@@ -20,3 +20,12 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Harun Erkurt"
 SPDX-License-Identifier = "FSL-1.1-MIT"
+
+[[annotations]]
+path = ".gitignore"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
