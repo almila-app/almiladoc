@@ -1,0 +1,35 @@
+name: Conversion bug
+description: A document converts wrongly, fails or crashes.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: almiladoc version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Format
+      options: [DOCX, DOC, PDF, PPTX, PPT, XLSX, XLS, ODS, ODT, ODP, RTF, EPUB, CSV, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output, error or crash.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Input
+      description: Attach the smallest file you may share publicly, or describe how to build one. Never attach a confidential document.

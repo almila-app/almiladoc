@@ -1,0 +1,15 @@
+name: Feature request
+description: A format, a fidelity improvement or an API change.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Need
+      description: What you convert and what is lost or missing today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
