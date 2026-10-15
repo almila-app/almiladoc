@@ -791,7 +791,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- flate2 1.1.9
+- flate2 1.1.10
 
 Copyright (c) 2014-2026 Alex Crichton
 
@@ -2137,7 +2137,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- miniz_oxide 0.8.9
+- miniz_oxide 0.9.1
 
 MIT License
 
@@ -2170,7 +2170,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- miniz_oxide 0.8.9
+- miniz_oxide 0.9.1
 
 MIT License
 
