@@ -11,7 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 almiladoc = { path = ".." }
-cfb = "0.14.0"
+cfb = "0.15.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [[bin]]
