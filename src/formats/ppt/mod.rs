@@ -12,10 +12,12 @@ use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Document, Inline, Style, inlines_are_empty};
-use crate::shared::binary::{get_u32, optional_ole_stream, read_ole_stream, utf16le_units};
+use crate::shared::binary::{
+    OptionalStream, get_u32, optional_ole_stream, read_ole_stream, utf16le_units,
+};
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
-use crate::shared::officeart::record_at;
+use crate::shared::officeart::{record_at, records};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -30,8 +32,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
     let data = read_ole_stream(parse_ctx, &mut ole, "PowerPoint Document")?;
-    let current_user =
-        optional_ole_stream(parse_ctx, &mut ole, "Current User")?.unwrap_or_default();
+    let current_user = optional_ole_stream(parse_ctx, &mut ole, "Current User")?.or_empty();
     if get_u32(&current_user, 12) == Some(0xF3D1_C4DF) {
         return Err(ConvertError::Encrypted);
     }
@@ -61,7 +62,7 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
     ole: &mut cfb::CompoundFile<R>,
 ) -> Result<Vec<crate::model::Asset>, ConvertError> {
     use crate::shared::officeart;
-    let Some(pictures) = optional_ole_stream(parse_ctx, ole, "Pictures")? else {
+    let OptionalStream::Read(pictures) = optional_ole_stream(parse_ctx, ole, "Pictures")? else {
         return Ok(Vec::new());
     };
     let mut sink = crate::shared::assets::AssetSink::new(parse_ctx);
@@ -90,16 +91,6 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
         }
     }
     Ok(sink.assets)
-}
-
-/// Iterate the records laid out back to back in `data`.
-fn children(data: &[u8]) -> impl Iterator<Item = (u16, u16, &[u8])> {
-    let mut pos = 0;
-    std::iter::from_fn(move || {
-        let (ver_inst, rec_type, body) = record_at(data, pos)?;
-        pos += 8 + body.len();
-        Some((ver_inst, rec_type, body))
-    })
 }
 
 /// A text shape being accumulated: header type, text, then styling.
@@ -183,11 +174,11 @@ fn locate_document<'a>(data: &'a [u8], current_user: &[u8]) -> Option<DocLayout<
         return None;
     };
     let (.., slide_list) =
-        children(doc).find(|&(ver_inst, rec_type, _)| rec_type == 0x0FF0 && ver_inst >> 4 == 0)?;
-    let notes_list = children(doc)
+        records(doc).find(|&(ver_inst, rec_type, _)| rec_type == 0x0FF0 && ver_inst >> 4 == 0)?;
+    let notes_list = records(doc)
         .find(|&(ver_inst, rec_type, _)| rec_type == 0x0FF0 && ver_inst >> 4 == 2)
         .map(|(.., body)| body);
-    let master_list = children(doc)
+    let master_list = records(doc)
         .find(|&(ver_inst, rec_type, _)| rec_type == 0x0FF0 && ver_inst >> 4 == 1)
         .map(|(.., body)| body);
     Some(DocLayout { persist, slide_list, notes_list, master_list })
@@ -196,7 +187,7 @@ fn locate_document<'a>(data: &'a [u8], current_user: &[u8]) -> Option<DocLayout<
 /// One master's TxMasterStyleAtoms, keyed by text-type instance.
 fn master_styles(master: &[u8]) -> MasterStyles {
     let mut styles = MasterStyles::new();
-    for (ver_inst, rec_type, body) in children(master) {
+    for (ver_inst, rec_type, body) in records(master) {
         if rec_type == 0x0FA3 {
             let instance = ver_inst >> 4;
             styles.entry(instance).or_insert_with(|| styletext::parse_master_style(body, instance));
@@ -215,7 +206,7 @@ fn collect_masters(
 ) -> Vec<(u32, MasterStyles)> {
     let mut out = Vec::new();
     if let Some(list) = master_list {
-        for (_, rec_type, body) in children(list) {
+        for (_, rec_type, body) in records(list) {
             if rec_type != 0x03F3 {
                 continue;
             }
@@ -285,7 +276,7 @@ impl<'c> Extractor<'c> {
     ) -> Result<(), ConvertError> {
         // (persistIdRef, slideId) of the page whose container is pending.
         let mut pending: Option<(u32, u32)> = None;
-        for (ver_inst, rec_type, body) in children(list) {
+        for (ver_inst, rec_type, body) in records(list) {
             match rec_type {
                 // SlidePersistAtom: the next slide/notes page begins.
                 0x03F3 => {
@@ -327,7 +318,7 @@ impl<'c> Extractor<'c> {
         {
             if is_notes {
                 // NotesAtom.slideIdRef names the owning slide (0 = none).
-                id = children(body)
+                id = records(body)
                     .find(|&(_, t, _)| t == 0x03F1)
                     .and_then(|(.., atom)| get_u32(atom, 0))
                     .filter(|&v| v != 0);
@@ -387,7 +378,7 @@ impl<'c> Extractor<'c> {
             .and_then(|id| persist.get(&id))
             .and_then(|&off| record_at(data, off))
             .filter(|&(_, t, _)| t == 0x03EE)
-            .and_then(|(_, _, body)| children(body).find(|&(_, rec_type, _)| rec_type == 0x03EF))
+            .and_then(|(_, _, body)| records(body).find(|&(_, rec_type, _)| rec_type == 0x03EF))
             .and_then(|(.., atom)| get_u32(atom, 12))
             .and_then(|mid| self.masters.iter().position(|&(id, _)| id == mid))
             .unwrap_or(0);
@@ -417,7 +408,7 @@ impl<'c> Extractor<'c> {
                 // A NotesAtom slideIdRef in the masters range (high bit
                 // set) marks the notes master: template chrome, excluded.
                 0x03F0 if self.recovering => {
-                    let master = children(body)
+                    let master = records(body)
                         .find(|&(_, t, _)| t == 0x03F1)
                         .and_then(|(.., atom)| get_u32(atom, 0))
                         .is_some_and(|id| id & 0x8000_0000 != 0);

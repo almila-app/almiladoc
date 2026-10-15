@@ -1,8 +1,8 @@
 //! OfficeArt (MS-ODRAW) blip extraction shared by the legacy binary
 //! formats: DOC picture data (`PICF` + OfficeArt records in the Data
 //! stream) and the PPT `Pictures` stream (a sequence of BStore file
-//! blocks). Only the picture payloads are extracted; drawing geometry is
-//! out of scope.
+//! blocks), and the record walk their drawing readers share. Drawing
+//! geometry is out of scope.
 
 use crate::limits::{Limit, LimitExceeded};
 use std::borrow::Cow;
@@ -18,6 +18,17 @@ pub(crate) fn record_at(data: &[u8], off: usize) -> Option<(u16, u16, &[u8])> {
     let len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
     let body = rest.get(8..)?.get(..len)?;
     Some((ver_inst, rec_type, body))
+}
+
+/// The records laid out back to back in `data`, up to the first that does
+/// not fit.
+pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = (u16, u16, &[u8])> {
+    let mut pos = 0;
+    std::iter::from_fn(move || {
+        let (ver_inst, rec_type, body) = record_at(data, pos)?;
+        pos += 8 + body.len();
+        Some((ver_inst, rec_type, body))
+    })
 }
 
 /// An extracted picture payload.

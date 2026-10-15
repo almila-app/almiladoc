@@ -2,9 +2,11 @@
 //! `istdBase` inheritance chains and UPX formatting payloads, resolved into
 //! effective per-style character formatting and paragraph properties.
 
+use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::formats::doc::sprm::{PapDelta, apply_pap_sprms, apply_style_chpx};
 use crate::model::Style;
-use crate::shared::binary::{get_u16, get_u32, utf16le_units};
+use crate::shared::binary::{decode_utf16, get_u16, get_u32, utf16le_units};
 use crate::shared::blockstyle::{self, BlockStyle};
 use std::collections::HashMap;
 
@@ -47,51 +49,64 @@ struct Std {
     is_paragraph: bool,
 }
 
-pub fn parse(word_doc: &[u8], table: &[u8]) -> Stylesheet {
-    let Some(fc) = get_u32(word_doc, 0xA2).map(|v| v as usize) else {
-        return Stylesheet::default();
+/// The style sheet; one that does not read in full is `part_unreadable`
+/// when the document has list tables, whose labels styles can carry, and
+/// `style_part_unreadable` otherwise.
+pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], has_lists: bool) -> Stylesheet {
+    let lcb = get_u32(word_doc, 0xA6).unwrap_or(0) as usize;
+    let fc = get_u32(word_doc, 0xA2).unwrap_or(0) as usize;
+    let (stds, complete) = match table.get(fc..fc.saturating_add(lcb)) {
+        _ if lcb == 0 => (HashMap::new(), true),
+        Some(stsh) => parse_stds(parse_ctx, stsh),
+        None => (HashMap::new(), false),
     };
-    let Some(lcb) = get_u32(word_doc, 0xA6).map(|v| v as usize) else {
-        return Stylesheet::default();
-    };
-    let Some(stsh) = table.get(fc..fc.saturating_add(lcb)) else {
-        return Stylesheet::default();
-    };
+    if !complete {
+        if has_lists {
+            parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
+        } else {
+            parse_ctx.emit(DiagnosticCode::StylePartUnreadable, Region::Container);
+        }
+    }
+    let mut sheet = Stylesheet::default();
+    let mut memo: HashMap<u16, ResolvedStyle> = HashMap::new();
+    for &istd in stds.keys() {
+        let resolved = resolve(parse_ctx, istd, &stds, &mut memo);
+        sheet.resolved.insert(istd, resolved);
+    }
+    sheet
+}
+
+/// The style records of an `STSH`, and whether every one read.
+fn parse_stds(parse_ctx: &ParseCtx, stsh: &[u8]) -> (HashMap<u16, Std>, bool) {
+    let mut stds: HashMap<u16, Std> = HashMap::new();
     let (Some(cb_stshi), Some(cstd), Some(cb_std_base)) =
         (get_u16(stsh, 0), get_u16(stsh, 2), get_u16(stsh, 4))
     else {
-        return Stylesheet::default();
+        return (stds, false);
     };
-
-    let mut stds: HashMap<u16, Std> = HashMap::new();
     let mut pos = 2 + cb_stshi as usize;
+    let mut complete = true;
     for istd in 0..cstd {
         let Some(cb_std) = get_u16(stsh, pos) else {
-            break;
+            return (stds, false);
         };
         pos += 2;
         if cb_std == 0 {
             continue;
         }
         let Some(record) = stsh.get(pos..).and_then(|rest| rest.get(..cb_std as usize)) else {
-            break;
+            return (stds, false);
         };
         pos += cb_std as usize;
-        if let Some(std) = parse_std(record, cb_std_base as usize) {
-            stds.insert(istd, std);
+        match parse_std(parse_ctx, record, cb_std_base as usize) {
+            Some(std) => drop(stds.insert(istd, std)),
+            None => complete = false,
         }
     }
-
-    let mut sheet = Stylesheet::default();
-    let mut memo: HashMap<u16, ResolvedStyle> = HashMap::new();
-    for &istd in stds.keys() {
-        let resolved = resolve(istd, &stds, &mut memo);
-        sheet.resolved.insert(istd, resolved);
-    }
-    sheet
+    (stds, complete)
 }
 
-fn parse_std(record: &[u8], cb_std_base: usize) -> Option<Std> {
+fn parse_std(parse_ctx: &ParseCtx, record: &[u8], cb_std_base: usize) -> Option<Std> {
     let first = get_u16(record, 0)?;
     let sti = first & 0x0FFF;
     let second = get_u16(record, 2)?;
@@ -113,7 +128,10 @@ fn parse_std(record: &[u8], cb_std_base: usize) -> Option<Std> {
             .unwrap_or_default(),
     )
     .collect();
-    let name = String::from_utf16_lossy(&name_units);
+    let (name, replaced) = decode_utf16(name_units);
+    if replaced {
+        parse_ctx.emit(DiagnosticCode::InvalidStyleEncoding, Region::Container);
+    }
     let mut upx_pos = name_off.checked_add(4)?.checked_add(name_bytes)?;
 
     let mut upx: Vec<&[u8]> = Vec::new();
@@ -151,6 +169,7 @@ fn parse_std(record: &[u8], cb_std_base: usize) -> Option<Std> {
 /// and resolve from their acyclic prefix; valid chains of any depth resolve
 /// fully.
 fn resolve(
+    parse_ctx: &ParseCtx,
     istd: u16,
     stds: &HashMap<u16, Std>,
     memo: &mut HashMap<u16, ResolvedStyle>,
@@ -169,7 +188,7 @@ fn resolve(
             break;
         }
         if !visiting.insert(cur) {
-            log::warn!("style istdBase cycle at istd {cur}");
+            parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
             break;
         }
         let Some(std) = stds.get(&cur) else {
@@ -222,7 +241,7 @@ mod tests {
             stds.insert(i, style(0x0FFE, i - 1));
         }
         let mut memo = HashMap::new();
-        assert_eq!(resolve(40, &stds, &mut memo).heading, Some(3));
+        assert_eq!(resolve(&ParseCtx::default(), 40, &stds, &mut memo).heading, Some(3));
     }
 
     #[test]
@@ -231,7 +250,44 @@ mod tests {
         stds.insert(0u16, style(2, 1)); // based on a member of the cycle
         stds.insert(1u16, style(0x0FFE, 2));
         stds.insert(2u16, style(0x0FFE, 1));
+        let parse_ctx = ParseCtx::default();
         let mut memo = HashMap::new();
-        assert_eq!(resolve(0, &stds, &mut memo).heading, Some(2));
+        assert_eq!(resolve(&parse_ctx, 0, &stds, &mut memo).heading, Some(2));
+        assert_eq!(resolve(&parse_ctx, 1, &stds, &mut memo).heading, None);
+        let reported: Vec<_> =
+            parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
+        assert_eq!(reported, [(DiagnosticCode::StyleCycle, Region::Container, 1)]);
+    }
+
+    #[test]
+    fn a_style_name_with_an_unpaired_surrogate_is_reported() {
+        let record = |unit: u16| {
+            let mut record = vec![0u8; 10];
+            record[2] = 0x01;
+            record.extend_from_slice(&1u16.to_le_bytes());
+            record.extend_from_slice(&unit.to_le_bytes());
+            record.extend_from_slice(&[0, 0]);
+            record
+        };
+        let parse_ctx = ParseCtx::default();
+        assert!(parse_std(&parse_ctx, &record(0x41), 10).is_some());
+        assert!(parse_ctx.diagnostics().is_empty());
+        assert!(parse_std(&parse_ctx, &record(0xD800), 10).is_some());
+        let reported: Vec<_> =
+            parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
+        assert_eq!(reported, [(DiagnosticCode::InvalidStyleEncoding, Region::Container, 1)]);
+    }
+
+    #[test]
+    fn a_style_sheet_cut_short_does_not_read_in_full() {
+        let complete = |stsh: &[u8]| parse_stds(&ParseCtx::default(), stsh).1;
+        assert!(complete(&[4, 0, 1, 0, 10, 0, 0, 0]));
+        for (case, stsh) in [
+            ("a header too short", &[4, 0, 1, 0][..]),
+            ("a missing record length", &[4, 0, 2, 0, 10, 0, 0, 0]),
+            ("a record past the end", &[4, 0, 1, 0, 10, 0, 20, 0, 1, 2, 3]),
+        ] {
+            assert!(!complete(stsh), "{case}");
+        }
     }
 }

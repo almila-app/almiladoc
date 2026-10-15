@@ -336,7 +336,9 @@ fn every_enforced_limit_is_read_from_the_config() {
         (fixture("ppt/pres.ppt"), Format::Ppt, Limit::Work, 1),
         (fixture("xls/sheet.xls"), Format::Excel, Limit::Work, 1),
     ];
-    let defaults = converter(1);
+    let mut config = Config::default();
+    config.on_loss = OnLoss::Report;
+    let defaults = Converter::new(config).unwrap();
     for (bytes, format, limit, max) in cases {
         let case = format!("{format:?} {limit} {max}");
         assert!(defaults.convert(Input::new(&bytes, format)).is_ok(), "{case}");

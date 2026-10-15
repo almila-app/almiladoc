@@ -6,6 +6,8 @@
 //! apply when their LFO is first used, and the number text (`xst` with
 //! `rgbxchNums` placeholders) is preserved for composite markers.
 
+use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::shared::binary::{get_u16, get_u32};
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, NumberText};
@@ -74,7 +76,9 @@ impl Lists {
 }
 
 /// FIB offsets (Word 97+): fcPlfLst/lcbPlfLst at 0x2E2, fcPlfLfo at 0x2EA.
-pub fn parse(word_doc: &[u8], table: &[u8]) -> Lists {
+/// List tables that do not read in full are `part_unreadable`: the labels
+/// of the lists they lose do not render.
+pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8]) -> Lists {
     let lst_fc = get_u32(word_doc, 0x2E2).unwrap_or(0) as usize;
     let lst_lcb = get_u32(word_doc, 0x2E6).unwrap_or(0) as usize;
     let lfo_fc = get_u32(word_doc, 0x2EA).unwrap_or(0) as usize;
@@ -86,38 +90,47 @@ pub fn parse(word_doc: &[u8], table: &[u8]) -> Lists {
     }
     // lcbPlfLst covers only the LSTF array; each list's LVL structures
     // follow it in the table stream, uncounted.
-    let by_lsid = parse_plf_lst(table, lst_fc, lst_lcb);
-    let Some(plf_lfo) = table.get(lfo_fc..lfo_fc.saturating_add(lfo_lcb)) else {
-        return lists;
-    };
-    parse_plf_lfo(plf_lfo, &by_lsid, &mut lists);
+    let (by_lsid, lst_complete) = parse_plf_lst(parse_ctx, table, lst_fc, lst_lcb);
+    let lfo_complete = lfo_lcb == 0
+        || table
+            .get(lfo_fc..lfo_fc.saturating_add(lfo_lcb))
+            .is_some_and(|plf_lfo| parse_plf_lfo(parse_ctx, plf_lfo, &by_lsid, &mut lists));
+    if !(lst_complete && lfo_complete) {
+        parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
+    }
     lists
 }
 
 const LSTF_SIZE: usize = 28;
 
-fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> HashMap<u32, [LevelDef; LEVELS]> {
+/// Each list's levels by `lsid`, and whether every list read.
+fn parse_plf_lst(
+    parse_ctx: &ParseCtx,
+    table: &[u8],
+    fc: usize,
+    lcb: usize,
+) -> (HashMap<u32, [LevelDef; LEVELS]>, bool) {
     let mut out = HashMap::new();
-    let Some(plf) = table.get(fc..) else {
-        return out;
+    let Some(plf) = table.get(fc..).filter(|plf| plf.len() >= lcb) else {
+        return (out, false);
     };
     let Some(count) = get_u16(plf, 0).map(|v| v as usize) else {
-        return out;
+        return (out, false);
     };
     let mut lstfs: Vec<(u32, bool)> = Vec::with_capacity(count);
     let mut pos = 2usize;
     for _ in 0..count {
         let Some(record) = plf.get(pos..).and_then(|rest| rest.get(..LSTF_SIZE)) else {
-            return out;
+            return (out, false);
         };
         let Some(lsid) = get_u32(record, 0) else {
-            return out;
+            return (out, false);
         };
         let simple = record[26] & 0x01 != 0;
         lstfs.push((lsid, simple));
         pos = match pos.checked_add(LSTF_SIZE) {
             Some(next) => next,
-            None => return out,
+            None => return (out, false),
         };
     }
     // The LVL array begins where lcbPlfLst ends, still relative to `plf`.
@@ -126,12 +139,12 @@ fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> HashMap<u32, [LevelDef;
         let n_levels = if simple { 1 } else { LEVELS };
         let mut levels: [LevelDef; LEVELS] = std::array::from_fn(|_| LevelDef::default());
         for slot in levels.iter_mut().take(n_levels) {
-            match parse_lvl(plf, pos) {
+            match parse_lvl(parse_ctx, plf, pos) {
                 Some((def, next)) => {
                     *slot = def;
                     pos = next;
                 }
-                None => return out,
+                None => return (out, false),
             }
         }
         if simple {
@@ -141,11 +154,12 @@ fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> HashMap<u32, [LevelDef;
         }
         out.insert(lsid, levels);
     }
-    out
+    (out, true)
 }
 
-/// One LVL: an LVLF header, then PAPX and CHPX grpprls, then the number text.
-fn parse_lvl(plf: &[u8], pos: usize) -> Option<(LevelDef, usize)> {
+/// One LVL: an LVLF header, then PAPX and CHPX grpprls, then the number
+/// text, whose unpaired surrogates are `invalid_encoding`.
+fn parse_lvl(parse_ctx: &ParseCtx, plf: &[u8], pos: usize) -> Option<(LevelDef, usize)> {
     const LVLF_SIZE: usize = 28;
     let record = plf.get(pos..)?;
     let header = record.get(..LVLF_SIZE)?;
@@ -167,17 +181,28 @@ fn parse_lvl(plf: &[u8], pos: usize) -> Option<(LevelDef, usize)> {
     let marker = marker_for_nfc(nfc);
     let mut text: Vec<NumberText> = Vec::new();
     if marker.is_some_and(MarkerKind::ordered) {
-        for i in 0..xch_count {
-            let unit = i.checked_mul(2)?.checked_add(next)?;
-            let ch = get_u16(record, unit)?;
-            if ch <= 0x08 && placeholder_offsets.contains(&((i + 1) as u8)) {
-                text.push(NumberText::Level(ch as u8));
-            } else if let Some(c) = char::from_u32(ch as u32).filter(|c| !c.is_control()) {
+        let units = (0..xch_count)
+            .map(|i| get_u16(record, i.checked_mul(2)?.checked_add(next)?))
+            .collect::<Option<Vec<u16>>>()?;
+        let mut i = 0usize;
+        let mut replaced = false;
+        for unit in char::decode_utf16(units) {
+            let c = unit.unwrap_or_else(|_| {
+                replaced = true;
+                char::REPLACEMENT_CHARACTER
+            });
+            i += c.len_utf16();
+            if u32::from(c) <= 0x08 && placeholder_offsets.contains(&(i as u8)) {
+                text.push(NumberText::Level(u32::from(c) as u8));
+            } else if !c.is_control() {
                 match text.last_mut() {
                     Some(NumberText::Literal(s)) => s.push(c),
                     _ => text.push(NumberText::Literal(c.to_string())),
                 }
             }
+        }
+        if replaced {
+            parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Body);
         }
     }
     next = next.checked_add(xch_count.checked_mul(2)?)?;
@@ -190,26 +215,33 @@ fn parse_lvl(plf: &[u8], pos: usize) -> Option<(LevelDef, usize)> {
 
 const LFO_SIZE: usize = 16;
 
-fn parse_plf_lfo(plf: &[u8], by_lsid: &HashMap<u32, [LevelDef; LEVELS]>, lists: &mut Lists) {
+/// Resolve each LFO into `lists`, and whether every one read.
+fn parse_plf_lfo(
+    parse_ctx: &ParseCtx,
+    plf: &[u8],
+    by_lsid: &HashMap<u32, [LevelDef; LEVELS]>,
+    lists: &mut Lists,
+) -> bool {
     let Some(count) = get_u32(plf, 0).map(|v| v as usize) else {
-        return;
+        return false;
     };
     let mut lfos: Vec<(u32, usize)> = Vec::with_capacity(count);
     let mut pos = 4;
     for _ in 0..count {
         let Some(record) = plf.get(pos..).and_then(|rest| rest.get(..LFO_SIZE)) else {
-            return;
+            return false;
         };
         let Some(lsid) = get_u32(record, 0) else {
-            return;
+            return false;
         };
         let clfolvl = record[12] as usize;
         lfos.push((lsid, clfolvl));
         let Some(next) = pos.checked_add(LFO_SIZE) else {
-            return;
+            return false;
         };
         pos = next;
     }
+    let mut complete = true;
     for (i, (lsid, clfolvl)) in lfos.into_iter().enumerate() {
         let ilfo = (i + 1) as u16;
         let mut def = match by_lsid.get(&lsid) {
@@ -220,9 +252,11 @@ fn parse_plf_lfo(plf: &[u8], by_lsid: &HashMap<u32, [LevelDef; LEVELS]>, lists: 
         };
         for _ in 0..clfolvl {
             let Some(override_record) = plf.get(pos..).and_then(|rest| rest.get(..8)) else {
+                complete = false;
                 break;
             };
             let Some(start_at) = get_u32(override_record, 0) else {
+                complete = false;
                 break;
             };
             let bits = override_record[4];
@@ -230,12 +264,13 @@ fn parse_plf_lfo(plf: &[u8], by_lsid: &HashMap<u32, [LevelDef; LEVELS]>, lists: 
             let f_start_at = bits & 0x10 != 0;
             let f_formatting = bits & 0x20 != 0;
             let Some(next) = pos.checked_add(8) else {
+                complete = false;
                 break;
             };
             pos = next;
             if f_formatting {
                 // The override embeds a full LVL; its own start wins.
-                match parse_lvl(plf, pos) {
+                match parse_lvl(parse_ctx, plf, pos) {
                     Some((lvl_def, next)) => {
                         if ilvl < LEVELS {
                             if f_start_at {
@@ -245,7 +280,10 @@ fn parse_plf_lfo(plf: &[u8], by_lsid: &HashMap<u32, [LevelDef; LEVELS]>, lists: 
                         }
                         pos = next;
                     }
-                    None => break,
+                    None => {
+                        complete = false;
+                        break;
+                    }
                 }
             } else if f_start_at && ilvl < LEVELS {
                 def.levels[ilvl].start = start_at as u64;
@@ -254,6 +292,7 @@ fn parse_plf_lfo(plf: &[u8], by_lsid: &HashMap<u32, [LevelDef; LEVELS]>, lists: 
         }
         lists.by_ilfo.insert(ilfo, def);
     }
+    complete
 }
 
 /// MS-OSHARED numbering format codes.
@@ -289,7 +328,7 @@ mod tests {
         for ch in [0x0000u16, '-' as u16, 0x0001, ')' as u16] {
             lvl.extend_from_slice(&ch.to_le_bytes());
         }
-        let (def, next) = parse_lvl(&lvl, 0).unwrap();
+        let (def, next) = parse_lvl(&ParseCtx::default(), &lvl, 0).unwrap();
         assert_eq!(next, lvl.len());
         assert_eq!(def.start, 5);
         assert_eq!(def.marker, Some(MarkerKind::LowerAlpha));
@@ -307,13 +346,88 @@ mod tests {
     }
 
     #[test]
+    fn number_text_keeps_surrogate_pairs_and_reports_an_unpaired_unit() {
+        let lvl_at = |placeholder: u8, units: &[u16]| {
+            let mut lvl = vec![0u8; 28];
+            lvl[6] = placeholder;
+            lvl.extend_from_slice(&u16::try_from(units.len()).unwrap().to_le_bytes());
+            lvl.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+            lvl
+        };
+        let lvl = |units: &[u16]| lvl_at(0, units);
+        let parse_ctx = ParseCtx::default();
+        let (def, _) = parse_lvl(&parse_ctx, &lvl(&[0xD835, 0xDC00, 0x2E]), 0).unwrap();
+        let literal = |text: &str| vec![NumberText::Literal(text.into())];
+        assert_eq!(def.pattern.text, literal("\u{1D400}."));
+        let (def, _) = parse_lvl(&parse_ctx, &lvl_at(3, &[0xD835, 0xDC00, 0x0000]), 0).unwrap();
+        assert_eq!(
+            def.pattern.text,
+            [NumberText::Literal("\u{1D400}".into()), NumberText::Level(0)]
+        );
+        assert!(parse_ctx.diagnostics().is_empty());
+        let (def, _) = parse_lvl(&parse_ctx, &lvl(&[0xDC00, 0x2E]), 0).unwrap();
+        assert_eq!(def.pattern.text, literal("\u{FFFD}."));
+        let reported: Vec<_> =
+            parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
+        assert_eq!(reported, [(DiagnosticCode::InvalidEncoding, Region::Body, 1)]);
+    }
+
+    /// A decimal LVL with no grpprls and an empty number text.
+    fn empty_lvl() -> Vec<u8> {
+        vec![0u8; 30]
+    }
+
+    #[test]
+    fn a_list_table_cut_short_does_not_read_in_full() {
+        let complete =
+            |table: &[u8], lcb: usize| parse_plf_lst(&ParseCtx::default(), table, 0, lcb).1;
+        let mut lstf = vec![0u8; LSTF_SIZE];
+        lstf[26] = 0x01;
+        let plf = [&[1u8, 0][..], &lstf].concat();
+        assert!(complete(&[plf.clone(), empty_lvl()].concat(), plf.len()));
+        for (case, table, lcb) in [
+            ("a count cut short", vec![1u8], 1),
+            ("an LSTF array cut short", plf[..12].to_vec(), 12),
+            ("an LVL cut short", [plf.clone(), empty_lvl()[..10].to_vec()].concat(), plf.len()),
+        ] {
+            assert!(!complete(&table, lcb), "{case}");
+        }
+    }
+
+    #[test]
+    fn a_list_override_table_cut_short_does_not_read_in_full() {
+        let complete = |plf: &[u8]| {
+            parse_plf_lfo(&ParseCtx::default(), plf, &HashMap::new(), &mut Lists::default())
+        };
+        let lfo = |clfolvl: u8| {
+            let mut lfo = vec![0u8; LFO_SIZE];
+            lfo[12] = clfolvl;
+            lfo
+        };
+        let formatting = [words(&[1]), lfo(1), vec![0, 0, 0, 0, 0x20, 0, 0, 0]].concat();
+        assert!(complete(&[words(&[1]), lfo(0)].concat()));
+        assert!(complete(&[formatting.clone(), empty_lvl()].concat()));
+        for (case, plf) in [
+            ("a count cut short", vec![1u8, 0]),
+            ("an LFO array cut short", [words(&[2]), lfo(0)].concat()),
+            ("an override's LVL cut short", [formatting, empty_lvl()[..10].to_vec()].concat()),
+        ] {
+            assert!(!complete(&plf), "{case}");
+        }
+    }
+
+    fn words(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
     fn default_restart_when_f_no_restart_is_clear() {
         let mut lvl = vec![0u8; 28];
         lvl[0..4].copy_from_slice(&1u32.to_le_bytes());
         lvl[4] = 0; // decimal
         lvl[26] = 3; // ilvlRestartLim is ignored without fNoRestart
         lvl.extend_from_slice(&0u16.to_le_bytes());
-        let (def, _) = parse_lvl(&lvl, 0).unwrap();
+        let (def, _) = parse_lvl(&ParseCtx::default(), &lvl, 0).unwrap();
         assert_eq!(def.restart, None);
     }
 }

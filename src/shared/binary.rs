@@ -39,15 +39,19 @@ pub(crate) fn decode_utf16(units: impl IntoIterator<Item = u16>) -> (String, boo
 }
 
 /// Read a named stream from an OLE2 compound file. A missing stream is
-/// `MissingPart`; the read is hard-capped at `max_entry_bytes` so a corrupt
-/// sector chain cannot expand without bound.
+/// `MissingPart` and an entry that is no stream `Malformed`; the read
+/// is hard-capped at `max_entry_bytes` so a corrupt sector chain cannot
+/// expand without bound.
 pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
     parse_ctx: &ParseCtx,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<Vec<u8>, ConvertError> {
     let max = parse_ctx.limits().max_entry_bytes;
-    let stream = ole.open_stream(name).map_err(|_| ConvertError::missing_part(name))?;
+    let stream = ole.open_stream(name).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ConvertError::missing_part(name),
+        _ => ConvertError::malformed_part(name, "unreadable stream"),
+    })?;
     let declared = stream.len();
     let bytes = read_capped(stream, declared, max, name, "unreadable stream")?;
     if bytes.len() as u64 > max {
@@ -56,21 +60,40 @@ pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
     Ok(bytes)
 }
 
-/// Read a stream the conversion can do without: absent or unreadable is
-/// `None`, and only a fatal error propagates.
+/// A stream the conversion can do without, as read.
+#[derive(Debug)]
+pub(crate) enum OptionalStream {
+    Absent,
+    Unreadable,
+    Read(Vec<u8>),
+}
+
+impl OptionalStream {
+    /// The stream's bytes, empty when it is absent or unreadable.
+    pub(crate) fn or_empty(self) -> Vec<u8> {
+        match self {
+            OptionalStream::Read(bytes) => bytes,
+            OptionalStream::Absent | OptionalStream::Unreadable => Vec::new(),
+        }
+    }
+}
+
+/// Read a stream the conversion can do without; only a fatal error
+/// propagates.
 pub(crate) fn optional_ole_stream<R: Read + std::io::Seek>(
     parse_ctx: &ParseCtx,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
-) -> Result<Option<Vec<u8>>, ConvertError> {
+) -> Result<OptionalStream, ConvertError> {
     unless_fatal(read_ole_stream(parse_ctx, ole, name))
 }
 
-fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<Option<Vec<u8>>, ConvertError> {
+fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<OptionalStream, ConvertError> {
     match read {
-        Ok(bytes) => Ok(Some(bytes)),
+        Ok(bytes) => Ok(OptionalStream::Read(bytes)),
         Err(e) if e.is_fatal() => Err(e),
-        Err(_) => Ok(None),
+        Err(ConvertError::MissingPart { .. }) => Ok(OptionalStream::Absent),
+        Err(_) => Ok(OptionalStream::Unreadable),
     }
 }
 
@@ -119,13 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_stream_is_none_when_absent() {
+    fn an_optional_stream_is_absent_only_when_no_entry_names_it() {
         let mut ole = one_stream_ole("Data", b"abc");
-        assert_eq!(
-            optional_ole_stream(&ParseCtx::default(), &mut ole, "Data").unwrap().as_deref(),
-            Some(&b"abc"[..])
-        );
-        assert_eq!(optional_ole_stream(&ParseCtx::default(), &mut ole, "Pictures").unwrap(), None);
+        ole.create_storage("Pictures").unwrap();
+        let ctx = ParseCtx::default();
+        let read = |ole: &mut cfb::CompoundFile<_>, name| optional_ole_stream(&ctx, ole, name);
+        assert!(matches!(read(&mut ole, "Data"), Ok(OptionalStream::Read(b)) if b == b"abc"));
+        assert!(matches!(read(&mut ole, "Current User"), Ok(OptionalStream::Absent)));
+        assert!(matches!(read(&mut ole, "Pictures"), Ok(OptionalStream::Unreadable)));
     }
 
     #[test]
@@ -137,10 +161,9 @@ mod tests {
         ] {
             assert!(unless_fatal(Err(fatal)).is_err());
         }
-        for skipped in
-            [ConvertError::missing_part("Data"), ConvertError::malformed_part("Data", "corrupt")]
-        {
-            assert!(matches!(unless_fatal(Err(skipped)), Ok(None)));
-        }
+        let absent = unless_fatal(Err(ConvertError::missing_part("Data")));
+        assert!(matches!(absent, Ok(OptionalStream::Absent)));
+        let corrupt = unless_fatal(Err(ConvertError::malformed_part("Data", "corrupt")));
+        assert!(matches!(corrupt, Ok(OptionalStream::Unreadable)));
     }
 }

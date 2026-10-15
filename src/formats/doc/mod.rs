@@ -9,24 +9,26 @@ mod sprm;
 mod stsh;
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::model::{
-    Block, Document, ImageSource, Inline, Note, NoteKind, Style, inlines_are_empty,
+    Block, Document, ImageSource, Inline, LinkTarget, Note, NoteKind, Style, inlines_are_empty,
     inlines_to_plain_text,
 };
 use crate::shared::assets::AssetSink;
 use crate::shared::binary::{
-    get_u16, get_u32, optional_ole_stream, read_ole_stream, utf16le_units,
+    OptionalStream, get_u16, get_u32, optional_ole_stream, read_ole_stream, utf16le_units,
 };
 use crate::shared::blockstyle::StyledRun;
 use crate::shared::delta::rebase_emphasis;
-use crate::shared::fields::{FieldFrame, field_result};
+use crate::shared::fields::{FieldFrame, field_result, hyperlink_target};
 use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 use crate::shared::list::MarkerKind;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
+use crate::shared::officeart::{record_at, records};
 use lists::{LEVELS, ListDef, Lists};
 use sprm::{PapDelta, Tap, apply_chpx, apply_pap_sprms, chpx_istd};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use stsh::Stylesheet;
 
@@ -46,25 +48,27 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let (table_name, other_table) =
         if flags & 0x0200 != 0 { ("1Table", "0Table") } else { ("0Table", "1Table") };
     let table = match optional_ole_stream(parse_ctx, &mut ole, table_name)? {
-        Some(table) => table,
-        None => optional_ole_stream(parse_ctx, &mut ole, other_table)?.unwrap_or_default(),
+        OptionalStream::Absent => optional_ole_stream(parse_ctx, &mut ole, other_table)?.or_empty(),
+        stream => stream.or_empty(),
     };
 
-    let ccp_text = get_u32(&word_doc, 0x4C).unwrap_or(0) as usize;
-    let ccp_ftn = get_u32(&word_doc, 0x50).unwrap_or(0) as usize;
-    let ccp_hdd = get_u32(&word_doc, 0x54).unwrap_or(0) as usize;
-    let ccp_mcr = get_u32(&word_doc, 0x58).unwrap_or(0) as usize;
-    let ccp_atn = get_u32(&word_doc, 0x5C).unwrap_or(0) as usize;
-    let ccp_edn = get_u32(&word_doc, 0x60).unwrap_or(0) as usize;
+    let ccp = |off| get_u32(&word_doc, off).unwrap_or(0) as usize;
+    let (ccp_text, ccp_ftn, ccp_hdd) = (ccp(0x4C), ccp(0x50), ccp(0x54));
+    let (ccp_mcr, ccp_atn, ccp_edn) = (ccp(0x58), ccp(0x5C), ccp(0x60));
     let fc_clx = get_u32(&word_doc, 0x1A2).unwrap_or(0) as usize;
     let lcb_clx = get_u32(&word_doc, 0x1A6).unwrap_or(0) as usize;
 
     let (pieces, prcs) = if lcb_clx > 0 {
-        parse_clx(&table, fc_clx, lcb_clx)?
+        parse_clx(parse_ctx, &table, fc_clx, lcb_clx)?
     } else {
         (legacy_single_piece(&word_doc), Vec::new())
     };
     let total_cp = ccp_text + ccp_ftn + ccp_hdd + ccp_mcr + ccp_atn + ccp_edn;
+    let edn_base = ccp_text + ccp_ftn + ccp_hdd + ccp_mcr + ccp_atn;
+    let stories = Stories {
+        main_end: ccp_text,
+        notes: [ccp_text..ccp_text + ccp_ftn, edn_base..edn_base + ccp_edn],
+    };
     // Compressed (8-bit) piece text decodes in the document's ANSI code
     // page: FibBase.lid, or FibRgW97.lidFE when fFarEast is set.
     let lid = if flags & 0x4000 != 0 {
@@ -73,30 +77,34 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         get_u16(&word_doc, 0x06)
     };
     let encoding = lid_encoding(lid.unwrap_or(0));
-    let text = extract_text(&word_doc, &pieces, total_cp, encoding);
+    let text = extract_text(parse_ctx, &word_doc, &pieces, total_cp, encoding, &stories);
 
-    let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.unwrap_or_default();
+    let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.or_empty();
     let chpx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &data)?;
     let papx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0x102, FkpKind::Papx, &data)?;
-    let stylesheet = stsh::parse(&word_doc, &table);
-    let list_tables = lists::parse(&word_doc, &table);
+    let has_lists = get_u32(&word_doc, 0x2E6).is_some_and(|lcb| lcb > 0);
+    let stylesheet = stsh::parse(parse_ctx, &word_doc, &table, has_lists);
+    let list_tables = lists::parse(parse_ctx, &word_doc, &table);
+    report_unread_stories(parse_ctx, &word_doc, &table, [ccp_hdd, ccp_atn, ccp(0x64)]);
 
     // Note references (CP-indexed) and note body ranges.
     let mut note_refs: HashMap<usize, String> = HashMap::new();
     let mut note_ranges: Vec<(usize, usize, String, NoteKind)> = Vec::new();
-    let ftn_base = ccp_text;
-    let edn_base = ccp_text + ccp_ftn + ccp_hdd + ccp_mcr + ccp_atn;
     for (ref_off, txt_off, base, prefix, kind) in [
-        (0xAA, 0xB2, ftn_base, "fn", NoteKind::Footnote),
+        (0xAA, 0xB2, ccp_text, "fn", NoteKind::Footnote),
         (0x20A, 0x212, edn_base, "en", NoteKind::Endnote),
     ] {
-        let (ref_cps, n_refs) = parse_plc(&word_doc, &table, ref_off, 2);
-        let (txt_cps, _) = parse_plc(&word_doc, &table, txt_off, 0);
-        for i in 0..n_refs {
-            note_refs.insert(text.index_of_cp(ref_cps[i] as usize), format!("{prefix}{i}"));
-            if i + 1 < txt_cps.len() {
-                let lo = text.index_of_cp(base + txt_cps[i] as usize);
-                let hi = text.index_of_cp(base + txt_cps[i + 1] as usize);
+        let [refs, txts] = [(ref_off, 2), (txt_off, 0)].map(|(fib_off, data_size)| {
+            read_plc(&word_doc, &table, fib_off, data_size).unwrap_or_else(|| {
+                parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Note);
+                Plc::EMPTY
+            })
+        });
+        for i in 0..refs.n {
+            note_refs.insert(text.index_of_cp(refs.cp(i)), format!("{prefix}{i}"));
+            if i < txts.n {
+                let lo = text.index_of_cp(base + txts.cp(i));
+                let hi = text.index_of_cp(base + txts.cp(i + 1));
                 note_ranges.push((lo, hi, format!("{prefix}{i}"), kind));
             }
         }
@@ -104,6 +112,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let main_end = text.index_of_cp(ccp_text);
 
     let piece_prcs: Vec<Option<usize>> = pieces.iter().map(|p| p.prm_prc).collect();
+    let shapes = floating_shapes(parse_ctx, &word_doc, &table)?;
     let assembler = Assembler {
         parse_ctx,
         text,
@@ -114,11 +123,13 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         prcs,
         piece_prcs,
         note_refs,
+        shapes,
         counters: std::cell::RefCell::new(Counters::default()),
+        damage_reported: std::cell::RefCell::new(HashSet::new()),
         data,
         assets: std::cell::RefCell::new(AssetSink::new(parse_ctx)),
     };
-    let blocks = assembler.build_blocks(0, main_end)?;
+    let blocks = assembler.build_blocks(0, main_end, Region::Body)?;
     let mut notes = Vec::new();
     for (lo, hi, id, kind) in note_ranges {
         let lo = lo.min(assembler.text.chars.len());
@@ -126,28 +137,197 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         if lo >= hi {
             continue;
         }
-        notes.push(Note { id, kind, blocks: assembler.build_blocks(lo, hi)? });
+        notes.push(Note { id, kind, blocks: assembler.build_blocks(lo, hi, Region::Note)? });
     }
     let assets = std::mem::take(&mut assembler.assets.borrow_mut().assets);
     Ok(Document { blocks, notes, assets })
 }
 
-/// Read a PLC's CP array; n is the number of data elements.
-fn parse_plc(word_doc: &[u8], table: &[u8], fib_off: usize, data_size: usize) -> (Vec<u32>, usize) {
+/// The main document's and the notes' CP ranges: the stories this reader
+/// renders.
+struct Stories {
+    main_end: usize,
+    notes: [std::ops::Range<usize>; 2],
+}
+
+impl Stories {
+    /// The rendered regions the CPs `cps` reach.
+    fn regions(&self, cps: std::ops::Range<usize>) -> impl Iterator<Item = Region> {
+        let reaches =
+            |story: &std::ops::Range<usize>| cps.start < story.end && story.start < cps.end;
+        let body = reaches(&(0..self.main_end)).then_some(Region::Body);
+        let note = self.notes.iter().any(reaches).then_some(Region::Note);
+        body.into_iter().chain(note)
+    }
+}
+
+/// A PLC from the table stream: `n + 1` CPs, then `n` data elements.
+struct Plc<'t> {
+    bytes: &'t [u8],
+    n: usize,
+    data_size: usize,
+}
+
+impl<'t> Plc<'t> {
+    const EMPTY: Plc<'static> = Plc { bytes: &[], n: 0, data_size: 0 };
+
+    fn cp(&self, i: usize) -> usize {
+        get_u32(self.bytes, i * 4).unwrap_or(0) as usize
+    }
+
+    fn data(&self, i: usize) -> &'t [u8] {
+        let at = (self.n + 1) * 4 + i * self.data_size;
+        self.bytes.get(at..).and_then(|rest| rest.get(..self.data_size)).unwrap_or_default()
+    }
+}
+
+/// The PLC whose FIB `fc`/`lcb` pair sits at `fib_off`: empty when `lcb` is
+/// 0, `None` when it does not lie in the table stream or holds no whole
+/// number of records.
+fn read_plc<'t>(
+    word_doc: &[u8],
+    table: &'t [u8],
+    fib_off: usize,
+    data_size: usize,
+) -> Option<Plc<'t>> {
+    let bytes = table_range(word_doc, table, fib_off)?;
+    if bytes.is_empty() {
+        return Some(Plc::EMPTY);
+    }
+    let records = bytes.len().checked_sub(4).filter(|_| bytes.len() >= 8)?;
+    let n = records / (4 + data_size);
+    (records % (4 + data_size) == 0).then_some(Plc { bytes, n, data_size })
+}
+
+/// The table-stream bytes the FIB `fc`/`lcb` pair at `fib_off` names: empty
+/// when `lcb` is 0, `None` when they do not lie in the table stream.
+fn table_range<'t>(word_doc: &[u8], table: &'t [u8], fib_off: usize) -> Option<&'t [u8]> {
     let fc = get_u32(word_doc, fib_off).unwrap_or(0) as usize;
     let lcb = get_u32(word_doc, fib_off + 4).unwrap_or(0) as usize;
-    let Some(plc) = table.get(fc..fc.saturating_add(lcb)) else {
-        return (Vec::new(), 0);
+    if lcb == 0 {
+        return Some(&[]);
+    }
+    table.get(fc..fc.saturating_add(lcb))
+}
+
+/// Count the header and footer stories and the comments, which this reader
+/// does not render, and the body text-box stories, which it never reads,
+/// from the story lengths `ccpHdd`, `ccpAtn` and `ccpTxbx`; a story whose
+/// table does not read counts once.
+fn report_unread_stories(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], ccps: [usize; 3]) {
+    let [ccp_hdd, ccp_atn, ccp_txbx] = ccps;
+    match read_plc(word_doc, table, 0xF2, 0) {
+        Some(hdd) => {
+            let stories = hdd.n.saturating_sub(1);
+            let sections = stories.saturating_sub(6) / 6;
+            for story in (6..6 + sections * 6).filter(|&i| hdd.cp(i + 1) > hdd.cp(i)) {
+                match (story - 6) % 6 {
+                    0 | 1 | 4 => parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header),
+                    _ => parse_ctx.emit(DiagnosticCode::FooterOmitted, Region::Footer),
+                }
+            }
+        }
+        None if ccp_hdd > 0 => parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header),
+        None => {}
+    }
+    match read_plc(word_doc, table, 0xBA, 30) {
+        Some(comments) => {
+            parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments.n as u64)
+        }
+        None if ccp_atn > 0 => parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
+        None => {}
+    }
+    if ccp_txbx > 0 {
+        let boxes = read_plc(word_doc, table, 0x25A, 22).map_or(0, |txbx| {
+            (0..txbx.n.saturating_sub(1)).filter(|&i| get_u16(txbx.data(i), 8) == Some(0)).count()
+        });
+        parse_ctx.emit_count(DiagnosticCode::TextBoxUnread, Region::Body, boxes.max(1) as u64);
+    }
+}
+
+/// What a floating shape the main document anchors shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ShapeKind {
+    Picture,
+    TextBox,
+    Graphic,
+}
+
+/// The kind of shape each main-document anchor CP names, from `PlcSpaMom`
+/// and the main drawing of the `OfficeArtContent`.
+fn floating_shapes(
+    parse_ctx: &ParseCtx,
+    word_doc: &[u8],
+    table: &[u8],
+) -> Result<HashMap<usize, ShapeKind>, ConvertError> {
+    let Some(spa) = read_plc(word_doc, table, 0x1DA, 26).filter(|spa| spa.n > 0) else {
+        return Ok(HashMap::new());
     };
-    if lcb < 8 {
-        return (Vec::new(), 0);
+    let kinds = table_range(word_doc, table, 0x22A)
+        .and_then(main_drawing)
+        .map_or(Ok(HashMap::new()), |drawing| shape_kinds(parse_ctx, drawing))?;
+    Ok((0..spa.n)
+        .filter_map(|i| {
+            let spid = get_u32(spa.data(i), 0)?;
+            Some((spa.cp(i), kinds.get(&spid).copied().unwrap_or(ShapeKind::Graphic)))
+        })
+        .collect())
+}
+
+/// The main document's `OfficeArtDgContainer` in an `OfficeArtContent`: the
+/// drawing whose `dgglbl` is 0, after the `OfficeArtDggContainer`.
+fn main_drawing(content: &[u8]) -> Option<&[u8]> {
+    let (_, _, dgg) = record_at(content, 0)?;
+    let mut rest = content.get(8 + dgg.len()..)?;
+    loop {
+        let (&dgglbl, drawing) = rest.split_first()?;
+        let (_, _, body) = record_at(drawing, 0)?;
+        let (container, next) = drawing.split_at_checked(8 + body.len())?;
+        if dgglbl == 0 {
+            return Some(container);
+        }
+        rest = next;
     }
-    let n = if data_size == 0 { lcb / 4 - 1 } else { (lcb - 4) / (4 + data_size) };
-    let mut cps = Vec::with_capacity(n + 1);
-    for i in 0..=n {
-        cps.push(get_u32(plc, i * 4).unwrap_or(0));
+}
+
+/// Each shape's kind by `spid` (0 when it has none), over every shape
+/// container in the OfficeArt records of `run`.
+fn shape_kinds(parse_ctx: &ParseCtx, run: &[u8]) -> Result<HashMap<u32, ShapeKind>, ConvertError> {
+    let mut kinds = HashMap::new();
+    let mut pending = vec![run];
+    while let Some(container) = pending.pop() {
+        for (ver_inst, rec_type, body) in records(container) {
+            parse_ctx.charge(1)?;
+            if rec_type == 0xF004 {
+                let mut spid = None;
+                let mut kind = ShapeKind::Graphic;
+                for (ver_inst, rec_type, body) in records(body) {
+                    parse_ctx.charge(1)?;
+                    match rec_type {
+                        0xF00A => spid = get_u32(body, 0),
+                        0xF00B | 0xF122 => kind = shape_kind(kind, ver_inst >> 4, body),
+                        _ => {}
+                    }
+                }
+                kinds.insert(spid.unwrap_or(0), kind);
+            } else if ver_inst & 0xF == 0xF {
+                pending.push(body);
+            }
+        }
     }
-    (cps, n)
+    Ok(kinds)
+}
+
+/// `kind` updated by an OfficeArt property table of `count` entries: a
+/// `pib` makes a picture, an `lTxid` a text box.
+fn shape_kind(kind: ShapeKind, count: u16, props: &[u8]) -> ShapeKind {
+    (0..usize::from(count)).filter_map(|i| get_u16(props, i * 6)).fold(kind, |kind, id| {
+        match (id & 0x3FFF, kind) {
+            (0x0104, _) => ShapeKind::Picture,
+            (0x0080, ShapeKind::Graphic) => ShapeKind::TextBox,
+            _ => kind,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +343,7 @@ struct Piece {
 }
 
 fn parse_clx(
+    parse_ctx: &ParseCtx,
     table: &[u8],
     fc: usize,
     lcb: usize,
@@ -191,7 +372,7 @@ fn parse_clx(
                     .get(5..)
                     .and_then(|payload| payload.get(..lcb_plc))
                     .ok_or_else(|| ConvertError::malformed("PlcPcd out of bounds"))?;
-                let pieces = parse_plc_pcd(plc, &mut prcs)?;
+                let pieces = parse_plc_pcd(parse_ctx, plc, &mut prcs)?;
                 return Ok((pieces, prcs));
             }
             _ => return Err(ConvertError::malformed("malformed Clx")),
@@ -199,7 +380,11 @@ fn parse_clx(
     }
 }
 
-fn parse_plc_pcd(plc: &[u8], prcs: &mut Vec<Vec<u8>>) -> Result<Vec<Piece>, ConvertError> {
+fn parse_plc_pcd(
+    parse_ctx: &ParseCtx,
+    plc: &[u8],
+    prcs: &mut Vec<Vec<u8>>,
+) -> Result<Vec<Piece>, ConvertError> {
     if plc.len() < 4 + 12 {
         return Err(ConvertError::malformed("empty piece table"));
     }
@@ -229,7 +414,7 @@ fn parse_plc_pcd(plc: &[u8], prcs: &mut Vec<Vec<u8>>) -> Result<Vec<Piece>, Conv
                     Some(prcs.len() - 1)
                 }
                 None => {
-                    log::debug!("Prm0 sprm outside the converted model: 0x{prm:04X}");
+                    parse_ctx.emit(DiagnosticCode::FormattingUnreadable, Region::Body);
                     None
                 }
             }
@@ -286,6 +471,8 @@ struct TextStream {
     cps: Vec<u32>,
     /// Piece index of each char, for Prm application.
     piece_of: Vec<u32>,
+    /// Whether each char stands in for bytes that did not decode.
+    replaced: Vec<bool>,
 }
 
 impl TextStream {
@@ -332,24 +519,47 @@ fn is_lead_byte(enc: &'static encoding_rs::Encoding, b: u8) -> bool {
     }
 }
 
+/// The text of the pieces up to `total_cp`. A piece in a rendered story
+/// whose bytes lie outside the stream is `truncated_records`.
 fn extract_text(
+    parse_ctx: &ParseCtx,
     word_doc: &[u8],
     pieces: &[Piece],
     total_cp: usize,
     encoding: &'static encoding_rs::Encoding,
+    stories: &Stories,
 ) -> TextStream {
-    let mut text =
-        TextStream { chars: Vec::new(), fcs: Vec::new(), cps: Vec::new(), piece_of: Vec::new() };
+    let mut text = TextStream {
+        chars: Vec::new(),
+        fcs: Vec::new(),
+        cps: Vec::new(),
+        piece_of: Vec::new(),
+        replaced: Vec::new(),
+    };
     let mut cp = 0usize;
     for (piece_idx, piece) in pieces.iter().enumerate() {
         if cp >= total_cp {
             break;
         }
         let len = piece.cp_end.saturating_sub(piece.cp_start).min(total_cp - cp);
+        let byte_len = if piece.compressed { Some(len) } else { len.checked_mul(2) };
+        let Some(bytes) =
+            byte_len.and_then(|n| word_doc.get(piece.fc..).and_then(|rest| rest.get(..n)))
+        else {
+            for region in stories.regions(cp..cp + len) {
+                parse_ctx.emit(DiagnosticCode::TruncatedRecords, region);
+            }
+            cp += len;
+            continue;
+        };
+        let mut push = |c: char, fc: usize, cp: usize, replaced: bool| {
+            text.chars.push(c);
+            text.fcs.push(fc as u32);
+            text.cps.push(cp as u32);
+            text.piece_of.push(piece_idx as u32);
+            text.replaced.push(replaced);
+        };
         if piece.compressed {
-            let Some(bytes) = word_doc.get(piece.fc..).and_then(|rest| rest.get(..len)) else {
-                continue;
-            };
             // Byte-accurate accounting: in a compressed piece each CP is one
             // byte, so a double-byte character occupies two CPs and its FC is
             // the lead byte's.
@@ -357,31 +567,19 @@ fn extract_text(
             while i < bytes.len() {
                 let seq =
                     if is_lead_byte(encoding, bytes[i]) && i + 1 < bytes.len() { 2 } else { 1 };
-                let (s, _) = encoding.decode_without_bom_handling(&bytes[i..i + seq]);
+                let (s, replaced) = encoding.decode_without_bom_handling(&bytes[i..i + seq]);
                 for c in s.chars() {
-                    text.chars.push(c);
-                    text.fcs.push((piece.fc + i) as u32);
-                    text.cps.push(cp as u32);
-                    text.piece_of.push(piece_idx as u32);
+                    push(c, piece.fc + i, cp, replaced);
                 }
                 cp += seq;
                 i += seq;
             }
         } else {
-            let Some(byte_len) = len.checked_mul(2) else {
-                continue;
-            };
-            let Some(bytes) = word_doc.get(piece.fc..).and_then(|rest| rest.get(..byte_len)) else {
-                continue;
-            };
-            let units: Vec<u16> = utf16le_units(bytes).collect();
             let mut unit_idx = 0usize;
-            for r in char::decode_utf16(units.iter().copied()) {
-                let c = r.unwrap_or('\u{fffd}');
-                text.chars.push(c);
-                text.fcs.push((piece.fc + unit_idx * 2) as u32);
-                text.cps.push(cp as u32);
-                text.piece_of.push(piece_idx as u32);
+            for unit in char::decode_utf16(utf16le_units(bytes)) {
+                let replaced = unit.is_err();
+                let c = unit.unwrap_or(char::REPLACEMENT_CHARACTER);
+                push(c, piece.fc + unit_idx * 2, cp, replaced);
                 unit_idx += c.len_utf16();
                 cp += c.len_utf16();
             }
@@ -442,27 +640,20 @@ fn parse_fkps(
     data: &[u8],
 ) -> Result<Vec<Run>, ConvertError> {
     let mut runs = Vec::new();
-    let fc = get_u32(word_doc, fib_off).unwrap_or(0) as usize;
-    let lcb = get_u32(word_doc, fib_off + 4).unwrap_or(0) as usize;
-    let Some(plc) = table.get(fc..fc.saturating_add(lcb)) else {
+    let Some(bin_table) = read_plc(word_doc, table, fib_off, 4) else {
+        parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
         return Ok(runs);
     };
-    if plc.len() < 8 {
-        return Ok(runs);
-    }
-    let n = (plc.len() - 4) / 8;
-    for i in 0..n {
-        let Some(pn_raw) = get_u32(plc, (n + 1) * 4 + i * 4) else {
-            continue;
-        };
-        let pn = (pn_raw & 0x3F_FFFF) as usize;
-        let Some(page_off) = pn.checked_mul(512) else {
-            continue;
-        };
-        let Some(page) = word_doc.get(page_off..).and_then(|rest| rest.get(..512)) else {
-            continue;
-        };
-        parse_fkp_page(parse_ctx, page, kind, data, &mut runs)?;
+    for i in 0..bin_table.n {
+        let pn = get_u32(bin_table.data(i), 0).unwrap_or(0) & 0x3F_FFFF;
+        let page = (pn as usize)
+            .checked_mul(512)
+            .and_then(|off| word_doc.get(off..))
+            .and_then(|rest| rest.get(..512));
+        match page {
+            Some(page) => parse_fkp_page(parse_ctx, page, kind, data, &mut runs)?,
+            None => parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body),
+        }
     }
     Ok(runs)
 }
@@ -609,7 +800,11 @@ struct Assembler<'c> {
     prcs: Vec<Vec<u8>>,
     piece_prcs: Vec<Option<usize>>,
     note_refs: HashMap<usize, String>,
+    /// The floating shape each main-document anchor CP names.
+    shapes: HashMap<usize, ShapeKind>,
     counters: std::cell::RefCell<Counters>,
+    /// The pieces and regions already reported `invalid_encoding`.
+    damage_reported: std::cell::RefCell<HashSet<(u32, Region)>>,
     /// The Data stream, for `sprmCPicLocation` picture payloads.
     data: Vec<u8>,
     assets: std::cell::RefCell<AssetSink>,
@@ -622,11 +817,24 @@ struct EffectivePap {
     effective: PapDelta,
 }
 
+/// An open field and the pieces whose undecodable text its instruction and
+/// its result hold.
+#[derive(Default)]
+struct OpenField {
+    frame: FieldFrame,
+    instr_damage: Vec<u32>,
+    result_damage: Vec<u32>,
+}
+
 struct ParaBuilder {
     inlines: Vec<Inline>,
-    fields: Vec<FieldFrame>,
+    fields: Vec<OpenField>,
     text: String,
     style: Style,
+    /// The pieces whose undecodable text `text` holds.
+    text_damage: Vec<u32>,
+    /// The pieces whose undecodable text `inlines` holds.
+    damage: Vec<u32>,
 }
 
 impl ParaBuilder {
@@ -636,6 +844,8 @@ impl ParaBuilder {
             fields: Vec::new(),
             text: String::new(),
             style: Style::PLAIN,
+            text_damage: Vec::new(),
+            damage: Vec::new(),
         }
     }
 
@@ -644,68 +854,110 @@ impl ParaBuilder {
             return;
         }
         let text = std::mem::take(&mut self.text);
+        let damage = std::mem::take(&mut self.text_damage);
         let inline = Inline::Text { text, style: self.style };
         match self.fields.last_mut() {
-            Some(f) if !f.in_result => f.instr.push_str(&inlines_to_plain_text(&[inline])),
-            Some(f) => f.inlines.push(inline),
-            None => self.inlines.push(inline),
+            Some(f) if !f.frame.in_result => {
+                f.frame.instr.push_str(&inlines_to_plain_text(&[inline]));
+                f.instr_damage.extend(damage);
+            }
+            Some(f) => {
+                f.frame.inlines.push(inline);
+                f.result_damage.extend(damage);
+            }
+            None => {
+                self.inlines.push(inline);
+                self.damage.extend(damage);
+            }
         }
     }
 
-    fn push_char(&mut self, c: char, style: Style) {
+    /// Push `c`, which stands in for undecodable bytes of piece `damaged`
+    /// when one is given.
+    fn push_char(&mut self, c: char, style: Style, damaged: Option<u32>) {
         if style != self.style {
             self.flush_text();
             self.style = style;
         }
         self.text.push(c);
+        self.text_damage.extend(damaged);
     }
 
     fn push_inline(&mut self, inline: Inline) {
         self.flush_text();
         match self.fields.last_mut() {
-            Some(f) if !f.in_result => {}
-            Some(f) => f.inlines.push(inline),
+            Some(f) if !f.frame.in_result => {}
+            Some(f) => f.frame.inlines.push(inline),
             None => self.inlines.push(inline),
         }
     }
 
     fn field_begin(&mut self) {
         self.flush_text();
-        self.fields.push(FieldFrame::default());
+        self.fields.push(OpenField::default());
     }
 
     fn field_separate(&mut self) {
         self.flush_text();
         if let Some(f) = self.fields.last_mut() {
-            f.in_result = true;
+            f.frame.in_result = true;
         }
+    }
+
+    /// Whether the innermost open field is in the result of a `SHAPE`
+    /// field, the inline stand-in of the floating shape its `\x08` anchors.
+    fn in_shape_result(&self) -> bool {
+        self.fields.last().is_some_and(|f| {
+            let keyword = f.frame.instr.split_whitespace().next().unwrap_or_default();
+            f.frame.in_result && keyword.eq_ignore_ascii_case("SHAPE")
+        })
     }
 
     fn field_end(&mut self) {
         self.flush_text();
-        let Some(frame) = self.fields.pop() else {
+        let Some(OpenField { frame, instr_damage, mut result_damage }) = self.fields.pop() else {
             return;
         };
-        for inline in field_result(&frame.instr, frame.inlines) {
-            match self.fields.last_mut() {
-                Some(f) if !f.in_result => {}
-                Some(f) => f.inlines.push(inline),
-                None => self.inlines.push(inline),
+        let target_damaged = matches!(
+            hyperlink_target(&frame.instr),
+            Some(LinkTarget::External(t) | LinkTarget::Relative(t) | LinkTarget::Anchor(t))
+                if t.contains(char::REPLACEMENT_CHARACTER)
+        );
+        if target_damaged && !inlines_are_empty(&frame.inlines) {
+            result_damage.extend(instr_damage);
+        }
+        let inlines = field_result(&frame.instr, frame.inlines);
+        match self.fields.last_mut() {
+            Some(f) if !f.frame.in_result => {}
+            Some(f) => {
+                f.frame.inlines.extend(inlines);
+                f.result_damage.extend(result_damage);
+            }
+            None => {
+                self.inlines.extend(inlines);
+                self.damage.extend(result_damage);
             }
         }
     }
 
-    fn finish(mut self) -> Vec<Inline> {
+    /// The paragraph's inlines, and the pieces whose undecodable text they
+    /// hold.
+    fn finish(mut self) -> (Vec<Inline>, Vec<u32>) {
         self.flush_text();
         while !self.fields.is_empty() {
             self.field_end();
         }
-        self.inlines
+        (self.inlines, self.damage)
     }
 }
 
 impl Assembler<'_> {
-    fn build_blocks(&self, lo: usize, hi: usize) -> Result<Vec<Block>, ConvertError> {
+    fn build_blocks(
+        &self,
+        lo: usize,
+        hi: usize,
+        region: Region,
+    ) -> Result<Vec<Block>, ConvertError> {
         let mut blocks: Vec<Block> = Vec::new();
         let mut list_run: Vec<ListEntry> = Vec::new();
         let mut styled = StyledRun::default();
@@ -727,7 +979,9 @@ impl Assembler<'_> {
             match c {
                 '\r' | '\u{7}' | '\u{c}' | '\u{e}' => {
                     let pap = self.effective_pap(fc, i);
-                    let inlines = std::mem::replace(&mut para, ParaBuilder::new()).finish();
+                    let (inlines, damage) =
+                        std::mem::replace(&mut para, ParaBuilder::new()).finish();
+                    self.report_damage(&damage, region);
                     let is_cell_mark = c == '\u{7}';
                     if pap.effective.in_table.unwrap_or(false) || is_cell_mark {
                         // A table is a hard boundary for top-level list and
@@ -782,32 +1036,58 @@ impl Assembler<'_> {
                 '\u{b}' => para.push_inline(Inline::LineBreak),
                 '\u{13}' => para.field_begin(),
                 '\u{14}' => para.field_separate(),
-                '\u{15}' => para.field_end(),
+                '\u{15}' => {
+                    if para.fields.last().is_some_and(|f| is_choice_form_field(&f.frame.instr)) {
+                        self.parse_ctx.emit(DiagnosticCode::FormControlUnread, region);
+                    }
+                    para.field_end();
+                }
                 '\t' => {
                     let style = self.char_style(fc, i);
-                    para.push_char(' ', style);
+                    para.push_char(' ', style, None);
                 }
                 '\u{1e}' => {
                     let style = self.char_style(fc, i);
-                    para.push_char('-', style);
+                    para.push_char('-', style, None);
                 }
+                // An embedded object's location names its ObjectPool
+                // storage, not a picture.
+                '\u{1}' if self.chpx.lookup(fc).is_some_and(|p| sets_flag(&p.chpx, 0x080A)) => {
+                    self.parse_ctx.emit(DiagnosticCode::EmbeddedObject, region);
+                }
+                // Field data (a hyperlink's or form field's), not a picture.
+                '\u{1}' if self.chpx.lookup(fc).is_some_and(|p| sets_flag(&p.chpx, 0x0806)) => {}
                 // Inline picture special character: extract the payload
                 // pointed at by sprmCPicLocation.
                 '\u{1}' => {
-                    if let Some(image) = self.picture_at(fc)? {
+                    if let Some(image) = self.picture_at(fc, region, para.in_shape_result())? {
                         para.push_inline(image);
                     }
                 }
-                '\u{2}' | '\u{5}' | '\u{8}' | '\u{1f}' => {}
+                '\u{8}' => {
+                    let cp = self.text.cps.get(i).map_or(0, |&cp| cp as usize);
+                    match self.shapes.get(&cp).copied().unwrap_or(ShapeKind::Graphic) {
+                        ShapeKind::Picture => {
+                            self.parse_ctx.emit(DiagnosticCode::ImageUnplaced, region);
+                        }
+                        ShapeKind::Graphic => {
+                            self.parse_ctx.emit(DiagnosticCode::GraphicUnread, region);
+                        }
+                        ShapeKind::TextBox => {}
+                    }
+                }
+                '\u{2}' | '\u{5}' | '\u{1f}' => {}
                 c if c.is_control() => {}
                 c => {
                     let style = self.char_style(fc, i);
-                    para.push_char(c, style);
+                    let damaged = self.text.replaced.get(i).is_some_and(|&r| r);
+                    para.push_char(c, style, damaged.then(|| self.text.piece_of[i]));
                 }
             }
             i += 1;
         }
-        let inlines = para.finish();
+        let (inlines, damage) = para.finish();
+        self.report_damage(&damage, region);
         cell_styled.flush(&mut cell_blocks);
         self.flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
         if !inlines_are_empty(&inlines) {
@@ -950,34 +1230,63 @@ impl Assembler<'_> {
         }
     }
 
+    /// `invalid_encoding` in `region` once for each of `pieces` whose
+    /// undecodable text reached the output.
+    fn report_damage(&self, pieces: &[u32], region: Region) {
+        let mut reported = self.damage_reported.borrow_mut();
+        for &piece in pieces {
+            if reported.insert((piece, region)) {
+                self.parse_ctx.emit(DiagnosticCode::InvalidEncoding, region);
+            }
+        }
+    }
+
     /// Extract the inline picture whose PICF + OfficeArt data the character's
-    /// CHPX points at (`sprmCPicLocation`), retaining it as an asset.
-    /// Unsupported or unreachable payloads degrade with a log.
-    fn picture_at(&self, fc: u32) -> Result<Option<Inline>, ConvertError> {
+    /// CHPX points at (`sprmCPicLocation`), retaining it as an asset; one
+    /// that yields none is `image_unavailable` in `region`, unless it is a
+    /// `SHAPE` field's stand-in (`stand_in`) for a shape that is no picture.
+    fn picture_at(
+        &self,
+        fc: u32,
+        region: Region,
+        stand_in: bool,
+    ) -> Result<Option<Inline>, ConvertError> {
         let Some(offset) = self.chpx.lookup(fc).and_then(|p| sprm::chpx_pic_location(&p.chpx))
         else {
             return Ok(None);
         };
         let offset = offset as usize;
-        let Some(lcb) = get_u32(&self.data, offset).map(|v| v as usize) else {
-            return Ok(None);
-        };
-        let Some(cb_header) = get_u16(&self.data, offset + 4).map(|v| v as usize) else {
-            return Ok(None);
-        };
-        let Some(picf) = self.data.get(offset..offset.saturating_add(lcb)) else {
-            log::debug!("picture data out of bounds in the Data stream");
-            return Ok(None);
-        };
-        let art = &picf[cb_header.min(picf.len())..];
+        let picf = get_u32(&self.data, offset).zip(get_u16(&self.data, offset + 4)).and_then(
+            |(lcb, cb_header)| {
+                let picf = self.data.get(offset..offset.saturating_add(lcb as usize))?;
+                Some(&picf[usize::from(cb_header).min(picf.len())..])
+            },
+        );
         let max_bytes = self.parse_ctx.limits().max_entry_bytes;
-        let Some(blip) = crate::shared::officeart::first_blip(art, max_bytes)? else {
-            log::debug!("skipping picture with no supported blip payload");
+        let blip = match picf {
+            Some(art) => crate::shared::officeart::first_blip(art, max_bytes)?,
+            None => None,
+        };
+        let Some(blip) = blip else {
+            if !stand_in || self.names_a_picture(picf)? {
+                self.parse_ctx.emit(DiagnosticCode::ImageUnavailable, region);
+            }
             return Ok(None);
         };
         let part = format!("data/pic{offset}.{}", blip.extension);
         let id = self.assets.borrow_mut().add(blip.media_type.to_string(), part, &blip.bytes)?;
         Ok(Some(Inline::Image { alt: String::new(), source: ImageSource::Asset(id) }))
+    }
+
+    /// Whether a `SHAPE` field's stand-in that yields no picture stood for
+    /// one: data that does not read, or a shape with a `pib`, or no shape at
+    /// all. Any other shape is reported at the field's floating anchor.
+    fn names_a_picture(&self, art: Option<&[u8]>) -> Result<bool, ConvertError> {
+        let Some(art) = art else {
+            return Ok(true);
+        };
+        let kinds = shape_kinds(self.parse_ctx, art)?;
+        Ok(kinds.is_empty() || kinds.values().any(|&kind| kind == ShapeKind::Picture))
     }
 
     /// The visible number label of a numbered heading paragraph, with its
@@ -1020,6 +1329,25 @@ impl Assembler<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether a CHPX sets the one-byte flag `flag`: `sprmCFOle2` marks an
+/// embedded object, `sprmCFData` field data.
+fn sets_flag(chpx: &[u8], flag: u16) -> bool {
+    let mut set = false;
+    sprm::walk_sprms(chpx, |sprm, operand| {
+        if sprm == flag {
+            set = operand.first().is_some_and(|&v| v != 0);
+        }
+    });
+    set
+}
+
+/// Whether a field instruction is a check box or drop-down form field,
+/// whose state lives only in its form-field data.
+fn is_choice_form_field(instr: &str) -> bool {
+    let keyword = instr.split_whitespace().next().unwrap_or_default();
+    keyword.eq_ignore_ascii_case("FORMCHECKBOX") || keyword.eq_ignore_ascii_case("FORMDROPDOWN")
 }
 
 /// One accumulated table row: cell contents plus the TAP from the row-end
@@ -1192,6 +1520,7 @@ mod tests {
                 fcs: Vec::new(),
                 cps: Vec::new(),
                 piece_of: Vec::new(),
+                replaced: Vec::new(),
             },
             chpx: Runs::new(runs),
             papx: Runs::new(Vec::new()),
@@ -1200,7 +1529,9 @@ mod tests {
             prcs: Vec::new(),
             piece_prcs: Vec::new(),
             note_refs: HashMap::new(),
+            shapes: HashMap::new(),
             counters: std::cell::RefCell::new(Counters::default()),
+            damage_reported: std::cell::RefCell::new(HashSet::new()),
             data,
             assets: std::cell::RefCell::new(AssetSink::new(parse_ctx)),
         }
@@ -1221,39 +1552,566 @@ mod tests {
         chpx
     }
 
+    const TEXT_FC: usize = 0x600;
+
+    /// A DOC whose main text is `text` in one compressed legacy piece, with
+    /// the FIB fields, table-stream structures and Data stream a case adds.
+    struct DocBuilder {
+        word_doc: Vec<u8>,
+        table: Vec<u8>,
+        data: Option<Vec<u8>>,
+    }
+
+    impl DocBuilder {
+        fn new(text: &[u8]) -> Self {
+            let len = u32::try_from(text.len()).unwrap();
+            let mut word_doc = vec![0u8; TEXT_FC];
+            word_doc[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
+            word_doc.extend_from_slice(text);
+            let doc = DocBuilder { word_doc, table: Vec::new(), data: None };
+            doc.fib(0x18, TEXT_FC as u32).fib(0x1C, TEXT_FC as u32 + len).fib(0x4C, len)
+        }
+
+        fn fib(mut self, off: usize, value: u32) -> Self {
+            self.word_doc[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        /// `bytes` appended to the table stream, named by the FIB pair at `off`.
+        fn table(mut self, off: usize, bytes: &[u8]) -> Self {
+            let fc = u32::try_from(self.table.len()).unwrap();
+            self.table.extend_from_slice(bytes);
+            self.fib(off, fc).fib(off + 4, u32::try_from(bytes.len()).unwrap())
+        }
+
+        /// A piece table of `(cp_end, text, unicode, prm)` pieces whose text
+        /// is appended to the WordDocument stream.
+        fn pieces(mut self, pieces: &[(u32, &[u8], bool, u16)]) -> Self {
+            let mut cps = vec![0u32];
+            let mut pcds = Vec::new();
+            for &(cp_end, text, unicode, prm) in pieces {
+                let fc = u32::try_from(self.word_doc.len()).unwrap();
+                self.word_doc.extend_from_slice(text);
+                let fc = if unicode { fc } else { (fc * 2) | 0x4000_0000 };
+                cps.push(cp_end);
+                pcds.extend([&[0u8, 0][..], &fc.to_le_bytes(), &prm.to_le_bytes()].concat());
+            }
+            let plc = [words(&cps), pcds].concat();
+            let len = u32::try_from(plc.len()).unwrap().to_le_bytes();
+            self.table(0x1A2, &[&[2u8][..], &len, &plc].concat())
+        }
+
+        /// One CHPX FKP page giving the main text `grpprl`.
+        fn chpx(mut self, grpprl: &[u8]) -> Self {
+            let page = 2 * 512;
+            let end = u32::try_from(self.word_doc.len()).unwrap();
+            let fkp = &mut self.word_doc[page..page + 512];
+            fkp[..8].copy_from_slice(&words(&[TEXT_FC as u32, end]));
+            fkp[8] = 0x80;
+            fkp[0x100] = u8::try_from(grpprl.len()).unwrap();
+            fkp[0x101..0x101 + grpprl.len()].copy_from_slice(grpprl);
+            fkp[511] = 1;
+            self.table(0xFA, &words(&[TEXT_FC as u32, end, 2]))
+        }
+
+        /// A footnote story of `len` CPs after the main text, its reference
+        /// at CP 0.
+        fn footnote(self, len: u32) -> Self {
+            self.fib(0x50, len)
+                .table(0xAA, &[words(&[0, 1]), vec![0, 0]].concat())
+                .table(0xB2, &words(&[0, len]))
+        }
+
+        fn data(self, data: Vec<u8>) -> Self {
+            DocBuilder { data: Some(data), ..self }
+        }
+
+        fn bytes(self) -> Vec<u8> {
+            use std::io::Write;
+            let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+            let streams = [("WordDocument", Some(self.word_doc)), ("0Table", Some(self.table))];
+            for (name, bytes) in streams.into_iter().chain([("Data", self.data)]) {
+                if let Some(bytes) = bytes {
+                    ole.create_stream(name).unwrap().write_all(&bytes).unwrap();
+                }
+            }
+            ole.into_inner().into_inner()
+        }
+    }
+
+    fn words(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    fn utf16(units: &[u16]) -> Vec<u8> {
+        units.iter().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
     fn doc_with_inline_picture(inflated: usize) -> Vec<u8> {
-        use std::io::Write;
-        const TEXT_FC: u32 = 0x600;
-        const FKP_PN: u32 = 2;
-        let mut word_doc = vec![0u8; TEXT_FC as usize];
-        let mut put =
-            |at: usize, value: u32| word_doc[at..at + 4].copy_from_slice(&value.to_le_bytes());
-        put(0x18, TEXT_FC);
-        put(0x1C, TEXT_FC + 2);
-        put(0x4C, 2);
-        put(0xFA, 0);
-        put(0xFE, 12);
-        word_doc[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
-        let page = FKP_PN as usize * 512;
-        word_doc[page..page + 4].copy_from_slice(&TEXT_FC.to_le_bytes());
-        word_doc[page + 4..page + 8].copy_from_slice(&(TEXT_FC + 2).to_le_bytes());
-        word_doc[page + 8] = 0x80;
-        let chpx = pic_location_chpx();
-        word_doc[page + 0x100] = u8::try_from(chpx.len()).unwrap();
-        word_doc[page + 0x101..page + 0x101 + chpx.len()].copy_from_slice(&chpx);
-        word_doc[page + 511] = 1;
-        word_doc.extend_from_slice(b"\x01\r");
-        let mut table = Vec::new();
-        for value in [TEXT_FC, TEXT_FC + 2, FKP_PN] {
-            table.extend_from_slice(&value.to_le_bytes());
+        DocBuilder::new(b"\x01\r").chpx(&pic_location_chpx()).data(picture_data(inflated)).bytes()
+    }
+
+    fn record(ver_inst: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(body.len()).unwrap().to_le_bytes();
+        [&ver_inst.to_le_bytes()[..], &rec_type.to_le_bytes(), &len, body].concat()
+    }
+
+    /// A shape container for `spid` with the property ids `props`.
+    fn shape(spid: u32, props: &[u16]) -> Vec<u8> {
+        let table: Vec<u8> =
+            props.iter().flat_map(|id| [&id.to_le_bytes()[..], &[0; 4]].concat()).collect();
+        let sp = record(0x0002, 0xF00A, &[&spid.to_le_bytes()[..], &[0; 4]].concat());
+        let opt = record(u16::try_from(props.len()).unwrap() << 4 | 3, 0xF00B, &table);
+        record(0x000F, 0xF004, &[sp, opt].concat())
+    }
+
+    /// A floating shape anchored at CP 0 of `"\x08\r"`, drawn by `drawn`.
+    fn floating(spid: u32, drawn: &[u8]) -> Vec<u8> {
+        floating_in(spid, &[(0, drawn)])
+    }
+
+    /// A floating shape anchored at CP 0 of `"\x08\r"`, over the drawings
+    /// `(dgglbl, drawn)`.
+    fn floating_in(spid: u32, drawings: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut dgg = record(0x000F, 0xF000, &[]);
+        for &(dgglbl, drawn) in drawings {
+            dgg.push(dgglbl);
+            dgg.extend(record(0x000F, 0xF002, &record(0x000F, 0xF003, drawn)));
         }
-        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
-        for (name, bytes) in
-            [("WordDocument", word_doc), ("0Table", table), ("Data", picture_data(inflated))]
-        {
-            ole.create_stream(name).unwrap().write_all(&bytes).unwrap();
+        let spa = [words(&[0, 1, spid]), vec![0; 22]].concat();
+        DocBuilder::new(b"\x08\r").table(0x1DA, &spa).table(0x22A, &dgg).bytes()
+    }
+
+    const SHAPE_FIELD: &[u8] = b"\x13 SHAPE \x14\x01\x15\r";
+
+    /// Inline picture data whose art is `art`, for every `\x01` of `text`.
+    fn inline_art(text: &[u8], art: &[u8]) -> Vec<u8> {
+        let data = [&words(&[6 + u32::try_from(art.len()).unwrap()])[..], &[6, 0], art].concat();
+        DocBuilder::new(text).chpx(&pic_location_chpx()).data(data).bytes()
+    }
+
+    /// A document whose main text is the UTF-16 of `text`, with `~` an
+    /// unpaired surrogate.
+    fn damaged(text: &str) -> Vec<u8> {
+        let units: Vec<u16> =
+            text.encode_utf16().map(|u| if u == u16::from(b'~') { 0xDC00 } else { u }).collect();
+        let len = u32::try_from(units.len()).unwrap();
+        DocBuilder::new(b"").fib(0x4C, len).pieces(&[(len, &utf16(&units), true, 0)]).bytes()
+    }
+
+    fn fuel(bytes: &[u8]) -> u64 {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, bytes).unwrap();
+        parse_ctx.fuel()
+    }
+
+    type Reported = (DiagnosticCode, Region, u64);
+
+    fn reported(bytes: &[u8]) -> Vec<Reported> {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, bytes).unwrap();
+        parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect()
+    }
+
+    #[test]
+    fn each_loss_is_reported_in_its_story() {
+        use DiagnosticCode::*;
+        let unpaired = utf16(&[0x61, 0xD800, 0x62, 0x0D]);
+        let hdd = words(&[0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 4, 5, 5, 6, 8]);
+        let ftxbxs = |reusable: u16| {
+            [&[0u8; 4][..], &1u32.to_le_bytes(), &reusable.to_le_bytes(), &[0; 12]].concat()
+        };
+        let txbx = [words(&[0, 2, 4, 6, 8]), ftxbxs(0), ftxbxs(1), ftxbxs(0), ftxbxs(0)].concat();
+        let field = |name: &str| format!("\x13{name}\x14\x15\r").into_bytes();
+        let lfo = [&words(&[1, 0, 0, 0])[..], &[1, 0, 0, 0]].concat();
+        let in_footnote = |story: &[u8]| {
+            let len = u32::try_from(story.len()).unwrap();
+            DocBuilder::new(&[b"a\r", story].concat()).fib(0x4C, 2).footnote(len).bytes()
+        };
+
+        let chpx_with = |flag: u8| [&[flag, 0x08, 1][..], &pic_location_chpx()].concat();
+        let cases: Vec<(&str, Vec<u8>, Vec<Reported>)> = vec![
+            (
+                "body text with an unpaired surrogate",
+                DocBuilder::new(b"").fib(0x4C, 4).pieces(&[(4, &unpaired, true, 0)]).bytes(),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "footnote text with an unpaired surrogate",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .footnote(2)
+                    .pieces(&[(2, b"a\r", false, 0), (4, &utf16(&[0xDC00, 0x0D]), true, 0)])
+                    .bytes(),
+                vec![(InvalidEncoding, Region::Note, 1)],
+            ),
+            (
+                "header text, never rendered, with an unpaired surrogate",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .fib(0x54, 2)
+                    .pieces(&[(2, b"a\r", false, 0), (4, &utf16(&[0xDC00, 0x0D]), true, 0)])
+                    .bytes(),
+                vec![],
+            ),
+            (
+                "an unpaired surrogate in a discarded field instruction",
+                damaged("\x13 PAGE ~\x14 1\x15\r"),
+                vec![],
+            ),
+            (
+                "an unpaired surrogate in a hyperlink's target",
+                damaged("\x13 HYPERLINK \"http://x/~\" \x14a\x15\r"),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "an unpaired surrogate in a hyperlink's tooltip",
+                damaged("\x13 HYPERLINK \"http://x/\" \\o \"~\" \x14a\x15\r"),
+                vec![],
+            ),
+            (
+                "an unpaired surrogate in a field result",
+                damaged("\x13 PAGE \x14~\x15\r"),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "an unpaired surrogate in a nested field's result",
+                damaged("\x13 HYPERLINK \"http://x/\" \x14\x13 PAGE \x14~\x15\x15\r"),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "a broken double-byte sequence",
+                DocBuilder::new(b"\x81\x20\r").fib(0x06, 0x0411).bytes(),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "a piece outside the stream",
+                DocBuilder::new(b"ab\r").fib(0x18, 0x10_0000).fib(0x1C, 0x10_0003).bytes(),
+                vec![(TruncatedRecords, Region::Body, 1)],
+            ),
+            (
+                "a footnote piece outside the stream",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .footnote(2)
+                    .pieces(&[(2, b"a\r", false, 0), (4, b"", true, 0)])
+                    .bytes(),
+                vec![(TruncatedRecords, Region::Note, 1)],
+            ),
+            (
+                "a header piece outside the stream",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .fib(0x54, 2)
+                    .pieces(&[(2, b"a\r", false, 0), (4, b"", true, 0)])
+                    .bytes(),
+                vec![],
+            ),
+            (
+                "a piece outside the stream from a header into the endnotes",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .fib(0x54, 2)
+                    .fib(0x60, 2)
+                    .pieces(&[(2, b"a\r", false, 0), (6, b"", true, 0)])
+                    .bytes(),
+                vec![(TruncatedRecords, Region::Note, 1)],
+            ),
+            (
+                "a header piece outside the stream, then endnote text",
+                DocBuilder::new(b"")
+                    .fib(0x4C, 2)
+                    .fib(0x54, 4)
+                    .fib(0x60, 2)
+                    .pieces(&[(2, b"a\r", false, 0), (6, b"", true, 0), (8, b"", true, 0)])
+                    .bytes(),
+                vec![(TruncatedRecords, Region::Note, 1)],
+            ),
+            (
+                "an unpaired surrogate in an anchor link",
+                damaged("\x13 HYPERLINK \\l \"a~\" \x14a\x15\r"),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "an unpaired surrogate in a relative link",
+                damaged("\x13 HYPERLINK \"a~\" \x14a\x15\r"),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "a formatting bin table of no whole record",
+                DocBuilder::new(b"a\r").table(0xFA, &words(&[0, 2])).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "a Prm0 with no model field",
+                DocBuilder::new(b"").fib(0x4C, 2).pieces(&[(2, b"a\r", false, 0x05 << 1)]).bytes(),
+                vec![(FormattingUnreadable, Region::Body, 1)],
+            ),
+            (
+                "one section's odd and first headers and odd footer, then a story of no full section",
+                DocBuilder::new(b"a\r").fib(0x54, 8).table(0xF2, &hdd).bytes(),
+                vec![(HeaderOmitted, Region::Header, 2), (FooterOmitted, Region::Footer, 1)],
+            ),
+            (
+                "two comments",
+                DocBuilder::new(b"a\r")
+                    .table(0xBA, &[words(&[0, 1, 2]), vec![0; 60]].concat())
+                    .bytes(),
+                vec![(CommentOmitted, Region::Comment, 2)],
+            ),
+            (
+                "an unreadable comment table, with no comment text",
+                DocBuilder::new(b"a\r").fib(0xBA, 999).fib(0xBE, 72).bytes(),
+                vec![],
+            ),
+            (
+                "a comment table with a stray byte",
+                DocBuilder::new(b"a\r")
+                    .fib(0x5C, 2)
+                    .table(0xBA, &[words(&[0, 1]), vec![0; 30], vec![0]].concat())
+                    .bytes(),
+                vec![(CommentOmitted, Region::Comment, 1)],
+            ),
+            (
+                "a comment table that does not read",
+                DocBuilder::new(b"a\r").fib(0x5C, 2).fib(0xBA, 999).fib(0xBE, 72).bytes(),
+                vec![(CommentOmitted, Region::Comment, 1)],
+            ),
+            (
+                "a header table with a stray byte",
+                DocBuilder::new(b"a\r")
+                    .fib(0x54, 8)
+                    .table(0xF2, &[hdd.clone(), vec![0]].concat())
+                    .bytes(),
+                vec![(HeaderOmitted, Region::Header, 1)],
+            ),
+            (
+                "a header table that does not read, with no header text",
+                DocBuilder::new(b"a\r").fib(0xF2, 999).fib(0xF6, 60).bytes(),
+                vec![],
+            ),
+            (
+                "two text boxes in use, one reusable, and the final range",
+                DocBuilder::new(b"a\r").fib(0x64, 6).table(0x25A, &txbx).bytes(),
+                vec![(TextBoxUnread, Region::Body, 2)],
+            ),
+            (
+                "text-box text with no text-box table",
+                DocBuilder::new(b"a\r").fib(0x64, 6).bytes(),
+                vec![(TextBoxUnread, Region::Body, 1)],
+            ),
+            (
+                "text boxes whose table does not read",
+                DocBuilder::new(b"a\r").fib(0x64, 6).fib(0x25A, 999).fib(0x25E, 56).bytes(),
+                vec![(TextBoxUnread, Region::Body, 1)],
+            ),
+            (
+                "a text-box table that does not read, with no text-box text",
+                DocBuilder::new(b"a\r").fib(0x25A, 999).fib(0x25E, 56).bytes(),
+                vec![],
+            ),
+            (
+                "an embedded object",
+                DocBuilder::new(b"\x01\r").chpx(&chpx_with(0x0A)).bytes(),
+                vec![(EmbeddedObject, Region::Body, 1)],
+            ),
+            ("field data", DocBuilder::new(b"\x01\r").chpx(&chpx_with(0x06)).bytes(), vec![]),
+            (
+                "a picture with no Data stream",
+                DocBuilder::new(b"\x01\r").chpx(&pic_location_chpx()).bytes(),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a picture whose embedded-object flag is off",
+                DocBuilder::new(b"\x01\r")
+                    .chpx(&[&[0x0A, 0x08, 0][..], &pic_location_chpx()].concat())
+                    .bytes(),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a picture in a footnote with no Data stream",
+                DocBuilder::new(b"a\r\x01\r")
+                    .fib(0x4C, 2)
+                    .footnote(2)
+                    .chpx(&pic_location_chpx())
+                    .bytes(),
+                vec![(ImageUnavailable, Region::Note, 1)],
+            ),
+            (
+                "a floating shape's inline stand-in with no Data stream",
+                DocBuilder::new(SHAPE_FIELD).chpx(&pic_location_chpx()).bytes(),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a floating shape's inline stand-in whose art holds no shape",
+                inline_art(SHAPE_FIELD, &[]),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a picture with no blip",
+                inline_art(b"\x01\r", &[]),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "an inline shape that is no picture",
+                inline_art(b"\x01\r", &shape(1, &[0x0080])),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a floating text box's inline stand-in",
+                inline_art(SHAPE_FIELD, &shape(1, &[0x0080])),
+                vec![],
+            ),
+            (
+                "an inline shape that is no picture in another field's result",
+                inline_art(b"\x13 INCLUDEPICTURE x \x14\x01\x15\r", &shape(1, &[0x0080])),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "a floating picture's inline stand-in with no blip",
+                inline_art(SHAPE_FIELD, &shape(1, &[0x4104])),
+                vec![(ImageUnavailable, Region::Body, 1)],
+            ),
+            (
+                "an embedded object in a footnote",
+                DocBuilder::new(b"a\r\x01\r")
+                    .fib(0x4C, 2)
+                    .footnote(2)
+                    .chpx(&chpx_with(0x0A))
+                    .bytes(),
+                vec![(EmbeddedObject, Region::Note, 1)],
+            ),
+            (
+                "a check box in a footnote",
+                in_footnote(&field(" FORMCHECKBOX ")),
+                vec![(FormControlUnread, Region::Note, 1)],
+            ),
+            (
+                "a floating picture",
+                floating(7, &shape(7, &[0x4104])),
+                vec![(ImageUnplaced, Region::Body, 1)],
+            ),
+            ("a floating text box", floating(7, &shape(7, &[0x0080])), vec![]),
+            (
+                "a floating picture in the main drawing after a header drawing",
+                floating_in(7, &[(1, &shape(7, &[0x0181])), (0, &shape(7, &[0x4104]))]),
+                vec![(ImageUnplaced, Region::Body, 1)],
+            ),
+            (
+                "a floating shape",
+                floating(7, &shape(7, &[0x0181])),
+                vec![(GraphicUnread, Region::Body, 1)],
+            ),
+            (
+                "a floating shape no drawing holds",
+                floating(7, &shape(8, &[0x4104])),
+                vec![(GraphicUnread, Region::Body, 1)],
+            ),
+            (
+                "a check box and a drop-down, then a text form field",
+                DocBuilder::new(
+                    &[field(" FORMCHECKBOX "), field("formdropdown"), field("FORMTEXT")].concat(),
+                )
+                .bytes(),
+                vec![(FormControlUnread, Region::Body, 2)],
+            ),
+            (
+                "list tables outside the table stream",
+                DocBuilder::new(b"a\r").fib(0x2E2, 999).fib(0x2E6, 30).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "list tables with no overrides",
+                DocBuilder::new(b"a\r").table(0x2E2, &[0, 0]).bytes(),
+                vec![],
+            ),
+            (
+                "list tables whose range passes the end of the table stream",
+                DocBuilder::new(b"a\r")
+                    .table(0x2E2, &[0, 0])
+                    .fib(0x2E6, 30)
+                    .table(0x2EA, &[0; 4])
+                    .bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "a list override cut short",
+                DocBuilder::new(b"a\r").table(0x2E2, &[0, 0]).table(0x2EA, &lfo).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "list overrides outside the table stream",
+                DocBuilder::new(b"a\r").table(0x2E2, &[0, 0]).fib(0x2EA, 999).fib(0x2EE, 4).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "a style record that does not parse",
+                DocBuilder::new(b"a\r").table(0xA2, &[4, 0, 1, 0, 10, 0, 4, 0, 0, 0, 0, 0]).bytes(),
+                vec![(StylePartUnreadable, Region::Container, 1)],
+            ),
+            (
+                "a style sheet outside the table stream",
+                DocBuilder::new(b"a\r").fib(0xA2, 999).fib(0xA6, 10).bytes(),
+                vec![(StylePartUnreadable, Region::Container, 1)],
+            ),
+            (
+                "a style sheet outside the table stream, beside list tables",
+                DocBuilder::new(b"a\r")
+                    .fib(0xA2, 999)
+                    .fib(0xA6, 10)
+                    .fib(0x2E2, 999)
+                    .fib(0x2E6, 30)
+                    .bytes(),
+                vec![(PartUnreadable, Region::Body, 2)],
+            ),
+            (
+                "a character bin table outside the table stream",
+                DocBuilder::new(b"a\r").fib(0xFA, 999).fib(0xFE, 12).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "a paragraph bin table too short to hold a page",
+                DocBuilder::new(b"a\r").table(0x102, &[0; 4]).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "an FKP page outside the stream",
+                DocBuilder::new(b"a\r").table(0x102, &words(&[0, 2, 900])).bytes(),
+                vec![(PartUnreadable, Region::Body, 1)],
+            ),
+            (
+                "footnote and endnote tables outside the table stream",
+                DocBuilder::new(b"a\r")
+                    .fib(0xAA, 999)
+                    .fib(0xAE, 10)
+                    .fib(0x212, 999)
+                    .fib(0x216, 8)
+                    .bytes(),
+                vec![(PartUnreadable, Region::Note, 2)],
+            ),
+        ];
+        for (case, bytes, expected) in cases {
+            assert_eq!(reported(&bytes), expected, "{case}");
         }
-        ole.into_inner().into_inner()
+    }
+
+    #[test]
+    fn both_drawing_walks_charge_the_parses_context() {
+        let undrawn = fuel(&floating(7, &[]));
+        assert_eq!(fuel(&floating(7, &shape(7, &[0x0080]))), undrawn + 3);
+        let stand_in = |art: &[u8]| fuel(&inline_art(SHAPE_FIELD, art));
+        assert_eq!(stand_in(&shape(1, &[0x0080])), stand_in(&[]) + 3);
+    }
+
+    #[test]
+    fn every_drawing_record_walked_is_charged_once() {
+        let run = record(0x000F, 0xF003, &[shape(1, &[]), shape(2, &[0x0104])].concat());
+        let parse_ctx = ParseCtx::default();
+        let kinds = shape_kinds(&parse_ctx, &run).unwrap();
+        assert_eq!(kinds, HashMap::from([(1, ShapeKind::Graphic), (2, ShapeKind::Picture)]));
+        assert_eq!(parse_ctx.fuel(), 7);
+        let limits = crate::limits::Limits { max_work: 6, ..Default::default() };
+        assert!(shape_kinds(&ParseCtx::new(&limits), &run).is_err());
     }
 
     fn inline_picture_bytes(
@@ -1267,7 +2125,7 @@ mod tests {
             props: RunProps { chpx: pic_location_chpx(), ..RunProps::default() },
         };
         let assembler = assembler(&parse_ctx, vec![run], picture_data(inflated));
-        assert!(assembler.picture_at(0)?.is_some());
+        assert!(assembler.picture_at(0, Region::Body, false)?.is_some());
         Ok(assembler.assets.borrow().assets[0].bytes.len())
     }
 
@@ -1339,6 +2197,18 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let runs = parse_fkps(&parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &[]).unwrap();
         assert_eq!((runs.len(), parse_ctx.fuel()), (6, 6));
+    }
+
+    #[test]
+    fn a_word_document_that_is_no_stream_is_malformed_and_one_absent_is_missing() {
+        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        ole.create_storage("WordDocument").unwrap();
+        let storage = ole.into_inner().into_inner();
+        let absent = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        let absent = absent.into_inner().into_inner();
+        let code = |bytes: &[u8]| parse(&ParseCtx::default(), bytes).unwrap_err().code();
+        assert_eq!(code(&storage), "malformed");
+        assert_eq!(code(&absent), "missingPart");
     }
 
     fn ole_stream(ole: &mut cfb::CompoundFile<std::io::Cursor<&[u8]>>, name: &str) -> Vec<u8> {
