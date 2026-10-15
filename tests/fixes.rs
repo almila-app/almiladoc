@@ -6,20 +6,22 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
 
-fn docx(run_content: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let document = format!(
-        r#"<w:document {W}><w:body><w:p><w:r>{run_content}</w:r></w:p></w:body></w:document>"#
-    );
+fn docx(body: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let document = format!(r#"<w:document {W}><w:body>{body}</w:body></w:document>"#);
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default())?;
     zip.write_all(document.as_bytes())?;
     Ok(zip.finish()?.into_inner())
 }
 
-fn markdown(run_content: &str) -> Result<String, Box<dyn Error>> {
-    let bytes = docx(run_content)?;
+fn body_markdown(body: &str) -> Result<String, Box<dyn Error>> {
+    let bytes = docx(body)?;
     let markdown: Result<String, ConvertError> = to_markdown_bytes(&bytes, Format::Docx);
     Ok(markdown?.trim_end().to_owned())
+}
+
+fn markdown(run_content: &str) -> Result<String, Box<dyn Error>> {
+    body_markdown(&format!("<w:p><w:r>{run_content}</w:r></w:p>"))
 }
 
 fn sym(font: &str, code: &str) -> String {
@@ -92,5 +94,12 @@ fn docx_non_breaking_hyphen_keeps_the_run_style() -> TestResult {
 fn docx_soft_hyphen_stays_dropped() -> TestResult {
     let content = r#"<w:t>hyphen</w:t><w:softHyphen/><w:t>ation</w:t>"#;
     assert_eq!(markdown(content)?, "hyphenation");
+    Ok(())
+}
+
+#[test]
+fn docx_heading_line_break_slugs_as_the_space_it_renders() -> TestResult {
+    let body = r#"<w:p><w:hyperlink w:anchor="_Toc1"><w:r><w:t>go</w:t></w:r></w:hyperlink></w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:bookmarkStart w:id="0" w:name="_Toc1"/><w:r><w:t>Part One</w:t><w:br/><w:t>Overview</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p>"#;
+    assert_eq!(body_markdown(body)?, "[go](#part-one-overview)\n\n# Part One Overview");
     Ok(())
 }

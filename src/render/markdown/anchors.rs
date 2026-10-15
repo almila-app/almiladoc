@@ -50,7 +50,9 @@ pub(crate) fn resolve_anchors(doc: &Document) -> AnchorMap {
     // inside the heading content) to those slugs.
     walk_blocks(&doc.blocks, &mut |block| {
         if let Block::Heading { anchor, content, .. } = block {
-            let Some(slug) = ids.claim(gfm_slug(&inlines_to_plain_text(content))) else {
+            let Some(slug) =
+                ids.claim(gfm_slug(&inlines_to_plain_text(content).replace('\n', " ")))
+            else {
                 return;
             };
             let mut bind = |id: &str| {
@@ -274,6 +276,24 @@ mod tests {
     fn empty_slugs_become_section() {
         assert_eq!(gfm_slug("!!!"), "section");
         assert_eq!(gfm_slug(""), "section");
+    }
+
+    #[test]
+    fn heading_line_breaks_slug_as_spaces() {
+        let doc = Document {
+            blocks: vec![Block::Heading {
+                level: 1,
+                anchor: Some("toc".to_string()),
+                content: vec![
+                    Inline::plain("Part One"),
+                    Inline::LineBreak,
+                    Inline::plain("Overview"),
+                ],
+            }],
+            notes: Vec::new(),
+            assets: Vec::new(),
+        };
+        assert_eq!(resolve_anchors(&doc).fragment("toc"), Some("part-one-overview"));
     }
 
     #[test]

@@ -40,7 +40,6 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #170 issue, pdf-inspector 1.14.2 lacks the right-to-left extraction fix: fixed by the pdf-inspector upgrade in the dependency step (ADR 0001 decision 19, step 2).
 - #171 PR, preserve link and image destinations: destinations are corrupted today; entity escaping is taken under ADR 0001 decision 8, and backslashes are escaped rather than percent-encoded.
 - #172 issue, ligature characters dropped from PDF text: glyph-name ligature recovery arrives with the pdf-inspector upgrade (ADR 0001 decision 19, step 2).
-- #180 PR, slug a heading line break as the space it renders: heading slugs must match the rendered heading text so table-of-contents links resolve.
 - #181 PR, update pdf-inspector for the right-to-left fix: the upgrade belongs to the dependency step (ADR 0001 decision 19, step 2), pinned to the current release with regenerated snapshots.
 - #182 issue, PPTX images dropped in `mc:AlternateContent`: branch selection and OLE previews are read, and whatever stays unread is reported (ADR 0001 decisions 8 and 10).
 - #184 PR, keep bare numbered levels as ordered markers: a bare `%1` level renders as an ordered list marker, chosen by the serializer.
@@ -54,6 +53,7 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id; a start override restarts its level once per instance, and a level override without one continues the count.
 - #177 PR, preserve DOCX symbol checkbox states: a Wingdings or Wingdings 2 ballot-box `w:sym` is read as the model's checkbox inline rather than as glyph text, with the strict hex validation kept; other symbols wait for a symbol-font map.
 - #179 PR, keep non-breaking hyphens: `w:noBreakHyphen` renders as a hyphen in its run's style, as the DOC and RTF readers already do; `w:softHyphen` stays dropped.
+- #180 PR, slug a heading line break as the space it renders: a heading's slug reads each line break as the space the heading renders, so a table-of-contents link to a multi-line heading resolves.
 
 ## Already fixed
 
