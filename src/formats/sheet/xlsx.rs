@@ -1,27 +1,35 @@
 //! In-house SpreadsheetML reader (.xlsx / .xlsm): the workbook's visible
 //! sheets, shared strings, cell number formats from `xl/styles.xml`, and
 //! merge regions. Rows, columns, and sheets the source hides are omitted,
-//! and merge regions are remapped onto the surviving grid.
+//! and merge regions are remapped onto the surviving grid. Hyperlinks,
+//! print headers and footers, comments and the referenced drawing are read
+//! only to report what the grid does not carry.
 
 use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
 use super::{format_duration_days, format_float, format_time_of_day};
 use crate::ctx::ParseCtx;
-use crate::diagnostics::Region;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
-use crate::model::{Block, Cell, Document, GridBuilder, Inline, Table, TableKind};
+use crate::model::{
+    Block, Cell, Document, GridBuilder, Inline, Table, TableKind, inlines_to_plain_text,
+};
 use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, path};
 use crate::shared::header::resolve_header_rows;
+use crate::shared::link_label::{label_is_absolute_url, label_shows_target};
 use crate::shared::text::clean_text;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub(super) const SHARED_STRINGS_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
+
+const COMMENTS_REL: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
 
 /// The grid bounds the format defines; a reference outside them is not a
 /// real cell.
@@ -51,32 +59,39 @@ pub(super) fn parse(
         Some(root) => shared_strings(&root),
         None => Vec::new(),
     };
-    let styles = Styles::read(
-        Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.xml")
-            .read_xml(pkg, Role::Content(Region::Body))?,
-    );
+    let styles_part = Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.xml");
+    let styles = match styles_part.read_xml(pkg, Role::Content(Region::Body))? {
+        Some(root) => match root.find(ns::SML, "styleSheet") {
+            Some(style_sheet) => Styles::read(style_sheet),
+            None => {
+                parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
+                Styles { xfs: CellXfs::unread(true) }
+            }
+        },
+        None => Styles { xfs: CellXfs::unread(styles_part.reported_when_unread(pkg)) },
+    };
 
-    // Visible sheets in workbook order; hidden and veryHidden sheets are
-    // omitted entirely, heading included.
-    let mut sheets: Vec<(String, String)> = Vec::new();
-    for sheet in workbook
+    let mut sheets: Vec<(usize, String, String)> = Vec::new();
+    for (position, sheet) in workbook
         .first_descendant(ns::SML, "sheets")
         .into_iter()
         .flat_map(|s| s.find_all(ns::SML, "sheet"))
+        .enumerate()
     {
+        let _unit = parse_ctx.enter_unit(position);
         if matches!(sheet.attr_unqualified("state"), Some("hidden" | "veryHidden")) {
+            parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             continue;
         }
         let name = sheet.attr_unqualified("name").unwrap_or_default().to_string();
-        let Some(target) =
-            sheet.attr_qualified(ns::R, "id").and_then(|rid| wb_rels.internal_target(rid))
-        else {
-            log::warn!("skipping sheet {name:?} with no worksheet relationship");
-            continue;
-        };
-        match path::resolve(wb_part, target) {
-            Ok(t) => sheets.push((name, t.path)),
-            Err(e) => log::warn!("skipping sheet {name:?} with unresolvable target: {e}"),
+        let target = sheet
+            .attr_qualified(ns::R, "id")
+            .and_then(|rid| wb_rels.internal_target(rid))
+            .and_then(|target| path::resolve(wb_part, target).ok());
+        match target {
+            Some(t) => sheets.push((position, name, t.path)),
+            None if wb_rels.reported() => {}
+            None => parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body),
         }
     }
 
@@ -85,16 +100,18 @@ pub(super) fn parse(
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (position, (name, part)) in sheets.iter().enumerate() {
-        let _unit = parse_ctx.enter_unit(position);
+    for (position, name, part) in &sheets {
+        let _unit = parse_ctx.enter_unit(*position);
         let worksheet = pkg.related_xml_part(part, Role::Reported(Region::Body))?;
         let Some(worksheet) = worksheet.as_ref().and_then(|r| r.find(ns::SML, "worksheet")) else {
-            log::warn!("skipping unreadable sheet {name:?}");
+            parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             failed += 1;
             continue;
         };
-        let mut content = read_sheet(worksheet, &shared, &styles, date1904);
-        content.checkboxes = read_vml_checkboxes(pkg, part)?;
+        let mut content = read_sheet(parse_ctx, worksheet, &shared, &styles, date1904);
+        let drawing =
+            worksheet.find(ns::SML, "drawing").and_then(|d| d.attr_qualified(ns::R, "id"));
+        read_sheet_parts(parse_ctx, pkg, part, drawing, &mut content)?;
         let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
@@ -107,6 +124,113 @@ pub(super) fn parse(
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
     }
     Ok(doc)
+}
+
+/// What a worksheet's relationships carry beside its cells: form control
+/// checkboxes, the targets of its external hyperlinks, and the comments and
+/// the drawing its `drawing` element names, which no output holds and which
+/// are reported.
+fn read_sheet_parts(
+    parse_ctx: &ParseCtx,
+    pkg: &mut Package,
+    part: &str,
+    drawing: Option<&str>,
+    content: &mut SheetContent,
+) -> Result<(), ConvertError> {
+    let rels = read_rels(pkg, &rels_part_for(part), Role::Content(Region::Body))?;
+    content.checkboxes = read_vml_checkboxes(parse_ctx, pkg, part, &rels)?;
+    let mut targets: HashMap<String, Rc<str>> = HashMap::new();
+    for link in &mut content.links {
+        if let LinkTarget::Related(id) = &link.target {
+            link.target = match rels.get(id) {
+                Some(rel) => LinkTarget::Url(
+                    targets.entry(id.clone()).or_insert_with(|| rel.target.as_str().into()).clone(),
+                ),
+                None if rels.reported() => LinkTarget::Reported,
+                None => LinkTarget::Unknown,
+            };
+        }
+    }
+    for (_, rel) in rels.iter() {
+        if rel.rel_type == COMMENTS_REL {
+            parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+        }
+    }
+    let Some(id) = drawing else {
+        return Ok(());
+    };
+    match rels.internal_target(id).and_then(|target| path::resolve(part, target).ok()) {
+        Some(target) => {
+            if let Some(root) = pkg.related_xml_part(&target.path, Role::Content(Region::Body))? {
+                let Some(drawing) = root.find(ns::XDR, "wsDr") else {
+                    parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
+                    return Ok(());
+                };
+                let mut losses = Vec::new();
+                drawing_losses(drawing, false, &mut losses);
+                for code in losses {
+                    parse_ctx.emit(code, Region::Body);
+                }
+            }
+        }
+        None if rels.reported() => {}
+        None => parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body),
+    }
+    Ok(())
+}
+
+/// The pictures, charts and text-bearing shapes a sheet drawing places,
+/// none of which the grid holds. Hidden objects show nothing; alternate
+/// content counts its Choice, which the application shows, there leaving
+/// out the form controls a legacy drawing also carries, or its Fallback
+/// when the Choice holds nothing counted.
+fn drawing_losses(parent: &Element, in_choice: bool, out: &mut Vec<DiagnosticCode>) {
+    for child in parent.child_elems() {
+        if child.is(ns::MC, "AlternateContent") {
+            let mut branch = Vec::new();
+            if let Some(choice) = child.find(ns::MC, "Choice") {
+                drawing_losses(choice, true, &mut branch);
+            }
+            if branch.is_empty()
+                && let Some(fallback) = child.find(ns::MC, "Fallback")
+            {
+                drawing_losses(fallback, in_choice, &mut branch);
+            }
+            out.append(&mut branch);
+            continue;
+        }
+        if child.ns.as_deref() != Some(ns::XDR) {
+            continue;
+        }
+        let properties = child
+            .child_elems()
+            .find(|e| e.ns.as_deref() == Some(ns::XDR) && e.local.starts_with("nv"))
+            .and_then(|nv| nv.find(ns::XDR, "cNvPr"));
+        let hidden = properties.and_then(|pr| pr.attr_unqualified("hidden")).is_some_and(bool_attr);
+        let compat_control = in_choice
+            && properties.is_some_and(|pr| pr.descendants(ns::A14, "compatExt").next().is_some());
+        match child.local.as_str() {
+            "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
+                drawing_losses(child, in_choice, out)
+            }
+            _ if hidden || compat_control => {}
+            "grpSp" => drawing_losses(child, in_choice, out),
+            "pic" => out.push(DiagnosticCode::ImageUnplaced),
+            "graphicFrame" => out.push(DiagnosticCode::GraphicUnread),
+            "sp" => {
+                if child.descendants(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
+                    out.push(DiagnosticCode::GraphicUnread);
+                }
+                if child
+                    .find(ns::XDR, "spPr")
+                    .is_some_and(|pr| pr.find(ns::A, "blipFill").is_some())
+                {
+                    out.push(DiagnosticCode::ImageUnplaced);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A workbook-level sibling part: the relationship of the given type when
@@ -139,6 +263,12 @@ impl Sibling {
         } else {
             pkg.optional_part(&self.path, role)
         }
+    }
+
+    /// Whether a read that came back empty reported its loss: the part is
+    /// related, or present but unreadable.
+    pub(super) fn reported_when_unread(&self, pkg: &Package) -> bool {
+        self.related || pkg.has_part(&self.path)
     }
 
     fn read_xml(&self, pkg: &mut Package, role: Role) -> Result<Option<Element>, ConvertError> {
@@ -174,26 +304,55 @@ fn rich_text(item: &Element) -> String {
     out
 }
 
-/// A cell's resolved number format: General, or a parsed format code.
-/// Shared with the BIFF reader - .xls XF/FORMAT records resolve into the
-/// same representation.
+/// A cell's resolved number format: General, a parsed format code, or
+/// General standing in for a format that could not be applied, which a
+/// numeric cell reports as the code it carries. Shared with the BIFF reader,
+/// whose XF and FORMAT records resolve into the same representation.
 #[derive(Clone)]
 pub(super) enum CellFormat {
     General,
     Fmt(Rc<NumberFormat>),
+    Fallback(DiagnosticCode),
+}
+
+/// The ordered cell formats of a workbook, which a cell names by index.
+pub(super) struct CellXfs {
+    xfs: Vec<CellFormat>,
+    /// The styles part did not read and reported that, so a cell naming an
+    /// index it would have held reports nothing more.
+    reported: bool,
+}
+
+impl CellXfs {
+    pub(super) fn new(xfs: Vec<CellFormat>) -> CellXfs {
+        CellXfs { xfs, reported: false }
+    }
+
+    /// No styles part was read; `reported` when its read reported the loss.
+    pub(super) fn unread(reported: bool) -> CellXfs {
+        CellXfs { xfs: Vec::new(), reported }
+    }
+
+    /// The format at `index`; one outside the table renders General, as the
+    /// application repairs it, and the default index 0 of a workbook with no
+    /// formats is General.
+    pub(super) fn get(&self, index: usize) -> CellFormat {
+        match self.xfs.get(index) {
+            Some(format) => format.clone(),
+            None if self.reported || (index == 0 && self.xfs.is_empty()) => CellFormat::General,
+            None => CellFormat::Fallback(DiagnosticCode::NumberFormatFallback),
+        }
+    }
 }
 
 /// `xl/styles.xml` reduced to what rendering needs: the ordered `cellXfs`
 /// list, each entry's numFmtId resolved to a parsed format.
 struct Styles {
-    xfs: Vec<CellFormat>,
+    xfs: CellXfs,
 }
 
 impl Styles {
-    fn read(root: Option<Element>) -> Styles {
-        let Some(root) = root else {
-            return Styles { xfs: Vec::new() };
-        };
+    fn read(root: &Element) -> Styles {
         let mut custom: HashMap<u32, &str> = HashMap::new();
         for fmts in root.descendants(ns::SML, "numFmts") {
             for nf in fmts.find_all(ns::SML, "numFmt") {
@@ -220,36 +379,73 @@ impl Styles {
                     .collect()
             })
             .unwrap_or_default();
-        Styles { xfs }
+        Styles { xfs: CellXfs::new(xfs) }
     }
 
     /// The format for a cell's `s` attribute, an index into `cellXfs`
     /// (default 0).
-    fn for_cell(&self, s: Option<&str>) -> &CellFormat {
-        let i = s.and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-        self.xfs.get(i).unwrap_or(&CellFormat::General)
+    fn for_cell(&self, s: Option<&str>) -> CellFormat {
+        self.xfs.get(s.map_or(Some(0), |s| s.parse::<usize>().ok()).unwrap_or(usize::MAX))
     }
 }
 
 /// A numFmtId's format: the file's own `numFmt` entries first, then the
 /// built-in table. Unknown ids and unsupported codes fall back to General -
-/// never to a guess.
+/// never to a guess - and carry what that fallback costs.
 pub(super) fn resolve_format(id: u32, custom: &HashMap<u32, &str>) -> CellFormat {
     let code = custom.get(&id).copied().or_else(|| builtin_code(id));
-    match code {
+    let unread = match code {
         Some(code) => match NumberFormat::parse(code) {
-            Some(f) => CellFormat::Fmt(Rc::new(f)),
-            None => {
-                log::debug!("unsupported number format {code:?}, rendering as General");
-                CellFormat::General
-            }
+            Some(f) => return CellFormat::Fmt(Rc::new(f)),
+            None => shows_more_than_its_number(code),
         },
-        None => {
-            if id != 0 {
-                log::debug!("numFmtId {id} has no resolvable code, rendering as General");
+        None if id == 0 => return CellFormat::General,
+        None => matches!(id, 5..=8 | 27..=36 | 42 | 44 | 50..=58 | 71..=81),
+    };
+    CellFormat::Fallback(if unread {
+        DiagnosticCode::NumberFormatUnread
+    } else {
+        DiagnosticCode::NumberFormatFallback
+    })
+}
+
+/// Whether a format code shows more than the number General shows: a date
+/// or time token, an elapsed-time bracket, literal text, or a currency or
+/// unit symbol. A `[$-…]` bracket names only a locale, and the `General`
+/// keyword shows the number.
+fn shows_more_than_its_number(code: &str) -> bool {
+    const CURRENCY: &[char] = &['$', '¢', '£', '¥', '₩', '₪', '₫', '€', '₱', '₹', '₺', '₽', '฿'];
+    let mut rest = code;
+    loop {
+        let mut chars = rest.chars();
+        let Some(c) = chars.next() else {
+            return false;
+        };
+        let after = chars.as_str();
+        rest = match c {
+            '[' => {
+                let (bracket, tail) = after.split_once(']').unwrap_or((after, ""));
+                let currency =
+                    bracket.strip_prefix('$').is_some_and(|s| !s.is_empty() && !s.starts_with('-'));
+                let elapsed = !bracket.is_empty()
+                    && bracket.chars().all(|c| matches!(c.to_ascii_lowercase(), 'h' | 'm' | 's'));
+                if currency || elapsed {
+                    return true;
+                }
+                tail
             }
-            CellFormat::General
-        }
+            '"' | '\\' => return true,
+            '_' | '*' => {
+                chars.next();
+                chars.as_str()
+            }
+            'E' | 'e' if after.starts_with(['+', '-']) => after.get(1..).unwrap_or_default(),
+            'G' | 'g' if rest.get(..7).is_some_and(|w| w.eq_ignore_ascii_case("general")) => {
+                rest.get(7..).unwrap_or_default()
+            }
+            c if c.is_alphabetic() || CURRENCY.contains(&c) => return true,
+            _ => after,
+        };
     }
 }
 
@@ -266,9 +462,33 @@ pub(super) struct SheetContent {
     pub(super) hidden_cols: Vec<(u32, u32)>,
     /// Inclusive zero-based merge regions (r1, c1, r2, c2), area > 1.
     pub(super) merges: Vec<(u32, u32, u32, u32)>,
+    /// External hyperlinks by the cells whose text labels them.
+    pub(super) links: Vec<SheetLink>,
+    /// What each zero-based (row, col) lost, reported only where the cell
+    /// survives hidden filtering and no merge covers it.
+    pub(super) losses: Vec<(u32, u32, DiagnosticCode)>,
+}
+
+/// A hyperlink to a target outside the workbook over an inclusive
+/// zero-based range (r1, c1, r2, c2).
+pub(super) struct SheetLink {
+    pub(super) range: (u32, u32, u32, u32),
+    pub(super) target: LinkTarget,
+}
+
+pub(super) enum LinkTarget {
+    /// A relationship id not yet looked up in the worksheet's relationships.
+    Related(String),
+    /// A target held once per relationship, however many links name it.
+    Url(Rc<str>),
+    /// The target is gone and nothing has reported it.
+    Unknown,
+    /// The target is gone with a relationships part already reported.
+    Reported,
 }
 
 fn read_sheet(
+    parse_ctx: &ParseCtx,
     worksheet: &Element,
     shared: &[String],
     styles: &Styles,
@@ -312,14 +532,20 @@ fn read_sheet(
             // cells entirely, so iteration order says nothing.
             let (cr, cc) = match c.attr_unqualified("r").map(parse_ref) {
                 Some(Some(rc)) => rc,
-                Some(None) => continue,
+                Some(None) => {
+                    out.losses.push((r, next_col, DiagnosticCode::CellValueUnreadable));
+                    continue;
+                }
                 None => (r, next_col),
             };
             next_col = cc + 1;
             if cr >= MAX_ROWS || cc >= MAX_COLS {
                 continue;
             }
-            let text = cell_text(c, shared, styles, date1904);
+            let (text, loss) = cell_text(c, shared, styles, date1904);
+            if let Some(code) = loss {
+                out.losses.push((cr, cc, code));
+            }
             if !text.is_empty() {
                 out.cells.insert((cr, cc), text);
             }
@@ -329,7 +555,7 @@ fn read_sheet(
         worksheet.find_all(ns::SML, "mergeCells").flat_map(|mc| mc.find_all(ns::SML, "mergeCell"))
     {
         let Some(region) = merge.attr_unqualified("ref").and_then(parse_region) else {
-            log::debug!("skipping unparseable merge reference");
+            parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
             continue;
         };
         let (r1, c1, r2, c2) = region;
@@ -337,64 +563,98 @@ fn read_sheet(
             out.merges.push(region);
         }
     }
+    for link in worksheet
+        .find_all(ns::SML, "hyperlinks")
+        .flat_map(|links| links.find_all(ns::SML, "hyperlink"))
+    {
+        let range = link.attr_unqualified("ref").and_then(parse_region);
+        if let (Some(range), Some(id)) = (range, link.attr_qualified(ns::R, "id")) {
+            out.links.push(SheetLink { range, target: LinkTarget::Related(id.to_string()) });
+        }
+    }
+    for header_footer in worksheet.find_all(ns::SML, "headerFooter") {
+        for item in header_footer.child_elems() {
+            if item.text().trim().is_empty() {
+                continue;
+            }
+            match item.local.as_str() {
+                "oddHeader" | "evenHeader" | "firstHeader" => {
+                    parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header)
+                }
+                "oddFooter" | "evenFooter" | "firstFooter" => {
+                    parse_ctx.emit(DiagnosticCode::FooterOmitted, Region::Footer)
+                }
+                _ => {}
+            }
+        }
+    }
     out
 }
 
-/// A cell's rendered text, per its `t` type and resolved number format.
-fn cell_text(c: &Element, shared: &[String], styles: &Styles, date1904: bool) -> String {
+/// A cell's rendered text, per its `t` type and resolved number format, and
+/// what rendering it lost.
+fn cell_text(
+    c: &Element,
+    shared: &[String],
+    styles: &Styles,
+    date1904: bool,
+) -> (String, Option<DiagnosticCode>) {
     let fmt = styles.for_cell(c.attr_unqualified("s"));
-    let value = || c.find(ns::SML, "v").map(|v| v.text()).unwrap_or_default();
-    match c.attr_unqualified("t").unwrap_or("n") {
-        "s" => {
-            let v = value();
-            match v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)) {
-                Some(text) => format_as_text(fmt, text),
-                None => {
-                    log::debug!("shared string index {v:?} out of range");
-                    String::new()
-                }
-            }
-        }
-        "str" => format_as_text(fmt, &clean_text(&value())),
+    let v = c.find(ns::SML, "v").map(|v| v.text());
+    let value = v.as_deref().map(str::trim).unwrap_or_default();
+    // A formula whose result the writer never cached: the application
+    // recalculates and shows it. Excel caches an empty string result as an
+    // empty `v`, so only an absent one is lost there.
+    let formula = c.find(ns::SML, "f").is_some();
+    let unread = || (String::new(), Some(DiagnosticCode::CellValueUnreadable));
+    let text = match c.attr_unqualified("t").unwrap_or("n") {
+        "s" => match value.parse::<usize>().ok().and_then(|i| shared.get(i)) {
+            Some(text) => format_as_text(&fmt, text),
+            None => return unread(),
+        },
+        "str" if formula && v.is_none() => return unread(),
+        "str" => format_as_text(&fmt, &clean_text(v.as_deref().unwrap_or_default())),
         "inlineStr" => {
             let text = c.find(ns::SML, "is").map(|is| clean_text(&rich_text(is)));
-            format_as_text(fmt, &text.unwrap_or_default())
+            format_as_text(&fmt, &text.unwrap_or_default())
         }
-        "b" => match value().trim() {
+        "b" => match value {
             "1" | "true" => "TRUE".to_string(),
             "0" | "false" => "FALSE".to_string(),
-            _ => String::new(),
+            "" if !formula => String::new(),
+            _ => return unread(),
         },
-        "e" | "d" => clean_text(&value()),
-        _ => {
-            let v = value();
-            let v = v.trim();
-            if v.is_empty() {
-                return String::new();
-            }
-            let Ok(n) = v.parse::<f64>() else {
-                log::debug!("unparseable numeric cell value {v:?}");
-                return String::new();
-            };
-            render_number(fmt, n, date1904)
-        }
-    }
-}
-
-/// Render a numeric cell through its resolved format. Shared with the BIFF
-/// and binary readers so every container formats identically.
-pub(super) fn render_number(fmt: &CellFormat, n: f64, date1904: bool) -> String {
-    let text = match fmt {
-        CellFormat::General => format_float(n),
-        CellFormat::Fmt(f) => match f.format_number(n) {
-            Rendered::General { value, prefix, suffix } => {
-                format!("{prefix}{}{suffix}", format_float(value))
-            }
-            Rendered::Text(s) => s,
-            Rendered::DateTime(parts) => render_serial(n, parts, date1904),
+        "e" | "d" => clean_text(v.as_deref().unwrap_or_default()),
+        _ if value.is_empty() && formula => return unread(),
+        _ if value.is_empty() => String::new(),
+        _ => match value.parse::<f64>() {
+            Ok(n) => return render_number(&fmt, n, date1904),
+            Err(_) => return unread(),
         },
     };
-    clean_text(&text)
+    (text, None)
+}
+
+/// Render a numeric cell through its resolved format, with the code a
+/// fallback to General costs. Shared with the BIFF and binary readers so
+/// every container formats identically.
+pub(super) fn render_number(
+    fmt: &CellFormat,
+    n: f64,
+    date1904: bool,
+) -> (String, Option<DiagnosticCode>) {
+    let (text, loss) = match fmt {
+        CellFormat::General => (format_float(n), None),
+        CellFormat::Fallback(code) => (format_float(n), Some(*code)),
+        CellFormat::Fmt(f) => match f.format_number(n) {
+            Rendered::General { value, prefix, suffix } => {
+                (format!("{prefix}{}{suffix}", format_float(value)), None)
+            }
+            Rendered::Text(s) => (s, None),
+            Rendered::DateTime(parts) => (render_serial(n, parts, date1904), None),
+        },
+    };
+    (clean_text(&text), loss)
 }
 
 pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> String {
@@ -403,7 +663,7 @@ pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> String {
             Some(s) => clean_text(&s),
             None => text.to_string(),
         },
-        CellFormat::General => text.to_string(),
+        CellFormat::General | CellFormat::Fallback(_) => text.to_string(),
     }
 }
 
@@ -442,19 +702,104 @@ pub(super) fn build_table(
     // A merge with no surviving row or column disappears with its content.
     // One whose origin is hidden keeps its content at the first surviving
     // position it covers, so the value is not lost.
+    let mut moved: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
     sheet.merges.retain(|&(r1, c1, r2, c2)| {
         let vr = first_visible(&hidden_rows, r1, r2);
         let vc = first_visible(&hidden_cols, c1, c2);
         let (Some(vr), Some(vc)) = (vr, vc) else {
             return false;
         };
-        if (vr, vc) != (r1, c1)
-            && let Some(text) = cells.remove(&(r1, c1))
-        {
-            cells.insert((vr, vc), text);
+        if (vr, vc) != (r1, c1) {
+            moved.insert((r1, c1), (vr, vc));
+            if let Some(text) = cells.remove(&(r1, c1)) {
+                cells.insert((vr, vc), text);
+            }
         }
         true
     });
+    let place = |at: (u32, u32)| moved.get(&at).copied().unwrap_or(at);
+    // A link shows in the first visible cell of its range, or where its
+    // range's origin moved with a merge.
+    let candidates: Vec<((u32, u32), bool, &SheetLink)> = sheet
+        .links
+        .iter()
+        .filter_map(|link| {
+            let (r1, c1, r2, c2) = link.range;
+            match moved.get(&(r1, c1)) {
+                Some(&at) => Some((at, true, link)),
+                None => first_visible(&hidden_rows, r1, r2)
+                    .zip(first_visible(&hidden_cols, c1, c2))
+                    .map(|at| (at, false, link)),
+            }
+        })
+        .collect();
+    let covered = merge_covered(
+        parse_ctx,
+        &sheet.merges,
+        sheet
+            .losses
+            .iter()
+            .map(|&(r, c, _)| (r, c))
+            .chain(candidates.iter().filter(|&&(_, moved, _)| !moved).map(|&(at, _, _)| at)),
+    )?;
+    // An uncovered cell is judged once, by its own label. A link a single
+    // merge hides whole is not shown; one that leaves the merge is judged
+    // at its covered first cell, which shows no label.
+    let mut judged: HashSet<(u32, u32)> = HashSet::new();
+    let mut links: Vec<((u32, u32), bool, &LinkTarget)> = Vec::new();
+    for (at, moved, link) in candidates {
+        match covered.get(&at).filter(|_| !moved) {
+            None => {
+                if judged.insert(at) {
+                    links.push((at, true, &link.target));
+                }
+            }
+            Some(&merge) if !merge_hides(merge, link.range) => {
+                links.push((at, false, &link.target));
+            }
+            Some(_) => {}
+        }
+    }
+    let losses: Vec<((u32, u32), DiagnosticCode)> = sheet
+        .losses
+        .iter()
+        .filter(|&&(r, c, _)| !covered.contains_key(&(r, c)))
+        .map(|&(r, c, code)| (place((r, c)), code))
+        .collect();
+    let held: HashSet<(u32, u32)> =
+        cells.keys().copied().chain(losses.iter().map(|&(at, _)| at)).collect();
+    let hidden_rows_held: HashSet<u32> =
+        held.iter().map(|&(r, _)| r).filter(|&r| hidden_row(r)).collect();
+    let hidden_cols_held: HashSet<u32> =
+        held.iter().map(|&(_, c)| c).filter(|&c| hidden_col(c)).collect();
+    let hidden_lines = hidden_rows_held.len().saturating_add(hidden_cols_held.len());
+    let hidden_lines = u64::try_from(hidden_lines).unwrap_or(u64::MAX);
+    parse_ctx.emit_count(DiagnosticCode::HiddenOmitted, Region::Body, hidden_lines);
+    let shown = |(r, c): (u32, u32)| !hidden_row(r) && !hidden_col(c);
+    for (at, code) in losses {
+        if shown(at) {
+            parse_ctx.emit(code, Region::Body);
+        }
+    }
+    for (at, labelled, target) in links {
+        let label =
+            cells.get(&at).filter(|_| labelled).map(|inlines| inlines_to_plain_text(inlines));
+        let label = label.as_deref().unwrap_or_default();
+        let lost = match target {
+            LinkTarget::Url(url) => {
+                parse_ctx.charge(label.len().saturating_add(url.len()) as u64)?;
+                !label_shows_target(label, url)
+            }
+            LinkTarget::Related(_) | LinkTarget::Unknown => {
+                parse_ctx.charge(label.len() as u64)?;
+                !label_is_absolute_url(label)
+            }
+            LinkTarget::Reported => false,
+        };
+        if lost {
+            parse_ctx.emit(DiagnosticCode::LinkTargetUnread, Region::Body);
+        }
+    }
 
     // Populated extent over visible cells only.
     let mut bounds: Option<(u32, u32, u32, u32)> = None;
@@ -554,6 +899,39 @@ pub(super) fn build_table(
     }
     table.header_rows = resolve_header_rows(&table, 0);
     Ok(Some(table))
+}
+
+/// An inclusive zero-based cell range (r1, c1, r2, c2).
+type Span = (u32, u32, u32, u32);
+
+/// The positions among `at` that a merge covers without being its origin,
+/// which the application does not show, each with a merge that covers it.
+/// Each position a merge's range visits is charged.
+fn merge_covered(
+    parse_ctx: &ParseCtx,
+    merges: &[(u32, u32, u32, u32)],
+    at: impl Iterator<Item = (u32, u32)>,
+) -> Result<HashMap<(u32, u32), Span>, ConvertError> {
+    let at: BTreeSet<(u32, u32)> = at.collect();
+    let mut covered = HashMap::new();
+    for &(r1, c1, r2, c2) in merges {
+        for &(r, c) in at.range((r1, c1)..=(r2, c2)) {
+            parse_ctx.charge(1)?;
+            if (c1..=c2).contains(&c) && (r, c) != (r1, c1) {
+                covered.insert((r, c), (r1, c1, r2, c2));
+            }
+        }
+    }
+    Ok(covered)
+}
+
+/// True when `merge` holds the whole of `range`: given a covered first
+/// visible cell, the range then leaves out the merge's origin and no cell of
+/// it is shown.
+fn merge_hides(merge: Span, range: Span) -> bool {
+    let (mr1, mc1, mr2, mc2) = merge;
+    let (r1, c1, r2, c2) = range;
+    mr1 <= r1 && r2 <= mr2 && mc1 <= c1 && c2 <= mc2
 }
 
 /// Flatten inclusive ranges into a sorted, deduplicated coordinate list.
@@ -737,6 +1115,12 @@ mod tests {
         date1904: bool,
         /// Further parts, verbatim: (name, body).
         extra: Vec<(&'a str, &'a str)>,
+        /// The workbook's `sheet` list in place of one entry per sheet.
+        listed: Option<&'a str>,
+        /// The first sheet's relationships part.
+        sheet_rels: Option<&'a str>,
+        /// Further workbook relationships, verbatim.
+        workbook_rels: &'a str,
     }
 
     impl Wb<'_> {
@@ -765,11 +1149,13 @@ mod tests {
                 ));
             }
             let pr = if self.date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
+            let sheets = self.listed.unwrap_or(&sheets);
             let workbook = format!(
                 r#"<?xml version="1.0"?><workbook xmlns="{SML}" xmlns:r="{R}">{pr}<sheets>{sheets}</sheets></workbook>"#
             );
             let rels = format!(
-                r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}">{rels}</Relationships>"#
+                r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}">{rels}{}</Relationships>"#,
+                self.workbook_rels
             );
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
             let opts = zip::write::SimpleFileOptions::default();
@@ -797,6 +1183,14 @@ mod tests {
                 add(
                     "xl/sharedStrings.xml",
                     &format!(r#"<?xml version="1.0"?><sst xmlns="{SML}">{shared}</sst>"#),
+                );
+            }
+            if let Some(body) = self.sheet_rels {
+                add(
+                    "xl/worksheets/_rels/sheet1.xml.rels",
+                    &format!(
+                        r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}">{body}</Relationships>"#
+                    ),
                 );
             }
             for (name, body) in &self.extra {
@@ -1117,13 +1511,440 @@ mod tests {
     fn every_grid_position_is_charged_once() {
         let sheet = SheetContent {
             cells: HashMap::from([((0, 0), "a".to_string()), ((1, 2), "b".to_string())]),
-            checkboxes: Default::default(),
-            hidden_rows: HashSet::new(),
-            hidden_cols: Vec::new(),
-            merges: Vec::new(),
+            ..SheetContent::default()
         };
         let parse_ctx = ParseCtx::default();
         assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
         assert_eq!(parse_ctx.fuel(), 6);
+    }
+
+    type Reported = (DiagnosticCode, Region, Option<u32>, u64);
+
+    fn diagnose(wb: &Wb) -> Vec<Reported> {
+        let parse_ctx = ParseCtx::default();
+        super::super::parse(&parse_ctx, &wb.build()).unwrap();
+        let unit = |d: &crate::diagnostics::Diagnostic| d.unit.map(std::num::NonZeroU32::get);
+        parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, unit(&d), d.count)).collect()
+    }
+
+    const CELL: DiagnosticCode = DiagnosticCode::CellValueUnreadable;
+    const UNREAD: DiagnosticCode = DiagnosticCode::NumberFormatUnread;
+    const FALLBACK: DiagnosticCode = DiagnosticCode::NumberFormatFallback;
+    const BODY: Region = Region::Body;
+
+    fn number_cells(styles: &[u32]) -> String {
+        let cells: String = styles
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!(r#"<c r="{}1" s="{s}"><v>2</v></c>"#, char::from(b'A' + i as u8)))
+            .collect();
+        format!(
+            r#"<sheetData><row r="1">{cells}<c r="Z1" s="1" t="inlineStr"><is><t>x</t></is></c></row></sheetData>"#
+        )
+    }
+
+    #[test]
+    fn each_sheet_site_reports_its_loss_in_its_sheets_unit() {
+        let one = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData>"#;
+        let listed = r#"<sheet name="A" sheetId="1" r:id="rId1"/><sheet name="H" sheetId="2" state="hidden" r:id="rId2"/><sheet name="N" sheetId="3"/><sheet name="X" sheetId="4" r:id="rId9"/><sheet name="M" sheetId="5" r:id="rId3"/><sheet name="E" sheetId="6" r:id="rId4"/>"#;
+        let missing = format!(
+            r#"<Relationship Id="rId3" Type="{WS_REL}" Target="worksheets/gone.xml"/><Relationship Id="rId4" Type="{WS_REL}" Target="worksheets/a%2Fb.xml"/>"#
+        );
+        let wb = Wb {
+            sheets: vec![("A", "", one), ("H", "", one)],
+            listed: Some(listed),
+            workbook_rels: &missing,
+            ..Wb::default()
+        };
+        let bytes = wb.build();
+        let parse_ctx = ParseCtx::default();
+        super::super::parse(&parse_ctx, &bytes).unwrap();
+        let reported: Vec<_> = parse_ctx
+            .diagnostics()
+            .iter()
+            .map(|d| (d.code, d.unit.map(std::num::NonZeroU32::get), d.count))
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                (DiagnosticCode::UnitUnreadable, Some(3), 1),
+                (DiagnosticCode::UnitUnreadable, Some(4), 1),
+                (DiagnosticCode::UnitUnreadable, Some(5), 1),
+                (DiagnosticCode::UnitUnreadable, Some(6), 1),
+                (DiagnosticCode::HiddenOmitted, Some(2), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_format_that_does_not_apply_reports_per_numeric_cell() {
+        let styles = r#"<numFmts><numFmt numFmtId="164" formatCode="[DBNum1]yyyy"/><numFmt numFmtId="165" formatCode="0.0.0"/><numFmt numFmtId="166" formatCode="€0.00"/><numFmt numFmtId="167" formatCode="[DBNum1][h]"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="166"/><xf numFmtId="5"/><xf numFmtId="30"/><xf numFmtId="41"/><xf numFmtId="23"/><xf numFmtId="167"/></cellXfs>"#;
+        let body = number_cells(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let wb = Wb { styles: Some(styles), ..one_sheet(&body) };
+        assert_eq!(diagnose(&wb), [(UNREAD, BODY, Some(1), 5), (FALLBACK, BODY, Some(1), 4)]);
+        let body = number_cells(&[0, 3]);
+        let unstyled =
+            Wb { styles: Some(r#"<cellXfs><xf numFmtId="0"/></cellXfs>"#), ..one_sheet(&body) };
+        assert_eq!(diagnose(&unstyled), [(FALLBACK, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn literal_text_dates_and_currency_are_more_than_the_number() {
+        for code in [
+            "[DBNum1]yyyy",
+            "abc0",
+            "€0.00",
+            "0\" kg\"",
+            "\\$0",
+            "[$€-407]0.0.0",
+            "[DBNum1][h]",
+            "[MM]0.0.0",
+        ] {
+            assert!(shows_more_than_its_number(code), "{code}");
+        }
+        for code in [
+            "0.0.0",
+            "0;0;0;0;0",
+            "[DBNum1]0",
+            "0.0E+0",
+            "_(0_)",
+            "[Red]0",
+            "[$-409]0",
+            "[$-409]0.0.0",
+            "[DBNum1][$-804]General",
+        ] {
+            assert!(!shows_more_than_its_number(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_cell_whose_value_does_not_read_reports_it() {
+        for (cell, expected) in [
+            (r#"<c r="A1" t="s"><v>7</v></c>"#, &[(CELL, BODY, Some(1), 1)][..]),
+            (r#"<c r="A1"><v>twelve</v></c>"#, &[(CELL, BODY, Some(1), 1)]),
+            (r#"<c r="A1" t="str"><f>A2</f></c>"#, &[(CELL, BODY, Some(1), 1)]),
+            (r#"<c r="A1" t="str"><f>A2</f><v></v></c>"#, &[]),
+            (r#"<c r="A1"><f>A2</f><v/></c>"#, &[(CELL, BODY, Some(1), 1)]),
+            (r#"<c r="A1"><v/></c>"#, &[]),
+            (r#"<c r="A1" t="b"><f>A2</f></c>"#, &[(CELL, BODY, Some(1), 1)]),
+            (r#"<c r="A1" t="b"><v>2</v></c>"#, &[(CELL, BODY, Some(1), 1)]),
+            (r#"<c r="1A"><v>1</v></c>"#, &[(CELL, BODY, Some(1), 1)]),
+        ] {
+            let body = format!(
+                r#"<sheetData><row r="1">{cell}<c r="B1" t="inlineStr"><is><t>x</t></is></c></row></sheetData><mergeCells><mergeCell ref="B1:B2"/></mergeCells>"#
+            );
+            assert_eq!(diagnose(&one_sheet(&body)), expected, "{cell}");
+        }
+        let bad_merge = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row></sheetData><mergeCells><mergeCell ref="A0:B"/></mergeCells>"#;
+        assert_eq!(
+            diagnose(&one_sheet(bad_merge)),
+            [(DiagnosticCode::TableSpanRepaired, BODY, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn hidden_rows_and_columns_count_where_they_hold_content() {
+        let body = r#"<cols><col min="2" max="16384" hidden="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c><c r="B1" t="inlineStr"><is><t>b</t></is></c><c r="C1" t="inlineStr"><is><t>c</t></is></c></row><row r="2" hidden="1"><c r="A2" t="inlineStr"><is><t>h</t></is></c></row><row r="3" hidden="1"/></sheetData>"#;
+        assert_eq!(diagnose(&one_sheet(body)), [(DiagnosticCode::HiddenOmitted, BODY, Some(1), 3)]);
+    }
+
+    const HLINK_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+
+    fn link_cells(cells: &[(&str, &str)]) -> String {
+        cells
+            .iter()
+            .map(|(at, text)| format!(r#"<c r="{at}" t="inlineStr"><is><t>{text}</t></is></c>"#))
+            .collect()
+    }
+
+    #[test]
+    fn a_hyperlink_whose_label_hides_its_target_loses_it() {
+        let rels = format!(
+            r#"<Relationship Id="rId1" Type="{HLINK_REL}" Target="https://example.org/paper" TargetMode="External"/><Relationship Id="rId2" Type="{HLINK_REL}" Target="http://www.example.org/" TargetMode="External"/><Relationship Id="rId3" Type="{HLINK_REL}" Target="https://doi.org/10.1234/abc" TargetMode="External"/>"#
+        );
+        let row1 = link_cells(&[
+            ("A1", "see here"),
+            ("B1", "www.example.org"),
+            ("C1", "10.1234/abc"),
+            ("D1", "next sheet"),
+            ("E1", "gone"),
+            ("F1", "https://example.org/x"),
+            ("G1", "localhost:8888"),
+            ("H1", "see here"),
+        ]);
+        let row2 = link_cells(&[("A2", "see here")]);
+        let body = format!(
+            r#"<cols><col min="8" max="8" hidden="1"/></cols><sheetData><row r="1">{row1}</row><row r="2" hidden="1">{row2}</row></sheetData><hyperlinks xmlns:r="{R}"><hyperlink ref="A1" r:id="rId1"/><hyperlink ref="B1" r:id="rId2"/><hyperlink ref="C1:C2" r:id="rId3"/><hyperlink ref="D1" location="S!A1"/><hyperlink ref="E1" r:id="rId8"/><hyperlink ref="F1" r:id="rId8"/><hyperlink ref="G1" r:id="rId8"/><hyperlink ref="H1" r:id="rId1"/><hyperlink ref="A2" r:id="rId1"/></hyperlinks>"#
+        );
+        let wb = Wb { sheet_rels: Some(&rels), ..one_sheet(&body) };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                (DiagnosticCode::LinkTargetUnread, BODY, Some(1), 3),
+                (DiagnosticCode::HiddenOmitted, BODY, Some(1), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_loss_or_link_a_merge_covers_is_not_shown() {
+        let rels = format!(
+            r#"<Relationship Id="rId1" Type="{HLINK_REL}" Target="https://example.org/paper" TargetMode="External"/>"#
+        );
+        let covered = format!(
+            r#"<sheetData><row r="1">{}<c r="B1"><f>1+1</f></c></row></sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells><hyperlinks xmlns:r="{R}"><hyperlink ref="B1" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A1", "a")])
+        );
+        assert_eq!(diagnose(&Wb { sheet_rels: Some(&rels), ..one_sheet(&covered) }), []);
+        let past_hidden = format!(
+            r#"<sheetData><row r="1" hidden="1"/><row r="2">{}</row></sheetData><hyperlinks xmlns:r="{R}"><hyperlink ref="A1:A2" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A2", "see here")])
+        );
+        assert_eq!(
+            diagnose(&Wb { sheet_rels: Some(&rels), ..one_sheet(&past_hidden) }),
+            [(DiagnosticCode::LinkTargetUnread, BODY, Some(1), 1)]
+        );
+        let moved = format!(
+            r#"<sheetData><row r="1" hidden="1">{}</row><row r="2">{}</row></sheetData><mergeCells><mergeCell ref="A1:A2"/></mergeCells><hyperlinks xmlns:r="{R}"><hyperlink ref="A1" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A1", "see here")]),
+            link_cells(&[("B2", "x")])
+        );
+        assert_eq!(
+            diagnose(&Wb { sheet_rels: Some(&rels), ..one_sheet(&moved) }),
+            [(DiagnosticCode::LinkTargetUnread, BODY, Some(1), 1)]
+        );
+        let covered_first = format!(
+            r#"<sheetData><row r="1" hidden="1">{}</row><row r="2">{}</row></sheetData><mergeCells><mergeCell ref="A1:A2"/></mergeCells><hyperlinks xmlns:r="{R}"><hyperlink ref="A2" r:id="rId1"/><hyperlink ref="A1" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A1", "see here")]),
+            link_cells(&[("B2", "x")])
+        );
+        assert_eq!(
+            diagnose(&Wb { sheet_rels: Some(&rels), ..one_sheet(&covered_first) }),
+            [(DiagnosticCode::LinkTargetUnread, BODY, Some(1), 1)]
+        );
+        let leaves_merge = format!(
+            r#"<sheetData><row r="1">{}</row><row r="2">{}</row></sheetData><mergeCells><mergeCell ref="A1:B1"/></mergeCells><hyperlinks xmlns:r="{R}"><hyperlink ref="B1:B2" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A1", "a"), ("B1", "https://example.org/paper")]),
+            link_cells(&[("B2", "see here")])
+        );
+        assert_eq!(
+            diagnose(&Wb { sheet_rels: Some(&rels), ..one_sheet(&leaves_merge) }),
+            [(DiagnosticCode::LinkTargetUnread, BODY, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn a_link_target_is_charged_per_judged_cell() {
+        let target: Rc<str> = format!("https://example.org/{}", "a".repeat(10_000)).into();
+        let sheet = || SheetContent {
+            cells: (0..100).map(|c| ((0, c), "a".to_string())).collect(),
+            links: (0..100)
+                .map(|c| SheetLink { range: (0, c, 0, c), target: LinkTarget::Url(target.clone()) })
+                .collect(),
+            ..SheetContent::default()
+        };
+        let limits = crate::limits::Limits { max_work: 2_000_000, ..Default::default() };
+        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
+        let limits = crate::limits::Limits { max_work: 500_000, ..Default::default() };
+        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_link_label_is_charged_once_per_cell() {
+        let sheet = || SheetContent {
+            cells: HashMap::from([((0, 0), "a".repeat(10_000))]),
+            links: (0..1_000)
+                .map(|_| SheetLink {
+                    range: (0, 0, 0, 0),
+                    target: LinkTarget::Url("https://example.org/".into()),
+                })
+                .collect(),
+            ..SheetContent::default()
+        };
+        let limits = crate::limits::Limits { max_work: 20_000, ..Default::default() };
+        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
+        let limits = crate::limits::Limits { max_work: 5_000, ..Default::default() };
+        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_hyperlink_under_a_reported_relationships_part_adds_nothing() {
+        let body = format!(
+            r#"<sheetData><row r="1">{}</row></sheetData><hyperlinks xmlns:r="{R}"><hyperlink ref="A1" r:id="rId1"/></hyperlinks>"#,
+            link_cells(&[("A1", "see here")])
+        );
+        let wb = Wb {
+            extra: vec![("xl/worksheets/_rels/sheet1.xml.rels", "<Relationships")],
+            ..one_sheet(&body)
+        };
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::PartUnreadable, BODY, Some(1), 1)]);
+    }
+
+    const DRAWING_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
+
+    fn drawing(objects: &str) -> String {
+        format!(
+            r#"<xdr:wsDr xmlns:xdr="{xdr}" xmlns:a="{a}" xmlns:a14="{a14}" xmlns:mc="{mc}">{objects}</xdr:wsDr>"#,
+            xdr = ns::XDR,
+            a = ns::A,
+            a14 = ns::A14,
+            mc = ns::MC
+        )
+    }
+
+    fn sp(hidden: &str, inner: &str) -> String {
+        format!(
+            r#"<xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="s"{hidden}/></xdr:nvSpPr>{inner}</xdr:sp></xdr:twoCellAnchor>"#
+        )
+    }
+
+    fn drawing_wb<'a>(rels: &'a str, body: &'a str, parts: Vec<(&'a str, &'a str)>) -> Wb<'a> {
+        Wb { sheet_rels: Some(rels), extra: parts, ..one_sheet(body) }
+    }
+
+    #[test]
+    fn drawings_comments_and_print_headers_are_reported() {
+        const TEXT: &str = "<xdr:txBody><a:p><a:r><a:t>Note</a:t></a:r></a:p></xdr:txBody>";
+        const FILL: &str = r#"<xdr:spPr><a:blipFill><a:blip/></a:blipFill></xdr:spPr>"#;
+        const PIC: &str = r#"<xdr:twoCellAnchor><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="p"/></xdr:nvPicPr></xdr:pic></xdr:twoCellAnchor>"#;
+        const CHART: &str = "<xdr:oneCellAnchor><xdr:graphicFrame/></xdr:oneCellAnchor>";
+        let control = r#"<xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="c"><a:extLst><a:ext><a14:compatExt spid="_x0000_s1025"/></a:ext></a:extLst></xdr:cNvPr></xdr:nvSpPr><xdr:txBody><a:p><a:r><a:t>Check Box 1</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:twoCellAnchor>"#;
+        let alternate = |choice: &str, fallback: &str| {
+            format!(
+                r#"<mc:AlternateContent><mc:Choice Requires="a14">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+            )
+        };
+        let objects = [
+            PIC.to_string(),
+            CHART.to_string(),
+            format!(
+                "<xdr:absoluteAnchor><xdr:grpSp>{}{}</xdr:grpSp></xdr:absoluteAnchor>",
+                sp("", TEXT),
+                sp("", "")
+            ),
+            PIC.replace(r#"name="p""#, r#"name="p" hidden="1""#),
+            r#"<xdr:oneCellAnchor><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="6" name="g" hidden="1"/></xdr:nvGraphicFramePr></xdr:graphicFrame></xdr:oneCellAnchor>"#.to_string(),
+            sp(r#" hidden="1""#, TEXT),
+            sp("", FILL),
+            sp("", &format!("{FILL}{TEXT}")),
+            alternate(control, ""),
+            alternate(PIC, ""),
+            alternate(CHART, ""),
+            alternate(CHART, PIC),
+            alternate(&format!("{PIC}{PIC}"), PIC),
+            alternate("", PIC),
+            control.to_string(),
+        ]
+        .concat();
+        let drawing1 = drawing(&objects);
+        let orphan = drawing(PIC);
+        let rels = format!(
+            r#"<Relationship Id="rId1" Type="{DRAWING_REL}" Target="../drawings/drawing1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/><Relationship Id="rId3" Type="{DRAWING_REL}" Target="../drawings/drawing2.xml"/>"#
+        );
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData><headerFooter><oddHeader>&amp;CTitle</oddHeader><oddFooter>&amp;CPage &amp;P</oddFooter><evenFooter> </evenFooter></headerFooter><drawing xmlns:r="{R}" r:id="rId1"/>"#
+        );
+        let parts = vec![
+            ("xl/drawings/drawing1.xml", drawing1.as_str()),
+            ("xl/drawings/drawing2.xml", &orphan),
+        ];
+        assert_eq!(
+            diagnose(&drawing_wb(&rels, &body, parts)),
+            [
+                (DiagnosticCode::ImageUnplaced, BODY, Some(1), 7),
+                (DiagnosticCode::GraphicUnread, BODY, Some(1), 6),
+                (DiagnosticCode::HeaderOmitted, Region::Header, Some(1), 1),
+                (DiagnosticCode::FooterOmitted, Region::Footer, Some(1), 1),
+                (DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1),
+            ]
+        );
+        let unnamed = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData><drawing xmlns:r="{R}" r:id="rId9"/>"#
+        );
+        assert_eq!(
+            diagnose(&drawing_wb(&rels, &unnamed, vec![])),
+            [
+                (DiagnosticCode::PartUnreadable, BODY, Some(1), 1),
+                (DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1),
+            ]
+        );
+        let named = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData><drawing xmlns:r="{R}" r:id="rId1"/>"#
+        );
+        let corrupt_rels = Wb {
+            extra: vec![("xl/worksheets/_rels/sheet1.xml.rels", "<Relationships")],
+            ..one_sheet(&named)
+        };
+        assert_eq!(diagnose(&corrupt_rels), [(DiagnosticCode::PartUnreadable, BODY, Some(1), 1)]);
+        let only_drawing = format!(
+            r#"<Relationship Id="rId1" Type="{DRAWING_REL}" Target="../drawings/drawing1.xml"/>"#
+        );
+        let wrong_root = format!(r#"<xdr:pic xmlns:xdr="{}"/>"#, ns::XDR);
+        let parts = vec![("xl/drawings/drawing1.xml", wrong_root.as_str())];
+        assert_eq!(
+            diagnose(&drawing_wb(&only_drawing, &named, parts)),
+            [(DiagnosticCode::PartUnreadable, BODY, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn a_styles_part_with_the_wrong_root_is_unreadable_once() {
+        let rels = format!(r#"<Relationship Id="rId90" Type="{STYLES_REL}" Target="styles.xml"/>"#);
+        let styles = format!(r#"<?xml version="1.0"?><sst xmlns="{SML}"/>"#);
+        let body = number_cells(&[1, 2]);
+        let wb = Wb {
+            workbook_rels: &rels,
+            extra: vec![("xl/styles.xml", &styles)],
+            ..one_sheet(&body)
+        };
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::PartUnreadable, BODY, None, 1)]);
+    }
+
+    #[test]
+    fn a_loss_where_the_sheet_hides_it_is_only_hidden() {
+        let styles = r#"<numFmts><numFmt numFmtId="164" formatCode="[DBNum1]yyyy"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs>"#;
+        let body = r#"<cols><col min="2" max="2" hidden="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c><c r="B1" s="1"><v>2</v></c></row><row r="2" hidden="1"><c r="A2"><f>1+1</f><v/></c></row></sheetData>"#;
+        let wb = Wb { styles: Some(styles), ..one_sheet(body) };
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::HiddenOmitted, BODY, Some(1), 2)]);
+        let moved = r#"<sheetData><row r="1" hidden="1"><c r="A1"><f>1+1</f><v/></c></row><row r="2"><c r="B2" t="inlineStr"><is><t>x</t></is></c></row></sheetData><mergeCells><mergeCell ref="A1:A2"/></mergeCells>"#;
+        assert_eq!(diagnose(&one_sheet(moved)), [(CELL, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn form_controls_the_grid_cannot_show_are_reported() {
+        let vml = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:schemas-microsoft-com:office:excel">
+            <v:shape><x:ClientData ObjectType="Checkbox"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor><x:Checked>1</x:Checked></x:ClientData></v:shape>
+            <v:shape style="visibility:hidden"><x:ClientData ObjectType="Checkbox"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor></x:ClientData></v:shape>
+            <v:shape><x:ClientData ObjectType="Checkbox"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor><x:Checked>2</x:Checked></x:ClientData></v:shape>
+            <v:shape><x:ClientData ObjectType="Checkbox"><x:Anchor>bad</x:Anchor></x:ClientData></v:shape>
+            <v:shape><x:ClientData ObjectType="Checkbox"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor><x:Checked>0</x:Checked></x:ClientData></v:shape>
+            <v:shape><x:ClientData ObjectType="Note"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor></x:ClientData></v:shape>
+            {others}
+            </xml>"##;
+        let others: String = ["Radio", "Label", "Button", "GBox", "Drop", "List", "Spin", "Scroll", "Edit"]
+            .map(|kind| format!(r#"<v:shape><x:ClientData ObjectType="{kind}"><x:Anchor>1, 5, 0, 2, 2, 10, 1, 1</x:Anchor></x:ClientData></v:shape>"#))
+            .concat();
+        let vml = vml.replace("{others}", &others);
+        let rels = format!(
+            r#"<Relationship Id="rId1" Type="{VML_REL}" Target="../drawings/vmlDrawing1.vml"/>"#
+        );
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/drawings/vmlDrawing1.vml", &vml)],
+            ..one_sheet(
+                r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData>"#,
+            )
+        };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                (DiagnosticCode::FormControlUnread, BODY, Some(1), 11),
+                (DiagnosticCode::HiddenOmitted, BODY, Some(1), 1),
+            ]
+        );
     }
 }

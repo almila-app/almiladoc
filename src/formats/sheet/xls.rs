@@ -596,7 +596,7 @@ fn read_sheet(
                         &mut out,
                         row,
                         col,
-                        render_number(globals.format(ixfe), n, globals.date1904),
+                        render_number(globals.format(ixfe), n, globals.date1904).0,
                     );
                 }
             }
@@ -609,7 +609,7 @@ fn read_sheet(
                         &mut out,
                         row,
                         col,
-                        render_number(globals.format(ixfe), n, globals.date1904),
+                        render_number(globals.format(ixfe), n, globals.date1904).0,
                     );
                 }
             }
@@ -628,7 +628,7 @@ fn read_sheet(
                             break;
                         }
                         let n = rk_number(rk);
-                        let text = render_number(globals.format(ixfe), n, globals.date1904);
+                        let text = render_number(globals.format(ixfe), n, globals.date1904).0;
                         put(&mut out, u32::from(row), col, text);
                     }
                 }
@@ -668,7 +668,7 @@ fn read_sheet(
                             _ => {}
                         }
                     } else if let Some(n) = get_f64(body, 6) {
-                        let text = render_number(globals.format(ixfe), n, globals.date1904);
+                        let text = render_number(globals.format(ixfe), n, globals.date1904).0;
                         put(&mut out, row, col, text);
                     }
                 }

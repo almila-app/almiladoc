@@ -13,6 +13,7 @@ pub mod fields;
 pub mod grid;
 pub mod header;
 pub mod html;
+pub mod link_label;
 pub mod list;
 pub mod math;
 pub mod mc;

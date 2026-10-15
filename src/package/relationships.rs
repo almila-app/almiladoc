@@ -58,10 +58,6 @@ impl Relationships {
 
     /// True when the part exists but could not be read and its read reported
     /// the loss by role, so the sites that resolve through it stay silent.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the relationship sites that stay silent report nothing yet")
-    )]
     pub(crate) fn reported(&self) -> bool {
         self.reported
     }

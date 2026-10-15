@@ -28,6 +28,7 @@ pub mod ns {
     pub const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
     pub const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
     pub const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    pub const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     pub const PKG_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 
     pub const OFFICE: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";

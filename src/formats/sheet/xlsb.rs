@@ -107,7 +107,8 @@ pub(super) fn parse(
                 continue;
             }
         };
-        content.checkboxes = read_vml_checkboxes(pkg, part)?;
+        let rels = read_rels(pkg, &rels_part_for(part), Role::Content(Region::Body))?;
+        content.checkboxes = read_vml_checkboxes(parse_ctx, pkg, part, &rels)?;
         let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
@@ -312,8 +313,8 @@ fn cell_text(
     date1904: bool,
 ) -> Result<String, ConvertError> {
     Ok(match id {
-        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), date1904),
-        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, date1904),
+        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), date1904).0,
+        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, date1904).0,
         BRT_CELL_ST | BRT_FMLA_STRING => format_as_text(fmt, &clean_text(&f.wide_string()?)),
         BRT_CELL_RSTRING => {
             f.u8()?; // RichStr flags; runs and phonetic data trail the string

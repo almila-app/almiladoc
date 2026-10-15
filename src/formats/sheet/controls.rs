@@ -3,13 +3,14 @@
 //! the worksheet's legacy VML drawing part; BIFF keeps them in OBJ records.
 //! Either way a checkbox lands in the cell its anchor starts in.
 
-use crate::diagnostics::Region;
+use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::model::Inline;
 use crate::package::Package;
 use crate::package::archive::Role;
 use crate::package::path;
-use crate::package::relationships::{TargetMode, read_rels, rels_part_for};
+use crate::package::relationships::{Relationships, TargetMode};
 use crate::package::xml::{Element, ns};
 use crate::shared::text::{clean_text, collapse_ws};
 use std::collections::HashMap;
@@ -41,12 +42,15 @@ pub(super) fn cell_inlines(text: Option<String>, boxes: &[Checkbox]) -> Vec<Inli
     out
 }
 
-/// The checkboxes in a worksheet part's VML drawings.
+/// The checkboxes in the VML drawings a worksheet part's relationships
+/// name; hidden form controls, and those the grid cannot show, are
+/// reported.
 pub(super) fn read_vml_checkboxes(
+    parse_ctx: &ParseCtx,
     pkg: &mut Package,
     sheet_part: &str,
+    rels: &Relationships,
 ) -> Result<Checkboxes, ConvertError> {
-    let rels = read_rels(pkg, &rels_part_for(sheet_part), Role::Content(Region::Body))?;
     let mut out = Checkboxes::new();
     let mut targets: Vec<String> = rels
         .iter()
@@ -58,38 +62,47 @@ pub(super) fn read_vml_checkboxes(
     targets.dedup();
     for target in targets {
         if let Some(root) = pkg.related_xml_part(&target, Role::Content(Region::Body))? {
-            vml_checkboxes(&root, &mut out);
+            vml_checkboxes(parse_ctx, &root, &mut out);
         }
     }
     Ok(out)
 }
 
-fn vml_checkboxes(root: &Element, out: &mut Checkboxes) {
+/// The form control kinds a legacy drawing holds beside checkboxes, each of
+/// which shows a caption, state or selection the grid does not hold.
+const OTHER_CONTROLS: [&str; 9] =
+    ["Radio", "Label", "Button", "GBox", "Drop", "List", "Spin", "Scroll", "Edit"];
+
+fn vml_checkboxes(parse_ctx: &ParseCtx, root: &Element, out: &mut Checkboxes) {
     for shape in root.descendants(ns::VML, "shape") {
-        let Some(data) = shape
-            .find(ns::X_VML, "ClientData")
-            .filter(|d| d.attr_unqualified("ObjectType") == Some("Checkbox"))
-        else {
+        let Some(data) = shape.find(ns::X_VML, "ClientData") else {
             continue;
         };
+        let kind = data.attr_unqualified("ObjectType").unwrap_or_default();
+        let checkbox = kind == "Checkbox";
+        if !checkbox && !OTHER_CONTROLS.contains(&kind) {
+            continue;
+        }
         if shape
             .attr_unqualified("style")
             .is_some_and(|s| s.replace(' ', "").contains("visibility:hidden"))
         {
+            parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             continue;
         }
-        let Some(at) = data.find(ns::X_VML, "Anchor").and_then(|a| anchor_cell(&a.text())) else {
-            log::debug!("skipping a checkbox with no readable anchor");
-            continue;
-        };
+        let at = data.find(ns::X_VML, "Anchor").and_then(|a| anchor_cell(&a.text()));
         // Absent means unchecked; 2 is the mixed state, which has no token.
         let checked = match data.find(ns::X_VML, "Checked").map(|c| c.text()) {
-            None => false,
+            None => Some(false),
             Some(v) => match v.trim() {
-                "0" => false,
-                "1" => true,
-                _ => continue,
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
             },
+        };
+        let (Some(at), Some(checked), true) = (at, checked, checkbox) else {
+            parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body);
+            continue;
         };
         let caption = shape
             .find(ns::VML, "textbox")

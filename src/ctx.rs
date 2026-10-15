@@ -59,8 +59,13 @@ impl<'a> ParseCtx<'a> {
 
     /// Report one occurrence of `code` in `region`, in the current unit.
     pub(crate) fn emit(&self, code: DiagnosticCode, region: Region) {
+        self.emit_count(code, region, 1);
+    }
+
+    /// Report `count` occurrences of `code` in `region`, in the current unit.
+    pub(crate) fn emit_count(&self, code: DiagnosticCode, region: Region, count: u64) {
         let mut diagnostics = self.diagnostics.take();
-        diagnostics.add(code, region, self.unit.get(), 1);
+        diagnostics.add(code, region, self.unit.get(), count);
         self.diagnostics.set(diagnostics);
     }
 

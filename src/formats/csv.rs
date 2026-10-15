@@ -9,6 +9,7 @@
 //! first record is one.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, Document, Inline, Table, TableKind};
 use crate::shared::header::resolve_header_rows;
@@ -17,7 +18,10 @@ use csv::ReaderBuilder;
 use std::borrow::Cow;
 
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
-    let text = decode(bytes);
+    let (text, loss) = decode(bytes);
+    if let Some(code) = loss {
+        parse_ctx.emit(code, Region::Body);
+    }
     let delimiter = sniff_delimiter(&text);
 
     let mut reader = ReaderBuilder::new()
@@ -30,8 +34,10 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     for record in reader.records() {
         let record = match record {
             Ok(r) => r,
-            Err(e) => {
-                log::warn!("skipping unreadable csv record: {e}");
+            // Unreachable while the input is a `str` read flexibly: no
+            // I/O, UTF-8 or record-length error can arise.
+            Err(_) => {
+                parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
                 continue;
             }
         };
@@ -50,25 +56,30 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     Ok(doc)
 }
 
-fn decode(bytes: &[u8]) -> Cow<'_, str> {
-    match bytes {
-        [0xFF, 0xFE, ..] => {
-            let (s, _, _) = encoding_rs::UTF_16LE.decode(bytes);
-            Cow::Owned(s.into_owned())
-        }
-        [0xFE, 0xFF, ..] => {
-            let (s, _, _) = encoding_rs::UTF_16BE.decode(bytes);
-            Cow::Owned(s.into_owned())
-        }
-        _ => {
-            let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-            match std::str::from_utf8(bytes) {
-                Ok(s) => Cow::Borrowed(s),
-                Err(_) => {
-                    let (s, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
-                    Cow::Owned(s.into_owned())
-                }
-            }
+/// The text and what decoding it cost: `invalid_encoding` when a UTF-16
+/// file holds bytes that do not decode as UTF-16, `encoding_assumed` when
+/// bytes that are not UTF-8 are read as windows-1252.
+fn decode(bytes: &[u8]) -> (Cow<'_, str>, Option<DiagnosticCode>) {
+    let utf16 = match bytes {
+        [0xFF, 0xFE, ..] => Some(encoding_rs::UTF_16LE),
+        [0xFE, 0xFF, ..] => Some(encoding_rs::UTF_16BE),
+        _ => None,
+    };
+    if let Some(encoding) = utf16 {
+        let (text, _, replaced) = encoding.decode(bytes);
+        return (
+            Cow::Owned(text.into_owned()),
+            replaced.then_some(DiagnosticCode::InvalidEncoding),
+        );
+    }
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(s) => (Cow::Borrowed(s), None),
+        Err(_) => {
+            // windows-1252 maps every byte, so the guess replaces nothing it
+            // can detect.
+            let text = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0;
+            (Cow::Owned(text.into_owned()), Some(DiagnosticCode::EncodingAssumed))
         }
     }
 }
@@ -115,6 +126,7 @@ fn sniff_delimiter(text: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::LossClass;
 
     #[test]
     fn quoted_fields_keep_padding() {
@@ -158,5 +170,31 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         parse(&parse_ctx, b"a,b\n1,2,3\n").unwrap();
         assert_eq!(parse_ctx.fuel(), 5);
+    }
+
+    #[test]
+    fn a_decoding_loss_reports_once_per_file() {
+        let utf16 = |bom: [u8; 2], unit: fn(u16) -> [u8; 2]| {
+            let units =
+                "a,b\n".encode_utf16().chain([0xD800, 0xDC01, 0xDC00, u16::from(b','), 0xD800]);
+            bom.into_iter().chain(units.flat_map(unit)).collect::<Vec<u8>>()
+        };
+        for (bytes, code) in [
+            (utf16([0xFF, 0xFE], u16::to_le_bytes), Some(DiagnosticCode::InvalidEncoding)),
+            (utf16([0xFE, 0xFF], u16::to_be_bytes), Some(DiagnosticCode::InvalidEncoding)),
+            (b"\xfeaf,\xe7ay\n".to_vec(), Some(DiagnosticCode::EncodingAssumed)),
+            ("şef,çay\n".as_bytes().to_vec(), None),
+        ] {
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, &bytes).unwrap();
+            let reported: Vec<_> = parse_ctx
+                .into_diagnostics()
+                .iter()
+                .map(|d| (d.code, d.class, d.region, d.unit, d.count))
+                .collect();
+            let expected: Vec<_> =
+                code.map(|c| (c, LossClass::Lost, Region::Body, None, 1)).into_iter().collect();
+            assert_eq!(reported, expected, "{bytes:?}");
+        }
     }
 }

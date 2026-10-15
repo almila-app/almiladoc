@@ -43,6 +43,7 @@ path = [
     "src/identity.rs",
     "src/ledger.rs",
     "src/pool.rs",
+    "src/shared/link_label.rs",
     "tests/converter.rs",
     "tests/diagnostics.rs",
     "tests/fixes.rs",
@@ -60,6 +61,8 @@ path = [
     "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__unclosed--recovers.docx.diagnostics.snap",
     "tests/snapshots/snapshots__pdf__handmade-arabic.pdf.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-sheet.xlsb.diagnostics.snap",
+    "tests/snapshots/snapshots__xlsx__sheet.xlsx.diagnostics.snap",
     "uv.lock",
 ]
 precedence = "override"
@@ -141,6 +144,7 @@ path = [
     "src/shared/grid.rs",
     "src/shared/html.rs",
     "src/shared/math/tests.rs",
+    "src/shared/mod.rs",
     "src/shared/officeart.rs",
     "tests/common/mod.rs",
     "tests/fixturegen/common.py",

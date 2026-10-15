@@ -77,6 +77,26 @@ fn reported(conversion: &Conversion) -> Vec<(DiagnosticCode, Region, Option<u32>
     conversion.diagnostics().iter().map(|d| (d.code, d.region, unit(&d), d.count)).collect()
 }
 
+/// What `conversion` reports beyond `baseline`, the same input before an
+/// edit: the policy drops a fixture holds stay out of each case. Only
+/// increases count; a code the edit lowers or removes is not seen.
+fn added(
+    conversion: &Conversion,
+    baseline: &Conversion,
+) -> Vec<(DiagnosticCode, Region, Option<u32>, u64)> {
+    let before = reported(baseline);
+    reported(conversion)
+        .into_iter()
+        .filter_map(|(code, region, unit, count)| {
+            let held = before
+                .iter()
+                .find(|&&(c, r, u, _)| (c, r, u) == (code, region, unit))
+                .map_or(0, |&(.., n)| n);
+            (count > held).then_some((code, region, unit, count - held))
+        })
+        .collect()
+}
+
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 fn graphic_pptx() -> Vec<u8> {
@@ -172,6 +192,8 @@ enum Source {
 const PART: DiagnosticCode = DiagnosticCode::PartUnreadable;
 const RECOVERED: DiagnosticCode = DiagnosticCode::RecoveredXml;
 const STYLE: DiagnosticCode = DiagnosticCode::StylePartUnreadable;
+const CELL: DiagnosticCode = DiagnosticCode::CellValueUnreadable;
+const UNIT: DiagnosticCode = DiagnosticCode::UnitUnreadable;
 
 const fn case(
     source: Source,
@@ -470,8 +492,18 @@ const CASES: &[Case] = &[
         &[("xl/_rels/workbook.xml.rels", Corrupt)],
         &[(PART, Body, None, 1)],
     ),
-    case(Fixture("xlsx/sheet.xlsx"), Format::Excel, &[("xl/sharedStrings.xml", Corrupt)], &[]),
-    case(Fixture("xlsx/sheet.xlsx"), Format::Excel, &[("xl/worksheets/sheet1.xml", Corrupt)], &[]),
+    case(
+        Fixture("xlsx/sheet.xlsx"),
+        Format::Excel,
+        &[("xl/sharedStrings.xml", Corrupt)],
+        &[(CELL, Body, Some(1), 17), (CELL, Body, Some(2), 2)],
+    ),
+    case(
+        Fixture("xlsx/sheet.xlsx"),
+        Format::Excel,
+        &[("xl/worksheets/sheet1.xml", Corrupt)],
+        &[(UNIT, Body, Some(1), 1)],
+    ),
     case(
         Fixture("xlsx/sheet.xlsx"),
         Format::Excel,
@@ -576,11 +608,14 @@ fn every_part_reports_by_the_role_its_reader_names() {
             Source::GraphicPptx => graphic_pptx(),
         };
         let clean = report.convert(Input::new(&original, case.format)).unwrap();
-        assert_eq!(reported(&clean), [], "case {index} before its edit");
+        match case.source {
+            Source::Fixture(_) => assert!(clean.is_complete(), "case {index} before its edit"),
+            Source::GraphicPptx => assert_eq!(reported(&clean), [], "case {index} before its edit"),
+        }
         let bytes = repack(&original, case.edits);
         let reporting = report.convert(Input::new(&bytes, case.format));
         let conversion = reporting.unwrap_or_else(|e| panic!("case {index}: {e}"));
-        assert_eq!(reported(&conversion), case.expected, "case {index}");
+        assert_eq!(added(&conversion, &clean), case.expected, "case {index}");
         let lost = case.expected.iter().any(|(code, ..)| code.class() == LossClass::Lost);
         assert_eq!(conversion.is_complete(), !lost, "case {index}");
         match fail.convert(Input::new(&bytes, case.format)) {
