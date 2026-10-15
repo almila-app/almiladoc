@@ -77,6 +77,7 @@ path = [
     "python/tests/test_almiladoc.py",
     "src/error.rs",
     "src/lib.rs",
+    "src/package/xml.rs",
     "tests/fixturegen/common.py",
     "tests/fixturegen/csv.py",
     "tests/fixturegen/doc.py",

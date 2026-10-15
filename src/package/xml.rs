@@ -8,9 +8,9 @@
 
 use crate::error::ConvertError;
 use crate::package::limits;
-use quick_xml::NsReader;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{QName, ResolveResult};
+use quick_xml::{NsReader, XmlVersion};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -205,7 +205,7 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
     let mut reader = NsReader::from_reader(utf8.as_ref());
     reader.config_mut().check_end_names = false;
 
-    let mut interner: HashMap<Vec<u8>, Rc<str>> = HashMap::new();
+    let mut interner: HashMap<String, Rc<str>> = HashMap::new();
     let mut root =
         Element { ns: None, local: String::new(), attrs: Vec::new(), children: Vec::new() };
     let mut stack: Vec<Element> = Vec::new();
@@ -234,7 +234,7 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
             }
             Event::End(end) => match stack.pop() {
                 Some(elem) => {
-                    if elem.local.as_bytes() != end.local_name().as_ref() {
+                    if elem.local != end.local_name().as_ref() {
                         recovered = true;
                     }
                     attach(&mut stack, &mut root, Node::Elem(elem));
@@ -242,23 +242,20 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
                 None => recovered = true,
             },
             Event::Text(e) => {
-                let text = match e.decode() {
-                    Ok(t) => t.into_owned(),
-                    Err(_) => String::from_utf8_lossy(e.as_ref()).into_owned(),
-                };
+                let text = e.into_inner().into_owned();
                 if !text.is_empty() {
                     bump_nodes(&mut nodes)?;
                     push_text(&mut stack, &mut root, text);
                 }
             }
             Event::GeneralRef(e) => {
-                let name = String::from_utf8_lossy(e.as_ref()).into_owned();
+                let name = e.into_inner();
                 let resolved = resolve_entity(&name).unwrap_or_else(|| format!("&{name};"));
                 bump_nodes(&mut nodes)?;
                 push_text(&mut stack, &mut root, resolved);
             }
             Event::CData(e) => {
-                let text = String::from_utf8_lossy(e.as_ref()).into_owned();
+                let text = e.into_inner().into_owned();
                 bump_nodes(&mut nodes)?;
                 push_text(&mut stack, &mut root, text);
             }
@@ -307,7 +304,8 @@ fn to_utf8(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn declared_encoding(head: &[u8]) -> Option<String> {
-    let head = std::str::from_utf8(head).ok()?;
+    let end = head.windows(2).position(|w| w == b"?>")?;
+    let head = std::str::from_utf8(&head[..end]).ok()?;
     let idx = head.find("encoding")?;
     let rest = &head[idx + "encoding".len()..];
     let rest = rest.trim_start().strip_prefix('=')?.trim_start();
@@ -345,27 +343,26 @@ pub fn normalize_ooxml_uri(uri: &str) -> Option<String> {
     Some(format!("http://schemas.openxmlformats.org/{family}/2006/{tail}"))
 }
 
-fn intern(interner: &mut HashMap<Vec<u8>, Rc<str>>, uri: &[u8]) -> Rc<str> {
+fn intern(interner: &mut HashMap<String, Rc<str>>, uri: &str) -> Rc<str> {
     if let Some(rc) = interner.get(uri) {
         return rc.clone();
     }
-    let raw = String::from_utf8_lossy(uri).into_owned();
-    let rc: Rc<str> = Rc::from(normalize_ooxml_uri(&raw).unwrap_or(raw));
-    interner.insert(uri.to_vec(), rc.clone());
+    let rc: Rc<str> = Rc::from(normalize_ooxml_uri(uri).unwrap_or_else(|| uri.to_owned()));
+    interner.insert(uri.to_owned(), rc.clone());
     rc
 }
 
 fn start_to_element(
     e: &BytesStart,
     reader: &NsReader<&[u8]>,
-    interner: &mut HashMap<Vec<u8>, Rc<str>>,
+    interner: &mut HashMap<String, Rc<str>>,
 ) -> Element {
     let (res, local) = reader.resolver().resolve_element(e.name());
     let ns = match res {
         ResolveResult::Bound(namespace) => Some(intern(interner, namespace.as_ref())),
         _ => None,
     };
-    let local = String::from_utf8_lossy(local.as_ref()).into_owned();
+    let local = local.as_ref().to_owned();
     let mut attrs = Vec::new();
     for attr in e.attributes() {
         let attr = match attr {
@@ -378,7 +375,7 @@ fn start_to_element(
         };
         // Namespace declarations are consumed by the reader's resolver; the
         // DOM stores only resolved names.
-        if attr.key.as_ref().strip_prefix(b"xmlns").is_some_and(|r| matches!(r, [] | [b':', ..])) {
+        if attr.key.as_namespace_binding().is_some() {
             continue;
         }
         let (res, alocal) = reader.resolver().resolve_attribute(attr.key);
@@ -387,14 +384,10 @@ fn start_to_element(
             _ => None,
         };
         let value = attr
-            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
-            .map(|v| v.into_owned())
-            .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).into_owned());
-        attrs.push(Attr {
-            ns: ans,
-            local: String::from_utf8_lossy(alocal.as_ref()).into_owned(),
-            value,
-        });
+            .normalized_value(XmlVersion::Implicit1_0)
+            .unwrap_or_else(|_| attr.value.clone())
+            .into_owned();
+        attrs.push(Attr { ns: ans, local: alocal.as_ref().to_owned(), value });
     }
     // `mc:Choice/@Requires` holds namespace *prefixes* evaluated in the
     // element's lexical scope (prefixes may be rebound locally). Resolve
@@ -410,11 +403,9 @@ fn start_to_element(
             .split_whitespace()
             .map(|prefix| {
                 let probe = format!("{prefix}:x");
-                match reader.resolver().resolve_element(QName(probe.as_bytes())).0 {
-                    ResolveResult::Bound(namespace) => {
-                        let raw = String::from_utf8_lossy(namespace.as_ref()).into_owned();
-                        normalize_ooxml_uri(&raw).unwrap_or(raw)
-                    }
+                match reader.resolver().resolve_element(QName(&probe)).0 {
+                    ResolveResult::Bound(namespace) => normalize_ooxml_uri(namespace.as_ref())
+                        .unwrap_or_else(|| namespace.as_ref().to_owned()),
                     _ => prefix.to_string(),
                 }
             })
@@ -591,6 +582,53 @@ mod tests {
         let r = &root.child_elems().next().unwrap();
         assert_eq!(r.attr_any("a"), Some("caf\u{e9}"));
         assert_eq!(r.text(), "\u{4f60}\u{597d}");
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_utf8_part_is_malformed() {
+        for xml in [
+            &b"<r>caf\xE9</r>"[..],
+            b"<r a=\"caf\xE9\"/>",
+            b"<r><![CDATA[caf\xE9]]></r>",
+            b"<r\xE9/>",
+        ] {
+            let err = parse_xml(xml).unwrap_err();
+            assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn short_legacy_encoded_part_is_transcoded() {
+        let root = parse_xml(
+            b"<?xml version=\"1.0\" encoding=\"windows-1252\"?><r a=\"\xE9\">caf\xE9</r>",
+        )
+        .unwrap();
+        let r = root.child_elems().next().unwrap();
+        assert_eq!(r.attr_any("a"), Some("\u{e9}"));
+        assert_eq!(r.text(), "caf\u{e9}");
+    }
+
+    #[test]
+    fn text_cdata_and_references_keep_their_content() {
+        let root = parse_xml(
+            b"<r xmlns=\"urn:d\" xmlns:q=\"urn:q\" a=\"x&amp;\ty\" b=\"&bogus;\">a\r\nb<![CDATA[<c>\r\n]]>&#x41;&lt;&bogus;</r>",
+        )
+        .unwrap();
+        let r = root.child_elems().next().unwrap();
+        assert_eq!(r.attr_any("a"), Some("x& y"));
+        assert_eq!(r.attr_any("b"), Some("&bogus;"));
+        assert_eq!(r.attrs.len(), 2);
+        assert_eq!(r.text(), "a\r\nb<c>\r\nA<&bogus;");
+    }
+
+    #[test]
+    fn namespace_binding_overflow_is_malformed() {
+        let decls = |from: usize, to: usize| {
+            (from..to).map(|i| format!(" xmlns:p{i}=\"urn:{i}\"")).collect::<String>()
+        };
+        let xml = format!("<a{}><b{}/></a>", decls(0, 65), decls(65, 130));
+        let err = parse_xml(xml.as_bytes()).unwrap_err();
+        assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
     }
 
     #[test]
