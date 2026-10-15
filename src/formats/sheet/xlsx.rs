@@ -469,10 +469,12 @@ pub(super) fn build_table(
     // sheet: the extent comes from cell coordinates, so a handful of cells
     // describes a whole sheet and a handful of sheets multiplies it.
     let limits = parse_ctx.limits();
-    *slots = slots.saturating_add(row_map.len() as u64 * col_map.len() as u64);
+    let positions = row_map.len() as u64 * col_map.len() as u64;
+    *slots = slots.saturating_add(positions);
     if *slots > limits.max_grid_slots {
         return Err(ConvertError::limit(Limit::GridSlots, limits.max_grid_slots));
     }
+    parse_ctx.charge(positions)?;
 
     // Remap merges onto the surviving coordinates. The covered-position set
     // is charged against the expansion budget up front, before any
@@ -1091,5 +1093,19 @@ mod tests {
         let limits = crate::limits::Limits { max_expansion: 5, ..Default::default() };
         let err = super::super::parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 5 }));
+    }
+
+    #[test]
+    fn every_grid_position_is_charged_once() {
+        let sheet = SheetContent {
+            cells: HashMap::from([((0, 0), "a".to_string()), ((1, 2), "b".to_string())]),
+            checkboxes: Default::default(),
+            hidden_rows: HashSet::new(),
+            hidden_cols: Vec::new(),
+            merges: Vec::new(),
+        };
+        let parse_ctx = ParseCtx::default();
+        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
+        assert_eq!(parse_ctx.fuel(), 6);
     }
 }

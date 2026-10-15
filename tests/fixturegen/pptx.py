@@ -376,7 +376,7 @@ def abuse(out):
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
 </Relationships>"""
-    write_zip(a / "hugespan--errors.pptx", [
+    write_zip(a / "max_expansion--hugespan--errors.pptx", [
         ("[Content_Types].xml", span_ct),
         ("_rels/.rels", span_root_rels),
         ("ppt/presentation.xml", span_pres),

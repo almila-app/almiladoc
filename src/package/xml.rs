@@ -216,6 +216,7 @@ pub fn parse_xml(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Element, ConvertE
 
     loop {
         let event = reader.read_event().map_err(|_| ConvertError::malformed("unparseable xml"))?;
+        parse_ctx.charge(1)?;
         match event {
             Event::Start(e) => {
                 if stack.len() as u64 >= limits.max_nesting_depth {
@@ -519,6 +520,18 @@ mod tests {
                 "{second}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_xml_event_is_charged_once() {
+        let parse_ctx = ParseCtx::default();
+        parse_xml(&parse_ctx, b"<?xml version=\"1.0\"?><a><b/>t<!--c--></a>").unwrap();
+        assert_eq!(parse_ctx.fuel(), 7);
+        let limits = Limits { max_work: 6, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let err =
+            parse_xml(&parse_ctx, b"<?xml version=\"1.0\"?><a><b/>t<!--c--></a>").unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 6 }));
     }
 
     #[test]

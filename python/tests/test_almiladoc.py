@@ -15,7 +15,7 @@ OUTLINE = FIXTURES / "docx" / "handmade-outline.docx"
 RICH = FIXTURES / "docx" / "handmade-rich.docx"
 CSV = FIXTURES / "csv" / "sheet.csv"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
-ZIPBOMB = FIXTURES / "abuse" / "zipbomb--errors.docx"
+ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
 
 

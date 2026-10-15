@@ -126,7 +126,7 @@ def abuse(out):
     nested = struct.pack("<HHI", 0x0000, 0x0FA8, 4) + b"deep"
     for _ in range(200):
         nested = struct.pack("<HHI", 0x000F, 0x03EE, len(nested)) + nested
-    write_cfb(a / "deepnest--errors.ppt", [
+    write_cfb(a / "max_record_depth--deepnest--errors.ppt", [
         ("Current User", b""),
         ("PowerPoint Document", nested),
     ])

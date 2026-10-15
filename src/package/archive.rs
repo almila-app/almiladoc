@@ -73,7 +73,7 @@ impl<'a> Package<'a> {
         // remains of the whole-archive total.
         let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read);
         let cap = limits.max_entry_bytes.min(remaining_total);
-        let bytes = read_entry(&mut file, cap, name)?;
+        let bytes = read_entry(self.parse_ctx, &mut file, cap, name)?;
         let read = bytes.len() as u64;
         if read > cap {
             return Err(if remaining_total < limits.max_entry_bytes {
@@ -124,12 +124,29 @@ impl<'a> Package<'a> {
 }
 
 fn read_entry<R: Read>(
+    parse_ctx: &ParseCtx,
     file: &mut zip::read::ZipFile<'_, R>,
     cap: u64,
     name: &str,
 ) -> Result<Vec<u8>, ConvertError> {
     let declared = file.size();
-    read_capped(file, declared, cap, name, "corrupt archive entry")
+    let mut counted = Counted { inner: file, read: 0 };
+    let bytes = read_capped(&mut counted, declared, cap, name, "corrupt archive entry");
+    parse_ctx.charge(counted.read.div_ceil(1024))?;
+    bytes
+}
+
+struct Counted<R> {
+    inner: R,
+    read: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
 }
 
 fn skip_unreadable<T>(
@@ -252,7 +269,8 @@ mod tests {
         let bytes = one_part_zip("a.bin", &[7u8; 1000]);
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
         let mut file = zip.by_name("a.bin").unwrap();
-        assert_eq!(read_entry(&mut file, 4096, "a.bin").unwrap().capacity(), 1000);
+        let read = read_entry(&ParseCtx::default(), &mut file, 4096, "a.bin").unwrap();
+        assert_eq!(read.capacity(), 1000);
     }
 
     #[test]
@@ -371,6 +389,69 @@ mod tests {
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("a.bin").unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 64 }));
+    }
+
+    #[test]
+    fn a_read_charges_one_unit_per_started_kib_and_a_cached_read_none() {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, len) in [("a.bin", 1024), ("b.bin", 1025), ("c.bin", 0)] {
+            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(&vec![7u8; len]).unwrap();
+        }
+        let data = w.finish().unwrap().into_inner();
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let mut spent = Vec::new();
+        for name in ["a.bin", "b.bin", "c.bin", "a.bin"] {
+            pkg.part(name).unwrap();
+            spent.push(parse_ctx.fuel());
+        }
+        assert_eq!(spent, [1, 3, 3, 3]);
+    }
+
+    #[test]
+    fn an_entry_failing_its_checksum_is_charged_for_what_it_inflated() {
+        let mut data = one_part_zip("word/comments.xml", &[b'x'; 4096]);
+        let crc = zip::ZipArchive::new(Cursor::new(data.as_slice()))
+            .unwrap()
+            .by_index(0)
+            .unwrap()
+            .crc32();
+        let (stored, corrupt) = (crc.to_le_bytes(), (!crc).to_le_bytes());
+        let at: Vec<usize> =
+            data.windows(4).enumerate().filter(|(_, w)| *w == stored).map(|(i, _)| i).collect();
+        assert_eq!(at.len(), 2);
+        for i in at {
+            data[i..i + 4].copy_from_slice(&corrupt);
+        }
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        assert!(pkg.optional_part("word/comments.xml").unwrap().is_none());
+        assert!(pkg.optional_part("word/comments.xml").unwrap().is_none());
+        assert_eq!(parse_ctx.fuel(), 8);
+        let limits = Limits { max_work: 3, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let read = pkg.optional_part("word/comments.xml");
+        assert!(
+            matches!(read, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3 })),
+            "{read:?}"
+        );
+    }
+
+    #[test]
+    fn optional_reads_propagate_a_cancellation() {
+        let data = one_part_zip("word/comments.xml", b"<comments/>");
+        let token = crate::ledger::CancelToken::new();
+        let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        assert!(pkg.part("word/comments.xml").unwrap().is_some());
+        token.cancel();
+        let read = pkg.optional_xml_part("word/comments.xml");
+        assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let read = pkg.optional_part("word/comments.xml");
+        assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
     }
 
     #[test]

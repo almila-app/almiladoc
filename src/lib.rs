@@ -23,6 +23,7 @@ mod converter;
 mod ctx;
 mod error;
 mod formats;
+mod ledger;
 mod limits;
 mod package;
 mod pool;
@@ -32,6 +33,7 @@ mod shared;
 pub use config::{Config, ConfigError};
 pub use converter::{Conversion, Converter, Input, Parsed};
 pub use error::{ConvertError, PartName, UnsupportedKind};
+pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 
 /// Input format. Selects the parser; container variants that share a parser

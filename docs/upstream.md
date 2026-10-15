@@ -12,7 +12,6 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #17 PR, unwrap single-cell tables that wrap a nested table: the fix for #14, rewritten as a model normalisation step without panicking paths.
 - #31 issue, slides concatenated without a boundary: slides become units with milestones in the model, so an untitled slide no longer merges into the one before it (ADR 0001 decisions 4 and 5).
 - #32 PR, separate slides with a thematic break: its ODP coverage and tests carry over to slide milestones (ADR 0001 decision 5); a thematic break is not used, as it cannot be told apart from a horizontal rule.
-- #44 PR, parse each package part once and bound the total: a part referenced repeatedly is charged once against a document-wide work budget (ADR 0001 decision 12).
 - #47 PR, single-pass RTF prelude scan and group-depth cap: RTF group nesting is bounded by the nesting limit and the prelude is scanned once (ADR 0001 decision 12).
 - #54 PR, invalid EPUB spine references: a spine whose references all dangle no longer converts to an empty success, and each dangling item is reported (ADR 0001 decision 10).
 - #62 issue, PDF through `to_document` with per-page extraction: PDF is parsed into the model with page units (ADR 0001 decisions 4 and 6).
@@ -42,6 +41,7 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 
 ## Taken
 
+- #44 PR, parse each package part once and bound the total: the bound is taken as the conversion-wide work budget of ADR 0001 decision 12, charged per decompressed KiB of a part and per XML event; parsing a part referenced repeatedly only once is still to take. Authored by abhinavmir (@AbhinavMir).
 - #96 issue, heading numbering in DOCM: list counters continue across numbering instances that share an abstract definition, fixed through #129; inferring heading numbers from text is not taken.
 - #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id; a start override restarts its level once per instance, and a level override without one continues the count. Authored by hari (@Mr-Neutr0n).
 - #154 PR, mark `Format` as `#[non_exhaustive]`: `Format`, `ConvertError`, its kinds, `Limit` and every model type are `#[non_exhaustive]` (ADR 0001 decision 2), and a doctest proves that an exhaustive match outside the crate fails to compile; the bindings' panicking wildcard arms are not taken, and the Python binding raises `InternalError` for a variant it does not mirror. Authored by Marcell Manfrin Barbacena (@marcellmanfrin).

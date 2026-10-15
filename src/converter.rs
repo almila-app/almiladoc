@@ -9,6 +9,8 @@ use crate::config::{Config, ConfigError};
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::formats;
+use crate::ledger::CancelToken;
+use crate::limits::Limit;
 use crate::model::Document;
 use crate::pool::run_on_pool;
 use crate::render::markdown::document_to_markdown;
@@ -41,8 +43,9 @@ impl Converter {
     /// or [`UnsupportedKind::FeatureDisabled`](crate::UnsupportedKind::FeatureDisabled)
     /// in a build without the `pdf` feature.
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
+        self.admit(&input)?;
         let document =
-            self.on_pool(|| formats::parse(&self.parse_ctx(), input.bytes, input.format))?;
+            self.on_pool(|| formats::parse(&self.parse_ctx(&input), input.bytes, input.format))?;
         Ok(Parsed { document, config: Arc::clone(&self.config) })
     }
 
@@ -53,20 +56,34 @@ impl Converter {
     ///
     /// [`ConvertError`] when no complete conversion was possible.
     pub fn convert(&self, input: Input<'_>) -> Result<Conversion, ConvertError> {
+        self.admit(&input)?;
         self.on_pool(|| {
             let markdown = match input.format {
                 #[cfg(feature = "pdf")]
                 Format::Pdf => formats::pdf::to_markdown(input.bytes)?,
-                format => {
-                    document_to_markdown(&formats::parse(&self.parse_ctx(), input.bytes, format)?)
-                }
+                format => document_to_markdown(&formats::parse(
+                    &self.parse_ctx(&input),
+                    input.bytes,
+                    format,
+                )?),
             };
             Ok(Conversion { markdown })
         })
     }
 
-    fn parse_ctx(&self) -> ParseCtx<'_> {
-        ParseCtx::new(&self.config.limits)
+    fn admit(&self, input: &Input<'_>) -> Result<(), ConvertError> {
+        if input.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            return Err(ConvertError::Cancelled);
+        }
+        let max = self.config.limits.max_input_bytes;
+        if input.bytes.len() as u64 > max {
+            return Err(ConvertError::limit(Limit::InputBytes, max));
+        }
+        Ok(())
+    }
+
+    fn parse_ctx<'c>(&'c self, input: &'c Input<'_>) -> ParseCtx<'c> {
+        ParseCtx::new(&self.config.limits).with_cancel(input.cancel.as_ref())
     }
 
     fn on_pool<T: Send>(
@@ -77,11 +94,13 @@ impl Converter {
     }
 }
 
-/// One document's bytes and the format they are parsed as.
+/// One document's bytes, the format they are parsed as, and the token that
+/// may cancel its conversion.
 #[derive(Clone)]
 pub struct Input<'a> {
     bytes: &'a [u8],
     format: Format,
+    cancel: Option<CancelToken>,
 }
 
 impl<'a> Input<'a> {
@@ -89,7 +108,14 @@ impl<'a> Input<'a> {
     /// [`Format::from_extension`] may supply.
     #[must_use]
     pub fn new(bytes: &'a [u8], format: Format) -> Self {
-        Input { bytes, format }
+        Input { bytes, format, cancel: None }
+    }
+
+    /// This input, its conversion failing [`ConvertError::Cancelled`] once
+    /// `token` is cancelled; a PDF is checked only before extraction starts.
+    #[must_use]
+    pub fn with_cancel(self, token: CancelToken) -> Self {
+        Input { cancel: Some(token), ..self }
     }
 }
 
@@ -258,5 +284,79 @@ mod tests {
     fn debug_shows_no_input_bytes() {
         let shown = format!("{:?}", Input::new(b"secret", Format::Csv));
         assert_eq!(shown, "Input { len: 6, format: Csv }");
+    }
+
+    fn corpus(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                corpus(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn equal_input_charges_equal_fuel() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut files = Vec::new();
+        corpus(&root, &mut files);
+        let mut charged = 0;
+        for path in files.iter().filter(|path| !path.starts_with(root.join("abuse"))) {
+            let bytes = std::fs::read(path).unwrap();
+            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let format = Format::sniff(&bytes).or_else(|| Format::from_extension(extension));
+            let Some(format) = format.filter(|format| *format != Format::Pdf) else {
+                continue;
+            };
+            let fuel = || {
+                let parse_ctx = ParseCtx::default();
+                let parsed = formats::parse(&parse_ctx, &bytes, format).is_ok();
+                (parsed, parse_ctx.fuel())
+            };
+            let first = fuel();
+            assert_eq!(first, fuel(), "{}", path.display());
+            charged += usize::from(first.1 > 0);
+        }
+        assert!(charged > 40, "{charged} fixtures charged");
+    }
+
+    #[test]
+    fn the_parse_context_charges_against_the_inputs_token() {
+        let converter = converter(1);
+        let token = CancelToken::new();
+        let input = Input::new(CSV, Format::Csv).with_cancel(token.clone());
+        let parse_ctx = converter.parse_ctx(&input);
+        assert!(parse_ctx.charge(1).is_ok());
+        token.cancel();
+        assert!(matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled)));
+    }
+
+    #[test]
+    fn a_token_cancelled_from_another_thread_stops_a_running_parse() {
+        let flood = [b"{\\rtf1 ".as_slice(), &b"{}".repeat(8 * 1024 * 1024)].concat();
+        let limits = crate::Limits { max_work: u64::MAX, ..crate::Limits::default() };
+        let token = CancelToken::new();
+        let result = std::thread::scope(|scope| {
+            let running = scope.spawn(|| {
+                let parse_ctx = ParseCtx::new(&limits).with_cancel(Some(&token));
+                formats::parse(&parse_ctx, &flood, Format::Rtf).map(drop)
+            });
+            token.cancel();
+            running.join().unwrap()
+        });
+        assert!(matches!(result, Err(ConvertError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn a_pre_cancelled_input_is_refused_before_its_size() {
+        let token = CancelToken::new();
+        token.cancel();
+        let mut config = Config::default();
+        config.limits.max_input_bytes = 1;
+        let converter = Converter::new(config).unwrap();
+        let input = Input::new(CSV, Format::Csv).with_cancel(token);
+        assert!(matches!(converter.convert(input), Err(ConvertError::Cancelled)));
     }
 }

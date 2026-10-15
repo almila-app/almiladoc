@@ -2,8 +2,8 @@
 //!
 //! One snapshot per fixture of the single conversion result: the Markdown
 //! output, or the terminal error. Logs are never snapshotted. Fixtures under
-//! `abuse/` are resource-abuse shapes and are exercised by dedicated tests once
-//! limits exist, not by the corpus sweep. Malformed fixtures encode their
+//! `abuse/` are resource-abuse shapes, each asserted against its limit in
+//! `tests/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
 //! expected outcome as `name--<outcome>.ext` where outcome is one of
 //! `recovers`, `skips`, `ignores`, `errors`.
 
@@ -234,24 +234,6 @@ fn rtf_inline_picture_is_retained() {
     let png = doc.assets.iter().find(|a| a.media_type == "image/png");
     let png = png.expect("png pict retained as an asset");
     assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']), "payload decodes from hex");
-}
-
-/// Resource-abuse fixtures must hard-fail with `ResourceLimit` - the one
-/// class of malformed input that never converts.
-#[test]
-fn abuse_fixtures_hard_fail() {
-    let root = fixture_root().join("abuse");
-    let mut files = Vec::new();
-    walk(&root, &mut files);
-    assert!(!files.is_empty(), "abuse fixture set is missing");
-    for path in files {
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let result = convert_file(&path);
-        assert!(
-            matches!(result, Err(ConvertError::ResourceLimit { .. })),
-            "{name}: expected a ResourceLimit error, got {result:?}"
-        );
-    }
 }
 
 /// Local-only sweep over the ~100 real-world files in `samples/` (gitignored).

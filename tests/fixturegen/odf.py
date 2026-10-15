@@ -236,7 +236,7 @@ def abuse(out):
 <table:table-cell office:value-type="string" table:number-columns-repeated="1000"><text:p>x</text:p></table:table-cell>
 </table:table-row>
 </table:table></office:spreadsheet></office:body></office:document-content>"""
-    write_zip(a / "hugerepeat--errors.ods",
+    write_zip(a / "max_expansion--hugerepeat--errors.ods",
               [("content.xml", repeat_ods)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
     # S1: a single cell whose declared span area is astronomically large; the
@@ -251,7 +251,7 @@ def abuse(out):
 <table:table-cell table:number-rows-spanned="2000000000" table:number-columns-spanned="2000000000"><text:p>x</text:p></table:table-cell>
 </table:table-row>
 </table:table></office:spreadsheet></office:body></office:document-content>"""
-    write_zip(a / "hugespan--errors.ods",
+    write_zip(a / "max_expansion--hugespan--errors.ods",
               [("content.xml", span_ods)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
     # S1: a repeated row whose cells are structurally present but empty used
@@ -265,8 +265,22 @@ def abuse(out):
 <table:table-row table:number-rows-repeated="9000000000000000"><table:table-cell><text:p/></table:table-cell></table:table-row>
 <table:table-row><table:table-cell><text:p>tail</text:p></table:table-cell></table:table-row>
 </table:table></office:spreadsheet></office:body></office:document-content>"""
-    write_zip(a / "emptyrowrepeat--errors.ods",
+    write_zip(a / "max_expansion--emptyrowrepeat--errors.ods",
               [("content.xml", emptyrepeat_ods)],
+              mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
+    # One 64 KiB cell repeated 1026 times: its duplicated text passes the
+    # 64 MiB expansion-text limit while the cell count stays far under its own.
+    longrepeat_ods = f"""<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:spreadsheet><table:table table:name="S">
+<table:table-row>
+<table:table-cell office:value-type="string" table:number-columns-repeated="1026"><text:p>{"x" * 65536}</text:p></table:table-cell>
+</table:table-row>
+</table:table></office:spreadsheet></office:body></office:document-content>"""
+    write_zip(a / "max_expansion_text_bytes--longrepeat--errors.ods",
+              [("content.xml", longrepeat_ods)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
 
 

@@ -39,13 +39,18 @@ path = [
     "src/config.rs",
     "src/converter.rs",
     "src/ctx.rs",
+    "src/ledger.rs",
     "src/pool.rs",
     "tests/converter.rs",
     "tests/fixes.rs",
     "tests/fixturegen/__init__.py",
+    "tests/fixtures/abuse/max_expansion_text_bytes--longrepeat--errors.ods",
+    "tests/fixtures/abuse/max_grid_slots--corners--errors.xlsx",
+    "tests/fixtures/abuse/max_total_bytes--paddedparts--errors.docx",
     "tests/fixtures/docx/handmade-run-marks.docx",
     "tests/fixtures/pdf/handmade-arabic.pdf",
     "tests/fixtures/pdf/handmade-ligatures.pdf",
+    "tests/limits.rs",
     "tests/snapshots/snapshots__docx__handmade-run-marks.docx.snap",
     "tests/snapshots/snapshots__pdf__handmade-arabic.pdf.snap",
     "uv.lock",
@@ -101,8 +106,10 @@ path = [
     "src/formats/pdf.rs",
     "src/formats/ppt/mod.rs",
     "src/formats/pptx/mod.rs",
+    "src/formats/rtf/lexer.rs",
     "src/formats/rtf/mod.rs",
     "src/formats/rtf/table.rs",
+    "src/formats/rtf/tables.rs",
     "src/formats/sheet/mod.rs",
     "src/formats/sheet/xls.rs",
     "src/formats/sheet/xlsb.rs",
@@ -118,7 +125,6 @@ path = [
     "src/model/table.rs",
     "src/package/mod.rs",
     "src/package/path.rs",
-    "src/package/xml.rs",
     "src/render/markdown/tests.rs",
     "src/shared/assets.rs",
     "src/shared/binary.rs",
@@ -139,6 +145,8 @@ path = [
     "tests/fixturegen/pptx.py",
     "tests/fixturegen/rtf.py",
     "tests/fixturegen/sheet.py",
+    "tests/fixtures/abuse/max_asset_total_bytes--twoimages--errors.docx",
+    "tests/fixtures/abuse/max_xml_nodes--flatflood--errors.docx",
     "tests/fixtures/docx/handmade-numbering.docx",
     "tests/fixtures/pdf/handmade-inline-image-no-colorspace.pdf",
     "tests/fixtures/rtf/text.rtf",
@@ -212,5 +220,16 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/package/xml.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

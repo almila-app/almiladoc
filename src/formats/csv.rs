@@ -16,7 +16,7 @@ use crate::shared::text::clean_text;
 use csv::ReaderBuilder;
 use std::borrow::Cow;
 
-pub fn parse(_parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let text = decode(bytes);
     let delimiter = sniff_delimiter(&text);
 
@@ -35,6 +35,7 @@ pub fn parse(_parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErr
                 continue;
             }
         };
+        parse_ctx.charge(record.len() as u64)?;
         let cells: Vec<Cell> =
             record.iter().map(|f| Cell::from_inlines(vec![Inline::plain(clean_text(f))])).collect();
         rows.push(cells);
@@ -150,5 +151,12 @@ mod tests {
         }
         let doc = parse(&ParseCtx::default(), &bytes).unwrap();
         assert!(!doc.blocks.is_empty());
+    }
+
+    #[test]
+    fn every_field_is_charged_once() {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, b"a,b\n1,2,3\n").unwrap();
+        assert_eq!(parse_ctx.fuel(), 5);
     }
 }

@@ -6,7 +6,7 @@ from fixturegen.common import write_zip
 # ---------------------------------------------------------------------------
 # R17a: merged ranges in spreadsheets become spanning grid cells
 
-def merged_xlsx(out):
+def write_one_sheet_xlsx(path, name, sheet):
     ct = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -18,14 +18,24 @@ def merged_xlsx(out):
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>"""
-    workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    workbook = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets><sheet name="Merged" sheetId="1" r:id="rId1"/></sheets></workbook>"""
+<sheets><sheet name="{name}" sheetId="1" r:id="rId1"/></sheets></workbook>"""
     wb_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
 </Relationships>"""
+    write_zip(path, [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", root_rels),
+        ("xl/workbook.xml", workbook),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("xl/worksheets/sheet1.xml", sheet),
+    ])
+
+
+def merged_xlsx(out):
     sheet = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <sheetData>
@@ -42,13 +52,7 @@ def merged_xlsx(out):
 </sheetData>
 <mergeCells count="2"><mergeCell ref="A1:B1"/><mergeCell ref="A2:A3"/></mergeCells>
 </worksheet>"""
-    write_zip(out / "xlsx" / "handmade-merged.xlsx", [
-        ("[Content_Types].xml", ct),
-        ("_rels/.rels", root_rels),
-        ("xl/workbook.xml", workbook),
-        ("xl/_rels/workbook.xml.rels", wb_rels),
-        ("xl/worksheets/sheet1.xml", sheet),
-    ])
+    write_one_sheet_xlsx(out / "xlsx" / "handmade-merged.xlsx", "Merged", sheet)
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +161,18 @@ def sheet_xlsb(out):
     ])
 
 
+def abuse(out):
+    sheet = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>
+<row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row>
+<row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>b</t></is></c></row>
+</sheetData>
+</worksheet>"""
+    write_one_sheet_xlsx(out / "abuse" / "max_grid_slots--corners--errors.xlsx", "Corners", sheet)
+
+
 def generate(out):
     merged_xlsx(out)
     sheet_xlsb(out)
+    abuse(out)

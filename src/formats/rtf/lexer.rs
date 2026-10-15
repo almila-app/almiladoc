@@ -2,6 +2,9 @@
 //! binary payloads can never corrupt group state; unbalanced groups are the
 //! caller's to recover (deliberately, with a log).
 
+use crate::ctx::ParseCtx;
+use crate::error::ConvertError;
+
 pub enum Token<'a> {
     Open,
     Close,
@@ -21,25 +24,31 @@ pub enum Token<'a> {
 }
 
 pub struct Lexer<'a> {
+    parse_ctx: &'a ParseCtx<'a>,
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(bytes: &'a [u8]) -> Self {
-        Lexer { bytes, pos: 0 }
+    pub fn new(parse_ctx: &'a ParseCtx<'a>, bytes: &'a [u8]) -> Self {
+        Lexer { parse_ctx, bytes, pos: 0 }
     }
 
-    pub fn next_token(&mut self) -> Option<Token<'a>> {
+    /// The next token, charging one unit of work per token and per skipped
+    /// line break or NUL.
+    pub fn next_token(&mut self) -> Result<Option<Token<'a>>, ConvertError> {
         loop {
-            let b = *self.bytes.get(self.pos)?;
+            let Some(&b) = self.bytes.get(self.pos) else {
+                return Ok(None);
+            };
+            self.parse_ctx.charge(1)?;
             self.pos += 1;
-            return Some(match b {
-                b'{' => Token::Open,
-                b'}' => Token::Close,
-                b'\\' => self.control()?,
+            return Ok(match b {
+                b'{' => Some(Token::Open),
+                b'}' => Some(Token::Close),
+                b'\\' => self.control(),
                 b'\r' | b'\n' | b'\0' => continue,
-                b => Token::Byte(b),
+                b => Some(Token::Byte(b)),
             });
         }
     }
@@ -111,9 +120,13 @@ impl<'a> Lexer<'a> {
 /// Extract the balanced content of destination groups named `name`
 /// (`{\name ...}` or `{\*\name ...}`), bin-aware. Returns the byte ranges of
 /// the group bodies including the destination word.
-pub fn destination_groups<'a>(bytes: &'a [u8], name: &str) -> Vec<&'a [u8]> {
+pub fn destination_groups<'a>(
+    parse_ctx: &'a ParseCtx<'a>,
+    bytes: &'a [u8],
+    name: &str,
+) -> Result<Vec<&'a [u8]>, ConvertError> {
     let mut out = Vec::new();
-    let mut lexer = Lexer::new(bytes);
+    let mut lexer = Lexer::new(parse_ctx, bytes);
     // Track group starts; when a group's first control word (skipping `\*`)
     // matches, remember its start depth and capture until it closes.
     let mut depth = 0usize;
@@ -121,7 +134,7 @@ pub fn destination_groups<'a>(bytes: &'a [u8], name: &str) -> Vec<&'a [u8]> {
     let mut capture: Option<(usize, usize)> = None; // (depth, start_pos)
     loop {
         let before = lexer.pos;
-        let Some(token) = lexer.next_token() else { break };
+        let Some(token) = lexer.next_token()? else { break };
         match token {
             Token::Open => {
                 depth += 1;
@@ -147,7 +160,7 @@ pub fn destination_groups<'a>(bytes: &'a [u8], name: &str) -> Vec<&'a [u8]> {
             _ => expecting_word_at = None,
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -158,11 +171,12 @@ mod tests {
     fn bin_payload_consumed_raw() {
         // Payload bytes are braces and backslashes; they must not lex.
         let src = br"{\rtf1 a\bin5 }}{\\x b}";
-        let mut lexer = Lexer::new(src);
+        let parse_ctx = ParseCtx::default();
+        let mut lexer = Lexer::new(&parse_ctx, src);
         let mut bin: Vec<u8> = Vec::new();
         let mut opens = 0;
         let mut closes = 0;
-        while let Some(t) = lexer.next_token() {
+        while let Some(t) = lexer.next_token().unwrap() {
             match t {
                 Token::Bin(p) => bin.extend_from_slice(p),
                 Token::Open => opens += 1,
@@ -177,10 +191,11 @@ mod tests {
     #[test]
     fn backslash_before_a_line_break_is_one_paragraph_mark() {
         for src in [b"{\\rtf1 a\\\nb}".as_slice(), b"{\\rtf1 a\\\r\nb}", b"{\\rtf1 a\\\rb}"] {
-            let mut lexer = Lexer::new(src);
+            let parse_ctx = ParseCtx::default();
+            let mut lexer = Lexer::new(&parse_ctx, src);
             let mut pars = 0;
             let mut symbols = 0;
-            while let Some(t) = lexer.next_token() {
+            while let Some(t) = lexer.next_token().unwrap() {
                 match t {
                     Token::Word { name: "par", param: None } => pars += 1,
                     Token::Symbol(_) => symbols += 1,
@@ -194,10 +209,36 @@ mod tests {
     #[test]
     fn destination_extraction() {
         let src = br"{\rtf1{\*\listtable{\list\listid5}}{\fonttbl{\f0 Arial;}} body}";
-        let lists = destination_groups(src, "listtable");
+        let parse_ctx = ParseCtx::default();
+        let lists = destination_groups(&parse_ctx, src, "listtable").unwrap();
         assert_eq!(lists.len(), 1);
         assert!(lists[0].starts_with(br"{\list"));
-        let fonts = destination_groups(src, "fonttbl");
+        let fonts = destination_groups(&parse_ctx, src, "fonttbl").unwrap();
         assert_eq!(fonts.len(), 1);
+    }
+
+    #[test]
+    fn every_token_and_skipped_line_break_is_charged() {
+        let parse_ctx = ParseCtx::default();
+        let mut lexer = Lexer::new(&parse_ctx, b"{\\b a}\r\n\0\\bin2 xy");
+        let mut tokens = 0;
+        while lexer.next_token().unwrap().is_some() {
+            tokens += 1;
+        }
+        assert_eq!((tokens, parse_ctx.fuel()), (5, 8));
+    }
+
+    #[test]
+    fn lexing_stops_at_the_contexts_max_work() {
+        let limits = crate::limits::Limits { max_work: 2, ..crate::limits::Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let mut lexer = Lexer::new(&parse_ctx, b"{}{}");
+        assert!(lexer.next_token().unwrap().is_some());
+        assert!(lexer.next_token().unwrap().is_some());
+        let err = lexer.next_token().err().unwrap();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max: 2 }
+        ));
     }
 }

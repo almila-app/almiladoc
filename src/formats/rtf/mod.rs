@@ -29,24 +29,27 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     }
     // The code page must be known before the font table decodes; scan the
     // header for \ansicpg first.
-    let default_encoding = scan_codepage(bytes);
-    let prelude = parse_prelude(bytes, default_encoding);
+    let default_encoding = scan_codepage(parse_ctx, bytes)?;
+    let prelude = parse_prelude(parse_ctx, bytes, default_encoding)?;
     let mut parser = Parser::new(parse_ctx, bytes, prelude, default_encoding);
     parser.run()?;
     parser.finish()
 }
 
-fn scan_codepage(bytes: &[u8]) -> &'static encoding_rs::Encoding {
+fn scan_codepage(
+    parse_ctx: &ParseCtx,
+    bytes: &[u8],
+) -> Result<&'static encoding_rs::Encoding, ConvertError> {
     // \ansicpg sits in the header, but generator comments and extra header
     // words can push it past any fixed prefix; the lexer scan is linear and
     // stops at the first match.
-    let mut lexer = Lexer::new(bytes);
-    while let Some(token) = lexer.next_token() {
+    let mut lexer = Lexer::new(parse_ctx, bytes);
+    while let Some(token) = lexer.next_token()? {
         if let Token::Word { name: "ansicpg", param: Some(cp) } = token {
-            return codepage_encoding(cp.max(0) as u32);
+            return Ok(codepage_encoding(cp.max(0) as u32));
         }
     }
-    encoding_rs::WINDOWS_1252
+    Ok(encoding_rs::WINDOWS_1252)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -632,7 +635,7 @@ impl<'a> Parser<'a> {
         default_encoding: &'static encoding_rs::Encoding,
     ) -> Self {
         Parser {
-            lexer: Lexer::new(bytes),
+            lexer: Lexer::new(parse_ctx, bytes),
             stack: Vec::new(),
             state: CharState::default(),
             prelude,
@@ -650,7 +653,7 @@ impl<'a> Parser<'a> {
     }
 
     fn run(&mut self) -> Result<(), ConvertError> {
-        while let Some(token) = self.lexer.next_token() {
+        while let Some(token) = self.lexer.next_token()? {
             match token {
                 Token::Open => {
                     self.flush_pending();
@@ -1425,5 +1428,12 @@ mod tests {
         .unwrap();
         assert_eq!(doc.assets.len(), 1, "only the preferred picture: {:?}", doc.assets);
         assert_eq!(doc.assets[0].media_type, "image/png");
+    }
+
+    #[test]
+    fn every_pass_over_the_input_charges_its_tokens() {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, br"{\rtf1{\fonttbl{\f0 A;}}x}").unwrap();
+        assert_eq!(parse_ctx.fuel(), 6 * 12 + 5);
     }
 }

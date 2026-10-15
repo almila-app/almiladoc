@@ -464,6 +464,7 @@ impl<'c> Extractor<'c> {
     }
 
     fn charge_record(&mut self) -> Result<(), ConvertError> {
+        self.parse_ctx.charge(1)?;
         self.records += 1;
         let max = self.parse_ctx.limits().max_records;
         if self.records > max {
@@ -689,5 +690,20 @@ mod tests {
             err,
             ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 4095 }
         ));
+    }
+
+    fn record(ver_inst: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
+        let len = u32::try_from(body.len()).unwrap();
+        [&ver_inst.to_le_bytes()[..], &rec_type.to_le_bytes(), &len.to_le_bytes(), body].concat()
+    }
+
+    #[test]
+    fn every_record_walked_is_charged_once() {
+        let atom = record(0x0000, 0x0FA8, b"ab");
+        let container = record(0x000F, 0x03EE, &[atom.clone(), atom.clone()].concat());
+        let data = [container, atom].concat();
+        let parse_ctx = ParseCtx::default();
+        Extractor::new(&parse_ctx).walk(&data).unwrap();
+        assert_eq!(parse_ctx.fuel(), 4);
     }
 }

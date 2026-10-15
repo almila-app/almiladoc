@@ -638,7 +638,7 @@ def abuse(out):
     bomb_doc = (f'<?xml version="1.0"?><w:document {W}><w:body><w:p><w:r><w:t>'
                 + "A" * (192 * 1024 * 1024)
                 + "</w:t></w:r></w:p></w:body></w:document>")
-    write_zip(a / "zipbomb--errors.docx", [
+    write_zip(a / "max_entry_bytes--zipbomb--errors.docx", [
         ("[Content_Types].xml", ct),
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", bomb_doc),
@@ -657,7 +657,7 @@ def abuse(out):
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
 </Relationships>"""
-    write_zip(a / "imagebomb--errors.docx", [
+    write_zip(a / "max_entry_bytes--imagebomb--errors.docx", [
         ("[Content_Types].xml", ct),
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", image_doc),
@@ -668,10 +668,53 @@ def abuse(out):
     deep_doc = (f'<?xml version="1.0"?><w:document {W}><w:body><w:p><w:r><w:t>'
                 + "<x>" * depth + "deep" + "</x>" * depth
                 + "</w:t></w:r></w:p></w:body></w:document>")
-    write_zip(a / "deepxml--errors.docx", [
+    write_zip(a / "max_nesting_depth--deepxml--errors.docx", [
         ("[Content_Types].xml", ct),
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", deep_doc),
+    ])
+    # Past the default node limit, each node an empty element.
+    flat_doc = (f'<?xml version="1.0"?><w:document {W}><w:body>'
+                + "<x/>" * 2_000_001
+                + "</w:body></w:document>")
+    write_zip(a / "max_xml_nodes--flatflood--errors.docx", [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", flat_doc),
+    ])
+    # Five parts the parser reads, each padded by a 110 MiB comment that no
+    # node counts: under the per-entry cap, past the whole-archive total.
+    pad = "<!--" + "A" * (110 * 1024 * 1024) + "-->"
+    write_zip(a / "max_total_bytes--paddedparts--errors.docx", [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/styles.xml", f'<?xml version="1.0"?>{pad}<w:styles {W}/>'),
+        ("word/numbering.xml", f'<?xml version="1.0"?>{pad}<w:numbering {W}/>'),
+        ("word/document.xml",
+         f'<?xml version="1.0"?>{pad}<w:document {W}><w:body/></w:document>'),
+        ("word/footnotes.xml", f'<?xml version="1.0"?>{pad}<w:footnotes {W}/>'),
+        ("word/endnotes.xml", f'<?xml version="1.0"?>{pad}<w:endnotes {W}/>'),
+    ])
+    # Two embedded images, each under the per-entry cap, together past the
+    # retained-asset total.
+    two_images_doc = (f'<?xml version="1.0"?><w:document {W} {R}><w:body>'
+                      + "".join('<w:p><w:r><w:drawing>'
+                                '<a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+                                f' r:embed="rId{n}"/>'
+                                '</w:drawing></w:r></w:p>' for n in (10, 11))
+                      + '</w:body></w:document>')
+    two_images_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/>
+</Relationships>"""
+    write_zip(a / "max_asset_total_bytes--twoimages--errors.docx", [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", two_images_doc),
+        ("word/_rels/document.xml.rels", two_images_rels),
+        ("word/media/image1.png", b"\x00" * (100 * 1024 * 1024)),
+        ("word/media/image2.png", b"\x00" * (100 * 1024 * 1024)),
     ])
 
 

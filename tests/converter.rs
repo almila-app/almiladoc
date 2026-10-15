@@ -1,7 +1,8 @@
 mod common;
 
 use almiladoc::{
-    Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits, UnsupportedKind,
+    CancelToken, Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits,
+    UnsupportedKind,
 };
 use common::{converter, fixture_root, format_of, walk};
 
@@ -106,6 +107,8 @@ fn limit_mut(limits: &mut Limits, limit: Limit) -> &mut u64 {
         Limit::AssetTotalBytes => &mut limits.max_asset_total_bytes,
         Limit::RecordDepth => &mut limits.max_record_depth,
         Limit::Records => &mut limits.max_records,
+        Limit::InputBytes => &mut limits.max_input_bytes,
+        Limit::Work => &mut limits.max_work,
         other => panic!("{other} is not enforced"),
     }
 }
@@ -318,6 +321,14 @@ fn every_enforced_limit_is_read_from_the_config() {
         (fixture("ppt/pres.ppt"), Format::Ppt, Limit::Records, 1),
         (fixture("xls/sheet.xls"), Format::Excel, Limit::Records, 1),
         (fixture("xlsb/handmade-sheet.xlsb"), Format::Excel, Limit::Records, 1),
+        (fixture("docx/text.docx"), Format::Docx, Limit::InputBytes, 64),
+        (fixture("csv/sheet.csv"), Format::Csv, Limit::InputBytes, 64),
+        (fixture("docx/text.docx"), Format::Docx, Limit::Work, 1),
+        (fixture("rtf/text.rtf"), Format::Rtf, Limit::Work, 1),
+        (fixture("csv/sheet.csv"), Format::Csv, Limit::Work, 1),
+        (fixture("doc/text.doc"), Format::Doc, Limit::Work, 1),
+        (fixture("ppt/pres.ppt"), Format::Ppt, Limit::Work, 1),
+        (fixture("xls/sheet.xls"), Format::Excel, Limit::Work, 1),
     ];
     let defaults = converter(1);
     for (bytes, format, limit, max) in cases {
@@ -340,4 +351,60 @@ fn a_raised_nesting_depth_admits_deeper_input() {
         "{error:?}"
     );
     convert_with(&bytes, Format::Docx, Limit::NestingDepth, Limits::MAX_NESTING_CEILING).unwrap();
+}
+
+fn with_limit(limit: Limit, max: u64) -> Converter {
+    let mut config = Config::default();
+    *limit_mut(&mut config.limits, limit) = max;
+    Converter::new(config).unwrap()
+}
+
+#[test]
+fn max_input_bytes_is_checked_before_parse_and_convert_of_every_format() {
+    let docx = std::fs::read(fixture_root().join("docx/text.docx")).unwrap();
+    let converter = with_limit(Limit::InputBytes, 64);
+    for (bytes, format) in [(docx, Format::Docx), (pdf(), Format::Pdf)] {
+        let parsed = converter.parse(Input::new(&bytes, format)).map(drop);
+        let converted = converter.convert(Input::new(&bytes, format)).map(drop);
+        for error in [parsed.unwrap_err(), converted.unwrap_err()] {
+            assert!(
+                matches!(
+                    error,
+                    ConvertError::ResourceLimit { limit: Limit::InputBytes, max: 64, .. }
+                ),
+                "{format:?}: {error:?}"
+            );
+        }
+    }
+    let exact = with_limit(Limit::InputBytes, 7);
+    assert!(exact.convert(Input::new(b"a,b\n1,2", Format::Csv)).is_ok());
+    assert!(exact.convert(Input::new(b"a,b\n1,2\n", Format::Csv)).is_err());
+}
+
+#[test]
+fn a_pre_cancelled_token_cancels_every_format() {
+    let token = CancelToken::new();
+    token.cancel();
+    let converter = converter(1);
+    let mut files = Vec::new();
+    walk(&fixture_root(), &mut files);
+    for path in files.iter().filter(|path| !path.to_string_lossy().contains("abuse")) {
+        let bytes = std::fs::read(path).unwrap();
+        let format = format_of(path, &bytes).unwrap();
+        let input = Input::new(&bytes, format).with_cancel(token.clone());
+        let parsed = converter.parse(input.clone()).map(drop);
+        let converted = converter.convert(input).map(drop);
+        for result in [parsed, converted] {
+            assert!(matches!(result, Err(ConvertError::Cancelled)), "{}", path.display());
+        }
+    }
+}
+
+#[test]
+fn an_uncancelled_token_changes_nothing() {
+    let bytes = std::fs::read(fixture_root().join("docx/text.docx")).unwrap();
+    let converter = converter(1);
+    let plain = converter.convert(Input::new(&bytes, Format::Docx)).unwrap();
+    let held = Input::new(&bytes, Format::Docx).with_cancel(CancelToken::new());
+    assert_eq!(converter.convert(held).unwrap(), plain);
 }

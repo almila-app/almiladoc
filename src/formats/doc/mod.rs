@@ -76,8 +76,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let text = extract_text(&word_doc, &pieces, total_cp, encoding);
 
     let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.unwrap_or_default();
-    let chpx_runs = parse_fkps(&word_doc, &table, 0xFA, FkpKind::Chpx, &data);
-    let papx_runs = parse_fkps(&word_doc, &table, 0x102, FkpKind::Papx, &data);
+    let chpx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &data)?;
+    let papx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0x102, FkpKind::Papx, &data)?;
     let stylesheet = stsh::parse(&word_doc, &table);
     let list_tables = lists::parse(&word_doc, &table);
 
@@ -434,20 +434,21 @@ impl Runs {
 }
 
 fn parse_fkps(
+    parse_ctx: &ParseCtx,
     word_doc: &[u8],
     table: &[u8],
     fib_off: usize,
     kind: FkpKind,
     data: &[u8],
-) -> Vec<Run> {
+) -> Result<Vec<Run>, ConvertError> {
     let mut runs = Vec::new();
     let fc = get_u32(word_doc, fib_off).unwrap_or(0) as usize;
     let lcb = get_u32(word_doc, fib_off + 4).unwrap_or(0) as usize;
     let Some(plc) = table.get(fc..fc.saturating_add(lcb)) else {
-        return runs;
+        return Ok(runs);
     };
     if plc.len() < 8 {
-        return runs;
+        return Ok(runs);
     }
     let n = (plc.len() - 4) / 8;
     for i in 0..n {
@@ -461,18 +462,25 @@ fn parse_fkps(
         let Some(page) = word_doc.get(page_off..).and_then(|rest| rest.get(..512)) else {
             continue;
         };
-        parse_fkp_page(page, kind, data, &mut runs);
+        parse_fkp_page(parse_ctx, page, kind, data, &mut runs)?;
     }
-    runs
+    Ok(runs)
 }
 
-fn parse_fkp_page(page: &[u8], kind: FkpKind, data: &[u8], runs: &mut Vec<Run>) {
+fn parse_fkp_page(
+    parse_ctx: &ParseCtx,
+    page: &[u8],
+    kind: FkpKind,
+    data: &[u8],
+    runs: &mut Vec<Run>,
+) -> Result<(), ConvertError> {
     let count = page[511] as usize;
     if count == 0 {
-        return;
+        return Ok(());
     }
     let entry_size = if kind == FkpKind::Papx { 13 } else { 1 };
     for k in 0..count {
+        parse_ctx.charge(1)?;
         let Some(fc_start) = get_u32(page, k * 4) else {
             continue;
         };
@@ -517,6 +525,7 @@ fn parse_fkp_page(page: &[u8], kind: FkpKind, data: &[u8], runs: &mut Vec<Run>) 
         }
         runs.push(Run { fc_start, fc_end, props });
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,5 +1325,49 @@ mod tests {
             err,
             ConvertError::ResourceLimit { limit: crate::limits::Limit::Expansion, max: 1 }
         ));
+    }
+
+    #[test]
+    fn every_fkp_run_is_charged_once() {
+        let mut word_doc = vec![0u8; 1024];
+        for (k, fc) in [0u32, 10, 20, 30].into_iter().enumerate() {
+            word_doc[512 + k * 4..512 + k * 4 + 4].copy_from_slice(&fc.to_le_bytes());
+        }
+        word_doc[1023] = 3;
+        word_doc[0xFE..0x102].copy_from_slice(&20u32.to_le_bytes());
+        let table: Vec<u8> = [0u32, 30, 60, 1, 1].into_iter().flat_map(u32::to_le_bytes).collect();
+        let parse_ctx = ParseCtx::default();
+        let runs = parse_fkps(&parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &[]).unwrap();
+        assert_eq!((runs.len(), parse_ctx.fuel()), (6, 6));
+    }
+
+    fn ole_stream(ole: &mut cfb::CompoundFile<std::io::Cursor<&[u8]>>, name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut ole.open_stream(name).unwrap(), &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_failure_in_the_paragraph_run_pass_propagates() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/doc/text.doc");
+        let bytes = std::fs::read(path).unwrap();
+        let mut ole = cfb::CompoundFile::open(std::io::Cursor::new(bytes.as_slice())).unwrap();
+        let word_doc = ole_stream(&mut ole, "WordDocument");
+        let flags = get_u16(&word_doc, 0x0A).unwrap();
+        let table = ole_stream(&mut ole, if flags & 0x0200 != 0 { "1Table" } else { "0Table" });
+        let fuel = |fib_off, kind| {
+            let parse_ctx = ParseCtx::default();
+            parse_fkps(&parse_ctx, &word_doc, &table, fib_off, kind, &[]).unwrap();
+            parse_ctx.fuel()
+        };
+        let chpx = fuel(0xFA, FkpKind::Chpx);
+        assert!(fuel(0x102, FkpKind::Papx) > 0);
+        let limits = crate::limits::Limits { max_work: chpx, ..crate::limits::Limits::default() };
+        let err = parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
+        assert!(
+            matches!(err, ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max }
+                if max == chpx),
+            "{err:?}"
+        );
     }
 }

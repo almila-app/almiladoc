@@ -1,6 +1,8 @@
 //! RTF prelude tables parsed into typed definitions: the font table (with
 //! per-font charsets), the style sheet, and the list/list-override tables.
 
+use crate::ctx::ParseCtx;
+use crate::error::ConvertError;
 use crate::formats::rtf::lexer::{Lexer, Token, destination_groups};
 use crate::shared::blockstyle::{self, BlockStyle};
 use crate::shared::delta::StyleDelta;
@@ -80,23 +82,27 @@ pub struct Prelude {
     pub lists: HashMap<i32, ListDef>,
 }
 
-pub fn parse_prelude(bytes: &[u8], default_encoding: &'static encoding_rs::Encoding) -> Prelude {
+pub fn parse_prelude(
+    parse_ctx: &ParseCtx,
+    bytes: &[u8],
+    default_encoding: &'static encoding_rs::Encoding,
+) -> Result<Prelude, ConvertError> {
     let mut prelude = Prelude::default();
 
-    for group in destination_groups(bytes, "fonttbl") {
-        parse_fonttbl(group, &mut prelude.fonts, default_encoding);
+    for group in destination_groups(parse_ctx, bytes, "fonttbl")? {
+        parse_fonttbl(parse_ctx, group, &mut prelude.fonts, default_encoding)?;
     }
-    for group in destination_groups(bytes, "stylesheet") {
-        parse_stylesheet(group, &mut prelude.styles, default_encoding);
+    for group in destination_groups(parse_ctx, bytes, "stylesheet")? {
+        parse_stylesheet(parse_ctx, group, &mut prelude.styles, default_encoding)?;
     }
     let mut by_list_id: HashMap<i32, ListDef> = HashMap::new();
-    for group in destination_groups(bytes, "listtable") {
-        parse_listtable(group, &mut by_list_id, default_encoding);
+    for group in destination_groups(parse_ctx, bytes, "listtable")? {
+        parse_listtable(parse_ctx, group, &mut by_list_id, default_encoding)?;
     }
-    for group in destination_groups(bytes, "listoverridetable") {
-        parse_overrides(group, &by_list_id, &mut prelude.lists, default_encoding);
+    for group in destination_groups(parse_ctx, bytes, "listoverridetable")? {
+        parse_overrides(parse_ctx, group, &by_list_id, &mut prelude.lists, default_encoding)?;
     }
-    prelude
+    Ok(prelude)
 }
 
 /// Collector for the byte payloads of `\leveltext` / `\levelnumbers`
@@ -137,13 +143,14 @@ impl LevelTextCollector {
 }
 
 fn parse_fonttbl(
+    parse_ctx: &ParseCtx,
     group: &[u8],
     fonts: &mut HashMap<i32, &'static encoding_rs::Encoding>,
     default_encoding: &'static encoding_rs::Encoding,
-) {
-    let mut lexer = Lexer::new(group);
+) -> Result<(), ConvertError> {
+    let mut lexer = Lexer::new(parse_ctx, group);
     let mut current: Option<i32> = None;
-    while let Some(token) = lexer.next_token() {
+    while let Some(token) = lexer.next_token()? {
         if let Token::Word { name, param } = token {
             match name {
                 "f" => current = param,
@@ -156,23 +163,25 @@ fn parse_fonttbl(
             }
         }
     }
+    Ok(())
 }
 
 /// The null style id: `\sbasedon222` means "based on nothing".
 const NULL_STYLE: i32 = 222;
 
 fn parse_stylesheet(
+    parse_ctx: &ParseCtx,
     group: &[u8],
     styles: &mut HashMap<i32, StyleDef>,
     enc: &'static encoding_rs::Encoding,
-) {
-    let mut lexer = Lexer::new(group);
+) -> Result<(), ConvertError> {
+    let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
     let mut current: Option<(i32, StyleDef, Option<i32>)> = None;
     let mut raw: HashMap<i32, (StyleDef, Option<i32>)> = HashMap::new();
     // A style's name is the text at the end of its group, before the `;`.
     let mut name: Vec<u8> = Vec::new();
-    while let Some(token) = lexer.next_token() {
+    while let Some(token) = lexer.next_token()? {
         match token {
             Token::Open => depth += 1,
             Token::Close => {
@@ -243,14 +252,16 @@ fn parse_stylesheet(
         }
         styles.insert(id, resolved);
     }
+    Ok(())
 }
 
 fn parse_listtable(
+    parse_ctx: &ParseCtx,
     group: &[u8],
     by_list_id: &mut HashMap<i32, ListDef>,
     enc: &'static encoding_rs::Encoding,
-) {
-    let mut lexer = Lexer::new(group);
+) -> Result<(), ConvertError> {
+    let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
     let mut list_depth: Option<usize> = None;
     let mut levels: [ListLevelDef; LIST_LEVELS] = std::array::from_fn(|_| ListLevelDef::default());
@@ -258,7 +269,7 @@ fn parse_listtable(
     let mut in_level = false;
     let mut list_id: Option<i32> = None;
     let mut collector = LevelTextCollector::default();
-    while let Some(token) = lexer.next_token() {
+    while let Some(token) = lexer.next_token()? {
         match token {
             Token::Open => depth += 1,
             Token::Close => {
@@ -320,18 +331,20 @@ fn parse_listtable(
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// Raw override number text: (`\leveltext` bytes, `\levelnumbers` bytes, legal).
 type RawLevelText = (Vec<u8>, Vec<u8>, bool);
 
 fn parse_overrides(
+    parse_ctx: &ParseCtx,
     group: &[u8],
     by_list_id: &HashMap<i32, ListDef>,
     lists: &mut HashMap<i32, ListDef>,
     enc: &'static encoding_rs::Encoding,
-) {
-    let mut lexer = Lexer::new(group);
+) -> Result<(), ConvertError> {
+    let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
     let mut over_depth: Option<usize> = None;
     let mut lfo_depth: Option<usize> = None;
@@ -374,7 +387,7 @@ fn parse_overrides(
         *markers = [None; LIST_LEVELS];
         *texts = std::array::from_fn(|_| None);
     };
-    while let Some(token) = lexer.next_token() {
+    while let Some(token) = lexer.next_token()? {
         match token {
             Token::Open => depth += 1,
             Token::Close => {
@@ -433,6 +446,7 @@ fn parse_overrides(
         }
     }
     flush(&mut ls, &mut list_id, &mut starts, &mut markers, &mut texts);
+    Ok(())
 }
 
 /// MS-OSHARED numbering formats -> marker kinds. `None` = no number.
