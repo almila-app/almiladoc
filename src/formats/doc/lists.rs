@@ -27,6 +27,9 @@ pub struct LevelDef {
     /// The level's number text (`xst` with `rgbxchNums` placeholders and
     /// LVLF `fLegal`); empty for bullets and malformed levels.
     pub pattern: NumberPattern,
+    /// The table-stream offset of the LVL when its number text holds an
+    /// unpaired surrogate: reported where a label shows it, once per region.
+    pub damaged_at: Option<usize>,
 }
 
 impl Default for LevelDef {
@@ -36,6 +39,7 @@ impl Default for LevelDef {
             start: 1,
             restart: None,
             pattern: NumberPattern::default(),
+            damaged_at: None,
         }
     }
 }
@@ -77,7 +81,8 @@ impl Lists {
 
 /// FIB offsets (Word 97+): fcPlfLst/lcbPlfLst at 0x2E2, fcPlfLfo at 0x2EA.
 /// List tables that do not read in full are `part_unreadable`: the labels
-/// of the lists they lose do not render.
+/// of the lists they lose do not render. A level's undecodable number text
+/// is reported where a paragraph shows it, not here.
 pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8]) -> Lists {
     let lst_fc = get_u32(word_doc, 0x2E2).unwrap_or(0) as usize;
     let lst_lcb = get_u32(word_doc, 0x2E6).unwrap_or(0) as usize;
@@ -90,11 +95,11 @@ pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8]) -> Lists {
     }
     // lcbPlfLst covers only the LSTF array; each list's LVL structures
     // follow it in the table stream, uncounted.
-    let (by_lsid, lst_complete) = parse_plf_lst(parse_ctx, table, lst_fc, lst_lcb);
+    let (by_lsid, lst_complete) = parse_plf_lst(table, lst_fc, lst_lcb);
     let lfo_complete = lfo_lcb == 0
         || table
             .get(lfo_fc..lfo_fc.saturating_add(lfo_lcb))
-            .is_some_and(|plf_lfo| parse_plf_lfo(parse_ctx, plf_lfo, &by_lsid, &mut lists));
+            .is_some_and(|plf_lfo| parse_plf_lfo(plf_lfo, lfo_fc, &by_lsid, &mut lists));
     if !(lst_complete && lfo_complete) {
         parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
     }
@@ -104,12 +109,7 @@ pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8]) -> Lists {
 const LSTF_SIZE: usize = 28;
 
 /// Each list's levels by `lsid`, and whether every list read.
-fn parse_plf_lst(
-    parse_ctx: &ParseCtx,
-    table: &[u8],
-    fc: usize,
-    lcb: usize,
-) -> (HashMap<u32, [LevelDef; LEVELS]>, bool) {
+fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> (HashMap<u32, [LevelDef; LEVELS]>, bool) {
     let mut out = HashMap::new();
     let Some(plf) = table.get(fc..).filter(|plf| plf.len() >= lcb) else {
         return (out, false);
@@ -139,7 +139,7 @@ fn parse_plf_lst(
         let n_levels = if simple { 1 } else { LEVELS };
         let mut levels: [LevelDef; LEVELS] = std::array::from_fn(|_| LevelDef::default());
         for slot in levels.iter_mut().take(n_levels) {
-            match parse_lvl(parse_ctx, plf, pos) {
+            match parse_lvl(plf, pos, fc) {
                 Some((def, next)) => {
                     *slot = def;
                     pos = next;
@@ -157,9 +157,10 @@ fn parse_plf_lst(
     (out, true)
 }
 
-/// One LVL: an LVLF header, then PAPX and CHPX grpprls, then the number
-/// text, whose unpaired surrogates are `invalid_encoding`.
-fn parse_lvl(parse_ctx: &ParseCtx, plf: &[u8], pos: usize) -> Option<(LevelDef, usize)> {
+/// One LVL at `pos` of `plf`, which starts at table-stream offset `origin`:
+/// an LVLF header, then PAPX and CHPX grpprls, then the number text, whose
+/// unpaired surrogates mark the level damaged.
+fn parse_lvl(plf: &[u8], pos: usize, origin: usize) -> Option<(LevelDef, usize)> {
     const LVLF_SIZE: usize = 28;
     let record = plf.get(pos..)?;
     let header = record.get(..LVLF_SIZE)?;
@@ -180,12 +181,12 @@ fn parse_lvl(parse_ctx: &ParseCtx, plf: &[u8], pos: usize) -> Option<(LevelDef, 
     next = next.checked_add(2)?;
     let marker = marker_for_nfc(nfc);
     let mut text: Vec<NumberText> = Vec::new();
+    let mut replaced = false;
     if marker.is_some_and(MarkerKind::ordered) {
         let units = (0..xch_count)
             .map(|i| get_u16(record, i.checked_mul(2)?.checked_add(next)?))
             .collect::<Option<Vec<u16>>>()?;
         let mut i = 0usize;
-        let mut replaced = false;
         for unit in char::decode_utf16(units) {
             let c = unit.unwrap_or_else(|_| {
                 replaced = true;
@@ -201,24 +202,25 @@ fn parse_lvl(parse_ctx: &ParseCtx, plf: &[u8], pos: usize) -> Option<(LevelDef, 
                 }
             }
         }
-        if replaced {
-            parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Body);
-        }
     }
     next = next.checked_add(xch_count.checked_mul(2)?)?;
     let restart = no_restart.then_some(restart_lim as u32);
+    let damaged_at = replaced.then(|| origin.saturating_add(pos));
     Some((
-        LevelDef { marker, start, restart, pattern: NumberPattern { text, legal } },
+        LevelDef { marker, start, restart, pattern: NumberPattern { text, legal }, damaged_at },
         pos.checked_add(next)?,
     ))
 }
 
 const LFO_SIZE: usize = 16;
 
-/// Resolve each LFO into `lists`, and whether every one read.
+/// Resolve each LFO of `plf`, which starts at table-stream offset `origin`,
+/// into `lists`, and whether every LFOLVL read. Each LFO's LFOData opens
+/// with a 4-byte `cp`, overrides or none; one missing at the end loses
+/// nothing.
 fn parse_plf_lfo(
-    parse_ctx: &ParseCtx,
     plf: &[u8],
+    origin: usize,
     by_lsid: &HashMap<u32, [LevelDef; LEVELS]>,
     lists: &mut Lists,
 ) -> bool {
@@ -250,6 +252,7 @@ fn parse_plf_lfo(
             }
             None => ListDef::unknown(ilfo),
         };
+        pos = pos.saturating_add(4);
         for _ in 0..clfolvl {
             let Some(override_record) = plf.get(pos..).and_then(|rest| rest.get(..8)) else {
                 complete = false;
@@ -270,7 +273,7 @@ fn parse_plf_lfo(
             pos = next;
             if f_formatting {
                 // The override embeds a full LVL; its own start wins.
-                match parse_lvl(parse_ctx, plf, pos) {
+                match parse_lvl(plf, pos, origin) {
                     Some((lvl_def, next)) => {
                         if ilvl < LEVELS {
                             if f_start_at {
@@ -328,8 +331,9 @@ mod tests {
         for ch in [0x0000u16, '-' as u16, 0x0001, ')' as u16] {
             lvl.extend_from_slice(&ch.to_le_bytes());
         }
-        let (def, next) = parse_lvl(&ParseCtx::default(), &lvl, 0).unwrap();
+        let (def, next) = parse_lvl(&lvl, 0, 0).unwrap();
         assert_eq!(next, lvl.len());
+        assert_eq!(def.damaged_at, None);
         assert_eq!(def.start, 5);
         assert_eq!(def.marker, Some(MarkerKind::LowerAlpha));
         assert_eq!(def.restart, Some(1));
@@ -346,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn number_text_keeps_surrogate_pairs_and_reports_an_unpaired_unit() {
+    fn number_text_keeps_surrogate_pairs_and_marks_an_unpaired_unit() {
         let lvl_at = |placeholder: u8, units: &[u16]| {
             let mut lvl = vec![0u8; 28];
             lvl[6] = placeholder;
@@ -355,21 +359,20 @@ mod tests {
             lvl
         };
         let lvl = |units: &[u16]| lvl_at(0, units);
-        let parse_ctx = ParseCtx::default();
-        let (def, _) = parse_lvl(&parse_ctx, &lvl(&[0xD835, 0xDC00, 0x2E]), 0).unwrap();
+        let (def, _) = parse_lvl(&lvl(&[0xD835, 0xDC00, 0x2E]), 0, 0).unwrap();
         let literal = |text: &str| vec![NumberText::Literal(text.into())];
         assert_eq!(def.pattern.text, literal("\u{1D400}."));
-        let (def, _) = parse_lvl(&parse_ctx, &lvl_at(3, &[0xD835, 0xDC00, 0x0000]), 0).unwrap();
+        assert_eq!(def.damaged_at, None);
+        let (def, _) = parse_lvl(&lvl_at(3, &[0xD835, 0xDC00, 0x0000]), 0, 0).unwrap();
         assert_eq!(
             def.pattern.text,
             [NumberText::Literal("\u{1D400}".into()), NumberText::Level(0)]
         );
-        assert!(parse_ctx.diagnostics().is_empty());
-        let (def, _) = parse_lvl(&parse_ctx, &lvl(&[0xDC00, 0x2E]), 0).unwrap();
+        assert_eq!(def.damaged_at, None);
+        let padded = [vec![0; 3], lvl(&[0xDC00, 0x2E])].concat();
+        let (def, _) = parse_lvl(&padded, 3, 100).unwrap();
         assert_eq!(def.pattern.text, literal("\u{FFFD}."));
-        let reported: Vec<_> =
-            parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
-        assert_eq!(reported, [(DiagnosticCode::InvalidEncoding, Region::Body, 1)]);
+        assert_eq!(def.damaged_at, Some(103));
     }
 
     /// A decimal LVL with no grpprls and an empty number text.
@@ -377,10 +380,29 @@ mod tests {
         vec![0u8; 30]
     }
 
+    /// A decimal LVL starting at `start` whose number text is an unpaired
+    /// surrogate.
+    fn damaged_lvl(start: u32) -> Vec<u8> {
+        let mut lvl = vec![0u8; 28];
+        lvl[0..4].copy_from_slice(&start.to_le_bytes());
+        [lvl, vec![1, 0, 0x00, 0xDC]].concat()
+    }
+
+    #[test]
+    fn a_damaged_list_level_is_marked_at_its_table_offset() {
+        let mut lstf = vec![0u8; LSTF_SIZE];
+        lstf[26] = 0x01;
+        let plf = [&[1u8, 0][..], &lstf].concat();
+        let table = [vec![0; 5], plf.clone(), damaged_lvl(1)].concat();
+        let (by_lsid, complete) = parse_plf_lst(&table, 5, plf.len());
+        assert!(complete);
+        let marks: Vec<_> = by_lsid[&0].iter().map(|level| level.damaged_at).collect();
+        assert_eq!(marks, [Some(5 + plf.len()); LEVELS]);
+    }
+
     #[test]
     fn a_list_table_cut_short_does_not_read_in_full() {
-        let complete =
-            |table: &[u8], lcb: usize| parse_plf_lst(&ParseCtx::default(), table, 0, lcb).1;
+        let complete = |table: &[u8], lcb: usize| parse_plf_lst(table, 0, lcb).1;
         let mut lstf = vec![0u8; LSTF_SIZE];
         lstf[26] = 0x01;
         let plf = [&[1u8, 0][..], &lstf].concat();
@@ -396,20 +418,14 @@ mod tests {
 
     #[test]
     fn a_list_override_table_cut_short_does_not_read_in_full() {
-        let complete = |plf: &[u8]| {
-            parse_plf_lfo(&ParseCtx::default(), plf, &HashMap::new(), &mut Lists::default())
-        };
-        let lfo = |clfolvl: u8| {
-            let mut lfo = vec![0u8; LFO_SIZE];
-            lfo[12] = clfolvl;
-            lfo
-        };
-        let formatting = [words(&[1]), lfo(1), vec![0, 0, 0, 0, 0x20, 0, 0, 0]].concat();
-        assert!(complete(&[words(&[1]), lfo(0)].concat()));
+        let complete = |plf: &[u8]| parse_plf_lfo(plf, 0, &HashMap::new(), &mut Lists::default());
+        let formatting = [words(&[1]), lfo(0, 1), words(&[0]), lfolvl(0x20)].concat();
+        assert!(complete(&[words(&[1]), lfo(0, 0)].concat()));
         assert!(complete(&[formatting.clone(), empty_lvl()].concat()));
         for (case, plf) in [
             ("a count cut short", vec![1u8, 0]),
-            ("an LFO array cut short", [words(&[2]), lfo(0)].concat()),
+            ("an LFO array cut short", [words(&[2]), lfo(0, 0)].concat()),
+            ("an override with no cp", [words(&[1]), lfo(0, 1), lfolvl(0)].concat()),
             ("an override's LVL cut short", [formatting, empty_lvl()[..10].to_vec()].concat()),
         ] {
             assert!(!complete(&plf), "{case}");
@@ -420,6 +436,39 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
+    fn lfo(lsid: u32, clfolvl: u8) -> Vec<u8> {
+        let mut lfo = vec![0u8; LFO_SIZE];
+        lfo[..4].copy_from_slice(&lsid.to_le_bytes());
+        lfo[12] = clfolvl;
+        lfo
+    }
+
+    /// An LFOLVL for level 0 with the `fStartAt`/`fFormatting` bits `flags`.
+    fn lfolvl(flags: u8) -> Vec<u8> {
+        [words(&[0]), vec![flags, 0, 0, 0]].concat()
+    }
+
+    #[test]
+    fn every_lfo_data_opens_with_its_cp() {
+        let mut levels: [LevelDef; LEVELS] = std::array::from_fn(|_| LevelDef::default());
+        levels[0].marker = Some(MarkerKind::Decimal);
+        let by_lsid = HashMap::from([(9, levels)]);
+        let head = [words(&[2]), lfo(9, 0), lfo(9, 1)].concat();
+        let data = [words(&[0x0A0B_0C0D, 0x1A1B_1C1D]), lfolvl(0x30)].concat();
+        let overriding = [head, data].concat();
+        let plf = [overriding.clone(), damaged_lvl(7)].concat();
+        let mut lists = Lists::default();
+        assert!(parse_plf_lfo(&plf, 1000, &by_lsid, &mut lists));
+        let first = lists.get(1).unwrap();
+        assert_eq!((first.levels[0].start, first.start_override[0]), (1, None));
+        let second = lists.get(2).unwrap();
+        assert_eq!(second.lsid, 9);
+        assert_eq!(second.levels[0].marker, Some(MarkerKind::Decimal));
+        assert_eq!((second.levels[0].start, second.start_override[0]), (7, Some(7)));
+        assert_eq!(second.levels[0].damaged_at, Some(1000 + overriding.len()));
+        assert_eq!(second.levels[1].damaged_at, None);
+    }
+
     #[test]
     fn default_restart_when_f_no_restart_is_clear() {
         let mut lvl = vec![0u8; 28];
@@ -427,7 +476,7 @@ mod tests {
         lvl[4] = 0; // decimal
         lvl[26] = 3; // ilvlRestartLim is ignored without fNoRestart
         lvl.extend_from_slice(&0u16.to_le_bytes());
-        let (def, _) = parse_lvl(&ParseCtx::default(), &lvl, 0).unwrap();
+        let (def, _) = parse_lvl(&lvl, 0, 0).unwrap();
         assert_eq!(def.restart, None);
     }
 }

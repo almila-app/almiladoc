@@ -790,6 +790,14 @@ fn composite_label(
 // ---------------------------------------------------------------------------
 // Assembly: text stream + formatting runs -> model
 
+/// Text whose undecodable units reach the output: a piece's characters, or
+/// the number text of the list level at a table-stream offset.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Damaged {
+    Piece(u32),
+    Level(usize),
+}
+
 struct Assembler<'c> {
     parse_ctx: &'c ParseCtx<'c>,
     text: TextStream,
@@ -803,8 +811,8 @@ struct Assembler<'c> {
     /// The floating shape each main-document anchor CP names.
     shapes: HashMap<usize, ShapeKind>,
     counters: std::cell::RefCell<Counters>,
-    /// The pieces and regions already reported `invalid_encoding`.
-    damage_reported: std::cell::RefCell<HashSet<(u32, Region)>>,
+    /// The damaged text and regions already reported `invalid_encoding`.
+    damage_reported: std::cell::RefCell<HashSet<(Damaged, Region)>>,
     /// The Data stream, for `sprmCPicLocation` picture payloads.
     data: Vec<u8>,
     assets: std::cell::RefCell<AssetSink>,
@@ -981,7 +989,7 @@ impl Assembler<'_> {
                     let pap = self.effective_pap(fc, i);
                     let (inlines, damage) =
                         std::mem::replace(&mut para, ParaBuilder::new()).finish();
-                    self.report_damage(&damage, region);
+                    self.report_damage(damage.into_iter().map(Damaged::Piece), region);
                     let is_cell_mark = c == '\u{7}';
                     if pap.effective.in_table.unwrap_or(false) || is_cell_mark {
                         // A table is a hard boundary for top-level list and
@@ -1030,7 +1038,14 @@ impl Assembler<'_> {
                         }
                     } else {
                         self.flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
-                        self.emit_paragraph(&pap, inlines, &mut blocks, &mut list_run, &mut styled);
+                        self.emit_paragraph(
+                            &pap,
+                            inlines,
+                            &mut blocks,
+                            &mut list_run,
+                            &mut styled,
+                            region,
+                        );
                     }
                 }
                 '\u{b}' => para.push_inline(Inline::LineBreak),
@@ -1087,7 +1102,7 @@ impl Assembler<'_> {
             i += 1;
         }
         let (inlines, damage) = para.finish();
-        self.report_damage(&damage, region);
+        self.report_damage(damage.into_iter().map(Damaged::Piece), region);
         cell_styled.flush(&mut cell_blocks);
         self.flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
         if !inlines_are_empty(&inlines) {
@@ -1147,6 +1162,7 @@ impl Assembler<'_> {
         blocks: &mut Vec<Block>,
         list_run: &mut Vec<ListEntry>,
         styled: &mut StyledRun,
+        region: Region,
     ) {
         let style = self.stylesheet.get(pap.istd);
         // A styled container absorbs its blank paragraphs: they are the
@@ -1169,7 +1185,7 @@ impl Assembler<'_> {
             rebase_emphasis(&mut content, style.chp);
             // A numbered heading advances its sequence and keeps its number
             // visible - headings have no native numbering in the output.
-            if let Some(label) = self.heading_label(pap) {
+            if let Some(label) = self.heading_label(pap, region) {
                 content.insert(0, Inline::Text { text: label, style: Style::PLAIN });
             }
             blocks.push(Block::Heading { level, anchor: None, content });
@@ -1190,7 +1206,7 @@ impl Assembler<'_> {
             let def = &list.levels[ilvl.min(LEVELS - 1)];
             if let Some(marker) = def.marker {
                 let (number, label) = if marker.ordered() {
-                    self.counters.borrow_mut().next(ilfo, list, ilvl)
+                    self.number(ilfo, list, ilvl, region)
                 } else {
                     (0, None)
                 };
@@ -1230,12 +1246,12 @@ impl Assembler<'_> {
         }
     }
 
-    /// `invalid_encoding` in `region` once for each of `pieces` whose
-    /// undecodable text reached the output.
-    fn report_damage(&self, pieces: &[u32], region: Region) {
+    /// `invalid_encoding` in `region` once for each damaged text whose
+    /// undecodable units reached the output.
+    fn report_damage(&self, damaged: impl IntoIterator<Item = Damaged>, region: Region) {
         let mut reported = self.damage_reported.borrow_mut();
-        for &piece in pieces {
-            if reported.insert((piece, region)) {
+        for damaged in damaged {
+            if reported.insert((damaged, region)) {
                 self.parse_ctx.emit(DiagnosticCode::InvalidEncoding, region);
             }
         }
@@ -1289,9 +1305,23 @@ impl Assembler<'_> {
         Ok(kinds.is_empty() || kinds.values().any(|&kind| kind == ShapeKind::Picture))
     }
 
+    /// Advance the sequence of an ordered level whose label a paragraph in
+    /// `region` shows, reporting the level's damaged number text there.
+    fn number(
+        &self,
+        ilfo: u16,
+        list: &ListDef,
+        ilvl: usize,
+        region: Region,
+    ) -> (u64, Option<String>) {
+        let damaged = list.levels[ilvl.min(LEVELS - 1)].damaged_at.map(Damaged::Level);
+        self.report_damage(damaged, region);
+        self.counters.borrow_mut().next(ilfo, list, ilvl)
+    }
+
     /// The visible number label of a numbered heading paragraph, with its
     /// trailing separator; advances the list sequence.
-    fn heading_label(&self, pap: &EffectivePap) -> Option<String> {
+    fn heading_label(&self, pap: &EffectivePap, region: Region) -> Option<String> {
         let ilfo = pap.effective.ilfo.unwrap_or(0);
         if ilfo == 0 || ilfo == 0xF801 {
             return None;
@@ -1303,7 +1333,7 @@ impl Assembler<'_> {
         if !marker.ordered() {
             return None;
         }
-        let (number, label) = self.counters.borrow_mut().next(ilfo, list, ilvl);
+        let (number, label) = self.number(ilfo, list, ilvl, region);
         Some(format!("{} ", label.unwrap_or_else(|| marker.label(number))))
     }
 
@@ -1612,6 +1642,40 @@ mod tests {
             fkp[0x101..0x101 + grpprl.len()].copy_from_slice(grpprl);
             fkp[511] = 1;
             self.table(0xFA, &words(&[TEXT_FC as u32, end, 2]))
+        }
+
+        /// One PAPX FKP page, in place of a CHPX page, giving each run of
+        /// `(bytes, grpprl)` the next `bytes` of the main text and its sprms.
+        fn papx(mut self, runs: &[(u32, &[u8])]) -> Self {
+            let page = 2 * 512;
+            let end = u32::try_from(self.word_doc.len()).unwrap();
+            let fkp = &mut self.word_doc[page..page + 512];
+            let mut fc = TEXT_FC as u32;
+            let mut at = 0x100;
+            for (k, &(bytes, grpprl)) in runs.iter().enumerate() {
+                let papx = [&[0u8, 0][..], grpprl].concat();
+                fkp[k * 4..k * 4 + 4].copy_from_slice(&fc.to_le_bytes());
+                fkp[(runs.len() + 1) * 4 + k * 13] = u8::try_from(at / 2).unwrap();
+                let cb = u8::try_from(papx.len() / 2 + 1).unwrap();
+                let head = if papx.len() % 2 == 1 { vec![cb] } else { vec![0, cb - 1] };
+                let entry = [head, papx].concat();
+                fkp[at..at + entry.len()].copy_from_slice(&entry);
+                at += entry.len().next_multiple_of(2);
+                fc += bytes;
+            }
+            fkp[runs.len() * 4..runs.len() * 4 + 4].copy_from_slice(&fc.to_le_bytes());
+            fkp[511] = u8::try_from(runs.len()).unwrap();
+            self.table(0x102, &words(&[TEXT_FC as u32, end, 2]))
+        }
+
+        /// One simple list whose `PlfLst` is `lcb` bytes, its level `lvl`
+        /// after them, and the overrides `plf_lfo`.
+        fn lists(self, lcb: usize, lvl: &[u8], plf_lfo: &[u8]) -> Self {
+            let mut plf = vec![0u8; lcb];
+            plf[0] = 1;
+            plf[2 + 26] = 0x01;
+            let lcb = u32::try_from(lcb).unwrap();
+            self.table(0x2E2, &[&plf[..], lvl].concat()).fib(0x2E6, lcb).table(0x2EA, plf_lfo)
         }
 
         /// A footnote story of `len` CPs after the main text, its reference
@@ -2101,6 +2165,60 @@ mod tests {
         assert_eq!(fuel(&floating(7, &shape(7, &[0x0080]))), undrawn + 3);
         let stand_in = |art: &[u8]| fuel(&inline_art(SHAPE_FIELD, art));
         assert_eq!(stand_in(&shape(1, &[0x0080])), stand_in(&[]) + 3);
+    }
+
+    #[test]
+    fn a_damaged_list_level_is_reported_where_a_label_shows_it() {
+        use DiagnosticCode::InvalidEncoding;
+        let mut lvl = vec![0u8; 28];
+        lvl[0] = 1;
+        lvl[6] = 4;
+        lvl.extend_from_slice(&5u16.to_le_bytes());
+        lvl.extend(utf16(&[0xD835, 0xDC00, 0xDC00, 0x0000, u16::from(b'.')]));
+        let numbered = |ilfo: u8| vec![0x0B, 0x46, ilfo, 0, 0x0A, 0x26, 0];
+        let heading = [numbered(1), vec![0x40, 0x26, 0]].concat();
+        let one_lfo = words(&[1, 0, 0, 0, 0, u32::MAX]);
+        let doc = |text: &[u8]| DocBuilder::new(text).lists(30, &lvl, &one_lfo);
+        let overriding = [
+            words(&[2, 0, 0, 0, 0, 0, 0, 0]),
+            vec![1, 0, 0, 0],
+            words(&[u32::MAX, u32::MAX, 0]),
+            vec![0x20, 0, 0, 0],
+            lvl.clone(),
+        ]
+        .concat();
+        let cases: [(&str, Vec<u8>, Vec<Reported>); 4] = [
+            (
+                "two body paragraphs and a footnote",
+                doc(b"a\rb\rc\r").papx(&[(6, &numbered(1))]).fib(0x4C, 4).footnote(2).bytes(),
+                vec![(InvalidEncoding, Region::Body, 1), (InvalidEncoding, Region::Note, 1)],
+            ),
+            (
+                "a numbered heading",
+                doc(b"a\r").papx(&[(2, &heading)]).bytes(),
+                vec![(InvalidEncoding, Region::Body, 1)],
+            ),
+            (
+                "a list level and an override level at one offset of their tables",
+                DocBuilder::new(b"a\rb\r")
+                    .lists(overriding.len() - lvl.len(), &lvl, &overriding)
+                    .papx(&[(2, &numbered(1)), (2, &numbered(2))])
+                    .bytes(),
+                vec![(InvalidEncoding, Region::Body, 2)],
+            ),
+            ("no paragraph", doc(b"a\r").bytes(), vec![]),
+        ];
+        let converter = |on_loss| {
+            crate::Converter::new(crate::Config { on_loss, ..Default::default() }).unwrap()
+        };
+        for (case, bytes, expected) in cases {
+            assert_eq!(reported(&bytes), expected, "{case}");
+            let input = crate::Input::new(&bytes, crate::Format::Doc);
+            let markdown = converter(crate::OnLoss::Report).convert(input.clone()).unwrap();
+            let shown = markdown.markdown().contains("\u{1D400}\u{FFFD}1.");
+            assert_eq!(shown, !expected.is_empty(), "{case}");
+            assert_eq!(converter(crate::OnLoss::Fail).convert(input).is_ok(), !shown, "{case}");
+        }
     }
 
     #[test]
