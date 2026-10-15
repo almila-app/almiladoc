@@ -502,6 +502,12 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     }
                 }
                 "tab" | "ptab" => self.push(Inline::Text { text: " ".into(), style: Style::PLAIN }),
+                "noBreakHyphen" => self.push(Inline::Text { text: "-".into(), style }),
+                "sym" => {
+                    if let Some(checked) = symbol_checkbox(child) {
+                        self.push(Inline::Checkbox(checked));
+                    }
+                }
                 // Markdown has no pages or columns, but every w:br still
                 // separates the runs around it: dropping a page break
                 // outright would join the words on either side. One left at
@@ -688,6 +694,35 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             self.pieces.push(Piece::Inlines(self.current));
         }
         self.pieces
+    }
+}
+
+/// The checkbox state a `w:sym` draws, for the Wingdings fonts' ballot-box glyphs only.
+fn symbol_checkbox(sym: &Element) -> Option<bool> {
+    let font = sym.attr(ns::W, "font")?;
+    let hex = sym.attr(ns::W, "char")?;
+    if hex.len() > 4 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let code = match u16::from_str_radix(hex, 16).ok()? {
+        // Word writes a symbol-font code either as the byte or in the U+F000 private-use block.
+        private @ 0xF000..=0xF0FF => private - 0xF000,
+        code => code,
+    };
+    if font.eq_ignore_ascii_case("Wingdings 2") {
+        match code {
+            0x52 => Some(true),
+            0xA3 => Some(false),
+            _ => None,
+        }
+    } else if font.eq_ignore_ascii_case("Wingdings") {
+        match code {
+            0xFE => Some(true),
+            0x6F => Some(false),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 

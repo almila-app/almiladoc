@@ -574,6 +574,32 @@ def blockstyle_docx(out):
     ])
 
 
+def run_marks_docx(out):
+    def box(font, code):
+        return f'<w:sym w:font="{font}" w:char="{code}"/>'
+
+    document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document {W}><w:body>
+<w:p><w:r>{box("Wingdings 2", "F052")}<w:t>Signed by both parties</w:t></w:r></w:p>
+<w:p><w:r>{box("Wingdings 2", "F0A3")}<w:t>Witnessed</w:t></w:r></w:p>
+<w:p><w:r>{box("Wingdings", "F0FE")}<w:t>Copy sent</w:t></w:r></w:p>
+<w:p><w:r>{box("Wingdings", "F06F")}<w:t>Copy filed</w:t></w:r></w:p>
+<w:p><w:r><w:t>Glyph</w:t>{box("Symbol", "F061")}<w:t>dropped</w:t></w:r></w:p>
+<w:p><w:r><w:t>Call 555</w:t><w:noBreakHyphen/><w:t>0123 by e</w:t><w:noBreakHyphen/><w:t>mail.</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Self</w:t><w:noBreakHyphen/><w:t>signed</w:t></w:r></w:p>
+<w:p><w:r><w:t>Hyphen</w:t><w:softHyphen/><w:t>ation stays joined.</w:t></w:r></w:p>
+<w:tbl><w:tr>
+<w:tc><w:p><w:r>{box("Wingdings 2", "0052")}<w:t>Required</w:t></w:r></w:p></w:tc>
+<w:tc><w:p><w:r>{box("Wingdings 2", "00A3")}<w:t>Not required</w:t></w:r></w:p></w:tc>
+</w:tr></w:tbl>
+</w:body></w:document>"""
+    write_zip(out / "docx" / "handmade-run-marks.docx", [
+        ("[Content_Types].xml", CONTENT_TYPES_BASE.format(extra="")),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", document),
+    ])
+
+
 def malformed(out):
     m = out / "malformed"
     m.mkdir(parents=True, exist_ok=True)
@@ -659,5 +685,6 @@ def generate(out):
     ole_docx(out)
     manyrefs_docx(out)
     math_docx(out)
+    run_marks_docx(out)
     malformed(out)
     abuse(out)

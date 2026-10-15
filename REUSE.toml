@@ -37,7 +37,10 @@ path = [
     "python/stubtest-allowlist.txt",
     "rust-toolchain.toml",
     "scripts/check_dist.py",
+    "tests/fixes.rs",
     "tests/fixturegen/__init__.py",
+    "tests/fixtures/docx/handmade-run-marks.docx",
+    "tests/snapshots/snapshots__docx__handmade-run-marks.docx.snap",
     "uv.lock",
 ]
 precedence = "override"
@@ -114,5 +117,16 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 hari <64578610+Mr-Neutr0n@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/docx/content.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 HanZephyr <50990263+HanZephyr@users.noreply.github.com>",
+    "2026 breken <312387581+breken-ai@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

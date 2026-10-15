@@ -1,0 +1,23 @@
+---
+source: tests/snapshots.rs
+expression: output
+---
+[x] Signed by both parties
+
+[ ] Witnessed
+
+[x] Copy sent
+
+[ ] Copy filed
+
+Glyphdropped
+
+Call 555-0123 by e-mail.
+
+**Self-signed**
+
+Hyphenation stays joined.
+
+|  |  |
+| --- | --- |
+| [x] Required | [ ] Not required |
