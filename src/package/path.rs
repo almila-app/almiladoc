@@ -47,14 +47,14 @@ pub(crate) fn resolve(base_part: &str, reference: &str) -> Result<Target, Conver
             raw => {
                 let decoded = decode_component(raw);
                 if decoded.contains('/') || decoded.contains('\\') {
-                    return Err(ConvertError::malformed(format!(
-                        "percent-encoded separator in package reference segment {raw:?}"
-                    )));
+                    return Err(ConvertError::malformed(
+                        "percent-encoded separator in a package reference",
+                    ));
                 }
                 if decoded == "." || decoded == ".." {
-                    return Err(ConvertError::malformed(format!(
-                        "percent-encoded traversal in package reference segment {raw:?}"
-                    )));
+                    return Err(ConvertError::malformed(
+                        "percent-encoded traversal in a package reference",
+                    ));
                 }
                 segments.push(decoded);
             }

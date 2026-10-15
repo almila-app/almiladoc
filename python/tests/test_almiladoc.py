@@ -23,6 +23,9 @@ class AlmiladocTest(unittest.TestCase):
         markdown = almiladoc.to_markdown(OUTLINE)
         self.assertRegex(markdown, r"(?m)^# ")
 
+    def test_to_markdown_falls_back_to_the_extension(self):
+        self.assertIn("| --- |", almiladoc.to_markdown(CSV))
+
     def test_to_markdown_bytes_converts_in_memory(self):
         markdown = almiladoc.to_markdown_bytes(RICH.read_bytes(), "docx")
         self.assertIn("| Quarter | Widgets |", markdown)
@@ -31,7 +34,7 @@ class AlmiladocTest(unittest.TestCase):
         markdown = almiladoc.to_markdown_bytes(RICH.read_bytes())
         self.assertIn("| Quarter | Widgets |", markdown)
         # CSV carries no signature, so it has to be named.
-        with self.assertRaisesRegex(almiladoc.ConvertError, "unrecognized file content"):
+        with self.assertRaisesRegex(almiladoc.ConvertError, "unrecognized content"):
             almiladoc.to_markdown_bytes(CSV.read_bytes())
         self.assertIn("| --- |", almiladoc.to_markdown_bytes(CSV.read_bytes(), "csv"))
 
@@ -81,6 +84,8 @@ class AlmiladocTest(unittest.TestCase):
         with self.assertRaises(almiladoc.ResourceLimitError) as caught:
             almiladoc.to_markdown_bytes(ZIPBOMB.read_bytes(), "docx")
         self.assertEqual(caught.exception.limit, "max_entry_bytes")
+        self.assertEqual(caught.exception.max, 128 * 1024 * 1024)
+        self.assertNotIn("word/", str(caught.exception))
 
         # A readable package carrying none of the parts a docx is made of.
         package = io.BytesIO()
@@ -89,6 +94,34 @@ class AlmiladocTest(unittest.TestCase):
         with self.assertRaises(almiladoc.MissingPartError) as caught:
             almiladoc.to_markdown_bytes(package.getvalue(), "docx")
         self.assertEqual(caught.exception.part, "word/document.xml")
+
+    def test_every_failure_class_subclasses_the_base(self):
+        for name in [
+            "UnsupportedError",
+            "NeedsOcrError",
+            "MalformedError",
+            "EncryptedError",
+            "ResourceLimitError",
+            "MissingPartError",
+            "CancelledError",
+            "InternalError",
+        ]:
+            self.assertTrue(issubclass(getattr(almiladoc, name), almiladoc.ConvertError), name)
+
+    def test_a_part_name_is_escaped_in_the_error(self):
+        package = io.BytesIO()
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr(
+                "_rels/.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Target="word/doc\u202eument.xml" Type="http://schemas.'
+                'openxmlformats.org/officeDocument/2006/relationships/officeDocument"/>'
+                "</Relationships>",
+            )
+        with self.assertRaises(almiladoc.MissingPartError) as caught:
+            almiladoc.to_markdown_bytes(package.getvalue(), "docx")
+        self.assertEqual(caught.exception.part, "word/doc\\u{202e}ument.xml")
+        self.assertNotIn("\u202e", str(caught.exception))
 
     def test_unreadable_files_and_bad_arguments_raise_the_python_exception(self):
         with self.assertRaises(FileNotFoundError):

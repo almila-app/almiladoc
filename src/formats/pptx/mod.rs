@@ -82,10 +82,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         })
         .unwrap_or_default();
     if slide_paths.is_empty() {
-        return Err(ConvertError::malformed_part(
-            pres_part.clone(),
-            "presentation has no slide list",
-        ));
+        return Err(ConvertError::malformed_part(&pres_part, "presentation has no slide list"));
     }
 
     let assets = RefCell::new(AssetSink::new());

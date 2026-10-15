@@ -1,6 +1,6 @@
 //! Python bindings for almiladoc.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
@@ -53,8 +53,11 @@ create_exception!(
     almiladoc,
     ResourceLimitError,
     ConvertError,
-    "A fixed safety limit was crossed: decompression, nesting depth, node \
-     count, repeat expansion, or retained asset bytes. `limit` names it."
+    "A safety limit was crossed - decompression, nesting depth, node count, \
+     repeat expansion or retained asset bytes - or the allocator refused a \
+     reservation. `limit` names it and `max` is its value; for `allocation`, \
+     the size of the reservation or the bound of the read the allocator \
+     refused, or 0 where the PDF engine does not say."
 );
 
 create_exception!(
@@ -62,6 +65,16 @@ create_exception!(
     MissingPartError,
     ConvertError,
     "A part required for any meaningful output is absent. `part` names it."
+);
+
+create_exception!(almiladoc, CancelledError, ConvertError, "The conversion was cancelled.");
+
+create_exception!(
+    almiladoc,
+    InternalError,
+    ConvertError,
+    "almiladoc failed in a way no input should cause; recycle the process \
+     that raised it."
 );
 
 /// Format names, as the extension that identifies each format. Container
@@ -101,41 +114,38 @@ fn format_name(format: almiladoc::Format) -> &'static str {
 }
 
 /// Raise the subclass that names the failure, carrying the part or limit at
-/// fault where the variant knows one. An unreadable file raises the `OSError`
-/// subclass any other read of it would.
+/// fault where the variant knows one.
 fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
-    let error = match error {
-        almiladoc::ConvertError::Io(e) => return e.into(),
-        other => other,
-    };
     let message = error.to_string();
-    // A variant added later raises the base class until it is named here.
     let raised = match &error {
-        almiladoc::ConvertError::Unsupported(_) => UnsupportedError::new_err(message),
+        almiladoc::ConvertError::Unsupported { .. } => UnsupportedError::new_err(message),
         almiladoc::ConvertError::NeedsOcr { .. } => NeedsOcrError::new_err(message),
         almiladoc::ConvertError::Malformed { .. } => MalformedError::new_err(message),
         almiladoc::ConvertError::Encrypted => EncryptedError::new_err(message),
         almiladoc::ConvertError::ResourceLimit { .. } => ResourceLimitError::new_err(message),
         almiladoc::ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
-        _ => ConvertError::new_err(message),
+        almiladoc::ConvertError::Cancelled => CancelledError::new_err(message),
+        _ => InternalError::new_err(message),
     };
+    let value = raised.value(py);
     let detail = match &error {
-        almiladoc::ConvertError::NeedsOcr { pages, page_count } => raised
-            .value(py)
+        almiladoc::ConvertError::NeedsOcr { pages, page_count, .. } => value
             .setattr("pages", pages.clone())
-            .and_then(|()| raised.value(py).setattr("page_count", *page_count)),
+            .and_then(|()| value.setattr("page_count", *page_count)),
         almiladoc::ConvertError::Malformed { part, .. } => {
-            raised.value(py).setattr("part", part.as_deref())
+            value.setattr("part", part.as_ref().map(almiladoc::PartName::as_str))
         }
-        almiladoc::ConvertError::ResourceLimit { limit, .. } => {
-            raised.value(py).setattr("limit", *limit)
+        almiladoc::ConvertError::ResourceLimit { limit, max, .. } => {
+            value.setattr("limit", limit.as_str()).and_then(|()| value.setattr("max", *max))
         }
-        almiladoc::ConvertError::MissingPart { part } => {
-            raised.value(py).setattr("part", part.as_str())
-        }
+        almiladoc::ConvertError::MissingPart { part, .. } => value.setattr("part", part.as_str()),
         _ => Ok(()),
     };
     detail.err().unwrap_or(raised)
+}
+
+fn extension_format(path: &Path) -> Option<almiladoc::Format> {
+    path.extension().and_then(|ext| ext.to_str()).and_then(almiladoc::Format::from_extension)
 }
 
 /// Detect the format from the content itself: the signature and identity each
@@ -156,7 +166,7 @@ fn format_from_extension(extension: &str) -> Option<&'static str> {
 /// The format a path's extension names.
 #[pyfunction]
 fn format_from_path(path: PathBuf) -> Option<&'static str> {
-    almiladoc::Format::from_path(&path).map(format_name)
+    extension_format(&path).map(format_name)
 }
 
 /// Convert a document file to Markdown. The format is detected from the file
@@ -164,7 +174,12 @@ fn format_from_path(path: PathBuf) -> Option<&'static str> {
 /// and unrecognizable containers.
 #[pyfunction]
 fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
-    py.detach(|| almiladoc::to_markdown(&path)).map_err(|e| convert_error(py, e))
+    let converted = py.detach(|| {
+        let data = std::fs::read(&path)?;
+        let format = almiladoc::Format::from_bytes(&data).or_else(|| extension_format(&path));
+        Ok::<_, std::io::Error>(almiladoc::to_markdown_bytes(&data, format))
+    })?;
+    converted.map_err(|e| convert_error(py, e))
 }
 
 /// Convert an in-memory document to Markdown. Without a format, it is
@@ -217,8 +232,10 @@ fn _almiladoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<document::Note>()?;
     m.add_class::<document::Style>()?;
     m.add_class::<document::Table>()?;
+    m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("ConvertError", m.py().get_type::<ConvertError>())?;
     m.add("EncryptedError", m.py().get_type::<EncryptedError>())?;
+    m.add("InternalError", m.py().get_type::<InternalError>())?;
     m.add("MalformedError", m.py().get_type::<MalformedError>())?;
     m.add("MissingPartError", m.py().get_type::<MissingPartError>())?;
     m.add("NeedsOcrError", m.py().get_type::<NeedsOcrError>())?;

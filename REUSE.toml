@@ -79,8 +79,34 @@ path = [
     "python/src/lib.rs",
     "python/tests/test_almiladoc.py",
     "src/error.rs",
-    "src/lib.rs",
+    "src/formats/doc/mod.rs",
+    "src/formats/docx/mod.rs",
+    "src/formats/mod.rs",
+    "src/formats/odf/mod.rs",
+    "src/formats/odf/styles.rs",
+    "src/formats/odf/table.rs",
+    "src/formats/pdf.rs",
+    "src/formats/ppt/mod.rs",
+    "src/formats/pptx/mod.rs",
+    "src/formats/sheet/xls.rs",
+    "src/formats/sheet/xlsb.rs",
+    "src/formats/sheet/xlsx.rs",
+    "src/limits.rs",
+    "src/model/asset.rs",
+    "src/model/block.rs",
+    "src/model/inline.rs",
+    "src/model/link.rs",
+    "src/model/list.rs",
+    "src/model/mod.rs",
+    "src/model/style.rs",
+    "src/model/table.rs",
+    "src/package/mod.rs",
+    "src/package/path.rs",
     "src/package/xml.rs",
+    "src/shared/assets.rs",
+    "src/shared/binary.rs",
+    "src/shared/chain.rs",
+    "tests/common/mod.rs",
     "tests/fixturegen/common.py",
     "tests/fixturegen/csv.py",
     "tests/fixturegen/doc.py",
@@ -101,7 +127,10 @@ path = [
     "tests/snapshots/snapshots__docx__handmade-numbering.docx.snap",
     "tests/snapshots/snapshots__docx__text.docx.snap",
     "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__empty--errors.docx.snap",
     "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__truncated--errors.doc.snap",
+    "tests/snapshots/snapshots__malformed__truncated--errors.docx.snap",
     "tests/snapshots/snapshots__pdf__handmade-inline-image-no-colorspace.pdf.snap",
     "tests/snapshots/snapshots__pdf__handmade-ligatures.pdf.snap",
     "tests/snapshots/snapshots__pdf__text.pdf.snap",
@@ -142,5 +171,25 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 breken <312387581+breken-ai@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/lib.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Marcell Manfrin Barbacena <20461967+marcellmanfrin@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/package/archive.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

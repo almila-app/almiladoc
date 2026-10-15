@@ -162,9 +162,7 @@ fn resolve_abstract<'n>(
     let mut current = abs_id.to_string();
     loop {
         if seen.contains(&current) {
-            return Err(ConvertError::malformed(format!(
-                "numbering indirection cycle at abstract {current:?}"
-            )));
+            return Err(ConvertError::malformed("numbering indirection cycle"));
         }
         seen.push(current.clone());
         let Some(abs) = abstracts.get(current.as_str()) else {
@@ -325,9 +323,9 @@ mod tests {
         paragraphs
             .iter()
             .map(|&(num_id, ilvl)| {
-                let instance = numbering.instance(num_id).ok_or_else(|| {
-                    ConvertError::malformed(format!("no numbering instance {num_id}"))
-                })?;
+                let instance = numbering
+                    .instance(num_id)
+                    .ok_or_else(|| ConvertError::malformed("no such numbering instance"))?;
                 Ok(counters.next(num_id, ilvl, instance).0)
             })
             .collect()

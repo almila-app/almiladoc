@@ -177,6 +177,7 @@ fn push_title_heading(inner: Vec<Block>, blocks: &mut Vec<Block>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::Limit;
     use std::io::{Cursor, Write};
 
     const CONTENT: &[u8] = br#"<office:document-content
@@ -231,7 +232,7 @@ mod tests {
         );
         let err = parse(&odt_with_content(&table_doc(&rows))).unwrap_err();
         assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_expansion_text_bytes", .. }),
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, .. }),
             "expected the text-byte budget, got: {err}"
         );
     }
@@ -286,12 +287,12 @@ mod tests {
     #[test]
     fn resource_limit_in_manifest_is_fatal() {
         let mut manifest = Vec::new();
-        for _ in 0..(crate::package::limits::MAX_XML_DEPTH + 2) {
+        for _ in 0..(crate::limits::MAX_XML_DEPTH + 2) {
             manifest.extend_from_slice(b"<d>");
         }
         let err = parse(&odt(&manifest)).unwrap_err();
         assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_xml_depth", .. }),
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlDepth, .. }),
             "encryption probing must not swallow fatal errors, got: {err}"
         );
     }

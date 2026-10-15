@@ -10,20 +10,43 @@ pub mod model;
 
 mod error;
 mod formats;
+mod limits;
 mod package;
 mod render;
 mod shared;
 
-pub use error::ConvertError;
+pub use error::{ConvertError, PartName, UnsupportedKind};
+pub use limits::Limit;
 
 use render::markdown::document_to_markdown;
-
-use std::path::Path;
 
 /// Input format. Selects the parser; container variants that share a parser
 /// (docm, xlsm, ...) map onto these via [`Format::from_bytes`] or
 /// [`Format::from_extension`].
+///
+/// New formats are added over time, so a match outside this crate needs a
+/// wildcard arm:
+///
+/// ```compile_fail,E0004
+/// fn name(format: almiladoc::Format) -> &'static str {
+///     match format {
+///         almiladoc::Format::Doc => "doc",
+///         almiladoc::Format::Docx => "docx",
+///         almiladoc::Format::Odt => "odt",
+///         almiladoc::Format::Pdf => "pdf",
+///         almiladoc::Format::Ppt => "ppt",
+///         almiladoc::Format::Pptx => "pptx",
+///         almiladoc::Format::Rtf => "rtf",
+///         almiladoc::Format::Epub => "epub",
+///         almiladoc::Format::Excel => "xlsx",
+///         almiladoc::Format::Ods => "ods",
+///         almiladoc::Format::Odp => "odp",
+///         almiladoc::Format::Csv => "csv",
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Format {
     /// Binary Word 97-2003 (`.doc`).
     Doc,
@@ -87,27 +110,6 @@ impl Format {
             _ => return None,
         })
     }
-
-    /// The format a path's extension names. `None` when the path has no
-    /// extension or names nothing recognized.
-    pub fn from_path(path: &Path) -> Option<Format> {
-        path.extension().and_then(|e| e.to_str()).and_then(Format::from_extension)
-    }
-}
-
-/// Convert a document file to Markdown. The format is detected from the
-/// file content ([`Format::from_bytes`]); the extension is the fallback for
-/// signature-less formats (CSV) and unrecognizable containers.
-pub fn to_markdown(path: impl AsRef<Path>) -> Result<String, ConvertError> {
-    let path = path.as_ref();
-    let bytes = std::fs::read(path)?;
-    let Some(format) = Format::from_bytes(&bytes).or_else(|| Format::from_path(path)) else {
-        return Err(ConvertError::Unsupported(format!(
-            "unrecognized file content and extension: {}",
-            path.display()
-        )));
-    };
-    to_markdown_bytes(&bytes, format)
 }
 
 /// Convert an in-memory document to Markdown. Pass a [`Format`] to select the
@@ -139,7 +141,7 @@ pub fn to_document(
 }
 
 fn resolve_format(bytes: &[u8], format: Option<Format>) -> Result<Format, ConvertError> {
-    format.or_else(|| Format::from_bytes(bytes)).ok_or_else(|| {
-        ConvertError::Unsupported("unrecognized file content: name the format explicitly".into())
-    })
+    format
+        .or_else(|| Format::from_bytes(bytes))
+        .ok_or(ConvertError::unsupported(UnsupportedKind::UnknownFormat))
 }

@@ -27,6 +27,7 @@ pub(crate) use table::GridBuilder;
 /// A parsed document: its body, its notes, and the bytes of everything it
 /// embedded.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Document {
     /// Body content in reading order.
     pub blocks: Vec<Block>,
@@ -39,6 +40,7 @@ pub struct Document {
 
 /// Footnote or endnote body, referenced from text by [`Inline::NoteRef`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Note {
     /// Document-scoped id the referencing [`Inline::NoteRef`] carries.
     pub id: String,
@@ -50,6 +52,7 @@ pub struct Note {
 
 /// Where the source document places a note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NoteKind {
     /// Placed at the foot of the page that references it.
     Footnote,

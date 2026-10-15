@@ -9,6 +9,7 @@ from almiladoc import Format
 __all__ = [
     "Asset",
     "Block",
+    "CancelledError",
     "Cell",
     "CellSlot",
     "ConvertError",
@@ -16,6 +17,7 @@ __all__ = [
     "EncryptedError",
     "ImageSource",
     "Inline",
+    "InternalError",
     "LinkTarget",
     "List",
     "ListItem",
@@ -64,17 +66,29 @@ class EncryptedError(ConvertError):
     """The document is encrypted or password-protected."""
 
 class ResourceLimitError(ConvertError):
-    """A fixed safety limit was crossed: decompression, nesting depth, node
-    count, repeat expansion, or retained asset bytes."""
+    """A safety limit was crossed - decompression, nesting depth, node count,
+    repeat expansion or retained asset bytes - or the allocator refused a
+    reservation."""
 
     limit: str
-    """The limit that was crossed, e.g. `max_entry_bytes`."""
+    """The limit that was crossed, e.g. `max_entry_bytes`, or `allocation`."""
+    max: int
+    """The limit's value; for `allocation`, the size of the reservation or the
+    bound of the read the allocator refused, or 0 where the PDF engine does
+    not say."""
 
 class MissingPartError(ConvertError):
     """A part required for any meaningful output is absent."""
 
     part: str
     """The part or stream that is missing."""
+
+class CancelledError(ConvertError):
+    """The conversion was cancelled."""
+
+class InternalError(ConvertError):
+    """almiladoc failed in a way no input should cause; recycle the process
+    that raised it."""
 
 def format_from_bytes(data: bytes | bytearray) -> Format | None:
     """Detect the format from the content itself: the signature and identity

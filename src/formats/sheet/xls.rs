@@ -11,8 +11,8 @@ use super::xlsx::{
 };
 use super::{error_literal, rk_number};
 use crate::error::ConvertError;
+use crate::limits::{self, Limit};
 use crate::model::{Block, Document, Inline};
-use crate::package::limits;
 use crate::shared::binary::{get_u16, get_u32, read_ole_stream, utf16le_units};
 use crate::shared::officeart;
 use crate::shared::text::clean_text;
@@ -54,7 +54,7 @@ const MAX_COLS: u32 = 256;
 
 pub(super) fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let mut ole = cfb::CompoundFile::open(Cursor::new(bytes))
-        .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
+        .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
     let data = workbook_stream(&mut ole)?;
     let mut records = 0u64;
     let globals = read_globals(&data, &mut records)?;
@@ -98,7 +98,7 @@ fn workbook_stream<R: std::io::Read + std::io::Seek>(
                     || e.name().eq_ignore_ascii_case("Book"))
         })
         .map(|e| e.name().to_string())
-        .ok_or(ConvertError::MissingPart { part: "Workbook".to_string() })?;
+        .ok_or_else(|| ConvertError::missing_part("Workbook"))?;
     read_ole_stream(ole, &name)
 }
 
@@ -131,10 +131,7 @@ fn next_record<'a>(
     };
     *records += 1;
     if *records > limits::MAX_RECORDS {
-        return Err(ConvertError::ResourceLimit {
-            limit: "max_records",
-            detail: format!("workbook stream exceeds {} records", limits::MAX_RECORDS),
-        });
+        return Err(ConvertError::limit(Limit::Records, limits::MAX_RECORDS));
     }
     Ok(Some(rec))
 }

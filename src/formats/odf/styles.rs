@@ -131,9 +131,7 @@ impl<'a> OdfStyles<'a> {
         let mut cursor = self.raw.get_key_value(&id).map(|(k, _)| k.as_str());
         while let Some(current) = cursor {
             if !visited.insert(current) {
-                return Err(ConvertError::malformed(format!(
-                    "style inheritance cycle at {current:?}"
-                )));
+                return Err(ConvertError::malformed("style inheritance cycle"));
             }
             chain.push(current);
             cursor = match self.raw.get(current) {

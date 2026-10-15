@@ -9,6 +9,13 @@ use pyo3::types::{PyBytes, PyList};
 
 use almiladoc::model;
 
+use crate::InternalError;
+
+/// A model variant this binding does not mirror yet: a bug in the binding.
+fn unmapped<T>(what: &str) -> PyResult<T> {
+    Err(InternalError::new_err(format!("the binding does not mirror this {what}")))
+}
+
 #[pyclass(frozen, get_all, module = "almiladoc")]
 pub struct Document {
     /// list[Block]
@@ -82,6 +89,7 @@ fn block(py: Python<'_>, block: model::Block) -> PyResult<Block> {
         }
         model::Block::Rule => Block::of("rule"),
         model::Block::Math(tex) => Block { text: Some(tex), ..Block::of("math") },
+        _ => return unmapped("block"),
     })
 }
 
@@ -136,12 +144,12 @@ fn inline(py: Python<'_>, inline: model::Inline) -> PyResult<Inline> {
         },
         model::Inline::Link { content, target } => Inline {
             content: Some(inlines(py, content)?),
-            target: Some(Py::new(py, LinkTarget::from(target))?),
+            target: Some(Py::new(py, link_target(target)?)?),
             ..Inline::of("link")
         },
         model::Inline::Image { alt, source } => Inline {
             alt: Some(alt),
-            source: Some(Py::new(py, ImageSource::from(source))?),
+            source: Some(Py::new(py, image_source(source)?)?),
             ..Inline::of("image")
         },
         model::Inline::Anchor(id) => Inline { anchor: Some(id), ..Inline::of("anchor") },
@@ -151,6 +159,7 @@ fn inline(py: Python<'_>, inline: model::Inline) -> PyResult<Inline> {
         model::Inline::Checkbox(checked) => {
             Inline { checked: Some(checked), ..Inline::of("checkbox") }
         }
+        _ => return unmapped("inline"),
     })
 }
 
@@ -179,15 +188,14 @@ pub struct LinkTarget {
     value: String,
 }
 
-impl From<model::LinkTarget> for LinkTarget {
-    fn from(target: model::LinkTarget) -> Self {
-        let (kind, value) = match target {
-            model::LinkTarget::External(v) => ("external", v),
-            model::LinkTarget::Relative(v) => ("relative", v),
-            model::LinkTarget::Anchor(v) => ("anchor", v),
-        };
-        LinkTarget { kind, value }
-    }
+fn link_target(target: model::LinkTarget) -> PyResult<LinkTarget> {
+    let (kind, value) = match target {
+        model::LinkTarget::External(v) => ("external", v),
+        model::LinkTarget::Relative(v) => ("relative", v),
+        model::LinkTarget::Anchor(v) => ("anchor", v),
+        _ => return unmapped("link target"),
+    };
+    Ok(LinkTarget { kind, value })
 }
 
 #[pyclass(frozen, get_all, module = "almiladoc")]
@@ -203,20 +211,19 @@ pub struct ImageSource {
     asset_id: Option<usize>,
 }
 
-impl From<model::ImageSource> for ImageSource {
-    fn from(source: model::ImageSource) -> Self {
-        match source {
-            model::ImageSource::External(url) => {
-                ImageSource { kind: "external", url: Some(url), asset_id: None }
-            }
-            model::ImageSource::Asset(id) => {
-                ImageSource { kind: "asset", url: None, asset_id: Some(id.0) }
-            }
-            model::ImageSource::Unavailable => {
-                ImageSource { kind: "unavailable", url: None, asset_id: None }
-            }
+fn image_source(source: model::ImageSource) -> PyResult<ImageSource> {
+    Ok(match source {
+        model::ImageSource::External(url) => {
+            ImageSource { kind: "external", url: Some(url), asset_id: None }
         }
-    }
+        model::ImageSource::Asset(id) => {
+            ImageSource { kind: "asset", url: None, asset_id: Some(id.0) }
+        }
+        model::ImageSource::Unavailable => {
+            ImageSource { kind: "unavailable", url: None, asset_id: None }
+        }
+        _ => return unmapped("image source"),
+    })
 }
 
 #[pyclass(frozen, get_all, module = "almiladoc")]
@@ -238,6 +245,7 @@ fn list(py: Python<'_>, list: model::List) -> PyResult<List> {
         model::MarkerKind::UpperAlpha => "upper_alpha",
         model::MarkerKind::LowerRoman => "lower_roman",
         model::MarkerKind::UpperRoman => "upper_roman",
+        _ => return unmapped("list marker"),
     };
     let items = list.items.into_iter().map(|item| list_item(py, item));
     Ok(List { marker, start: list.start, items: pylist(py, items)? })
@@ -282,6 +290,7 @@ fn table(py: Python<'_>, table: model::Table) -> PyResult<Table> {
         kind: match table.kind {
             model::TableKind::Data => "data",
             model::TableKind::Layout => "layout",
+            _ => return unmapped("table kind"),
         },
     })
 }
@@ -312,6 +321,7 @@ fn cell_slot(py: Python<'_>, slot: model::CellSlot) -> PyResult<CellSlot> {
             origin_row: Some(origin_row),
             origin_col: Some(origin_col),
         },
+        _ => return unmapped("cell slot"),
     })
 }
 
@@ -342,6 +352,7 @@ fn note(py: Python<'_>, note: model::Note) -> PyResult<Note> {
         kind: match note.kind {
             model::NoteKind::Footnote => "footnote",
             model::NoteKind::Endnote => "endnote",
+            _ => return unmapped("note kind"),
         },
         blocks: blocks(py, note.blocks)?,
     })

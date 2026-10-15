@@ -1,11 +1,13 @@
 /// Index into `Document::assets`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct AssetId(pub usize);
 
 /// An embedded binary asset (image, object payload). Bytes are always
 /// retained so the document stays self-contained; total retained bytes are
 /// capped by the fixed `max_asset_total_bytes` limit at parse time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Asset {
     /// This asset's own index, so a detached `Asset` still identifies itself.
     pub id: AssetId,

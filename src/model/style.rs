@@ -2,6 +2,7 @@
 /// frontend resolution (`shared::delta`); by the time content reaches the
 /// model every toggle has a definite value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Style {
     /// Bold weight.
     pub bold: bool,

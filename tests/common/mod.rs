@@ -18,3 +18,11 @@ pub fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// The fixture's format: detected from its content, else named by its
+/// extension.
+pub fn format_of(path: &Path, bytes: &[u8]) -> Option<almiladoc::Format> {
+    almiladoc::Format::from_bytes(bytes).or_else(|| {
+        path.extension().and_then(|ext| ext.to_str()).and_then(almiladoc::Format::from_extension)
+    })
+}

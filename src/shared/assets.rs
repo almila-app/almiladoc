@@ -1,9 +1,9 @@
 //! Embedded-asset accumulation with the fixed retained-bytes cap.
 
 use crate::error::ConvertError;
+use crate::limits::{self, Limit};
 use crate::model::{Asset, AssetId, ImageSource};
 use crate::package::Package;
-use crate::package::limits;
 use crate::package::relationships::{Relationships, TargetMode, rel_target_bytes};
 use std::cell::RefCell;
 
@@ -35,10 +35,10 @@ impl AssetSink {
         }
         self.total += bytes.len();
         if self.total > limits::MAX_ASSET_TOTAL_BYTES {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_asset_total_bytes",
-                detail: "embedded assets exceed the retained-bytes cap".into(),
-            });
+            return Err(ConvertError::limit(
+                Limit::AssetTotalBytes,
+                limits::MAX_ASSET_TOTAL_BYTES as u64,
+            ));
         }
         let id = AssetId(self.assets.len());
         self.by_part.insert(origin_part.clone(), id);
@@ -122,6 +122,6 @@ mod tests {
         let mut sink = AssetSink::new();
         sink.total = limits::MAX_ASSET_TOTAL_BYTES - 10;
         let err = sink.add("image/png".into(), "media/big.png".into(), &[0; 11]).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_asset_total_bytes", .. }));
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, .. }));
     }
 }

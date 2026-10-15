@@ -2,6 +2,7 @@ use crate::model::{AnchorId, ImageSource, LinkTarget, Style};
 
 /// One span of inline content.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Inline {
     /// Styled text. Runs are split wherever the style changes.
     Text {

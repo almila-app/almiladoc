@@ -1,6 +1,5 @@
-use crate::error::ConvertError;
+use crate::limits::{self, Limit, LimitExceeded};
 use crate::model::{Block, Inline, inlines_are_empty};
-use crate::package::limits;
 use std::collections::HashMap;
 
 /// Canonical table grid. **Invariant:** every logical grid position appears
@@ -9,6 +8,7 @@ use std::collections::HashMap;
 /// back at its origin. Frontends construct grids through one internal builder
 /// that enforces this, so a `Table` handed to a consumer always holds.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Table {
     /// Rows of slots. Rows may differ in length when the source is ragged.
     pub grid: Vec<Vec<CellSlot>>,
@@ -20,6 +20,7 @@ pub struct Table {
 
 /// What a table is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum TableKind {
     /// A real data table.
     #[default]
@@ -31,6 +32,7 @@ pub enum TableKind {
 
 /// One position in a [`Table::grid`]: either a cell or the shadow of one.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CellSlot {
     /// The cell itself, holding the content and the span extents.
     Origin(Cell),
@@ -46,6 +48,7 @@ pub enum CellSlot {
 
 /// A table cell and the extent it spans.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Cell {
     /// The cell's content.
     pub blocks: Vec<Block>,
@@ -165,15 +168,12 @@ impl GridBuilder {
     /// materialized automatically when the next cell is placed.
     ///
     /// The complete span area is charged against the expansion budget before
-    /// any expansion happens; `ResourceLimit` when the budget is exceeded.
-    pub fn place(&mut self, cell: Cell) -> Result<(), ConvertError> {
+    /// any expansion happens; `LimitExceeded` when the budget is exceeded.
+    pub fn place(&mut self, cell: Cell) -> Result<(), LimitExceeded> {
         let area = (cell.col_span.max(1) as u64) * (cell.row_span.max(1) as u64);
         self.expansion = self.expansion.saturating_add(area - 1);
         if self.expansion > limits::MAX_EXPANSION {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_expansion",
-                detail: "table span expansion exceeds the content budget".into(),
-            });
+            return Err(LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
         }
         let row = self.row_index();
         self.skip_pending(row);
@@ -448,7 +448,7 @@ mod tests {
         let mut b = GridBuilder::new();
         b.next_row();
         let err = b.place(Cell::spanning(vec![], u32::MAX, u32::MAX)).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_expansion", .. }));
+        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         b.next_row();
         b.place(Cell::spanning(vec![], 3, 3)).unwrap(); // 8 more: still within
         let err = b.place(Cell::spanning(vec![], 2, 2)).unwrap_err(); // 3 more: over
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_expansion", .. }));
+        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
     }
 
     #[test]

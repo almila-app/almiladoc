@@ -3,7 +3,6 @@
 //! OPC/EPUB target resolution.
 
 pub mod archive;
-pub mod limits;
 pub mod path;
 pub mod relationships;
 pub mod xml;

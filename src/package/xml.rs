@@ -7,7 +7,7 @@
 //! silently.
 
 use crate::error::ConvertError;
-use crate::package::limits;
+use crate::limits::{self, Limit};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
@@ -213,16 +213,11 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
     let mut recovered = false;
 
     loop {
-        let event = reader
-            .read_event()
-            .map_err(|e| ConvertError::malformed(format!("unparseable xml: {e}")))?;
+        let event = reader.read_event().map_err(|_| ConvertError::malformed("unparseable xml"))?;
         match event {
             Event::Start(e) => {
                 if stack.len() >= limits::MAX_XML_DEPTH {
-                    return Err(ConvertError::ResourceLimit {
-                        limit: "max_xml_depth",
-                        detail: format!("element nesting exceeds {}", limits::MAX_XML_DEPTH),
-                    });
+                    return Err(ConvertError::limit(Limit::XmlDepth, limits::MAX_XML_DEPTH as u64));
                 }
                 bump_nodes(&mut nodes)?;
                 stack.push(start_to_element(&e, &reader, &mut interner));
@@ -318,10 +313,7 @@ fn declared_encoding(head: &[u8]) -> Option<String> {
 fn bump_nodes(nodes: &mut usize) -> Result<(), ConvertError> {
     *nodes += 1;
     if *nodes > limits::MAX_XML_NODES {
-        return Err(ConvertError::ResourceLimit {
-            limit: "max_xml_nodes",
-            detail: format!("part exceeds {} xml nodes", limits::MAX_XML_NODES),
-        });
+        return Err(ConvertError::limit(Limit::XmlNodes, limits::MAX_XML_NODES as u64));
     }
     Ok(())
 }
@@ -646,7 +638,7 @@ mod tests {
             xml.extend_from_slice(b"<d>");
         }
         let err = parse_xml(&xml).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: "max_xml_depth", .. }));
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlDepth, .. }));
     }
 
     #[test]

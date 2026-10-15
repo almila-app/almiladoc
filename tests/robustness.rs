@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{fixture_root, walk};
+use common::{fixture_root, format_of, walk};
 
 struct Rng(u64);
 
@@ -32,10 +32,10 @@ fn mutated_fixtures_never_panic() {
         if rel.starts_with("abuse") {
             continue; // abuse shapes are asserted separately; mutating them is slow
         }
-        let Some(format) = almiladoc::Format::from_path(&path) else {
+        let original = std::fs::read(&path).unwrap();
+        let Some(format) = format_of(&path, &original) else {
             continue;
         };
-        let original = std::fs::read(&path).unwrap();
         if original.is_empty() {
             continue;
         }

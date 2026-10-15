@@ -9,9 +9,9 @@
 mod styletext;
 
 use crate::error::ConvertError;
+use crate::limits::{self, Limit};
 use crate::model::{Block, Document, Inline, Style, inlines_are_empty};
-use crate::package::limits;
-use crate::shared::binary::{get_u32, read_ole_stream, utf16le_units};
+use crate::shared::binary::{get_u32, optional_ole_stream, read_ole_stream, utf16le_units};
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::list::{ListEntry, ListKey, MarkerKind, flush_list};
 use crate::shared::officeart::record_at;
@@ -27,9 +27,9 @@ type MasterStyles = HashMap<u16, Vec<MasterLevel>>;
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
-        .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
+        .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
     let data = read_ole_stream(&mut ole, "PowerPoint Document")?;
-    let current_user = read_ole_stream(&mut ole, "Current User").unwrap_or_default();
+    let current_user = optional_ole_stream(&mut ole, "Current User")?.unwrap_or_default();
     if get_u32(&current_user, 12) == Some(0xF3D1_C4DF) {
         return Err(ConvertError::Encrypted);
     }
@@ -58,7 +58,7 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
     ole: &mut cfb::CompoundFile<R>,
 ) -> Result<Vec<crate::model::Asset>, ConvertError> {
     use crate::shared::officeart;
-    let Ok(pictures) = read_ole_stream(ole, "Pictures") else {
+    let Some(pictures) = optional_ole_stream(ole, "Pictures")? else {
         return Ok(Vec::new());
     };
     let mut sink = crate::shared::assets::AssetSink::new();
@@ -416,10 +416,10 @@ impl Extractor {
                 0x0FF0 if ver_inst >> 4 != 0 => {}
                 _ => {
                     if stack.len() >= limits::MAX_RECORD_DEPTH {
-                        return Err(ConvertError::ResourceLimit {
-                            limit: "max_record_depth",
-                            detail: format!("record nesting exceeds {}", limits::MAX_RECORD_DEPTH),
-                        });
+                        return Err(ConvertError::limit(
+                            Limit::RecordDepth,
+                            limits::MAX_RECORD_DEPTH as u64,
+                        ));
                     }
                     stack.push((body, 0));
                 }
@@ -448,10 +448,7 @@ impl Extractor {
     fn charge_record(&mut self) -> Result<(), ConvertError> {
         self.records += 1;
         if self.records > limits::MAX_RECORDS {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_records",
-                detail: format!("record stream exceeds {} records", limits::MAX_RECORDS),
-            });
+            return Err(ConvertError::limit(Limit::Records, limits::MAX_RECORDS));
         }
         Ok(())
     }

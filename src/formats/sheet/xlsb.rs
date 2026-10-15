@@ -11,8 +11,8 @@ use super::xlsx::{
 };
 use super::{error_literal, rk_number};
 use crate::error::ConvertError;
+use crate::limits::{self, Limit};
 use crate::model::{Block, Document, Inline};
-use crate::package::limits;
 use crate::package::relationships::{read_rels, rel_type, rels_part_for};
 use crate::package::{Package, path};
 use crate::shared::binary::utf16le_units;
@@ -349,10 +349,7 @@ impl<'a> Records<'a> {
         }
         self.seen += 1;
         if self.seen > limits::MAX_RECORDS {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_records",
-                detail: "record stream exceeds the record budget".into(),
-            });
+            return Err(ConvertError::limit(Limit::Records, limits::MAX_RECORDS));
         }
         let b0 = self.byte()?;
         let id = if b0 & 0x80 != 0 {

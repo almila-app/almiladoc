@@ -9,15 +9,20 @@
 
 mod common;
 
-use common::{fixture_root, walk};
+use common::{fixture_root, format_of, walk};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+fn convert_file(path: &Path) -> Result<String, almiladoc::ConvertError> {
+    let bytes = std::fs::read(path).unwrap();
+    almiladoc::to_markdown_bytes(&bytes, format_of(path, &bytes))
+}
+
 /// Convert one file, capturing panics so a bad parser records a baseline
 /// instead of aborting the whole harness.
 fn convert(path: &Path) -> String {
-    let result = std::panic::catch_unwind(|| almiladoc::to_markdown(path));
+    let result = std::panic::catch_unwind(|| convert_file(path));
     match result {
         Ok(Ok(md)) => md,
         Ok(Err(e)) => format!("ERROR: {e:#}"),
@@ -166,7 +171,7 @@ fn fixtures_detect_from_content() {
 fn scanned_pages_are_reported_not_dropped() {
     let mixed = std::fs::read(fixture_root().join("pdf/handmade-mixed.pdf")).unwrap();
     match almiladoc::to_markdown_bytes(&mixed, almiladoc::Format::Pdf) {
-        Err(almiladoc::ConvertError::NeedsOcr { pages, page_count }) => {
+        Err(almiladoc::ConvertError::NeedsOcr { pages, page_count, .. }) => {
             assert_eq!((pages, page_count), (vec![2], 2));
         }
         other => panic!("expected NeedsOcr, got {other:?}"),
@@ -247,7 +252,7 @@ fn abuse_fixtures_hard_fail() {
     assert!(!files.is_empty(), "abuse fixture set is missing");
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let result = almiladoc::to_markdown(&path);
+        let result = convert_file(&path);
         assert!(
             matches!(result, Err(almiladoc::ConvertError::ResourceLimit { .. })),
             "{name}: expected a ResourceLimit error, got {result:?}"

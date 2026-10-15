@@ -10,8 +10,8 @@
 
 use crate::error::ConvertError;
 use crate::formats::odf::text::{Ctx, parse_container};
+use crate::limits::{self, Limit};
 use crate::model::{Block, Cell, GridBuilder, Inline, TableKind};
-use crate::package::limits;
 use crate::package::xml::{Element, ns};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::text::clean_text;
@@ -102,10 +102,7 @@ impl TableState {
     fn charge(&mut self, cells: u64) -> Result<(), ConvertError> {
         self.expansion = self.expansion.saturating_add(cells);
         if self.expansion > limits::MAX_EXPANSION {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_expansion",
-                detail: "table repeat expansion exceeds the content budget".into(),
-            });
+            return Err(ConvertError::limit(Limit::Expansion, limits::MAX_EXPANSION));
         }
         Ok(())
     }
@@ -115,10 +112,10 @@ impl TableState {
     fn charge_bytes(&mut self, bytes: u64) -> Result<(), ConvertError> {
         self.expansion_bytes = self.expansion_bytes.saturating_add(bytes);
         if self.expansion_bytes > limits::MAX_EXPANSION_TEXT_BYTES {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_expansion_text_bytes",
-                detail: "table repeat expansion duplicates more text than the budget".into(),
-            });
+            return Err(ConvertError::limit(
+                Limit::ExpansionTextBytes,
+                limits::MAX_EXPANSION_TEXT_BYTES,
+            ));
         }
         Ok(())
     }

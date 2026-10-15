@@ -7,8 +7,8 @@ use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
 use super::{format_duration_days, format_float, format_time_of_day};
 use crate::error::ConvertError;
+use crate::limits::{self, Limit};
 use crate::model::{Block, Cell, Document, GridBuilder, Inline, Table, TableKind};
-use crate::package::limits;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, path};
@@ -464,10 +464,7 @@ pub(super) fn build_table(
     // describes a whole sheet and a handful of sheets multiplies it.
     *slots = slots.saturating_add(row_map.len() as u64 * col_map.len() as u64);
     if *slots > limits::MAX_GRID_SLOTS {
-        return Err(ConvertError::ResourceLimit {
-            limit: "max_grid_slots",
-            detail: format!("workbook extent covers {slots} grid positions"),
-        });
+        return Err(ConvertError::limit(Limit::GridSlots, limits::MAX_GRID_SLOTS));
     }
 
     // Remap merges onto the surviving coordinates. The covered-position set
@@ -489,10 +486,7 @@ pub(super) fn build_table(
         }
         expansion = expansion.saturating_add((rn as u64) * (cn as u64) - 1);
         if expansion > limits::MAX_EXPANSION {
-            return Err(ConvertError::ResourceLimit {
-                limit: "max_expansion",
-                detail: "merge region expansion exceeds the content budget".into(),
-            });
+            return Err(ConvertError::limit(Limit::Expansion, limits::MAX_EXPANSION));
         }
         origins.insert((r0, c0), (cn as u32, rn as u32));
         for r in r0..r0 + rn {
@@ -996,7 +990,7 @@ mod tests {
         );
         let err = parse(&wb.build()).unwrap_err();
         assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_grid_slots", .. }),
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. }),
             "got {err:?}"
         );
 
@@ -1005,7 +999,7 @@ mod tests {
         let wb = Wb { sheets: vec![("A", "", half), ("B", "", half)], ..Wb::default() };
         let err = parse(&wb.build()).unwrap_err();
         assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: "max_grid_slots", .. }),
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. }),
             "got {err:?}"
         );
     }

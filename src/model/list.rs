@@ -2,6 +2,7 @@ use crate::model::Block;
 
 /// The marker family a list level uses in the source document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MarkerKind {
     /// Unordered.
     Bullet,
@@ -93,6 +94,7 @@ fn roman(mut n: u64) -> String {
 /// the frontends (`shared::list`), which split runs whenever the list
 /// instance or marker kind changes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct List {
     /// The marker family every item in this run uses.
     pub marker: MarkerKind,
@@ -112,6 +114,7 @@ impl List {
 /// One item of a [`List`], which may hold nested blocks including further
 /// lists.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ListItem {
     /// The item's content.
     pub blocks: Vec<Block>,

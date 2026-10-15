@@ -37,9 +37,7 @@ impl<'a, D> StyleChains<'a, D> {
         let mut cursor = self.raw.get_key_value(id).map(|(k, _)| *k);
         while let Some(current) = cursor {
             if !visited.insert(current) {
-                return Err(ConvertError::malformed(format!(
-                    "style inheritance cycle at {current:?}"
-                )));
+                return Err(ConvertError::malformed("style inheritance cycle"));
             }
             let (def, parent) = self.raw[current];
             if let Some(hit) = visit(def) {

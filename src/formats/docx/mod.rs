@@ -53,7 +53,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let body = doc_tree
         .find(ns::W, "document")
         .and_then(|d| d.find(ns::W, "body"))
-        .ok_or_else(|| ConvertError::malformed_part(main_part.clone(), "no document body"))?;
+        .ok_or_else(|| ConvertError::malformed_part(&main_part, "no document body"))?;
 
     let counters = RefCell::new(Counters::default());
     let assets = RefCell::new(AssetSink::new());

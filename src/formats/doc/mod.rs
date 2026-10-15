@@ -9,13 +9,15 @@ mod sprm;
 mod stsh;
 
 use crate::error::ConvertError;
+use crate::limits;
 use crate::model::{
     Block, Document, ImageSource, Inline, Note, NoteKind, Style, inlines_are_empty,
     inlines_to_plain_text,
 };
-use crate::package::limits;
 use crate::shared::assets::AssetSink;
-use crate::shared::binary::{get_u16, get_u32, read_ole_stream, utf16le_units};
+use crate::shared::binary::{
+    get_u16, get_u32, optional_ole_stream, read_ole_stream, utf16le_units,
+};
 use crate::shared::blockstyle::StyledRun;
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::{FieldFrame, field_result};
@@ -31,11 +33,11 @@ use stsh::Stylesheet;
 pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
-        .map_err(|e| ConvertError::malformed(format!("not an OLE2 compound file: {e}")))?;
+        .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
 
     let word_doc = read_ole_stream(&mut ole, "WordDocument")?;
     if get_u16(&word_doc, 0) != Some(0xA5EC) {
-        return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic".to_string()));
+        return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic"));
     }
     let flags = get_u16(&word_doc, 0x0A).unwrap_or(0);
     if flags & 0x0100 != 0 {
@@ -43,9 +45,10 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     }
     let (table_name, other_table) =
         if flags & 0x0200 != 0 { ("1Table", "0Table") } else { ("0Table", "1Table") };
-    let table = read_ole_stream(&mut ole, table_name)
-        .or_else(|_| read_ole_stream(&mut ole, other_table))
-        .unwrap_or_default();
+    let table = match optional_ole_stream(&mut ole, table_name)? {
+        Some(table) => table,
+        None => optional_ole_stream(&mut ole, other_table)?.unwrap_or_default(),
+    };
 
     let ccp_text = get_u32(&word_doc, 0x4C).unwrap_or(0) as usize;
     let ccp_ftn = get_u32(&word_doc, 0x50).unwrap_or(0) as usize;
@@ -72,7 +75,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let encoding = lid_encoding(lid.unwrap_or(0));
     let text = extract_text(&word_doc, &pieces, total_cp, encoding);
 
-    let data = read_ole_stream(&mut ole, "Data").unwrap_or_default();
+    let data = optional_ole_stream(&mut ole, "Data")?.unwrap_or_default();
     let chpx_runs = parse_fkps(&word_doc, &table, 0xFA, FkpKind::Chpx, &data);
     let papx_runs = parse_fkps(&word_doc, &table, 0x102, FkpKind::Papx, &data);
     let stylesheet = stsh::parse(&word_doc, &table);

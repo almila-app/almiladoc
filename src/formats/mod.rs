@@ -13,7 +13,7 @@ mod rtf;
 mod sheet;
 
 use crate::Format;
-use crate::error::ConvertError;
+use crate::error::{ConvertError, UnsupportedKind};
 use crate::model::Document;
 
 pub fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
@@ -31,8 +31,6 @@ pub fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
         Format::Ppt => ppt::parse(bytes),
         // pdf-inspector produces Markdown directly; there is no document
         // model for PDFs. `to_markdown_bytes` routes them to `pdf`.
-        Format::Pdf => Err(ConvertError::Unsupported(
-            "PDF converts directly to Markdown; use to_markdown or to_markdown_bytes".to_string(),
-        )),
+        Format::Pdf => Err(ConvertError::unsupported(UnsupportedKind::PdfDocumentModel)),
     }
 }

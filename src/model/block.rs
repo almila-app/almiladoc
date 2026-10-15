@@ -2,6 +2,7 @@ use crate::model::{AnchorId, Inline, List, Table};
 
 /// One block-level piece of a document body.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Block {
     /// A section heading.
     Heading {

@@ -46,21 +46,21 @@ except almiladoc.NeedsOcrError as error:
     print(error.pages, error.page_count)
 ```
 
-Every conversion failure subclasses `almiladoc.ConvertError`: `UnsupportedError`, `NeedsOcrError`, `MalformedError`, `EncryptedError`, `ResourceLimitError` and `MissingPartError`. An unreadable file raises `OSError`.
+Every conversion failure subclasses `almiladoc.ConvertError`: `UnsupportedError`, `NeedsOcrError`, `MalformedError`, `EncryptedError`, `ResourceLimitError` (with `limit` and `max`), `MissingPartError`, `CancelledError` and `InternalError`. An unreadable file raises `OSError`.
 
 ## Rust
 
 ```rust
 use almiladoc::{ConvertError, Format};
 
-fn convert(path: &str, csv: &[u8]) -> Result<(String, String), ConvertError> {
-    let report = almiladoc::to_markdown(path)?;
+fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), ConvertError> {
+    let report = almiladoc::to_markdown_bytes(report, None)?;
     let table = almiladoc::to_markdown_bytes(csv, Format::Csv)?;
     Ok((report, table))
 }
 ```
 
-`to_document` stops at the document model, which also carries the embedded assets; on a PDF it returns `Unsupported`. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart` or `Io`.
+The crate reads no file: pass the bytes and name the format, or leave it to `Format::from_bytes`; CSV carries no signature and has to be named. `to_document` stops at the document model, which also carries the embedded assets; on a PDF it returns `Unsupported`. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name.
 
 ## Development
 

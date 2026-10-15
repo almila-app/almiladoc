@@ -5,6 +5,7 @@ from typing import Literal
 from almiladoc._almiladoc import (
     Asset,
     Block,
+    CancelledError,
     Cell,
     CellSlot,
     ConvertError,
@@ -12,6 +13,7 @@ from almiladoc._almiladoc import (
     EncryptedError,
     ImageSource,
     Inline,
+    InternalError,
     LinkTarget,
     List,
     ListItem,
@@ -41,6 +43,7 @@ via `format_from_bytes` or `format_from_extension`."""
 __all__ = [
     "Asset",
     "Block",
+    "CancelledError",
     "Cell",
     "CellSlot",
     "ConvertError",
@@ -49,6 +52,7 @@ __all__ = [
     "Format",
     "ImageSource",
     "Inline",
+    "InternalError",
     "LinkTarget",
     "List",
     "ListItem",

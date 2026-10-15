@@ -3,7 +3,8 @@
 //! reading.
 
 use crate::error::ConvertError;
-use crate::package::limits;
+use crate::limits::{self, Limit};
+use crate::package::archive::read_capped;
 use std::io::Read;
 
 /// Little-endian `u16` at `off`; `None` when out of bounds.
@@ -28,31 +29,75 @@ pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<Vec<u8>, ConvertError> {
-    let stream =
-        ole.open_stream(name).map_err(|_| ConvertError::MissingPart { part: name.to_string() })?;
-    let mut bytes = Vec::new();
-    let read = stream.take(limits::MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes).map_err(|e| {
-        ConvertError::Malformed {
-            part: Some(name.to_string()),
-            detail: format!("unreadable stream: {e}"),
-        }
-    })? as u64;
-    if read > limits::MAX_ENTRY_BYTES {
-        return Err(ConvertError::ResourceLimit {
-            limit: "max_entry_bytes",
-            detail: format!("{name} stream exceeds the read cap"),
-        });
+    let stream = ole.open_stream(name).map_err(|_| ConvertError::missing_part(name))?;
+    let declared = stream.len();
+    let bytes = read_capped(stream, declared, limits::MAX_ENTRY_BYTES, name, "unreadable stream")?;
+    if bytes.len() as u64 > limits::MAX_ENTRY_BYTES {
+        return Err(ConvertError::limit(Limit::EntryBytes, limits::MAX_ENTRY_BYTES));
     }
     Ok(bytes)
+}
+
+/// Read a stream the conversion can do without: absent or unreadable is
+/// `None`, and only a fatal error propagates.
+pub(crate) fn optional_ole_stream<R: Read + std::io::Seek>(
+    ole: &mut cfb::CompoundFile<R>,
+    name: &str,
+) -> Result<Option<Vec<u8>>, ConvertError> {
+    unless_fatal(read_ole_stream(ole, name))
+}
+
+fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<Option<Vec<u8>>, ConvertError> {
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.is_fatal() => Err(e),
+        Err(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
 
     #[test]
     fn integer_reads_reject_overflowing_offsets() {
         assert_eq!(get_u16(&[1, 2, 3, 4], usize::MAX), None);
         assert_eq!(get_u32(&[1, 2, 3, 4], usize::MAX), None);
+    }
+
+    fn one_stream_ole(name: &str, bytes: &[u8]) -> cfb::CompoundFile<Cursor<Vec<u8>>> {
+        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        ole.create_stream(name).unwrap().write_all(bytes).unwrap();
+        ole
+    }
+
+    #[test]
+    fn a_stream_read_reserves_its_declared_size() {
+        let mut ole = one_stream_ole("Data", &[7u8; 1000]);
+        assert_eq!(read_ole_stream(&mut ole, "Data").unwrap().capacity(), 1000);
+    }
+
+    #[test]
+    fn an_optional_stream_is_none_when_absent() {
+        let mut ole = one_stream_ole("Data", b"abc");
+        assert_eq!(optional_ole_stream(&mut ole, "Data").unwrap().as_deref(), Some(&b"abc"[..]));
+        assert_eq!(optional_ole_stream(&mut ole, "Pictures").unwrap(), None);
+    }
+
+    #[test]
+    fn optional_streams_propagate_only_fatal_errors() {
+        for fatal in [
+            ConvertError::limit(Limit::Allocation, 64),
+            ConvertError::Cancelled,
+            ConvertError::Internal,
+        ] {
+            assert!(unless_fatal(Err(fatal)).is_err());
+        }
+        for skipped in
+            [ConvertError::missing_part("Data"), ConvertError::malformed_part("Data", "corrupt")]
+        {
+            assert!(matches!(unless_fatal(Err(skipped)), Ok(None)));
+        }
     }
 }

@@ -7,6 +7,7 @@ pub type AnchorId = String;
 
 /// Where a link points.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinkTarget {
     /// Absolute URL with a scheme.
     External(String),
@@ -29,6 +30,7 @@ impl LinkTarget {
 
 /// Where an image's bytes live.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ImageSource {
     /// Absolute URL with a scheme.
     External(String),

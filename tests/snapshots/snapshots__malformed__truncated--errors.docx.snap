@@ -2,4 +2,4 @@
 source: tests/snapshots.rs
 expression: output
 ---
-ERROR: malformed document: not a readable zip archive: invalid Zip archive: Could not find EOCD
+ERROR: malformed document: not a readable zip archive
