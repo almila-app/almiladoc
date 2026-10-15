@@ -1,7 +1,7 @@
 //! `StyleTextPropAtom` and `TxMasterStyleAtom` parsing: paragraph and
 //! character formatting runs keyed by text range, per MS-PPT's
 //! TextPFException / TextCFException layouts. Parsing is defensive - a
-//! malformed exception aborts styling for that atom (logged), never the text.
+//! malformed exception aborts styling for that atom, never the text.
 
 use crate::shared::binary::{get_u16, get_u32};
 
@@ -36,49 +36,46 @@ pub struct StyleRuns {
     pub chars: Vec<CharProps>,
 }
 
-/// Parse a `StyleTextPropAtom` body for text of `text_len` characters.
-pub fn parse_style_text(body: &[u8], text_len: usize) -> StyleRuns {
+/// Parse a `StyleTextPropAtom` body for text of `text_len` UTF-16 units, and
+/// whether its runs cover the text and every one parsed.
+pub fn parse_style_text(body: &[u8], text_len: usize) -> (StyleRuns, bool) {
     let mut runs = StyleRuns::default();
     let mut pos = 0usize;
     // Paragraph runs cover text_len + 1 (the implicit final paragraph mark).
     let mut covered = 0usize;
     while covered <= text_len {
-        let Some(count) = get_u32(body, pos).map(|v| v as usize) else {
-            break;
+        let (Some(count), Some(depth)) = (get_u32(body, pos), get_u16(body, pos + 4)) else {
+            return (runs, false);
         };
-        let Some(depth) = get_u16(body, pos + 4) else {
-            break;
-        };
+        let count = count as usize;
         pos += 6;
         let Some((pf, next)) = parse_pf_exception(body, pos) else {
-            log::debug!("unparseable paragraph style run; keeping styling parsed so far");
-            return runs;
+            return (runs, false);
         };
         pos = next;
         runs.paragraphs.push(ParaProps { count, depth, bullet: pf });
         covered += count;
         if count == 0 {
-            break;
+            return (runs, false);
         }
     }
     let mut covered = 0usize;
     while covered <= text_len {
         let Some(count) = get_u32(body, pos).map(|v| v as usize) else {
-            break;
+            return (runs, false);
         };
         pos += 4;
         let Some((cf, next)) = parse_cf_exception(body, pos) else {
-            log::debug!("unparseable character style run; dropping remaining styling");
-            break;
+            return (runs, false);
         };
         pos = next;
         runs.chars.push(CharProps { count, bold: cf.bold, italic: cf.italic });
         covered += count;
         if count == 0 {
-            break;
+            return (runs, false);
         }
     }
-    runs
+    (runs, true)
 }
 
 /// TextPFException: mask + fields in mask-bit order. Returns the bullet
@@ -203,11 +200,11 @@ fn parse_cf_exception(body: &[u8], mut pos: usize) -> Option<(CfStyle, usize)> {
     Some((CfStyle { bold, italic }, pos))
 }
 
-/// A `TxMasterStyleAtom`: per-indent-level tri-state defaults
-/// (index = depth).
-pub fn parse_master_style(body: &[u8], instance: u16) -> Vec<MasterLevel> {
+/// A `TxMasterStyleAtom`'s per-indent-level tri-state defaults (index =
+/// depth), and whether every level it declares parsed.
+pub fn parse_master_style(body: &[u8], instance: u16) -> (Vec<MasterLevel>, bool) {
     let Some(levels) = get_u16(body, 0).map(|v| v as usize) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let mut pos = 2usize;
     let mut out = Vec::new();
@@ -218,14 +215,14 @@ pub fn parse_master_style(body: &[u8], instance: u16) -> Vec<MasterLevel> {
             pos += 2;
         }
         let Some((bullet, next)) = parse_pf_exception(body, pos) else {
-            break;
+            return (out, false);
         };
         pos = next;
         let Some((cf, next)) = parse_cf_exception(body, pos) else {
-            break;
+            return (out, false);
         };
         pos = next;
         out.push(MasterLevel { bullet, bold: cf.bold, italic: cf.italic });
     }
-    out
+    (out, true)
 }

@@ -25,7 +25,7 @@ use crate::shared::fields::{FieldFrame, field_result, hyperlink_target};
 use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 use crate::shared::list::MarkerKind;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
-use crate::shared::officeart::{record_at, records};
+use crate::shared::officeart::{self, record_at, records};
 use lists::{LEVELS, ListDef, Lists};
 use sprm::{PapDelta, Tap, apply_chpx, apply_pap_sprms, chpx_istd};
 use std::collections::{HashMap, HashSet};
@@ -321,12 +321,10 @@ fn shape_kinds(parse_ctx: &ParseCtx, run: &[u8]) -> Result<HashMap<u32, ShapeKin
 /// `kind` updated by an OfficeArt property table of `count` entries: a
 /// `pib` makes a picture, an `lTxid` a text box.
 fn shape_kind(kind: ShapeKind, count: u16, props: &[u8]) -> ShapeKind {
-    (0..usize::from(count)).filter_map(|i| get_u16(props, i * 6)).fold(kind, |kind, id| {
-        match (id & 0x3FFF, kind) {
-            (0x0104, _) => ShapeKind::Picture,
-            (0x0080, ShapeKind::Graphic) => ShapeKind::TextBox,
-            _ => kind,
-        }
+    officeart::properties(count, props).fold(kind, |kind, (id, _)| match (id, kind) {
+        (0x0104, _) => ShapeKind::Picture,
+        (0x0080, ShapeKind::Graphic) => ShapeKind::TextBox,
+        _ => kind,
     })
 }
 
@@ -1280,7 +1278,7 @@ impl Assembler<'_> {
         );
         let max_bytes = self.parse_ctx.limits().max_entry_bytes;
         let blip = match picf {
-            Some(art) => crate::shared::officeart::first_blip(art, max_bytes)?,
+            Some(art) => officeart::first_blip(art, max_bytes)?,
             None => None,
         };
         let Some(blip) = blip else {

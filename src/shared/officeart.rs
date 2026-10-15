@@ -5,6 +5,7 @@
 //! geometry is out of scope.
 
 use crate::limits::{Limit, LimitExceeded};
+use crate::shared::binary::{get_u16, get_u32};
 use std::borrow::Cow;
 use std::io::Read;
 
@@ -28,6 +29,15 @@ pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = (u16, u16, &[u8])> {
         let (ver_inst, rec_type, body) = record_at(data, pos)?;
         pos += 8 + body.len();
         Some((ver_inst, rec_type, body))
+    })
+}
+
+/// The `(property id, value)` pairs of an `OfficeArt` property table (`OPT` or
+/// tertiary `OPT`) of `count` entries, up to the first that does not fit.
+pub(crate) fn properties(count: u16, table: &[u8]) -> impl Iterator<Item = (u16, u32)> + '_ {
+    (0..usize::from(count)).map_while(|i| {
+        let at = i.checked_mul(6)?;
+        Some((get_u16(table, at)? & 0x3FFF, get_u32(table, at.checked_add(2)?)?))
     })
 }
 
@@ -181,4 +191,16 @@ pub(crate) fn deflated_metafile_blip(inflated: usize) -> Vec<u8> {
     record.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
     record.extend_from_slice(&body);
     record
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_property_table_yields_only_its_declared_entries() {
+        let entry = |id: u16, value: u32| [&id.to_le_bytes()[..], &value.to_le_bytes()].concat();
+        let table = [entry(0x4104, 5), entry(0x0186, 1)].concat();
+        assert_eq!(properties(1, &table).collect::<Vec<_>>(), [(0x0104, 5)]);
+    }
 }
