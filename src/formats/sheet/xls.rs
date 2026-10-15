@@ -7,18 +7,21 @@
 
 use super::controls::Checkbox;
 use super::xlsx::{
-    CellFormat, SheetContent, build_table, format_as_text, render_number, resolve_format,
+    CellFormat, CellXfs, LinkTarget, SheetContent, SheetLink, build_table, format_as_text,
+    render_number, resolve_format,
 };
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
-use crate::shared::binary::{get_u16, get_u32, read_ole_stream, utf16le_units};
+use crate::shared::binary::{decode_utf16, get_u16, get_u32, read_ole_stream, utf16le_units};
 use crate::shared::officeart;
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::rc::Rc;
 
 // Record types ([MS-XLS] 2.3.2), BIFF5-BIFF8 numbering.
 const BOF: u16 = 0x0809;
@@ -46,6 +49,11 @@ const STRING: u16 = 0x0207;
 const MSODRAWING: u16 = 0x00EC;
 const OBJ: u16 = 0x005D;
 const TXO: u16 = 0x01B6;
+const NOTE: u16 = 0x001C;
+const HEADER: u16 = 0x0014;
+const FOOTER: u16 = 0x0015;
+const HEADER_FOOTER: u16 = 0x089C;
+const HLINK: u16 = 0x01B8;
 
 /// BOF `dt` value for a worksheet (or dialog sheet) substream.
 const WORKSHEET_SUBSTREAM: u16 = 0x0010;
@@ -57,30 +65,44 @@ pub(super) fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, Conv
     let mut ole = cfb::CompoundFile::open(Cursor::new(bytes))
         .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
     let data = workbook_stream(parse_ctx, &mut ole)?;
-    let mut records = RecordCount { seen: 0, max: parse_ctx.limits().max_records };
+    let mut records = RecordCount::new(parse_ctx);
     let globals = read_globals(&data, &mut records)?;
 
-    let visible: Vec<&BoundSheet> = globals.sheets.iter().filter(|s| s.visible).collect();
-    let multi_sheet = visible.len() > 1;
+    let shown = globals.sheets.iter().filter(|s| matches!(s, Listed::Shown(_))).count();
     let mut doc = Document::default();
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for sheet in &visible {
+    for (position, listed) in globals.sheets.iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(position);
+        let sheet = match listed {
+            Listed::Shown(sheet) => sheet,
+            Listed::Hidden => {
+                parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+                continue;
+            }
+            Listed::Unreadable => {
+                parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
+                continue;
+            }
+        };
         let Some(content) = read_sheet(&data, &globals, sheet.offset, &mut records)? else {
-            log::warn!("skipping unreadable sheet {:?}", sheet.name);
+            parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             failed += 1;
             continue;
         };
         let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
-        if multi_sheet {
+        if shown > 1 {
+            if sheet.name_replaced {
+                parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Body);
+            }
             doc.blocks.push(Block::heading(2, vec![Inline::plain(sheet.name.clone())]));
         }
         doc.blocks.push(Block::Table(table));
     }
-    if !visible.is_empty() && failed == visible.len() {
+    if shown > 0 && failed == shown {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
     }
     Ok(doc)
@@ -117,10 +139,20 @@ fn record_at(data: &[u8], pos: usize) -> Option<(u16, &[u8], usize)> {
 /// A record: type, payload, position after it.
 type Record<'a> = (u16, &'a [u8], usize);
 
-/// Records read from the workbook stream, against `max_records`.
-struct RecordCount {
+/// Records read from the workbook stream, against `max_records`, and the
+/// context they report to.
+struct RecordCount<'c> {
+    parse_ctx: &'c ParseCtx<'c>,
     seen: u64,
     max: u64,
+    /// Where the stream was found cut, so the cut reports once.
+    cut_at: Option<usize>,
+}
+
+impl<'c> RecordCount<'c> {
+    fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
+        RecordCount { parse_ctx, seen: 0, max: parse_ctx.limits().max_records, cut_at: None }
+    }
 }
 
 /// `record_at` charging the stream-wide record budget.
@@ -132,8 +164,8 @@ fn next_record<'a>(
     let Some(rec) = record_at(data, pos) else {
         // Trailing bytes too short to form a record: the stream was cut, so
         // whatever was read is partial rather than complete.
-        if pos < data.len() {
-            log::warn!("workbook stream ends mid-record at byte {pos}; output may be partial");
+        if pos < data.len() && records.cut_at.replace(pos) != Some(pos) {
+            records.parse_ctx.emit(DiagnosticCode::TruncatedRecords, Region::Body);
         }
         return Ok(None);
     };
@@ -246,7 +278,8 @@ impl<'a> SegReader<'a> {
 /// repeated and the encoding can switch between 8-bit compressed and 16-bit
 /// UTF-16, so it is re-read rather than carried over. Rich runs and
 /// phonetic data are skipped, matching the xlsx reader's handling of `rPh`.
-fn read_biff8_string(r: &mut SegReader, short: bool, rich: bool) -> Option<String> {
+/// The text comes with whether a unit did not decode.
+fn read_biff8_string(r: &mut SegReader, short: bool, rich: bool) -> Option<(String, bool)> {
     let cch = if short { r.u8()? as usize } else { r.u16()? as usize };
     let flags = r.u8()?;
     let mut wide = flags & 0x01 != 0;
@@ -276,16 +309,16 @@ fn read_biff8_string(r: &mut SegReader, short: bool, rich: bool) -> Option<Strin
     // A truncated trailer loses only the strings after this one; the reader
     // then runs dry and the caller stops.
     let _ = r.skip(runs * 4).and_then(|()| r.skip(ext));
-    Some(String::from_utf16_lossy(&units))
+    Some(decode_utf16(units))
 }
 
 /// A BIFF5/BIFF7 byte string (no flags byte), decoded per the workbook's
-/// CODEPAGE record.
+/// CODEPAGE record, with whether a byte did not decode.
 fn read_byte_string(
     r: &mut SegReader,
     short: bool,
     encoding: &'static encoding_rs::Encoding,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let cch = if short { r.u8()? as usize } else { r.u16()? as usize };
     let mut bytes = Vec::with_capacity(cch);
     let mut remaining = cch;
@@ -298,8 +331,8 @@ fn read_byte_string(
         bytes.extend_from_slice(r.bytes(take)?);
         remaining -= take;
     }
-    let (text, _) = encoding.decode_without_bom_handling(&bytes);
-    Some(text.into_owned())
+    let (text, replaced) = encoding.decode_without_bom_handling(&bytes);
+    Some((text.into_owned(), replaced))
 }
 
 /// ANSI code page from the CODEPAGE record, for BIFF5 byte strings (BIFF8
@@ -324,29 +357,40 @@ fn codepage_encoding(cp: u16) -> &'static encoding_rs::Encoding {
     }
 }
 
+/// A sheet the workbook's directory lists, in source order.
+enum Listed {
+    Shown(BoundSheet),
+    Hidden,
+    /// A record too short for its offset, state or name, or whose name does
+    /// not read.
+    Unreadable,
+}
+
 struct BoundSheet {
     name: String,
+    /// The name needed a replacement character.
+    name_replaced: bool,
     /// Absolute stream offset of the sheet substream's BOF record.
     offset: usize,
-    visible: bool,
 }
 
 struct Globals {
     biff8: bool,
     date1904: bool,
     encoding: &'static encoding_rs::Encoding,
-    sst: Vec<String>,
+    /// Each shared string with whether it needed a replacement character.
+    sst: Vec<(String, bool)>,
     /// The XF table in record order; a cell's ixfe indexes it directly.
-    xfs: Vec<CellFormat>,
-    sheets: Vec<BoundSheet>,
+    xfs: CellXfs,
+    sheets: Vec<Listed>,
 }
 
 impl Globals {
-    fn format(&self, ixfe: u16) -> &CellFormat {
-        self.xfs.get(usize::from(ixfe)).unwrap_or(&CellFormat::General)
+    fn format(&self, ixfe: u16) -> CellFormat {
+        self.xfs.get(usize::from(ixfe))
     }
 
-    fn read_string(&self, r: &mut SegReader, short: bool) -> Option<String> {
+    fn read_string(&self, r: &mut SegReader, short: bool) -> Option<(String, bool)> {
         if self.biff8 {
             read_biff8_string(r, short, false)
         } else {
@@ -369,10 +413,10 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
         date1904: false,
         encoding: encoding_rs::WINDOWS_1252,
         sst: Vec::new(),
-        xfs: Vec::new(),
+        xfs: CellXfs::new(Vec::new()),
         sheets: Vec::new(),
     };
-    let mut formats: HashMap<u32, String> = HashMap::new();
+    let mut formats: HashMap<u32, (String, bool)> = HashMap::new();
     let mut xf_ifmts: Vec<u16> = Vec::new();
     let mut depth = 1usize;
     while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
@@ -427,36 +471,47 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
     // Resolved after the pass: FORMAT records are not ordered relative to
     // the XFs that reference them.
     let custom: HashMap<u32, &str> =
-        formats.iter().map(|(&id, code)| (id, code.as_str())).collect();
+        formats.iter().map(|(&id, (code, _))| (id, code.as_str())).collect();
     let mut cache: HashMap<u16, CellFormat> = HashMap::new();
-    globals.xfs = xf_ifmts
-        .iter()
-        .map(|&ifmt| {
-            cache.entry(ifmt).or_insert_with(|| resolve_format(u32::from(ifmt), &custom)).clone()
-        })
-        .collect();
+    globals.xfs = CellXfs::new(
+        xf_ifmts
+            .iter()
+            .map(|&ifmt| {
+                let id = u32::from(ifmt);
+                let format = cache.entry(ifmt).or_insert_with(|| resolve_format(id, &custom));
+                (format.clone(), formats.get(&id).is_some_and(|&(_, replaced)| replaced))
+            })
+            .collect(),
+    );
     Ok(globals)
 }
 
 /// BOUNDSHEET: substream offset, hidden state, sheet type, name. Chart and
 /// macro sheets stay listed (their substreams fail the worksheet check and
 /// count as unreadable, matching the xlsx reader's treatment of their
-/// parts); VBA modules are not sheets in any container and are dropped.
-fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<BoundSheet> {
-    let offset = get_u32(body, 0)? as usize;
-    let state = body.get(4)? & 0x03;
-    if *body.get(5)? == 0x06 {
+/// parts); VBA modules are not sheets in any container and are dropped
+/// (`None`). A hidden sheet is hidden whatever else its record holds.
+fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<Listed> {
+    if body.get(5) == Some(&0x06) {
         return None;
     }
-    let mut r = SegReader::new(vec![body.get(6..)?]);
-    let name = globals.read_string(&mut r, true)?;
-    Some(BoundSheet { name: clean_text(&name), offset, visible: state == 0 })
+    let read = || {
+        if body.get(4)? & 0x03 != 0 {
+            return Some(Listed::Hidden);
+        }
+        let offset = get_u32(body, 0)? as usize;
+        let mut r = SegReader::new(vec![body.get(6..)?]);
+        let (name, name_replaced) = globals.read_string(&mut r, true)?;
+        Some(Listed::Shown(BoundSheet { name: clean_text(&name), name_replaced, offset }))
+    };
+    Some(read().unwrap_or(Listed::Unreadable))
 }
 
 /// The shared string table (trap 1: strings routinely split across
 /// CONTINUE records, mid-character-data). A malformed tail keeps the
-/// entries read so far; LABELSST lookups past them log and stay empty.
-fn read_sst(segs: &[&[u8]]) -> Vec<String> {
+/// entries read so far; LABELSST lookups past them stay empty and report
+/// the cell as unreadable.
+fn read_sst(segs: &[&[u8]]) -> Vec<(String, bool)> {
     let mut r = SegReader::new(segs.to_vec());
     let unique = match (r.u32(), r.u32()) {
         (Some(_total), Some(unique)) => unique as usize,
@@ -464,13 +519,10 @@ fn read_sst(segs: &[&[u8]]) -> Vec<String> {
     };
     let mut out = Vec::new();
     while out.len() < unique {
-        let Some(text) = read_biff8_string(&mut r, false, true) else {
-            if out.len() < unique {
-                log::debug!("shared string table truncated at entry {}", out.len());
-            }
+        let Some((text, replaced)) = read_biff8_string(&mut r, false, true) else {
             break;
         };
-        out.push(clean_text(&text));
+        out.push((clean_text(&text), replaced));
     }
     out
 }
@@ -509,9 +561,10 @@ fn read_sheet(
     // for the STRING record that carries the text.
     let mut pending: Option<(u32, u32, u16)> = None;
     // A drawing object's shape arrives in MSODRAWING ahead of its OBJ, and
-    // a checkbox's caption in the TXO after it.
+    // its text in the TXO after it.
     let mut shape: Option<Shape> = None;
-    let mut last_checkbox: Option<(u32, u32)> = None;
+    let mut text_of: Option<TextOf> = None;
+    let parse_ctx = records.parse_ctx;
     while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
         pos = next;
         match rec_type {
@@ -564,40 +617,25 @@ fn read_sheet(
                 if let Some((row, col, ixfe)) = cell_ref(body)
                     && let Some(isst) = get_u32(body, 6)
                 {
-                    match globals.sst.get(isst as usize) {
-                        Some(text) => {
-                            put(&mut out, row, col, format_as_text(globals.format(ixfe), text));
-                        }
-                        None => log::debug!("shared string index {isst} out of range"),
-                    }
+                    let text = globals.sst.get(isst as usize).cloned();
+                    put_string(&mut out, row, col, globals, ixfe, text);
                 }
             }
             LABEL | RSTRING => {
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
-                if let Some((row, col, ixfe)) = cell_ref(body)
-                    && let Some(mut r) = string_reader(&segs, 6)
-                    && let Some(text) = globals.read_string(&mut r, false)
-                {
+                if let Some((row, col, ixfe)) = cell_ref(body) {
                     // RSTRING's trailing rich runs are formatting, not text.
-                    put(
-                        &mut out,
-                        row,
-                        col,
-                        format_as_text(globals.format(ixfe), &clean_text(&text)),
-                    );
+                    let text = string_reader(&segs, 6)
+                        .and_then(|mut r| globals.read_string(&mut r, false));
+                    put_string(&mut out, row, col, globals, ixfe, text);
                 }
             }
             NUMBER => {
                 if let Some((row, col, ixfe)) = cell_ref(body)
                     && let Some(n) = get_f64(body, 6)
                 {
-                    put(
-                        &mut out,
-                        row,
-                        col,
-                        render_number(globals.format(ixfe), n, globals.date1904).0,
-                    );
+                    put_number(&mut out, row, col, globals, ixfe, n);
                 }
             }
             RK => {
@@ -605,12 +643,7 @@ fn read_sheet(
                     && let Some(rk) = get_u32(body, 6)
                 {
                     let n = rk_number(rk);
-                    put(
-                        &mut out,
-                        row,
-                        col,
-                        render_number(globals.format(ixfe), n, globals.date1904).0,
-                    );
+                    put_number(&mut out, row, col, globals, ixfe, n);
                 }
             }
             MULRK => {
@@ -627,9 +660,7 @@ fn read_sheet(
                         if col >= MAX_COLS {
                             break;
                         }
-                        let n = rk_number(rk);
-                        let text = render_number(globals.format(ixfe), n, globals.date1904).0;
-                        put(&mut out, u32::from(row), col, text);
+                        put_number(&mut out, u32::from(row), col, globals, ixfe, rk_number(rk));
                     }
                 }
             }
@@ -643,8 +674,9 @@ fn read_sheet(
                         (1, code) => error_literal(code),
                         _ => None,
                     };
-                    if let Some(text) = text {
-                        put(&mut out, row, col, text.to_string());
+                    match text {
+                        Some(text) => put(&mut out, row, col, text.to_string()),
+                        None => lose(&mut out, row, col, DiagnosticCode::CellValueUnreadable),
                     }
                 }
             }
@@ -659,17 +691,17 @@ fn read_sheet(
                                 let text = if value[2] == 0 { "FALSE" } else { "TRUE" };
                                 put(&mut out, row, col, text.to_string());
                             }
-                            0x02 => {
-                                if let Some(text) = error_literal(value[2]) {
-                                    put(&mut out, row, col, text.to_string());
+                            0x02 => match error_literal(value[2]) {
+                                Some(text) => put(&mut out, row, col, text.to_string()),
+                                None => {
+                                    lose(&mut out, row, col, DiagnosticCode::CellValueUnreadable)
                                 }
-                            }
+                            },
                             // 0x03 is a blank string result.
                             _ => {}
                         }
                     } else if let Some(n) = get_f64(body, 6) {
-                        let text = render_number(globals.format(ixfe), n, globals.date1904).0;
-                        put(&mut out, row, col, text);
+                        put_number(&mut out, row, col, globals, ixfe, n);
                     }
                 }
             }
@@ -677,48 +709,123 @@ fn read_sheet(
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
                 shape = if segs.len() == 1 { last_shape(body) } else { last_shape(&segs.concat()) };
-                last_checkbox = None;
+                if !opens_text_box(body) {
+                    text_of = None;
+                }
             }
             OBJ if globals.biff8 => {
-                last_checkbox = None;
-                if let Some(checked) = obj_checkbox(body)
-                    && let Some(Shape { anchor: at, hidden: false }) = shape.take()
-                    && at.1 < MAX_COLS
-                {
-                    let caption = String::new();
-                    out.checkboxes.entry(at).or_default().push(Checkbox { checked, caption });
-                    last_checkbox = Some(at);
+                text_of = None;
+                let shape = shape.take();
+                let hidden = shape.as_ref().is_some_and(|s| s.hidden);
+                match obj_kind(body) {
+                    Some(Obj::Checkbox(_) | Obj::Control) if hidden => {
+                        parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body)
+                    }
+                    Some(Obj::Checkbox(Some(checked))) => match shape {
+                        Some(Shape { anchor: at, .. }) if at.1 < MAX_COLS => {
+                            let caption = String::new();
+                            out.checkboxes
+                                .entry(at)
+                                .or_default()
+                                .push(Checkbox { checked, caption });
+                            text_of = Some(TextOf::Checkbox(at));
+                        }
+                        _ => parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body),
+                    },
+                    Some(Obj::Checkbox(None)) => match shape {
+                        Some(Shape { anchor: (row, col), .. }) if col < MAX_COLS => {
+                            lose(&mut out, row, col, DiagnosticCode::FormControlUnread)
+                        }
+                        _ => parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body),
+                    },
+                    Some(Obj::Control) => {
+                        parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body)
+                    }
+                    Some(Obj::Picture) if !hidden => {
+                        parse_ctx.emit(DiagnosticCode::ImageUnplaced, Region::Body)
+                    }
+                    Some(Obj::Chart) if !hidden => {
+                        parse_ctx.emit(DiagnosticCode::GraphicUnread, Region::Body)
+                    }
+                    Some(Obj::Shape) if !hidden => text_of = Some(TextOf::Shape),
+                    _ => {}
                 }
             }
             TXO => {
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
-                if let Some(at) = last_checkbox.take()
-                    && let Some(caption) = txo_text(&segs)
-                    && let Some(b) = out.checkboxes.get_mut(&at).and_then(|v| v.last_mut())
-                {
-                    b.caption = clean_text(&caption);
+                match text_of.take() {
+                    Some(TextOf::Checkbox(at)) => {
+                        if let Some((caption, replaced)) = txo_text(&segs)
+                            && let Some(b) = out.checkboxes.get_mut(&at).and_then(|v| v.last_mut())
+                        {
+                            b.caption = clean_text(&caption);
+                            if replaced {
+                                lose(&mut out, at.0, at.1, DiagnosticCode::InvalidEncoding);
+                            }
+                        }
+                    }
+                    Some(TextOf::Shape)
+                        if txo_text(&segs).is_none_or(|(text, _)| !text.trim().is_empty()) =>
+                    {
+                        parse_ctx.emit(DiagnosticCode::GraphicUnread, Region::Body);
+                    }
+                    _ => {}
                 }
             }
             STRING => {
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
-                if let Some((row, col, ixfe)) = pending.take()
-                    && let Some(mut r) = string_reader(&segs, 0)
-                    && let Some(text) = globals.read_string(&mut r, false)
-                {
-                    put(
-                        &mut out,
-                        row,
-                        col,
-                        format_as_text(globals.format(ixfe), &clean_text(&text)),
-                    );
+                if let Some((row, col, ixfe)) = pending.take() {
+                    let text = string_reader(&segs, 0)
+                        .and_then(|mut r| globals.read_string(&mut r, false));
+                    put_string(&mut out, row, col, globals, ixfe, text);
                 }
             }
+            NOTE => parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
+            HEADER | FOOTER => {
+                let chars = if globals.biff8 {
+                    get_u16(body, 0)
+                } else {
+                    body.first().map(|&n| u16::from(n))
+                };
+                if chars.is_some_and(|n| n > 0) {
+                    omit_header_footer(parse_ctx, rec_type == HEADER);
+                }
+            }
+            HEADER_FOOTER => {
+                // cchHeaderEven, cchFooterEven, cchHeaderFirst, cchFooterFirst
+                for (at, header) in [(30, true), (32, false), (34, true), (36, false)] {
+                    if get_u16(body, at).is_some_and(|n| n > 0) {
+                        omit_header_footer(parse_ctx, header);
+                    }
+                }
+            }
+            HLINK => match hlink(body) {
+                Some(Some(link)) => out.links.push(link),
+                Some(None) => {}
+                None => parse_ctx.emit(DiagnosticCode::LinkTargetUnread, Region::Body),
+            },
             _ => {}
         }
     }
     Ok(Some(out))
+}
+
+/// The drawing object a TXO's text belongs to.
+enum TextOf {
+    /// A checkbox's caption, by the cell it is anchored in.
+    Checkbox((u32, u32)),
+    /// A shown shape's text, which the grid does not hold.
+    Shape,
+}
+
+/// Whether an MSODRAWING body opens with the client text box that carries
+/// the previous OBJ's text into its TXO ([MS-XLS] TxO), rather than a new
+/// shape.
+fn opens_text_box(body: &[u8]) -> bool {
+    const CLIENT_TEXTBOX: u16 = 0xF00D;
+    officeart::record_at(body, 0).is_some_and(|(_, rec_type, _)| rec_type == CLIENT_TEXTBOX)
 }
 
 /// What an OBJ needs from its shape: the cell the client anchor starts in,
@@ -774,38 +881,162 @@ fn last_shape(data: &[u8]) -> Option<Shape> {
     anchor.map(|anchor| Shape { anchor, hidden })
 }
 
-/// The checked state of an OBJ record when its FtCmo names a checkbox and
-/// its FtCblsData carries a definite state (2 is mixed, which has no token).
-fn obj_checkbox(body: &[u8]) -> Option<bool> {
+/// What an OBJ record draws, by its FtCmo object type.
+enum Obj {
+    /// A checkbox and its state, `None` for the mixed state, which has no
+    /// token.
+    Checkbox(Option<bool>),
+    /// Another form control: a button, option button, edit box, label,
+    /// spinner, scroll bar, list, group box or drop-down.
+    Control,
+    Picture,
+    Chart,
+    /// A text box or a drawn shape that can hold text: a rectangle, oval,
+    /// polygon or OfficeArt shape.
+    Shape,
+}
+
+/// The kind of an OBJ record's object; `None` for one this reader does not
+/// report, a drop-down the application draws for its own interface
+/// included. A subrecord running past the record ends the walk with what it
+/// read: FtLbsData, always last, holds a lower bound there ([MS-XLS]
+/// 2.5.149).
+fn obj_kind(body: &[u8]) -> Option<Obj> {
     const FT_END: u16 = 0x0000;
     const FT_CMO: u16 = 0x0015;
     const FT_CBLS_DATA: u16 = 0x0012;
-    const OT_CHECKBOX: u16 = 0x000B;
+    const FT_LBS_DATA: u16 = 0x0013;
     let mut off = 0usize;
-    let mut is_checkbox = false;
+    let mut ot = None;
     let mut state = None;
+    let mut interface = false;
     while let (Some(ft), Some(cb)) = (get_u16(body, off), get_u16(body, off + 2)) {
+        let start = off + 4;
         if ft == FT_END {
             break;
         }
-        let data = body.get(off + 4..off + 4 + usize::from(cb))?;
+        if ft == FT_LBS_DATA {
+            interface = cb != 0 && interface_dropdown(body.get(start..).unwrap_or_default());
+            break;
+        }
+        let Some(data) = body.get(start..start + usize::from(cb)) else {
+            break;
+        };
         match ft {
-            FT_CMO => is_checkbox = get_u16(data, 0) == Some(OT_CHECKBOX),
+            FT_CMO => ot = get_u16(data, 0),
             FT_CBLS_DATA => state = get_u16(data, 0),
             _ => {}
         }
-        off += 4 + usize::from(cb);
+        off = start + usize::from(cb);
     }
-    match (is_checkbox, state?) {
-        (true, 0) => Some(false),
-        (true, 1) => Some(true),
-        _ => None,
+    Some(match ot? {
+        0x000B => Obj::Checkbox(match state {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        }),
+        0x0012 | 0x0014 if interface => return None,
+        0x0007 | 0x000C | 0x000D | 0x000E | 0x0010 | 0x0011 | 0x0012 | 0x0013 | 0x0014 => {
+            Obj::Control
+        }
+        0x0008 => Obj::Picture,
+        0x0005 => Obj::Chart,
+        0x0002 | 0x0003 | 0x0006 | 0x0009 | 0x001E => Obj::Shape,
+        _ => return None,
+    })
+}
+
+/// Whether FtLbsData after its `ft` and `cbFContinued` names a behaviour
+/// class (`lct`, read when `fUseCB` is set) other than a regular sheet
+/// drop-down: an AutoFilter, PivotTable, AutoComplete, data validation or
+/// table total-row drop-down, which the application draws itself.
+fn interface_dropdown(lbs: &[u8]) -> bool {
+    let flags_at = get_u16(lbs, 0).map(|cb_fmla| 2 + usize::from(cb_fmla) + 4);
+    flags_at
+        .and_then(|at| get_u16(lbs, at))
+        .is_some_and(|flags| flags & 0x0001 != 0 && flags >> 8 != 0)
+}
+
+fn omit_header_footer(parse_ctx: &ParseCtx, header: bool) {
+    if header {
+        parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header);
+    } else {
+        parse_ctx.emit(DiagnosticCode::FooterOmitted, Region::Footer);
     }
 }
 
+/// An HLINK record's range with its external target: `Some(None)` for a
+/// link within the workbook, [`LinkTarget::Unknown`] for a moniker that
+/// does not read, and `None` for a record too short for its range or flags
+/// ([MS-XLS] 2.4.140, [MS-OSHARED] 2.3.7.1).
+fn hlink(body: &[u8]) -> Option<Option<SheetLink>> {
+    const HAS_MONIKER: u32 = 0x01;
+    let (r1, r2) = (u32::from(get_u16(body, 0)?), u32::from(get_u16(body, 2)?));
+    let (c1, c2) = (u32::from(get_u16(body, 4)?), u32::from(get_u16(body, 6)?));
+    let flags = get_u32(body, 28)?;
+    if flags & HAS_MONIKER == 0 {
+        return Some(None);
+    }
+    let target = body.get(32..).and_then(|data| hlink_target(data, flags));
+    let range = (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2));
+    let target = target.map_or(LinkTarget::Unknown, |url| LinkTarget::Url(Rc::from(url)));
+    Some(Some(SheetLink { range, target }))
+}
+
+/// The moniker's target after the optional display and frame names.
+fn hlink_target(data: &[u8], flags: u32) -> Option<String> {
+    const HAS_DISPLAY_NAME: u32 = 0x10;
+    const HAS_FRAME_NAME: u32 = 0x80;
+    const MONIKER_SAVED_AS_STR: u32 = 0x100;
+    let string_at = |pos: usize| -> Option<(&[u8], usize)> {
+        let len = usize::try_from(get_u32(data, pos)?).ok()?.checked_mul(2)?;
+        let start = pos.checked_add(4)?;
+        let end = start.checked_add(len)?;
+        Some((data.get(start..end)?, end))
+    };
+    let mut pos = 0usize;
+    for flag in [HAS_DISPLAY_NAME, HAS_FRAME_NAME] {
+        if flags & flag != 0 {
+            pos = string_at(pos)?.1;
+        }
+    }
+    if flags & MONIKER_SAVED_AS_STR != 0 {
+        return utf16_until_nul(string_at(pos)?.0);
+    }
+    moniker_target(data.get(pos..)?)
+}
+
+/// The target a URL or file moniker names ([MS-OSHARED] 2.3.7.6, 2.3.7.8).
+fn moniker_target(data: &[u8]) -> Option<String> {
+    const URL_MONIKER: [u8; 16] = [
+        0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9,
+        0x0B,
+    ];
+    const FILE_MONIKER: [u8; 16] = [0x03, 0x03, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+    let (clsid, rest) = data.split_at_checked(16)?;
+    if clsid == URL_MONIKER {
+        let len = usize::try_from(get_u32(rest, 0)?).ok()?;
+        utf16_until_nul(rest.get(4..)?.get(..len)?)
+    } else if clsid == FILE_MONIKER {
+        let len = usize::try_from(get_u32(rest, 2)?).ok()?;
+        let path = rest.get(6..)?.get(..len)?;
+        let path = path.split(|&b| b == 0).next()?;
+        Some(path.iter().map(|&b| char::from(b)).collect())
+    } else {
+        None
+    }
+}
+
+/// UTF-16LE text up to its terminating NUL; `None` when it does not decode.
+fn utf16_until_nul(bytes: &[u8]) -> Option<String> {
+    let units: Vec<u16> = utf16le_units(bytes).take_while(|&u| u != 0).collect();
+    String::from_utf16(&units).ok()
+}
+
 /// The text of a TXO record: `cchText` characters spread over the CONTINUE
-/// records after it, each opening with its own encoding flag byte.
-fn txo_text(segs: &[&[u8]]) -> Option<String> {
+/// records after it, each opening with its own encoding flag byte; with
+/// whether a unit did not decode.
+fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
     let mut remaining = usize::from(get_u16(segs.first()?, 10)?);
     let mut units: Vec<u16> = Vec::with_capacity(remaining);
     for seg in segs.iter().skip(1) {
@@ -823,13 +1054,59 @@ fn txo_text(segs: &[&[u8]]) -> Option<String> {
             remaining -= take;
         }
     }
-    Some(String::from_utf16_lossy(&units))
+    Some(decode_utf16(units))
 }
 
 /// Record only non-empty cell text, like the xlsx reader.
 fn put(out: &mut SheetContent, row: u32, col: u32, text: String) {
     if !text.is_empty() {
         out.cells.insert((row, col), text);
+    }
+}
+
+/// Record what a cell lost, reported once the grid shows the cell.
+fn lose(out: &mut SheetContent, row: u32, col: u32, code: DiagnosticCode) {
+    out.losses.push((row, col, code));
+}
+
+fn put_number(out: &mut SheetContent, row: u32, col: u32, globals: &Globals, ixfe: u16, n: f64) {
+    let rendered = render_number(&globals.format(ixfe), n, globals.date1904);
+    put_rendered(out, row, col, globals, ixfe, rendered);
+}
+
+fn put_string(
+    out: &mut SheetContent,
+    row: u32,
+    col: u32,
+    globals: &Globals,
+    ixfe: u16,
+    text: Option<(String, bool)>,
+) {
+    let rendered = match text {
+        Some((text, replaced)) => (
+            format_as_text(&globals.format(ixfe), &clean_text(&text)),
+            replaced.then_some(DiagnosticCode::InvalidEncoding),
+        ),
+        None => (String::new(), Some(DiagnosticCode::CellValueUnreadable)),
+    };
+    put_rendered(out, row, col, globals, ixfe, rendered);
+}
+
+/// Record a cell's text, what rendering it lost, and a replacement
+/// character its format code put in it.
+fn put_rendered(
+    out: &mut SheetContent,
+    row: u32,
+    col: u32,
+    globals: &Globals,
+    ixfe: u16,
+    (text, loss): (String, Option<DiagnosticCode>),
+) {
+    let format_replaced = loss != Some(DiagnosticCode::InvalidEncoding)
+        && globals.xfs.replaced_in(usize::from(ixfe), &text);
+    put(out, row, col, text);
+    for code in loss.into_iter().chain(format_replaced.then_some(DiagnosticCode::InvalidEncoding)) {
+        lose(out, row, col, code);
     }
 }
 
@@ -940,6 +1217,13 @@ mod tests {
         sst: Vec<Vec<u8>>,
         /// (name, hsState, substream records without BOF/EOF).
         sheets: Vec<(&'static str, u8, Vec<u8>)>,
+        /// The sheet whose name is written in UTF-16 with a lone surrogate
+        /// after it.
+        broken_name: Option<usize>,
+        /// Further globals records after the sheet directory, verbatim.
+        globals: Vec<u8>,
+        /// Bytes cut from the end of the stream.
+        cut: usize,
     }
 
     impl Wb {
@@ -965,14 +1249,20 @@ mod tests {
                 stream.extend(raw);
             }
             let mut patch_at = Vec::new();
-            for (name, state, _) in &self.sheets {
+            for (i, (name, state, _)) in self.sheets.iter().enumerate() {
                 let mut body = vec![0u8; 4];
                 body.push(*state);
                 body.push(0);
-                body.extend(short_ustr(name));
+                if self.broken_name == Some(i) {
+                    body.extend([name.len() as u8 + 1, 1]);
+                    body.extend(name.encode_utf16().chain([0xD800]).flat_map(u16::to_le_bytes));
+                } else {
+                    body.extend(short_ustr(name));
+                }
                 patch_at.push(stream.len() + 4);
                 stream.extend(rec(BOUNDSHEET, &body));
             }
+            stream.extend_from_slice(&self.globals);
             stream.extend(rec(EOF_REC, &[]));
             for (i, (_, _, records)) in self.sheets.iter().enumerate() {
                 let offset = (stream.len() as u32).to_le_bytes();
@@ -981,6 +1271,7 @@ mod tests {
                 stream.extend_from_slice(records);
                 stream.extend(rec(EOF_REC, &[]));
             }
+            stream.truncate(stream.len() - self.cut);
             ole_with("Workbook", &stream)
         }
     }
@@ -1282,6 +1573,11 @@ mod tests {
         out
     }
 
+    /// The MSODRAWING that carries an OBJ's text box into the TXO after it.
+    fn client_textbox() -> Vec<u8> {
+        rec(MSODRAWING, &[0, 0, 0x0D, 0xF0, 0, 0, 0, 0])
+    }
+
     /// Re-frame a record as its first `at` payload bytes plus a CONTINUE
     /// carrying the rest.
     fn split_at(record: &[u8], at: usize) -> Vec<u8> {
@@ -1297,6 +1593,7 @@ mod tests {
         let mut records = label(20, 0, 0, "14");
         records.extend(split_at(&msodrawing(20, 3, false), 12));
         records.extend(obj(0x0B, 1));
+        records.extend(client_textbox());
         records.extend(txo("Roof"));
         records.extend(msodrawing(20, 4, false));
         records.extend(obj(0x0B, 0));
@@ -1308,5 +1605,399 @@ mod tests {
         records.extend(obj(0x0B, 1));
         let doc = parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap();
         assert_eq!(texts(first_table(&doc)), vec![vec!["14", "", "", "[x] Roof", "[ ]"]]);
+    }
+
+    type Reported = (DiagnosticCode, Region, Option<u32>, u64);
+
+    fn diagnose(wb: &Wb) -> Vec<Reported> {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, &wb.build()).unwrap();
+        reported(parse_ctx)
+    }
+
+    fn reported(parse_ctx: ParseCtx) -> Vec<Reported> {
+        let unit = |d: &crate::diagnostics::Diagnostic| d.unit.map(std::num::NonZeroU32::get);
+        parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region, unit(&d), d.count)).collect()
+    }
+
+    fn in_unit(code: DiagnosticCode, unit: u32, count: u64) -> Reported {
+        let region = match code {
+            DiagnosticCode::HeaderOmitted => Region::Header,
+            DiagnosticCode::FooterOmitted => Region::Footer,
+            DiagnosticCode::CommentOmitted => Region::Comment,
+            _ => Region::Body,
+        };
+        (code, region, Some(unit), count)
+    }
+
+    #[test]
+    fn each_sheet_site_reports_its_loss_in_its_sheets_unit() {
+        let mut far = 0x00FF_FFFFu32.to_le_bytes().to_vec();
+        far.extend([0, 0]);
+        far.extend(short_ustr("Far"));
+        let hidden_cut_short = [0, 0, 0, 0, 1, 0, 5, 0, b'a'];
+        let shown_cut_short = [0, 0, 0, 0, 0, 0, 5, 0, b'a'];
+        let module = [0, 0, 0, 0, 0, 6, 1, 0, b'm'];
+        let wb = Wb {
+            xfs: vec![0],
+            sheets: vec![("A", 0, number(0, 0, 0, 1.0)), ("H", 1, number(0, 0, 0, 1.0))],
+            globals: [
+                rec(BOUNDSHEET, &[0, 0, 0]),
+                rec(BOUNDSHEET, &module),
+                rec(BOUNDSHEET, &far),
+                rec(BOUNDSHEET, &hidden_cut_short),
+                rec(BOUNDSHEET, &shown_cut_short),
+            ]
+            .concat(),
+            ..Wb::default()
+        };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::UnitUnreadable, 3, 1),
+                in_unit(DiagnosticCode::UnitUnreadable, 4, 1),
+                in_unit(DiagnosticCode::UnitUnreadable, 6, 1),
+                in_unit(DiagnosticCode::HiddenOmitted, 2, 1),
+                in_unit(DiagnosticCode::HiddenOmitted, 5, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shown_sheet_name_that_does_not_decode_reports_with_its_heading() {
+        let sheets = vec![("A", 0, number(0, 0, 0, 1.0)), ("B", 0, number(0, 0, 0, 1.0))];
+        let wb = Wb { xfs: vec![0], sheets, broken_name: Some(1), ..Wb::default() };
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::InvalidEncoding, 2, 1)]);
+        let alone = Wb { broken_name: Some(0), ..one_sheet(number(0, 0, 0, 1.0)) };
+        assert_eq!(diagnose(&alone), []);
+        let hidden = Wb {
+            xfs: vec![0],
+            sheets: vec![("A", 0, number(0, 0, 0, 1.0)), ("H", 1, number(0, 0, 0, 1.0))],
+            broken_name: Some(1),
+            ..Wb::default()
+        };
+        assert_eq!(diagnose(&hidden), [in_unit(DiagnosticCode::HiddenOmitted, 2, 1)]);
+    }
+
+    #[test]
+    fn a_cell_record_that_does_not_read_reports_it() {
+        let mut records = labelsst(0, 0, 0, 9);
+        records.extend(rec(BOOLERR, &[cell6(1, 0, 0), vec![0x99, 1]].concat()));
+        records.extend(formula(2, 0, 0, [2, 0, 0x99, 0, 0, 0, 0xFF, 0xFF]));
+        records.extend(rec(LABEL, &[cell6(3, 0, 0), vec![9, 0, 0, b'a']].concat()));
+        records.extend(rec(LABEL, &[cell6(4, 0, 0), vec![1, 0, 1, 0x00, 0xDC]].concat()));
+        records.extend(formula(5, 0, 0, [0, 0, 0, 0, 0, 0, 0xFF, 0xFF]));
+        records.extend(rec(STRING, &[9, 0, 0]));
+        records.extend(number(6, 0, 7, 1.0));
+        records.extend(labelsst(7, 0, 0, 1));
+        records.extend(labelsst(8, 0, 0, 0));
+        records.extend(label(9, 0, 0, "last"));
+        let mut sst = 3u32.to_le_bytes().to_vec();
+        sst.extend(3u32.to_le_bytes());
+        sst.extend(ustr("ok"));
+        sst.extend([1, 0, 1, 0x00, 0xD8]);
+        sst.extend([1, 0, 1, 0x00, 0xDC]);
+        let wb = Wb { sst: vec![rec(SST, &sst)], cut: 1, ..one_sheet(records) };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::CellValueUnreadable, 1, 5),
+                in_unit(DiagnosticCode::TruncatedRecords, 1, 1),
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 2),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hidden_cell_reports_only_that_it_is_hidden() {
+        let hidden_row = |row: u16| {
+            let mut body = vec![0u8; 16];
+            body[..2].copy_from_slice(&row.to_le_bytes());
+            body[12] = 0x20;
+            rec(ROW, &body)
+        };
+        let mut colinfo = vec![0u8; 12];
+        colinfo[..4].copy_from_slice(&[2, 0, 2, 0]);
+        colinfo[8] = 0x01;
+        let mut records = label(0, 0, 0, "shown");
+        records.extend(hidden_row(1));
+        records.extend(rec(COLINFO, &colinfo));
+        records.extend(labelsst(1, 0, 0, 9));
+        records.extend(number(1, 1, 7, 1.0));
+        records.extend(rec(LABEL, &[cell6(0, 2, 0), vec![1, 0, 1, 0x00, 0xDC]].concat()));
+        records.extend(rec(BOOLERR, &[cell6(3, 2, 0), vec![0x99, 1]].concat()));
+        records.extend(msodrawing(1, 3, false));
+        records.extend(obj(0x0B, 1));
+        let mut caption =
+            rec(TXO, &[vec![0u8; 10], 1u16.to_le_bytes().to_vec(), vec![0; 6]].concat());
+        caption.extend(rec(CONTINUE, &[1, 0x00, 0xD8]));
+        records.extend(caption);
+        records.extend(msodrawing(1, 4, false));
+        records.extend(obj(0x0B, 2));
+        records.extend(msodrawing(3, 2, false));
+        records.extend(obj(0x0B, 2));
+        assert_eq!(diagnose(&one_sheet(records)), [in_unit(DiagnosticCode::HiddenOmitted, 1, 2)]);
+    }
+
+    #[test]
+    fn a_biff5_string_that_does_not_decode_reports_in_its_cell() {
+        let mut stream = bof(0x0005, 0x0500);
+        stream.extend(rec(CODEPAGE, &1253u16.to_le_bytes()));
+        let mut boundsheet = vec![0u8; 6];
+        boundsheet.extend([1, b'S']);
+        let patch_at = stream.len() + 4;
+        stream.extend(rec(BOUNDSHEET, &boundsheet));
+        stream.extend(rec(EOF_REC, &[]));
+        let offset = (stream.len() as u32).to_le_bytes();
+        stream[patch_at..patch_at + 4].copy_from_slice(&offset);
+        stream.extend(bof(WORKSHEET_SUBSTREAM, 0x0500));
+        stream.extend(rec(LABEL, &[cell6(0, 0, 0), vec![2, 0, 0xAA, 0xAB]].concat()));
+        stream.extend(rec(EOF_REC, &[]));
+        let parse_ctx = ParseCtx::default();
+        let doc = parse(&parse_ctx, &ole_with("Book", &stream)).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["\u{FFFD}\u{AB}"]]);
+        assert_eq!(reported(parse_ctx), [in_unit(DiagnosticCode::InvalidEncoding, 1, 1)]);
+    }
+
+    #[test]
+    fn a_checkbox_caption_that_does_not_decode_reports_in_its_cell() {
+        let mut records = label(0, 0, 0, "x");
+        records.extend(msodrawing(0, 1, false));
+        records.extend(obj(0x0B, 1));
+        let mut caption =
+            rec(TXO, &[vec![0u8; 10], 2u16.to_le_bytes().to_vec(), vec![0; 6]].concat());
+        caption.extend(rec(CONTINUE, &[1, 0x00, 0xD8, b'a', 0]));
+        records.extend(caption);
+        let parse_ctx = ParseCtx::default();
+        let doc = parse(&parse_ctx, &one_sheet(records).build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["x", "[x] \u{FFFD}a"]]);
+        assert_eq!(reported(parse_ctx), [in_unit(DiagnosticCode::InvalidEncoding, 1, 1)]);
+    }
+
+    /// An OBJ record for a drop-down whose FtLbsData claims more bytes than
+    /// the record holds, as Excel and Apache POI write it, of behaviour class
+    /// `lct` (0 for a form control).
+    fn dropdown(lct: u8) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x0015u16.to_le_bytes());
+        body.extend_from_slice(&0x0012u16.to_le_bytes());
+        body.extend_from_slice(&0x0014u16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&[0u8; 14]);
+        body.extend_from_slice(&0x0013u16.to_le_bytes());
+        body.extend_from_slice(&0x1FEEu16.to_le_bytes());
+        body.extend_from_slice(&[0u8; 6]);
+        body.extend_from_slice(&[u8::from(lct != 0), lct]);
+        body.extend_from_slice(&[0u8; 2]);
+        body.extend_from_slice(&[0x02, 0, 8, 0, 20, 0, 0, 0, 0]);
+        rec(OBJ, &body)
+    }
+
+    #[test]
+    fn drawing_objects_notes_headers_and_links_are_reported() {
+        let mut records = label(0, 1, 0, "see here");
+        records.extend(label(1, 0, 0, "https://example.org/"));
+        for (hidden, ot, state) in [
+            (true, 0x0B, 1),
+            (false, 0x0B, 2),
+            (false, 0x0C, 0),
+            (true, 0x0C, 0),
+            (false, 0x08, 0),
+            (true, 0x08, 0),
+            (false, 0x05, 0),
+        ] {
+            records.extend(msodrawing(0, 3, hidden));
+            records.extend(obj(ot, state));
+        }
+        records.extend(obj(0x0B, 1));
+        records.extend(msodrawing(0, 4, false));
+        records.extend(dropdown(0));
+        records.extend(msodrawing(0, 5, false));
+        records.extend(dropdown(3));
+        records.extend(rec(NOTE, &[0u8; 12]));
+        records.extend(rec(HEADER, &ustr("&CTitle")));
+        records.extend(rec(FOOTER, &[]));
+        records.extend(hlink_record(0, 1, "https://example.org/paper"));
+        records.extend(hlink_record(1, 0, "https://example.org/"));
+        let mut internal = hlink_record(0, 2, "");
+        internal[4 + 28] = 0x08;
+        records.extend(internal);
+        records.extend(rec(HLINK, &[0u8; 20]));
+        assert_eq!(
+            diagnose(&one_sheet(records)),
+            [
+                in_unit(DiagnosticCode::ImageUnplaced, 1, 1),
+                in_unit(DiagnosticCode::GraphicUnread, 1, 1),
+                in_unit(DiagnosticCode::LinkTargetUnread, 1, 2),
+                in_unit(DiagnosticCode::FormControlUnread, 1, 4),
+                in_unit(DiagnosticCode::HeaderOmitted, 1, 1),
+                in_unit(DiagnosticCode::CommentOmitted, 1, 1),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 2),
+            ]
+        );
+    }
+
+    /// An HLINK record over one cell whose URL moniker names `url`.
+    fn hlink_record(row: u16, col: u16, url: &str) -> Vec<u8> {
+        hlink_over([row, row], [col, col], None, url)
+    }
+
+    /// An HLINK record over `rows` and `cols` as written, whose URL moniker
+    /// names `url`, after a display name when one is given.
+    fn hlink_over(rows: [u16; 2], cols: [u16; 2], display: Option<&str>, url: &str) -> Vec<u8> {
+        let utf16 = |s: &str| -> Vec<u8> {
+            let units: Vec<u8> = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+            [((units.len() / 2) as u32).to_le_bytes().to_vec(), units].concat()
+        };
+        let [r1, r2] = rows;
+        let [c1, c2] = cols;
+        let mut body: Vec<u8> = [r1, r2, c1, c2].iter().flat_map(|v| v.to_le_bytes()).collect();
+        body.extend([0u8; 16]);
+        body.extend(2u32.to_le_bytes());
+        body.extend(if display.is_some() { 0x17u32 } else { 0x03 }.to_le_bytes());
+        if let Some(name) = display {
+            body.extend(utf16(name));
+        }
+        body.extend([
+            0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B,
+            0xA9, 0x0B,
+        ]);
+        let units: Vec<u8> = url.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        body.extend((units.len() as u32).to_le_bytes());
+        body.extend(units);
+        rec(HLINK, &body)
+    }
+
+    #[test]
+    fn a_link_reads_its_target_past_its_display_name() {
+        let mut records = label(0, 1, 0, "www.example.org");
+        records.extend(label(1, 2, 0, "see here"));
+        let target = "http://www.example.org/";
+        records.extend(hlink_over([1, 0], [1, 1], Some("www.example.org"), target));
+        records.extend(hlink_over([2, 1], [3, 2], Some("see here"), target));
+        assert_eq!(
+            diagnose(&one_sheet(records)),
+            [in_unit(DiagnosticCode::LinkTargetUnread, 1, 1)]
+        );
+    }
+
+    #[test]
+    fn a_header_footer_record_reports_each_of_its_texts() {
+        let header_footer = |set: usize| {
+            let mut body = vec![0u8; 38];
+            body[28] = 0x0D;
+            for (i, at) in [30, 32, 34, 36].into_iter().enumerate().take(set) {
+                body[at] = 5 + i as u8;
+            }
+            rec(HEADER_FOOTER, &body)
+        };
+        let records: Vec<u8> = (0..=4).flat_map(header_footer).collect();
+        assert_eq!(
+            diagnose(&one_sheet(records)),
+            [
+                in_unit(DiagnosticCode::HeaderOmitted, 1, 6),
+                in_unit(DiagnosticCode::FooterOmitted, 1, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_reports_only_shown_text() {
+        let mut records = label(0, 0, 0, "x");
+        records.extend(msodrawing(0, 1, false));
+        records.extend(obj(0x02, 0));
+        records.extend(client_textbox());
+        records.extend(txo("Total"));
+        records.extend(msodrawing(0, 2, false));
+        records.extend(obj(0x06, 0));
+        records.extend(client_textbox());
+        records.extend(txo(""));
+        records.extend(msodrawing(0, 3, true));
+        records.extend(obj(0x03, 0));
+        records.extend(txo("hidden"));
+        records.extend(msodrawing(0, 4, false));
+        records.extend(obj(0x1E, 0));
+        records.extend(txo("  "));
+        for (col, ot) in [(5, 0x03), (6, 0x06), (7, 0x09), (8, 0x1E)] {
+            records.extend(msodrawing(0, col, false));
+            records.extend(obj(ot, 0));
+            records.extend(client_textbox());
+            records.extend(txo("Note"));
+        }
+        assert_eq!(diagnose(&one_sheet(records)), [in_unit(DiagnosticCode::GraphicUnread, 1, 5)]);
+    }
+
+    #[test]
+    fn a_format_code_that_does_not_decode_reports_where_it_shows() {
+        let code: Vec<u16> =
+            "0\" ".encode_utf16().chain([0xD800]).chain("\"".encode_utf16()).collect();
+        let mut format = 164u16.to_le_bytes().to_vec();
+        format.extend((code.len() as u16).to_le_bytes());
+        format.push(1);
+        format.extend(code.iter().flat_map(|u| u.to_le_bytes()));
+        let mut row = vec![0u8; 16];
+        row[..2].copy_from_slice(&1u16.to_le_bytes());
+        row[12] = 0x20;
+        let mut records = number(0, 0, 1, 2.0);
+        records.extend(number(0, 1, 0, 3.0));
+        records.extend(label(0, 2, 1, "text"));
+        records.extend(rec(LABEL, &[cell6(0, 3, 1), vec![1, 0, 1, 0x00, 0xDC]].concat()));
+        records.extend(rec(ROW, &row));
+        records.extend(number(1, 0, 1, 4.0));
+        let wb = Wb {
+            xfs: vec![0, 164],
+            globals: rec(FORMAT, &format),
+            sheets: vec![("S", 0, records)],
+            ..Wb::default()
+        };
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["2 \u{FFFD}", "3", "text", "\u{FFFD}"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 2),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_covers_its_whole_range() {
+        let mut records = label(0, 0, 0, "see here");
+        let mut link = hlink_record(0, 0, "https://example.org/paper");
+        link[4 + 2..4 + 4].copy_from_slice(&2u16.to_le_bytes());
+        link[4 + 6..4 + 8].copy_from_slice(&1u16.to_le_bytes());
+        records.extend(link);
+        let mut row = vec![0u8; 16];
+        row[12] = 0x20;
+        records.extend(rec(ROW, &row));
+        records.extend(label(1, 0, 0, "https://example.org/paper"));
+        assert_eq!(diagnose(&one_sheet(records)), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+    }
+
+    #[test]
+    fn a_file_moniker_names_its_path() {
+        let mut data = vec![0x03, 0x03, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+        data.extend(0u16.to_le_bytes());
+        data.extend(9u32.to_le_bytes());
+        data.extend(b"data.csv\0");
+        assert_eq!(moniker_target(&data).as_deref(), Some("data.csv"));
+        assert_eq!(moniker_target(&[0u8; 16]), None);
+    }
+
+    #[test]
+    fn a_string_says_whether_it_decoded() {
+        let bytes = [2u8, 0xAA, 0xAB];
+        let mut r = SegReader::new(vec![&bytes]);
+        let decoded = read_byte_string(&mut r, true, encoding_rs::WINDOWS_1253);
+        assert_eq!(decoded, Some(("\u{FFFD}\u{AB}".to_string(), true)));
+        let bytes = [2u8, b'o', b'k'];
+        let mut r = SegReader::new(vec![&bytes]);
+        let decoded = read_byte_string(&mut r, true, encoding_rs::WINDOWS_1253);
+        assert_eq!(decoded, Some(("ok".to_string(), false)));
+        let base = [vec![0u8; 10], 2u16.to_le_bytes().to_vec(), vec![0u8; 6]].concat();
+        let chars = [0x01, 0x00, 0xD8, 0x00, 0xDC];
+        assert_eq!(txo_text(&[&base, &chars]), Some(("\u{10000}".to_string(), false)));
     }
 }

@@ -128,9 +128,9 @@ pub(super) fn parse(
 
 /// What a worksheet's relationships carry beside its cells: form control
 /// checkboxes, the targets of its external hyperlinks, and the comments and
-/// the drawing its `drawing` element names, which no output holds and which
-/// are reported.
-fn read_sheet_parts(
+/// the drawing the sheet names, which no output holds and which are
+/// reported.
+pub(super) fn read_sheet_parts(
     parse_ctx: &ParseCtx,
     pkg: &mut Package,
     part: &str,
@@ -315,16 +315,17 @@ pub(super) enum CellFormat {
     Fallback(DiagnosticCode),
 }
 
-/// The ordered cell formats of a workbook, which a cell names by index.
+/// The ordered cell formats of a workbook, which a cell names by index,
+/// each with whether its format code needed a replacement character.
 pub(super) struct CellXfs {
-    xfs: Vec<CellFormat>,
+    xfs: Vec<(CellFormat, bool)>,
     /// The styles part did not read and reported that, so a cell naming an
     /// index it would have held reports nothing more.
     reported: bool,
 }
 
 impl CellXfs {
-    pub(super) fn new(xfs: Vec<CellFormat>) -> CellXfs {
+    pub(super) fn new(xfs: Vec<(CellFormat, bool)>) -> CellXfs {
         CellXfs { xfs, reported: false }
     }
 
@@ -338,10 +339,17 @@ impl CellXfs {
     /// formats is General.
     pub(super) fn get(&self, index: usize) -> CellFormat {
         match self.xfs.get(index) {
-            Some(format) => format.clone(),
+            Some((format, _)) => format.clone(),
             None if self.reported || (index == 0 && self.xfs.is_empty()) => CellFormat::General,
             None => CellFormat::Fallback(DiagnosticCode::NumberFormatFallback),
         }
+    }
+
+    /// Whether the format at `index` put a replacement character into the
+    /// cell text it rendered.
+    pub(super) fn replaced_in(&self, index: usize, text: &str) -> bool {
+        self.xfs.get(index).is_some_and(|&(_, replaced)| replaced)
+            && text.contains(char::REPLACEMENT_CHARACTER)
     }
 }
 
@@ -374,7 +382,8 @@ impl Styles {
                             .attr_unqualified("numFmtId")
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(0u32);
-                        cache.entry(id).or_insert_with(|| resolve_format(id, &custom)).clone()
+                        let format = cache.entry(id).or_insert_with(|| resolve_format(id, &custom));
+                        (format.clone(), false)
                     })
                     .collect()
             })

@@ -583,7 +583,7 @@ const CASES: &[Case] = &[
         Fixture("xlsb/handmade-sheet.xlsb"),
         Format::Excel,
         &[("xl/workbook.bin", Set(HIDDEN_SHEET_STATE, 0)), ("xl/worksheets/sheet1.bin", Corrupt)],
-        &[],
+        &[(UNIT, Body, Some(1), 1)],
     ),
     case(
         Fixture("xlsb/handmade-sheet.xlsb"),
@@ -595,7 +595,7 @@ const CASES: &[Case] = &[
         Fixture("xlsb/handmade-sheet.xlsb"),
         Format::Excel,
         &[("xl/sharedStrings.bin", Corrupt)],
-        &[],
+        &[(CELL, Body, Some(1), 2)],
     ),
 ];
 

@@ -1,24 +1,25 @@
 //! In-house binary SpreadsheetML reader (.xlsb): the same OPC package as
 //! xlsx with binary record streams (MS-XLSB) in place of XML parts. Cell
-//! values, number formats, visibility and merges are decoded here; grid
+//! values, number formats, visibility, merges, hyperlinks, print headers and
+//! footers and the drawing reference are decoded here; grid
 //! materialization, format resolution and date rendering are shared with
 //! the xlsx reader so both containers convert identically.
 
-use super::controls::read_vml_checkboxes;
 use super::xlsx::{
-    CellFormat, MAX_COLS, MAX_ROWS, SHARED_STRINGS_REL, SheetContent, Sibling, build_table,
-    format_as_text, render_number, resolve_format,
+    CellFormat, CellXfs, LinkTarget, MAX_COLS, MAX_ROWS, SHARED_STRINGS_REL, SheetContent,
+    SheetLink, Sibling, build_table, format_as_text, read_sheet_parts, render_number,
+    resolve_format,
 };
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
-use crate::diagnostics::Region;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
-use crate::package::archive::Role;
+use crate::package::archive::{Role, report};
 use crate::package::relationships::{read_rels, rel_type, rels_part_for};
 use crate::package::{Package, path};
-use crate::shared::binary::utf16le_units;
+use crate::shared::binary::{decode_utf16, utf16le_units};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
 
@@ -42,6 +43,9 @@ const BRT_CELL_RSTRING: u16 = 62;
 const BRT_WB_PROP: u16 = 153;
 const BRT_BUNDLE_SH: u16 = 156;
 const BRT_MERGE_CELL: u16 = 176;
+const BRT_BEGIN_HEADER_FOOTER: u16 = 479;
+const BRT_HLINK: u16 = 494;
+const BRT_DRAWING: u16 = 550;
 const BRT_BEGIN_CELL_XFS: u16 = 617;
 const BRT_END_CELL_XFS: u16 = 618;
 
@@ -60,26 +64,36 @@ pub(super) fn parse(
         &Sibling::of(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.bin"),
         Role::Reported(Region::Body),
         read_shared_strings,
-    )?;
-    let xfs = read_optional(
+    )?
+    .unwrap_or_default();
+    let styles_part = Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.bin");
+    let xfs = match read_optional(
         parse_ctx,
         pkg,
-        &Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.bin"),
+        &styles_part,
         Role::Content(Region::Body),
         read_styles,
-    )?;
+    )? {
+        Some(xfs) => CellXfs::new(xfs),
+        None => CellXfs::unread(styles_part.reported_when_unread(pkg)),
+    };
 
-    // Visible sheets in workbook order, resolved to their parts exactly as
-    // in xlsx: by relationship id, never by conventional part name.
-    let mut sheets: Vec<(String, String)> = Vec::new();
-    for (name, rid) in bundles {
-        let Some(target) = wb_rels.internal_target(&rid) else {
-            log::warn!("skipping sheet {name:?} with no worksheet relationship");
+    let mut sheets: Vec<(usize, Bundle, String)> = Vec::new();
+    for (position, bundle) in bundles.into_iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(position);
+        if bundle.hidden {
+            parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             continue;
-        };
-        match path::resolve(wb_part, target) {
-            Ok(t) => sheets.push((name, t.path)),
-            Err(e) => log::warn!("skipping sheet {name:?} with unresolvable target: {e}"),
+        }
+        let target = bundle
+            .rid
+            .as_deref()
+            .and_then(|rid| wb_rels.internal_target(rid))
+            .and_then(|target| path::resolve(wb_part, target).ok());
+        match target {
+            Some(t) => sheets.push((position, bundle, t.path)),
+            None if wb_rels.reported() => {}
+            None => parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body),
         }
     }
 
@@ -88,32 +102,29 @@ pub(super) fn parse(
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (position, (name, part)) in sheets.iter().enumerate() {
-        let _unit = parse_ctx.enter_unit(position);
+    for (position, bundle, part) in &sheets {
+        let _unit = parse_ctx.enter_unit(*position);
         let content = pkg
             .related_part(part, Role::Reported(Region::Body))?
             .map(|bytes| read_sheet(parse_ctx, &bytes, &shared, &xfs, date1904));
-        let mut content = match content {
-            Some(Ok(c)) => c,
+        let (mut content, drawing) = match content {
+            Some(Ok(read)) => read,
             Some(Err(e)) if e.is_fatal() => return Err(e),
-            Some(Err(e)) => {
-                log::warn!("skipping unreadable sheet {name:?}: {e}");
-                failed += 1;
-                continue;
-            }
-            None => {
-                log::warn!("skipping unreadable sheet {name:?}");
+            Some(Err(_)) | None => {
+                parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
                 failed += 1;
                 continue;
             }
         };
-        let rels = read_rels(pkg, &rels_part_for(part), Role::Content(Region::Body))?;
-        content.checkboxes = read_vml_checkboxes(parse_ctx, pkg, part, &rels)?;
+        read_sheet_parts(parse_ctx, pkg, part, drawing.as_deref(), &mut content)?;
         let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
         if multi_sheet {
-            doc.blocks.push(Block::heading(2, vec![Inline::plain(name.clone())]));
+            if bundle.name_replaced {
+                parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Body);
+            }
+            doc.blocks.push(Block::heading(2, vec![Inline::plain(bundle.name.clone())]));
         }
         doc.blocks.push(Block::Table(table));
     }
@@ -123,35 +134,41 @@ pub(super) fn parse(
     Ok(doc)
 }
 
-/// Read an optional binary part under the unified recovery policy: absent or
-/// corrupt yields the default with a log; fatal resource-limit errors always
-/// propagate.
-fn read_optional<T: Default>(
+/// Read an optional binary part under the unified recovery policy: absent
+/// or corrupt is `None`, a corrupt part reported by `role`; fatal
+/// resource-limit errors always propagate.
+fn read_optional<T>(
     parse_ctx: &ParseCtx,
     pkg: &mut Package,
     part: &Sibling,
     role: Role,
     read: fn(&ParseCtx, &[u8]) -> Result<T, ConvertError>,
-) -> Result<T, ConvertError> {
+) -> Result<Option<T>, ConvertError> {
     let Some(bytes) = part.read(pkg, role)? else {
-        return Ok(T::default());
+        return Ok(None);
     };
     match read(parse_ctx, &bytes) {
-        Ok(v) => Ok(v),
+        Ok(v) => Ok(Some(v)),
         Err(e) if e.is_fatal() => Err(e),
-        Err(e) => {
-            log::warn!("skipping corrupt part {}: {e}", part.path);
-            Ok(T::default())
+        Err(_) => {
+            report(parse_ctx, role.unreadable());
+            Ok(None)
         }
     }
 }
 
-/// `xl/workbook.bin`: the 1904 date flag from BrtWbProp, and each visible
-/// sheet's name and relationship id from its BrtBundleSh.
-fn read_workbook(
-    parse_ctx: &ParseCtx,
-    data: &[u8],
-) -> Result<(bool, Vec<(String, String)>), ConvertError> {
+/// A sheet the workbook lists, in source order.
+struct Bundle {
+    name: String,
+    /// The name needed a replacement character.
+    name_replaced: bool,
+    rid: Option<String>,
+    hidden: bool,
+}
+
+/// `xl/workbook.bin`: the 1904 date flag from BrtWbProp, and each sheet's
+/// name, relationship id and visibility from its BrtBundleSh.
+fn read_workbook(parse_ctx: &ParseCtx, data: &[u8]) -> Result<(bool, Vec<Bundle>), ConvertError> {
     let mut date1904 = false;
     let mut sheets = Vec::new();
     let mut records = Records::new(parse_ctx, data);
@@ -162,17 +179,12 @@ fn read_workbook(
                 let mut f = Fields::new(payload);
                 let state = f.u32()?;
                 f.u32()?; // iTabID
-                let rid = f.nullable_wide_string()?;
-                let name = clean_text(&f.wide_string()?);
+                let rid = f.nullable_wide_string()?.map(|(rid, _)| rid);
+                let (name, name_replaced) = f.wide_string()?;
                 // hsState 1 is hidden, 2 is veryHidden: omitted entirely,
                 // heading included, exactly as in xlsx.
-                if state == 1 || state == 2 {
-                    continue;
-                }
-                match rid {
-                    Some(rid) => sheets.push((name, rid)),
-                    None => log::warn!("skipping sheet {name:?} with no worksheet relationship"),
-                }
+                let hidden = state == 1 || state == 2;
+                sheets.push(Bundle { name: clean_text(&name), name_replaced, rid, hidden });
             }
             _ => {}
         }
@@ -181,11 +193,12 @@ fn read_workbook(
 }
 
 /// `styles.bin` reduced to the ordered cellXfs list, each entry's format id
-/// resolved to a parsed format. Only BrtXF records between BrtBeginCellXFs
+/// resolved to a parsed format and whether its code needed a replacement
+/// character. Only BrtXF records between BrtBeginCellXFs
 /// and BrtEndCellXFs are cell XFs; the cell-style XF collection also holds
 /// BrtXF records and must not shift the indices.
-fn read_styles(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<CellFormat>, ConvertError> {
-    let mut codes: HashMap<u32, String> = HashMap::new();
+fn read_styles(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<(CellFormat, bool)>, ConvertError> {
+    let mut codes: HashMap<u32, (String, bool)> = HashMap::new();
     let mut fmt_ids: Vec<u32> = Vec::new();
     let mut in_cell_xfs = false;
     let mut records = Records::new(parse_ctx, data);
@@ -206,41 +219,49 @@ fn read_styles(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<CellFormat>, Con
             _ => {}
         }
     }
-    let custom: HashMap<u32, &str> = codes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let custom: HashMap<u32, &str> = codes.iter().map(|(k, (v, _))| (*k, v.as_str())).collect();
     let mut cache: HashMap<u32, CellFormat> = HashMap::new();
     Ok(fmt_ids
         .iter()
-        .map(|id| cache.entry(*id).or_insert_with(|| resolve_format(*id, &custom)).clone())
+        .map(|id| {
+            let format = cache.entry(*id).or_insert_with(|| resolve_format(*id, &custom));
+            (format.clone(), codes.get(id).is_some_and(|&(_, replaced)| replaced))
+        })
         .collect())
 }
 
-/// `sharedStrings.bin`: one cleaned entry per BrtSSTItem in order. The item
-/// is a RichStr; formatting runs and phonetic data trail the string and are
-/// not content.
-fn read_shared_strings(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<String>, ConvertError> {
+/// `sharedStrings.bin`: one cleaned entry per BrtSSTItem in order, with
+/// whether it needed a replacement character. The item is a RichStr;
+/// formatting runs and phonetic data trail the string and are not content.
+fn read_shared_strings(
+    parse_ctx: &ParseCtx,
+    data: &[u8],
+) -> Result<Vec<(String, bool)>, ConvertError> {
     let mut out = Vec::new();
     let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         if id == BRT_SST_ITEM {
             let mut f = Fields::new(payload);
             f.u8()?; // fRichStr / fExtStr flags
-            out.push(clean_text(&f.wide_string()?));
+            let (text, replaced) = f.wide_string()?;
+            out.push((clean_text(&text), replaced));
         }
     }
     Ok(out)
 }
 
-/// One worksheet part. Rows come from the preceding BrtRowHdr; every cell
-/// record carries only its column and cellXfs index in the common cell
-/// header (MS-XLSB 2.5.10).
+/// One worksheet part, with the relationship id of the drawing it places.
+/// Rows come from the preceding BrtRowHdr; every cell record carries only
+/// its column and cellXfs index in the common cell header (MS-XLSB 2.5.10).
 fn read_sheet(
     parse_ctx: &ParseCtx,
     data: &[u8],
-    shared: &[String],
-    xfs: &[CellFormat],
+    shared: &[(String, bool)],
+    xfs: &CellXfs,
     date1904: bool,
-) -> Result<SheetContent, ConvertError> {
+) -> Result<(SheetContent, Option<String>), ConvertError> {
     let mut out = SheetContent::default();
+    let mut drawing = None;
     let mut row: Option<u32> = None;
     let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
@@ -248,11 +269,10 @@ fn read_sheet(
         match id {
             BRT_ROW_HDR => {
                 let rw = f.u32()?;
+                row = Some(rw);
                 if rw >= MAX_ROWS {
-                    row = None;
                     continue;
                 }
-                row = Some(rw);
                 f.skip(7)?; // ixfe, miyRw, fExtraAsc/fExtraDsc byte
                 if f.u8()? & 0x10 != 0 {
                     // fDyZero: the row is hidden.
@@ -271,7 +291,7 @@ fn read_sheet(
             BRT_MERGE_CELL => {
                 let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
                 if r1.max(r2) >= MAX_ROWS || c1.max(c2) >= MAX_COLS {
-                    log::debug!("skipping out-of-bounds merge region");
+                    parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
                     continue;
                 }
                 if r1 != r2 || c1 != c2 {
@@ -284,68 +304,117 @@ fn read_sheet(
                 let col = f.u32()?;
                 let style = f.u32()? & 0x00FF_FFFF;
                 let Some(r) = row else {
-                    log::debug!("skipping cell record before any row header");
+                    parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
                     continue;
                 };
-                if col >= MAX_COLS {
+                if r >= MAX_ROWS || col >= MAX_COLS {
                     continue;
                 }
-                let fmt = xfs.get(style as usize).unwrap_or(&CellFormat::General);
-                let text = cell_text(id, &mut f, fmt, shared, date1904)?;
+                let style = style as usize;
+                let (text, loss) = cell_text(id, &mut f, &xfs.get(style), shared, date1904)?;
+                if let Some(code) = loss {
+                    out.losses.push((r, col, code));
+                }
+                if loss != Some(DiagnosticCode::InvalidEncoding) && xfs.replaced_in(style, &text) {
+                    out.losses.push((r, col, DiagnosticCode::InvalidEncoding));
+                }
                 if !text.is_empty() {
                     out.cells.insert((r, col), text);
                 }
             }
+            BRT_HLINK => match hyperlink(&mut f) {
+                Ok(Some(link)) => out.links.push(link),
+                Ok(None) => {}
+                Err(e) if e.is_fatal() => return Err(e),
+                Err(_) => parse_ctx.emit(DiagnosticCode::LinkTargetUnread, Region::Body),
+            },
+            BRT_BEGIN_HEADER_FOOTER => {
+                if let Err(e) = omit_headers_and_footers(parse_ctx, &mut f)
+                    && e.is_fatal()
+                {
+                    return Err(e);
+                }
+            }
+            BRT_DRAWING => match f.nullable_wide_string() {
+                Ok(id) => drawing = id.map(|(id, _)| id),
+                Err(e) if e.is_fatal() => return Err(e),
+                Err(_) => parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body),
+            },
             _ => {}
         }
     }
-    Ok(out)
+    Ok((out, drawing))
 }
 
-/// A cell's rendered text from the record body after the common header.
-/// Formula records carry their cached result first; the parsed formula
-/// trails it and is never read.
+/// A BrtHLink's range and relationship id; `None` for a link within the
+/// workbook, which names no relationship.
+fn hyperlink(f: &mut Fields) -> Result<Option<SheetLink>, ConvertError> {
+    let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
+    let rel = f.nullable_wide_string()?.map(|(rel, _)| rel).filter(|rel| !rel.is_empty());
+    Ok(rel.map(|rel| SheetLink {
+        range: (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)),
+        target: LinkTarget::Related(rel),
+    }))
+}
+
+/// Report each non-blank header and footer of a BrtBeginHeaderFooter, in
+/// its order: odd, even and first-page header and footer pairs.
+fn omit_headers_and_footers(parse_ctx: &ParseCtx, f: &mut Fields) -> Result<(), ConvertError> {
+    f.u16()?; // fHFDiffOddEven, fHFDiffFirst, fHFScaleWithDoc, fHFAlignMargins
+    for header in [true, false, true, false, true, false] {
+        if f.nullable_wide_string()?.is_some_and(|(s, _)| !s.trim().is_empty()) {
+            let (code, region) = if header {
+                (DiagnosticCode::HeaderOmitted, Region::Header)
+            } else {
+                (DiagnosticCode::FooterOmitted, Region::Footer)
+            };
+            parse_ctx.emit(code, region);
+        }
+    }
+    Ok(())
+}
+
+/// A cell's rendered text from the record body after the common header,
+/// and what rendering it lost. Formula records carry their cached result
+/// first; the parsed formula trails it and is never read.
 fn cell_text(
     id: u16,
     f: &mut Fields,
     fmt: &CellFormat,
-    shared: &[String],
+    shared: &[(String, bool)],
     date1904: bool,
-) -> Result<String, ConvertError> {
+) -> Result<(String, Option<DiagnosticCode>), ConvertError> {
+    let unread = (String::new(), Some(DiagnosticCode::CellValueUnreadable));
+    let string = |(text, replaced): (String, bool)| {
+        (
+            format_as_text(fmt, &clean_text(&text)),
+            replaced.then_some(DiagnosticCode::InvalidEncoding),
+        )
+    };
     Ok(match id {
-        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), date1904).0,
-        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, date1904).0,
-        BRT_CELL_ST | BRT_FMLA_STRING => format_as_text(fmt, &clean_text(&f.wide_string()?)),
+        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), date1904),
+        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, date1904),
+        BRT_CELL_ST | BRT_FMLA_STRING => string(f.wide_string()?),
         BRT_CELL_RSTRING => {
             f.u8()?; // RichStr flags; runs and phonetic data trail the string
-            format_as_text(fmt, &clean_text(&f.wide_string()?))
+            string(f.wide_string()?)
         }
-        BRT_CELL_ISST => {
-            let isst = f.u32()?;
-            match usize::try_from(isst).ok().and_then(|i| shared.get(i)) {
-                Some(text) => format_as_text(fmt, text),
-                None => {
-                    log::debug!("shared string index {isst} out of range");
-                    String::new()
-                }
+        BRT_CELL_ISST => match usize::try_from(f.u32()?).ok().and_then(|i| shared.get(i)) {
+            Some((text, replaced)) => {
+                (format_as_text(fmt, text), replaced.then_some(DiagnosticCode::InvalidEncoding))
             }
-        }
-        BRT_CELL_BOOL | BRT_FMLA_BOOL => match f.u8()? {
-            1 => "TRUE".to_string(),
-            0 => "FALSE".to_string(),
-            _ => String::new(),
+            None => unread,
         },
-        BRT_CELL_ERROR | BRT_FMLA_ERROR => {
-            let code = f.u8()?;
-            match error_literal(code) {
-                Some(text) => text.to_string(),
-                None => {
-                    log::debug!("unknown error cell code {code:#04x}");
-                    String::new()
-                }
-            }
-        }
-        _ => String::new(),
+        BRT_CELL_BOOL | BRT_FMLA_BOOL => match f.u8()? {
+            1 => ("TRUE".to_string(), None),
+            0 => ("FALSE".to_string(), None),
+            _ => unread,
+        },
+        BRT_CELL_ERROR | BRT_FMLA_ERROR => match error_literal(f.u8()?) {
+            Some(text) => (text.to_string(), None),
+            None => unread,
+        },
+        _ => (String::new(), None),
     })
 }
 
@@ -453,20 +522,20 @@ impl<'a> Fields<'a> {
     }
 
     /// XLWideString (MS-XLSB 2.5.169): a u32 character count, then that many
-    /// UTF-16LE code units. Unpaired surrogates decode to U+FFFD.
-    fn wide_string(&mut self) -> Result<String, ConvertError> {
+    /// UTF-16LE code units. Unpaired surrogates decode to U+FFFD, and the
+    /// text comes with whether one did.
+    fn wide_string(&mut self) -> Result<(String, bool), ConvertError> {
         let cch = self.u32()? as usize;
         let bytes = cch
             .checked_mul(2)
             .ok_or_else(|| ConvertError::malformed("oversized string length"))
             .and_then(|n| self.take(n))?;
-        let units = utf16le_units(bytes);
-        Ok(char::decode_utf16(units).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)).collect())
+        Ok(decode_utf16(utf16le_units(bytes)))
     }
 
     /// XLNullableWideString: the reserved count 0xFFFFFFFF is the null
     /// string.
-    fn nullable_wide_string(&mut self) -> Result<Option<String>, ConvertError> {
+    fn nullable_wide_string(&mut self) -> Result<Option<(String, bool)>, ConvertError> {
         if self.data.get(self.pos..self.pos + 4) == Some(&[0xFF; 4]) {
             self.pos += 4;
             return Ok(None);
@@ -604,6 +673,9 @@ mod tests {
         date1904: bool,
         /// Further parts, verbatim: (name, body).
         extra: Vec<(&'a str, Vec<u8>)>,
+        /// Further workbook records and relationships, verbatim.
+        bundles: Vec<u8>,
+        workbook_rels: &'a str,
     }
 
     impl Wb<'_> {
@@ -625,6 +697,8 @@ mod tests {
                     r#"<Relationship Id="rId{id}" Type="{WS_REL}" Target="worksheets/sheet{id}.bin"/>"#
                 ));
             }
+            workbook.extend_from_slice(&self.bundles);
+            rels.push_str(self.workbook_rels);
             if self.styles.is_some() {
                 rels.push_str(&format!(
                     r#"<Relationship Id="rId90" Type="{STYLES_REL}" Target="styles.bin"/>"#
@@ -940,5 +1014,327 @@ mod tests {
         };
         let doc = parse(&wb.build()).unwrap();
         assert_eq!(texts(first_table(&doc)), vec![vec!["TRUE", "[x] Roof"]]);
+    }
+
+    type Reported = (DiagnosticCode, Region, Option<u32>, u64);
+
+    fn diagnose(wb: &Wb) -> Vec<Reported> {
+        let parse_ctx = ParseCtx::default();
+        super::super::parse(&parse_ctx, &wb.build()).unwrap();
+        let unit = |d: &crate::diagnostics::Diagnostic| d.unit.map(std::num::NonZeroU32::get);
+        parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region, unit(&d), d.count)).collect()
+    }
+
+    fn in_unit(code: DiagnosticCode, unit: u32, count: u64) -> Reported {
+        let region = match code {
+            DiagnosticCode::HeaderOmitted => Region::Header,
+            DiagnosticCode::FooterOmitted => Region::Footer,
+            DiagnosticCode::CommentOmitted => Region::Comment,
+            _ => Region::Body,
+        };
+        (code, region, Some(unit), count)
+    }
+
+    /// A BrtBundleSh naming its relationship (`None` for the null string)
+    /// and its name as UTF-16 code units.
+    fn bundle(name: &[u16], rid: Option<&str>) -> Vec<u8> {
+        let mut p = 0u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&9u32.to_le_bytes());
+        match rid {
+            Some(rid) => p.extend(wstr(rid)),
+            None => p.extend_from_slice(&[0xFF; 4]),
+        }
+        p.extend((name.len() as u32).to_le_bytes());
+        p.extend(name.iter().flat_map(|u| u.to_le_bytes()));
+        rec(BRT_BUNDLE_SH, &p)
+    }
+
+    fn one_value() -> Vec<u8> {
+        [row_hdr(0, false), real_cell(0, 0, 1.0)].concat()
+    }
+
+    fn string_cell(col: u32, units: &[u16]) -> Vec<u8> {
+        let mut p = cell(col, 0);
+        p.extend((units.len() as u32).to_le_bytes());
+        p.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+        rec(BRT_CELL_ST, &p)
+    }
+
+    #[test]
+    fn each_sheet_site_reports_its_loss_in_its_sheets_unit() {
+        let rels = format!(
+            r#"<Relationship Id="rId6" Type="{WS_REL}" Target="worksheets/gone.bin"/><Relationship Id="rId7" Type="{WS_REL}" Target="worksheets/a%2Fb.bin"/>"#
+        );
+        let name = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        let wb = Wb {
+            sheets: vec![("A", 0, one_value()), ("H", 1, one_value()), ("C", 0, vec![0x80])],
+            bundles: [
+                bundle(&name("X"), Some("rId77")),
+                bundle(&name("N"), None),
+                bundle(&name("G"), Some("rId6")),
+                bundle(&name("E"), Some("rId7")),
+            ]
+            .concat(),
+            workbook_rels: &rels,
+            ..Wb::default()
+        };
+        let lost = |unit| in_unit(DiagnosticCode::UnitUnreadable, unit, 1);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                lost(3),
+                lost(4),
+                lost(5),
+                lost(6),
+                lost(7),
+                in_unit(DiagnosticCode::HiddenOmitted, 2, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shown_sheet_name_that_does_not_decode_reports_with_its_heading() {
+        let rels =
+            format!(r#"<Relationship Id="rId8" Type="{WS_REL}" Target="worksheets/sheet1.bin"/>"#);
+        let broken = |rid| bundle(&[0x42, 0xD800], Some(rid));
+        let wb = Wb { bundles: broken("rId8"), workbook_rels: &rels, ..one_sheet(one_value()) };
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::InvalidEncoding, 2, 1)]);
+        let hidden = |rid| {
+            let mut record = broken(rid);
+            record[3] = 1;
+            record
+        };
+        let wb = Wb { bundles: hidden("rId8"), workbook_rels: &rels, ..one_sheet(one_value()) };
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 2, 1)]);
+    }
+
+    #[test]
+    fn a_cell_record_that_does_not_read_reports_it() {
+        let mut body = real_cell(0, 0, 1.0);
+        body.extend(row_hdr(0, false));
+        let mut isst = cell(1, 0);
+        isst.extend_from_slice(&7u32.to_le_bytes());
+        body.extend(rec(BRT_CELL_ISST, &isst));
+        let mut error = cell(2, 0);
+        error.push(0x99);
+        body.extend(rec(BRT_CELL_ERROR, &error));
+        let mut boolean = cell(3, 0);
+        boolean.push(2);
+        body.extend(rec(BRT_FMLA_BOOL, &boolean));
+        body.extend(string_cell(4, &[0xD800, 0x61]));
+        let mut replaced = cell(5, 0);
+        replaced.extend_from_slice(&1u32.to_le_bytes());
+        body.extend(rec(BRT_CELL_ISST, &replaced));
+        body.extend(real_cell(6, 0, 2.0));
+        let mut rk = cell(7, 5);
+        rk.extend_from_slice(&((7u32 << 2) | 2).to_le_bytes());
+        body.extend(rec(BRT_CELL_RK, &rk));
+        let mut rich = cell(8, 0);
+        rich.push(0);
+        rich.extend_from_slice(&2u32.to_le_bytes());
+        rich.extend([0x00, 0xDC, 0x61, 0x00]);
+        body.extend(rec(BRT_CELL_RSTRING, &rich));
+        body.extend(merge(0, 0, 0, MAX_COLS));
+        let shared = shared_strings_units(&[&[0x61], &[0xDC00], &[0xD800]]);
+        let wb = Wb { shared: Some(shared), ..one_sheet(body) };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::CellValueUnreadable, 1, 4),
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 3),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 1),
+                in_unit(DiagnosticCode::TableSpanRepaired, 1, 1),
+            ]
+        );
+    }
+
+    fn shared_strings_units(items: &[&[u16]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for units in items {
+            let mut p = vec![0u8];
+            p.extend((units.len() as u32).to_le_bytes());
+            p.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+            out.extend(rec(BRT_SST_ITEM, &p));
+        }
+        out
+    }
+
+    #[test]
+    fn a_hidden_cell_reports_only_that_it_is_hidden() {
+        let mut body = col_info(2, 2, true);
+        body.extend(row_hdr(0, false));
+        body.extend(real_cell(0, 0, 1.0));
+        body.extend(string_cell(2, &[0xD800]));
+        body.extend(row_hdr(1, true));
+        let mut isst = cell(0, 0);
+        isst.extend_from_slice(&7u32.to_le_bytes());
+        body.extend(rec(BRT_CELL_ISST, &isst));
+        body.extend(real_cell(1, 5, 1.0));
+        assert_eq!(diagnose(&one_sheet(body)), [in_unit(DiagnosticCode::HiddenOmitted, 1, 2)]);
+    }
+
+    #[test]
+    fn a_cell_past_the_grid_reports_nothing() {
+        let body = [
+            row_hdr(MAX_ROWS, false),
+            real_cell(0, 0, 1.0),
+            rec(BRT_CELL_ERROR, &[cell(1, 0), vec![0x99]].concat()),
+            row_hdr(0, false),
+            real_cell(0, 0, 2.0),
+            real_cell(MAX_COLS, 0, 3.0),
+        ]
+        .concat();
+        assert_eq!(diagnose(&one_sheet(body)), []);
+    }
+
+    #[test]
+    fn a_format_code_that_does_not_decode_reports_where_it_shows() {
+        let code: Vec<u16> =
+            "0\" ".encode_utf16().chain([0xD800]).chain("\"".encode_utf16()).collect();
+        let mut format = 164u16.to_le_bytes().to_vec();
+        format.extend((code.len() as u32).to_le_bytes());
+        format.extend(code.iter().flat_map(|u| u.to_le_bytes()));
+        let styles = [rec(BRT_FMT, &format), styles(&[], &[0, 164])].concat();
+        let body = [
+            row_hdr(0, false),
+            real_cell(0, 1, 2.0),
+            real_cell(1, 0, 3.0),
+            string_cell(2, &[0x74]),
+            rec(BRT_CELL_ST, &[cell(3, 1), 1u32.to_le_bytes().to_vec(), vec![0x00, 0xDC]].concat()),
+            row_hdr(1, true),
+            real_cell(0, 1, 4.0),
+        ]
+        .concat();
+        let wb = Wb { styles: Some(styles), ..one_sheet(body) };
+        let doc = parse(&wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["2 \u{FFFD}", "3", "t", "\u{FFFD}"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 2),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_styles_part_that_does_not_read_reports_once_for_its_cells() {
+        let body = [row_hdr(0, false), real_cell(0, 3, 1.0)].concat();
+        let wb = Wb { styles: Some(vec![0x80]), ..one_sheet(body.clone()) };
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::PartUnreadable, Region::Body, None, 1)]);
+        assert_eq!(
+            diagnose(&one_sheet(body)),
+            [in_unit(DiagnosticCode::NumberFormatFallback, 1, 1)]
+        );
+    }
+
+    fn hlink(r1: u32, r2: u32, c1: u32, c2: u32, fields: [&str; 4]) -> Vec<u8> {
+        let mut link = [r1, r2, c1, c2].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        for field in fields {
+            link.extend(wstr(field));
+        }
+        rec(BRT_HLINK, &link)
+    }
+
+    #[test]
+    fn hyperlinks_and_print_headers_are_reported() {
+        let mut body = row_hdr(0, false);
+        let mut label = cell(1, 0);
+        label.extend(wstr("see here"));
+        body.extend(rec(BRT_CELL_ST, &label));
+        body.extend(row_hdr(2, false));
+        let mut shown = cell(0, 0);
+        shown.extend(wstr("www.example.org"));
+        body.extend(rec(BRT_CELL_ST, &shown));
+        body.extend(hlink(0, 0, 1, 1, ["rId1", "", "", ""]));
+        body.extend(hlink(2, 2, 0, 0, ["rId2", "", "", ""]));
+        body.extend(hlink(0, 0, 0, 0, ["", "S!A1", "", ""]));
+        let mut header_footer = 0u16.to_le_bytes().to_vec();
+        header_footer.extend((2u32).to_le_bytes());
+        header_footer.extend([b'X', 0, 0x00, 0xD8]);
+        header_footer.extend_from_slice(&[0xFF; 4]);
+        for text in ["", "", "", "&CPage &P"] {
+            header_footer.extend(wstr(text));
+        }
+        body.extend(rec(BRT_BEGIN_HEADER_FOOTER, &header_footer));
+        const LINK: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+        let rels = format!(
+            r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}"><Relationship Id="rId1" Type="{LINK}" Target="https://example.org/" TargetMode="External"/><Relationship Id="rId2" Type="{LINK}" Target="http://www.example.org/" TargetMode="External"/></Relationships>"#
+        );
+        let wb = Wb {
+            extra: vec![("xl/worksheets/_rels/sheet1.bin.rels", rels.into_bytes())],
+            ..one_sheet(body)
+        };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::LinkTargetUnread, 1, 1),
+                in_unit(DiagnosticCode::HeaderOmitted, 1, 1),
+                in_unit(DiagnosticCode::FooterOmitted, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_record_read_only_to_report_never_drops_its_sheet() {
+        let mut body = one_value();
+        body.extend(rec(BRT_HLINK, &[0u8; 6]));
+        body.extend(rec(BRT_BEGIN_HEADER_FOOTER, &[0, 0, 1, 0, 0, 0, b'a', 0, 5, 0, 0, 0]));
+        body.extend(rec(BRT_DRAWING, &[9, 0, 0, 0]));
+        body.extend(real_cell(1, 0, 2.0));
+        let parse_ctx = ParseCtx::default();
+        let doc = super::super::parse(&parse_ctx, &one_sheet(body).build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["1", "2"]]);
+        let unit = |d: &crate::diagnostics::Diagnostic| d.unit.map(std::num::NonZeroU32::get);
+        let reported: Vec<Reported> = parse_ctx
+            .into_diagnostics()
+            .iter()
+            .map(|d| (d.code, d.region, unit(&d), d.count))
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                in_unit(DiagnosticCode::PartUnreadable, 1, 1),
+                in_unit(DiagnosticCode::LinkTargetUnread, 1, 1),
+                in_unit(DiagnosticCode::HeaderOmitted, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_drawing_and_comments_a_sheet_names_are_reported() {
+        const DRAWING_REL: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
+        const COMMENTS_REL: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+        let rels = format!(
+            r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}"><Relationship Id="rId1" Type="{DRAWING_REL}" Target="../drawings/drawing1.xml"/><Relationship Id="rId2" Type="{DRAWING_REL}" Target="../drawings/drawing2.xml"/><Relationship Id="rId3" Type="{COMMENTS_REL}" Target="../comments1.bin"/></Relationships>"#
+        );
+        let drawing = |kind: &str| {
+            format!(
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor><xdr:{kind}><xdr:nvPicPr><xdr:cNvPr id="1" name="x"/></xdr:nvPicPr></xdr:{kind}></xdr:twoCellAnchor></xdr:wsDr>"#
+            )
+            .into_bytes()
+        };
+        let mut body = one_value();
+        let mut id = Vec::new();
+        id.extend(wstr("rId2"));
+        body.extend(rec(BRT_DRAWING, &id));
+        let wb = Wb {
+            extra: vec![
+                ("xl/worksheets/_rels/sheet1.bin.rels", rels.into_bytes()),
+                ("xl/drawings/drawing1.xml", drawing("graphicFrame")),
+                ("xl/drawings/drawing2.xml", drawing("pic")),
+            ],
+            ..one_sheet(body)
+        };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::ImageUnplaced, 1, 1),
+                in_unit(DiagnosticCode::CommentOmitted, 1, 1),
+            ]
+        );
     }
 }

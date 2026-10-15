@@ -23,6 +23,21 @@ pub(crate) fn utf16le_units(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
     bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair))
 }
 
+/// The text of UTF-16 code units, each unpaired surrogate replaced, and
+/// whether any was.
+pub(crate) fn decode_utf16(units: impl IntoIterator<Item = u16>) -> (String, bool) {
+    let mut replaced = false;
+    let text = char::decode_utf16(units)
+        .map(|unit| {
+            unit.unwrap_or_else(|_| {
+                replaced = true;
+                char::REPLACEMENT_CHARACTER
+            })
+        })
+        .collect();
+    (text, replaced)
+}
+
 /// Read a named stream from an OLE2 compound file. A missing stream is
 /// `MissingPart`; the read is hard-capped at `max_entry_bytes` so a corrupt
 /// sector chain cannot expand without bound.
@@ -68,6 +83,13 @@ mod tests {
     fn integer_reads_reject_overflowing_offsets() {
         assert_eq!(get_u16(&[1, 2, 3, 4], usize::MAX), None);
         assert_eq!(get_u32(&[1, 2, 3, 4], usize::MAX), None);
+    }
+
+    #[test]
+    fn a_decode_says_whether_it_replaced_a_unit() {
+        assert_eq!(decode_utf16([0xD800, 0xDC00, 0x61]), ("\u{10000}a".to_string(), false));
+        assert_eq!(decode_utf16([0xDC00, 0x61]), ("\u{FFFD}a".to_string(), true));
+        assert_eq!(decode_utf16([0x61, 0xD800]), ("a\u{FFFD}".to_string(), true));
     }
 
     fn one_stream_ole(name: &str, bytes: &[u8]) -> cfb::CompoundFile<Cursor<Vec<u8>>> {
