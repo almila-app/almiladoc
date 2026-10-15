@@ -314,7 +314,7 @@ fn composite_marker_labels_are_escaped() {
 
 #[test]
 fn layout_table_unwrapped() {
-    let mut b = GridBuilder::new();
+    let mut b = GridBuilder::new(u64::MAX);
     b.next_row();
     b.place(Cell::new(vec![heading(1, "Boxed"), Block::Paragraph(vec![Inline::plain("body")])]))
         .unwrap();
@@ -389,7 +389,7 @@ fn table_multiparagraph_cell() {
 
 #[test]
 fn merged_cells_render_blank_covered_positions() {
-    let mut b = GridBuilder::new();
+    let mut b = GridBuilder::new(u64::MAX);
     b.next_row();
     b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("wide")])], 2, 1)).unwrap();
     b.place(Cell::from_inlines(vec![Inline::plain("end")])).unwrap();
@@ -405,7 +405,7 @@ fn merged_cells_render_blank_covered_positions() {
 
 #[test]
 fn trailing_covered_columns_are_preserved() {
-    let mut b = GridBuilder::new();
+    let mut b = GridBuilder::new(u64::MAX);
     b.next_row();
     b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("wide")])], 3, 1)).unwrap();
     let mut table = b.finish(TableKind::Data);

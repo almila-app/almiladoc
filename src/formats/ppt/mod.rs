@@ -8,8 +8,9 @@
 
 mod styletext;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::model::{Block, Document, Inline, Style, inlines_are_empty};
 use crate::shared::binary::{get_u32, optional_ole_stream, read_ole_stream, utf16le_units};
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
@@ -24,22 +25,23 @@ use styletext::{CharProps, MasterLevel, StyleRuns};
 /// instance (the text type).
 type MasterStyles = HashMap<u16, Vec<MasterLevel>>;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
-    let data = read_ole_stream(&mut ole, "PowerPoint Document")?;
-    let current_user = optional_ole_stream(&mut ole, "Current User")?.unwrap_or_default();
+    let data = read_ole_stream(parse_ctx, &mut ole, "PowerPoint Document")?;
+    let current_user =
+        optional_ole_stream(parse_ctx, &mut ole, "Current User")?.unwrap_or_default();
     if get_u32(&current_user, 12) == Some(0xF3D1_C4DF) {
         return Err(ConvertError::Encrypted);
     }
 
-    let mut ex = Extractor::default();
+    let mut ex = Extractor::new(parse_ctx);
     if !ex.parse_slides(&data, &current_user)? {
         // Labelled recovery path: the persist directory is unusable, so text
         // is taken in raw stream order (may include superseded edits).
         log::warn!("ppt persist directory unusable; recovering text in raw stream order");
-        ex = Extractor::default();
+        ex = Extractor::new(parse_ctx);
         ex.recovering = true;
         ex.walk(&data)?;
         ex.end_segment(None);
@@ -47,7 +49,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     if ex.encrypted {
         return Err(ConvertError::Encrypted);
     }
-    let assets = collect_pictures(&mut ole)?;
+    let assets = collect_pictures(parse_ctx, &mut ole)?;
     Ok(Document { blocks: ex.into_blocks(), notes: Vec::new(), assets })
 }
 
@@ -55,13 +57,15 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 /// BStore file blocks). Pictures are document-level assets; per-slide
 /// placement is not resolved. Unsupported formats degrade with a log.
 fn collect_pictures<R: std::io::Read + std::io::Seek>(
+    parse_ctx: &ParseCtx,
     ole: &mut cfb::CompoundFile<R>,
 ) -> Result<Vec<crate::model::Asset>, ConvertError> {
     use crate::shared::officeart;
-    let Some(pictures) = optional_ole_stream(ole, "Pictures")? else {
+    let Some(pictures) = optional_ole_stream(parse_ctx, ole, "Pictures")? else {
         return Ok(Vec::new());
     };
-    let mut sink = crate::shared::assets::AssetSink::new();
+    let mut sink = crate::shared::assets::AssetSink::new(parse_ctx);
+    let cap = parse_ctx.limits().max_entry_bytes;
     let mut pos = 0usize;
     let mut index = 0u32;
     while let Some((ver_inst, rec_type, body)) = officeart::record_at(&pictures, pos) {
@@ -70,11 +74,10 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
         if index > 100_000 {
             break;
         }
-        let cap = limits::MAX_ENTRY_BYTES as usize;
         let blip = match rec_type {
             0xF007 => officeart::fbse_blip(body, cap),
             _ => officeart::decode_blip(ver_inst, rec_type, body, cap),
-        };
+        }?;
         match blip {
             Some(blip) => {
                 sink.add(
@@ -106,8 +109,8 @@ struct PendingShape {
     styles: Option<StyleRuns>,
 }
 
-#[derive(Default)]
-struct Extractor {
+struct Extractor<'c> {
+    parse_ctx: &'c ParseCtx<'c>,
     /// Finished segments: (blocks, pairing id, is_notes).
     segments: Vec<(Vec<Block>, Option<u32>, bool)>,
     current: Vec<Block>,
@@ -238,7 +241,24 @@ fn collect_masters(
     out
 }
 
-impl Extractor {
+impl<'c> Extractor<'c> {
+    fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
+        Extractor {
+            parse_ctx,
+            segments: Vec::new(),
+            current: Vec::new(),
+            current_is_notes: false,
+            list_run: Vec::new(),
+            pending: None,
+            masters: Vec::new(),
+            active_master: 0,
+            shape_counter: 0,
+            encrypted: false,
+            recovering: false,
+            records: 0,
+        }
+    }
+
     /// Walk slides in presentation order: the UserEditAtom chain yields the
     /// persist directory, the DocumentContainer's SlideListWithText yields
     /// slide order and outline text, each slide container its own textboxes.
@@ -415,11 +435,9 @@ impl Extractor {
                 // Only instance 0 of SlideListWithText holds slide text here.
                 0x0FF0 if ver_inst >> 4 != 0 => {}
                 _ => {
-                    if stack.len() >= limits::MAX_RECORD_DEPTH {
-                        return Err(ConvertError::limit(
-                            Limit::RecordDepth,
-                            limits::MAX_RECORD_DEPTH as u64,
-                        ));
+                    let max = self.parse_ctx.limits().max_record_depth;
+                    if stack.len() as u64 >= max {
+                        return Err(ConvertError::limit(Limit::RecordDepth, max));
                     }
                     stack.push((body, 0));
                 }
@@ -447,8 +465,9 @@ impl Extractor {
 
     fn charge_record(&mut self) -> Result<(), ConvertError> {
         self.records += 1;
-        if self.records > limits::MAX_RECORDS {
-            return Err(ConvertError::limit(Limit::Records, limits::MAX_RECORDS));
+        let max = self.parse_ctx.limits().max_records;
+        if self.records > max {
+            return Err(ConvertError::limit(Limit::Records, max));
         }
         Ok(())
     }
@@ -629,5 +648,46 @@ impl Extractor {
                 self.current.push(Block::Paragraph(inlines));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::Limits;
+    use std::io::Write;
+
+    fn deflated_metafile_picture(inflated: usize) -> Vec<u8> {
+        let record = crate::shared::officeart::deflated_metafile_blip(inflated);
+        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        ole.create_stream("Pictures").unwrap().write_all(&record).unwrap();
+        ole.into_inner().into_inner()
+    }
+
+    #[test]
+    fn a_picture_inflating_past_the_contexts_entry_bytes_is_a_limit() {
+        let bytes = deflated_metafile_picture(4096);
+        let mut ole = cfb::CompoundFile::open(Cursor::new(bytes)).unwrap();
+        let limits = Limits { max_entry_bytes: 4096, ..Limits::default() };
+        let assets = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap();
+        assert_eq!(assets[0].bytes.len(), 4096);
+        let limits = Limits { max_entry_bytes: 4095, ..Limits::default() };
+        let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 }));
+    }
+
+    #[test]
+    fn pictures_past_the_contexts_asset_total_are_a_limit() {
+        let bytes = deflated_metafile_picture(4096);
+        let mut ole = cfb::CompoundFile::open(Cursor::new(bytes)).unwrap();
+        let limits = Limits { max_asset_total_bytes: 4096, ..Limits::default() };
+        let assets = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap();
+        assert_eq!(assets[0].bytes.len(), 4096);
+        let limits = Limits { max_asset_total_bytes: 4095, ..Limits::default() };
+        let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 4095 }
+        ));
     }
 }

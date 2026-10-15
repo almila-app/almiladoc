@@ -1,25 +1,31 @@
-//! Embedded-asset accumulation with the fixed retained-bytes cap.
+//! Embedded-asset accumulation under the retained-bytes cap.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::model::{Asset, AssetId, ImageSource};
 use crate::package::Package;
 use crate::package::relationships::{Relationships, TargetMode, rel_target_bytes};
 use std::cell::RefCell;
 
-#[derive(Default)]
 pub struct AssetSink {
     pub assets: Vec<Asset>,
     /// Origin part -> retained asset, so repeated references to the same
     /// part share one asset instead of duplicating its bytes (and falsely
     /// accumulating against the cap).
     by_part: std::collections::HashMap<String, AssetId>,
-    total: usize,
+    total: u64,
+    max_total: u64,
 }
 
 impl AssetSink {
-    pub fn new() -> Self {
-        AssetSink::default()
+    pub fn new(parse_ctx: &ParseCtx) -> Self {
+        AssetSink {
+            assets: Vec::new(),
+            by_part: std::collections::HashMap::new(),
+            total: 0,
+            max_total: parse_ctx.limits().max_asset_total_bytes,
+        }
     }
 
     /// Retain an asset's bytes (copied only when the part is not already
@@ -33,12 +39,9 @@ impl AssetSink {
         if let Some(&id) = self.by_part.get(&origin_part) {
             return Ok(id);
         }
-        self.total += bytes.len();
-        if self.total > limits::MAX_ASSET_TOTAL_BYTES {
-            return Err(ConvertError::limit(
-                Limit::AssetTotalBytes,
-                limits::MAX_ASSET_TOTAL_BYTES as u64,
-            ));
+        self.total = self.total.saturating_add(bytes.len() as u64);
+        if self.total > self.max_total {
+            return Err(ConvertError::limit(Limit::AssetTotalBytes, self.max_total));
         }
         let id = AssetId(self.assets.len());
         self.by_part.insert(origin_part.clone(), id);
@@ -98,7 +101,7 @@ mod tests {
 
     #[test]
     fn repeated_origin_parts_share_one_asset() {
-        let mut sink = AssetSink::new();
+        let mut sink = AssetSink::new(&ParseCtx::default());
         let a = sink.add("image/png".into(), "media/one.png".into(), &[1; 64]).unwrap();
         let b = sink.add("image/png".into(), "media/one.png".into(), &[1; 64]).unwrap();
         assert_eq!(a, b);
@@ -110,8 +113,8 @@ mod tests {
     fn repeated_references_cannot_trip_the_cap() {
         // Preload the counter to just under the cap (avoids large real
         // allocations, which would feed the R22 memory test's counter).
-        let mut sink = AssetSink::new();
-        sink.total = limits::MAX_ASSET_TOTAL_BYTES - 10;
+        let mut sink = AssetSink::new(&ParseCtx::default());
+        sink.total = sink.max_total - 10;
         for _ in 0..8 {
             assert!(sink.add("image/png".into(), "media/big.png".into(), &[0; 8]).is_ok());
         }
@@ -119,9 +122,22 @@ mod tests {
 
     #[test]
     fn crossing_the_cap_is_a_hard_error() {
-        let mut sink = AssetSink::new();
-        sink.total = limits::MAX_ASSET_TOTAL_BYTES - 10;
+        let mut sink = AssetSink::new(&ParseCtx::default());
+        sink.total = sink.max_total - 10;
         let err = sink.add("image/png".into(), "media/big.png".into(), &[0; 11]).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, .. }));
+    }
+
+    #[test]
+    fn the_cap_is_the_contexts() {
+        let limits =
+            crate::limits::Limits { max_asset_total_bytes: 10, ..crate::limits::Limits::default() };
+        let mut sink = AssetSink::new(&ParseCtx::new(&limits));
+        assert!(sink.add("image/png".into(), "media/a.png".into(), &[0; 10]).is_ok());
+        let err = sink.add("image/png".into(), "media/b.png".into(), &[0; 1]).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 10 }
+        ));
     }
 }

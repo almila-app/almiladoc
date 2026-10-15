@@ -7,4 +7,4 @@ pub mod path;
 pub mod relationships;
 pub mod xml;
 
-pub use archive::Package;
+pub use archive::{Package, PackageKind};

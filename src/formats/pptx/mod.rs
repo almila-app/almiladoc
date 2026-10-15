@@ -5,6 +5,7 @@
 
 mod cascade;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{
     Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind,
@@ -14,7 +15,7 @@ use crate::package::relationships::{
     RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_type, rels_part_for,
 };
 use crate::package::xml::{Element, ns, parse_xml};
-use crate::package::{Package, archive::probe_ole, path};
+use crate::package::{Package, PackageKind, archive::probe_ole, path};
 use crate::shared::assets::AssetSink;
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::classify_rel_target;
@@ -50,8 +51,8 @@ struct MasterInfo {
     placeholders: Vec<Placeholder>,
 }
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = match Package::open(bytes) {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
+    let pkg = match Package::open(parse_ctx, bytes, PackageKind::Opc) {
         Ok(p) => p,
         Err(e) => return Err(probe_ole(bytes).unwrap_or(e)),
     };
@@ -85,7 +86,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         return Err(ConvertError::malformed_part(&pres_part, "presentation has no slide list"));
     }
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::new(parse_ctx));
     let mut layouts: HashMap<String, LayoutInfo> = HashMap::new();
     let mut masters: HashMap<String, MasterInfo> = HashMap::new();
     let mut blocks: Vec<Block> = Vec::new();
@@ -151,6 +152,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         let master = layout.and_then(|l| l.master_path.as_ref()).and_then(|mp| masters.get(mp));
 
         let ctx = SlideCtx {
+            parse_ctx,
             pkg: &pkg,
             rels: slide_rels,
             base_part: slide_path,
@@ -255,6 +257,7 @@ fn load_master(pkg: &RefCell<Package>, master_path: &str) -> Result<MasterInfo, 
 }
 
 struct SlideCtx<'a, 'b> {
+    parse_ctx: &'b ParseCtx<'b>,
     pkg: &'b RefCell<Package<'a>>,
     rels: &'b Relationships,
     base_part: &'b str,
@@ -591,7 +594,7 @@ fn parse_graphic_frame(
         && let Some(rid) = chart_ref.attr_qualified(ns::R, "id")
         && let Some((part, bytes)) = ctx.rel_part(rid)?
     {
-        match parse_xml(&bytes) {
+        match parse_xml(ctx.parse_ctx, &bytes) {
             Ok(root) => blocks.extend(crate::shared::drawingml::chart_blocks(&root)),
             Err(e) if e.is_fatal() => return Err(e),
             Err(e) => log::warn!("skipping corrupt chart part {part}: {e}"),
@@ -602,7 +605,7 @@ fn parse_graphic_frame(
         && let Some(rid) = rel_ids.attr_qualified(ns::R, "dm")
         && let Some((part, bytes)) = ctx.rel_part(rid)?
     {
-        match parse_xml(&bytes) {
+        match parse_xml(ctx.parse_ctx, &bytes) {
             Ok(root) => blocks.extend(crate::shared::drawingml::diagram_blocks(&root)),
             Err(e) if e.is_fatal() => return Err(e),
             Err(e) => log::warn!("skipping corrupt diagram part {part}: {e}"),
@@ -618,7 +621,7 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
         tbl.find(ns::A, "tblPr")
             .is_some_and(|p| matches!(p.attr(ns::A, "firstRow"), Some("1") | Some("true"))),
     );
-    let mut builder = GridBuilder::new();
+    let mut builder = GridBuilder::new(ctx.parse_ctx.limits().max_expansion);
     for tr in tbl.find_all(ns::A, "tr") {
         builder.next_row();
         for tc in tr.find_all(ns::A, "tc") {

@@ -6,8 +6,9 @@
 //! (unclosed or mismatched tags) are repaired deliberately and logged, never
 //! silently.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
@@ -200,7 +201,8 @@ impl<'a> Iterator for DescendantNodes<'a> {
 /// nodes. Encoding comes from the BOM or XML declaration; the part is
 /// transcoded to UTF-8 before parsing so namespace resolution sees one
 /// consistent encoding.
-pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
+pub fn parse_xml(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Element, ConvertError> {
+    let limits = parse_ctx.limits();
     let utf8 = to_utf8(bytes);
     let mut reader = NsReader::from_reader(utf8.as_ref());
     reader.config_mut().check_end_names = false;
@@ -209,24 +211,21 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
     let mut root =
         Element { ns: None, local: String::new(), attrs: Vec::new(), children: Vec::new() };
     let mut stack: Vec<Element> = Vec::new();
-    let mut nodes: usize = 0;
+    let mut nodes: u64 = 0;
     let mut recovered = false;
 
     loop {
         let event = reader.read_event().map_err(|_| ConvertError::malformed("unparseable xml"))?;
         match event {
             Event::Start(e) => {
-                if stack.len() >= limits::MAX_NESTING_DEPTH {
-                    return Err(ConvertError::limit(
-                        Limit::NestingDepth,
-                        limits::MAX_NESTING_DEPTH as u64,
-                    ));
+                if stack.len() as u64 >= limits.max_nesting_depth {
+                    return Err(ConvertError::limit(Limit::NestingDepth, limits.max_nesting_depth));
                 }
-                bump_nodes(&mut nodes)?;
+                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 stack.push(start_to_element(&e, &reader, &mut interner));
             }
             Event::Empty(e) => {
-                bump_nodes(&mut nodes)?;
+                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 let elem = start_to_element(&e, &reader, &mut interner);
                 attach(&mut stack, &mut root, Node::Elem(elem));
             }
@@ -242,19 +241,19 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
             Event::Text(e) => {
                 let text = e.into_inner().into_owned();
                 if !text.is_empty() {
-                    bump_nodes(&mut nodes)?;
+                    bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                     push_text(&mut stack, &mut root, text);
                 }
             }
             Event::GeneralRef(e) => {
                 let name = e.into_inner();
                 let resolved = resolve_entity(&name).unwrap_or_else(|| format!("&{name};"));
-                bump_nodes(&mut nodes)?;
+                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 push_text(&mut stack, &mut root, resolved);
             }
             Event::CData(e) => {
                 let text = e.into_inner().into_owned();
-                bump_nodes(&mut nodes)?;
+                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 push_text(&mut stack, &mut root, text);
             }
             Event::Eof => break,
@@ -313,10 +312,10 @@ fn declared_encoding(head: &[u8]) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn bump_nodes(nodes: &mut usize) -> Result<(), ConvertError> {
+fn bump_nodes(nodes: &mut u64, max: u64) -> Result<(), ConvertError> {
     *nodes += 1;
-    if *nodes > limits::MAX_XML_NODES {
-        return Err(ConvertError::limit(Limit::XmlNodes, limits::MAX_XML_NODES as u64));
+    if *nodes > max {
+        return Err(ConvertError::limit(Limit::XmlNodes, max));
     }
     Ok(())
 }
@@ -485,12 +484,48 @@ fn resolve_entity(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::Limits;
+
+    fn default_depth() -> usize {
+        usize::try_from(Limits::default().max_nesting_depth).unwrap()
+    }
+
+    fn nested(depth: usize) -> Vec<u8> {
+        format!("{}{}", "<d>".repeat(depth), "</d>".repeat(depth)).into_bytes()
+    }
+
+    #[test]
+    fn depth_and_node_limits_are_the_contexts() {
+        let limits = Limits { max_nesting_depth: 3, max_xml_nodes: 4, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        assert!(parse_xml(&parse_ctx, &nested(3)).is_ok());
+        let err = parse_xml(&parse_ctx, &nested(4)).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 3 }));
+        assert!(parse_xml(&parse_ctx, b"<a><b/>t<c/></a>").is_ok());
+        let err = parse_xml(&parse_ctx, b"<a><b/>t<c/><e/></a>").unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 4 }));
+    }
+
+    #[test]
+    fn every_node_kind_is_charged_against_the_contexts_node_limit() {
+        let limits = Limits { max_xml_nodes: 1, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        assert!(parse_xml(&parse_ctx, b"<a></a>").is_ok());
+        for second in ["<b></b>", "<b/>", "t", "&amp;", "<![CDATA[t]]>"] {
+            let xml = format!("<a>{second}</a>");
+            let err = parse_xml(&parse_ctx, xml.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 1 }),
+                "{second}: {err:?}"
+            );
+        }
+    }
 
     #[test]
     fn resolves_namespaces_regardless_of_prefix() {
         let xml =
             br#"<x:root xmlns:x="urn:a" xmlns:y="urn:b"><y:kid x:id="1" plain="p"/></x:root>"#;
-        let root = parse_xml(xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), xml).unwrap();
         let r = root.find("urn:a", "root").unwrap();
         let kid = r.find("urn:b", "kid").unwrap();
         assert_eq!(kid.attr("urn:a", "id"), Some("1"));
@@ -502,7 +537,7 @@ mod tests {
     fn qualified_and_unqualified_lookups_are_separate() {
         let xml =
             br#"<x:root xmlns:x="urn:a" xmlns:r="urn:r"><x:kid r:id="rel" id="plain"/></x:root>"#;
-        let root = parse_xml(xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), xml).unwrap();
         let kid = root.first_descendant("urn:a", "kid").unwrap();
         assert_eq!(kid.attr_qualified("urn:r", "id"), Some("rel"));
         assert_eq!(kid.attr_unqualified("id"), Some("plain"));
@@ -536,7 +571,7 @@ mod tests {
         assert_eq!(normalize_ooxml_uri("urn:schemas-microsoft-com:vml"), None);
 
         let xml = br#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"><w:body/></w:document>"#;
-        let root = parse_xml(xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), xml).unwrap();
         let doc = root.find(ns::W, "document").unwrap();
         assert!(doc.find(ns::W, "body").is_some());
     }
@@ -544,7 +579,7 @@ mod tests {
     #[test]
     fn default_namespace_applies_to_elements_not_attributes() {
         let xml = br#"<root xmlns="urn:d"><kid id="1"/></root>"#;
-        let root = parse_xml(xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), xml).unwrap();
         let r = root.find("urn:d", "root").unwrap();
         let kid = r.find("urn:d", "kid").unwrap();
         assert_eq!(kid.attr_any("id"), Some("1"));
@@ -559,7 +594,7 @@ mod tests {
             <mc:Choice xmlns:z="urn:one" Requires="z"/>
             <mc:Choice xmlns:z="urn:two" Requires="z unknownprefix"/>
         </mc:AlternateContent>"#;
-        let root = parse_xml(xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), xml).unwrap();
         let alt = root.find(ns::MC, "AlternateContent").unwrap();
         let choices: Vec<&Element> = alt.find_all(ns::MC, "Choice").collect();
         assert_eq!(choices[0].attr_any("Requires"), Some("urn:one"));
@@ -573,7 +608,7 @@ mod tests {
         for unit in text.encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        let root = parse_xml(&bytes).unwrap();
+        let root = parse_xml(&ParseCtx::default(), &bytes).unwrap();
         let r = &root.child_elems().next().unwrap();
         assert_eq!(r.attr_any("a"), Some("caf\u{e9}"));
         assert_eq!(r.text(), "\u{4f60}\u{597d}");
@@ -587,7 +622,7 @@ mod tests {
             b"<r><![CDATA[caf\xE9]]></r>",
             b"<r\xE9/>",
         ] {
-            let err = parse_xml(xml).unwrap_err();
+            let err = parse_xml(&ParseCtx::default(), xml).unwrap_err();
             assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
         }
     }
@@ -595,6 +630,7 @@ mod tests {
     #[test]
     fn short_legacy_encoded_part_is_transcoded() {
         let root = parse_xml(
+            &ParseCtx::default(),
             b"<?xml version=\"1.0\" encoding=\"windows-1252\"?><r a=\"\xE9\">caf\xE9</r>",
         )
         .unwrap();
@@ -605,7 +641,7 @@ mod tests {
 
     #[test]
     fn text_cdata_and_references_keep_their_content() {
-        let root = parse_xml(
+        let root = parse_xml(&ParseCtx::default(),
             b"<r xmlns=\"urn:d\" xmlns:q=\"urn:q\" a=\"x&amp;\ty\" b=\"&bogus;\">a\r\nb<![CDATA[<c>\r\n]]>&#x41;&lt;&bogus;</r>",
         )
         .unwrap();
@@ -622,13 +658,13 @@ mod tests {
             (from..to).map(|i| format!(" xmlns:p{i}=\"urn:{i}\"")).collect::<String>()
         };
         let xml = format!("<a{}><b{}/></a>", decls(0, 65), decls(65, 130));
-        let err = parse_xml(xml.as_bytes()).unwrap_err();
+        let err = parse_xml(&ParseCtx::default(), xml.as_bytes()).unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
     }
 
     #[test]
     fn unclosed_elements_recovered() {
-        let root = parse_xml(b"<a><b>text").unwrap();
+        let root = parse_xml(&ParseCtx::default(), b"<a><b>text").unwrap();
         let a = root.child_elems().next().unwrap();
         assert_eq!(a.local, "a");
         assert_eq!(a.text(), "text");
@@ -637,17 +673,17 @@ mod tests {
     #[test]
     fn depth_limit_is_hard_error() {
         let mut xml = Vec::new();
-        for _ in 0..(limits::MAX_NESTING_DEPTH + 2) {
+        for _ in 0..(default_depth() + 2) {
             xml.extend_from_slice(b"<d>");
         }
-        let err = parse_xml(&xml).unwrap_err();
+        let err = parse_xml(&ParseCtx::default(), &xml).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. }));
     }
 
     #[test]
     fn deep_dom_traversal_is_iterative() {
         // Just under the cap: descendants/text must not overflow the stack.
-        let depth = limits::MAX_NESTING_DEPTH - 1;
+        let depth = default_depth() - 1;
         let mut xml = Vec::new();
         for _ in 0..depth {
             xml.extend_from_slice(b"<d>");
@@ -656,7 +692,7 @@ mod tests {
         for _ in 0..depth {
             xml.extend_from_slice(b"</d>");
         }
-        let root = parse_xml(&xml).unwrap();
+        let root = parse_xml(&ParseCtx::default(), &xml).unwrap();
         assert_eq!(root.text(), "leaf");
         assert_eq!(root.descendants("", "never").count(), 0);
     }

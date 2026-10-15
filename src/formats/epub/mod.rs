@@ -1,18 +1,19 @@
 //! EPUB: XHTML chapters in spine order, concatenated into one document with
 //! chapter-scoped anchors so intra-book navigation survives.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{AnchorId, Block, Document, ImageSource, Inline, LinkTarget};
 use crate::package::xml::Element;
-use crate::package::{Package, path};
+use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::{AssetSink, media_type_for};
 use crate::shared::html::{HtmlCtx, Stylesheet};
 use crate::shared::uri::is_absolute_uri;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = RefCell::new(Package::open(bytes)?);
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
+    let pkg = RefCell::new(Package::open(parse_ctx, bytes, PackageKind::Epub)?);
 
     let container = pkg.borrow_mut().required_xml_part("META-INF/container.xml")?;
     let opf_path = container
@@ -68,7 +69,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         }
     }
 
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::new(parse_ctx));
     let mut css_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut converted = 0usize;
     for chapter_path in &spine_paths {
@@ -93,7 +94,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         };
         // Chapter-start anchor: renders only when a link targets this chapter.
         doc.blocks.push(Block::Paragraph(vec![Inline::Anchor(chapter_path.clone())]));
-        doc.blocks.extend(crate::shared::html::to_blocks(body, &css, &ctx)?);
+        doc.blocks.extend(crate::shared::html::to_blocks(parse_ctx, body, &css, &ctx)?);
         converted += 1;
     }
     if spine_entries > 0 && converted == 0 {
@@ -254,7 +255,7 @@ mod tests {
             w.write_all(body.as_bytes()).unwrap();
         }
 
-        let doc = parse(&w.finish().unwrap().into_inner()).unwrap();
+        let doc = parse(&ParseCtx::default(), &w.finish().unwrap().into_inner()).unwrap();
         let text = doc
             .blocks
             .iter()

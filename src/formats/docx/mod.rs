@@ -7,18 +7,19 @@ mod content;
 mod numbering;
 mod styles;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Document, Note, NoteKind};
-use crate::package::Package;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::ns;
+use crate::package::{Package, PackageKind};
 use crate::shared::assets::AssetSink;
 use content::Ctx;
 use numbering::Counters;
 use std::cell::RefCell;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = match Package::open(bytes) {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
+    let pkg = match Package::open(parse_ctx, bytes, PackageKind::Opc) {
         Ok(p) => p,
         Err(e) => return Err(crate::package::archive::probe_ole(bytes).unwrap_or(e)),
     };
@@ -56,13 +57,14 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .ok_or_else(|| ConvertError::malformed_part(&main_part, "no document body"))?;
 
     let counters = RefCell::new(Counters::default());
-    let assets = RefCell::new(AssetSink::new());
+    let assets = RefCell::new(AssetSink::new(parse_ctx));
 
     let footnotes_part =
         typed_part_path(&doc_rels, &main_part, rel_type::FOOTNOTES, "footnotes.xml");
     let endnotes_part = typed_part_path(&doc_rels, &main_part, rel_type::ENDNOTES, "endnotes.xml");
 
     let ctx = Ctx {
+        parse_ctx,
         pkg: &pkg,
         rels: doc_rels,
         base_part: main_part,
@@ -167,7 +169,7 @@ mod tests {
                 Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
                 Target="https://e.com/pic.png" TargetMode="External"/>
             </Relationships>"#;
-        let doc = parse(&docx(document, rels)).unwrap();
+        let doc = parse(&ParseCtx::default(), &docx(document, rels)).unwrap();
         let image = find_image(&doc.blocks).expect("image inline");
         let Inline::Image { source, .. } = image else { unreachable!() };
         assert_eq!(*source, ImageSource::External("https://e.com/pic.png".into()));
@@ -200,7 +202,7 @@ mod tests {
                 ("word/document.xml", &numbered_paragraphs()),
                 ("word/numbering.xml", &numbering_with_start(start)),
             ]);
-            let doc = parse(&bytes).expect(start);
+            let doc = parse(&ParseCtx::default(), &bytes).expect(start);
             assert!(!doc.blocks.is_empty());
         }
     }
@@ -236,7 +238,7 @@ mod tests {
             ("word/styles.xml", &styles),
             ("word/numbering.xml", &numbering),
         ]);
-        let doc = parse(&bytes).unwrap();
+        let doc = parse(&ParseCtx::default(), &bytes).unwrap();
         let Some(Block::List(list)) = doc.blocks.first() else {
             panic!("expected a list, got {:?}", doc.blocks.first());
         };
@@ -258,7 +260,8 @@ mod tests {
             <w:r><w:t> grants</w:t></w:r>
             </w:p></w:body></w:document>"#
         );
-        let doc = parse(&docx_parts(&[("word/document.xml", &document)])).unwrap();
+        let doc =
+            parse(&ParseCtx::default(), &docx_parts(&[("word/document.xml", &document)])).unwrap();
         let Some(Block::Paragraph(inlines)) = doc.blocks.first() else { panic!() };
         assert_eq!(crate::model::inlines_to_plain_text(inlines), "This by-law grants");
     }
@@ -282,7 +285,9 @@ mod tests {
         for (body, expected) in cases {
             let document = format!(r#"<w:document {W}><w:body>{body}</w:body></w:document>"#);
             let bytes = docx_parts(&[("word/document.xml", &document)]);
-            let markdown = crate::render::markdown::document_to_markdown(&parse(&bytes).unwrap());
+            let markdown = crate::render::markdown::document_to_markdown(
+                &parse(&ParseCtx::default(), &bytes).unwrap(),
+            );
             assert_eq!(markdown, expected, "body: {body}");
         }
     }
@@ -317,7 +322,7 @@ mod tests {
             ("word/styles.xml", &styles),
             ("word/numbering.xml", &numbering),
         ]);
-        let doc = parse(&bytes).unwrap();
+        let doc = parse(&ParseCtx::default(), &bytes).unwrap();
         let headings: Vec<String> = doc
             .blocks
             .iter()

@@ -1,32 +1,52 @@
 //! ZIP archive access with decompression limits.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::package::xml::{Element, parse_xml};
 use std::collections::HashMap;
 use std::io::{Cursor, ErrorKind, Read};
 use std::rc::Rc;
 
+/// The family of a ZIP-based package: OPC, OpenDocument or EPUB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageKind {
+    /// Open Packaging Conventions: DOCX, PPTX, XLSX and XLSB.
+    Opc,
+    /// OpenDocument: ODT, ODS and ODP.
+    Odf,
+    /// EPUB's Open Container Format.
+    Epub,
+}
+
 /// A ZIP-based document package (OOXML, ODF, EPUB).
 pub struct Package<'a> {
+    parse_ctx: &'a ParseCtx<'a>,
+    #[expect(dead_code, reason = "no reader chooses an XML dialect by package kind yet")]
+    kind: PackageKind,
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
     total_read: u64,
     /// Decompressed parts by normalized name: repeated references are served
     /// from the cache instead of re-decompressing and re-charging the
     /// total-bytes budget (which would falsely trip on valid documents that
-    /// reference one part many times). Bounded by `MAX_TOTAL_BYTES`. Buffers
+    /// reference one part many times). Bounded by `max_total_bytes`. Buffers
     /// are shared (`Rc`), so a cache hit never copies the bytes.
     cache: HashMap<String, Rc<[u8]>>,
 }
 
 impl<'a> Package<'a> {
-    pub fn open(bytes: &'a [u8]) -> Result<Self, ConvertError> {
+    pub fn open(
+        parse_ctx: &'a ParseCtx<'a>,
+        bytes: &'a [u8],
+        kind: PackageKind,
+    ) -> Result<Self, ConvertError> {
         let zip = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|_| ConvertError::malformed("not a readable zip archive"))?;
-        if zip.len() > limits::MAX_ENTRY_COUNT {
-            return Err(ConvertError::limit(Limit::EntryCount, limits::MAX_ENTRY_COUNT as u64));
+        let max = parse_ctx.limits().max_entry_count;
+        if zip.len() as u64 > max {
+            return Err(ConvertError::limit(Limit::EntryCount, max));
         }
-        Ok(Package { zip, total_read: 0, cache: HashMap::new() })
+        Ok(Package { parse_ctx, kind, zip, total_read: 0, cache: HashMap::new() })
     }
 
     /// Read a part's bytes. `Ok(None)` means the part is absent (a valid
@@ -44,21 +64,22 @@ impl<'a> Package<'a> {
             Err(zip::result::ZipError::FileNotFound) => return Ok(None),
             Err(_) => return Err(ConvertError::malformed_part(name, "unreadable archive entry")),
         };
-        if file.size() > limits::MAX_ENTRY_BYTES {
-            return Err(ConvertError::limit(Limit::EntryBytes, limits::MAX_ENTRY_BYTES));
+        let limits = self.parse_ctx.limits();
+        if file.size() > limits.max_entry_bytes {
+            return Err(ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes));
         }
         // The declared size can lie; read through a hard-capped reader. The
         // cap is whichever budget has less room: the per-entry limit or what
         // remains of the whole-archive total.
-        let remaining_total = limits::MAX_TOTAL_BYTES.saturating_sub(self.total_read);
-        let cap = limits::MAX_ENTRY_BYTES.min(remaining_total);
+        let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read);
+        let cap = limits.max_entry_bytes.min(remaining_total);
         let bytes = read_entry(&mut file, cap, name)?;
         let read = bytes.len() as u64;
         if read > cap {
-            return Err(if remaining_total < limits::MAX_ENTRY_BYTES {
-                ConvertError::limit(Limit::TotalBytes, limits::MAX_TOTAL_BYTES)
+            return Err(if remaining_total < limits.max_entry_bytes {
+                ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes)
             } else {
-                ConvertError::limit(Limit::EntryBytes, limits::MAX_ENTRY_BYTES)
+                ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes)
             });
         }
         self.total_read += read;
@@ -91,14 +112,14 @@ impl<'a> Package<'a> {
         let Some(bytes) = self.optional_part(name)? else {
             return Ok(None);
         };
-        skip_unreadable(name, parse_xml(&bytes).map(Some))
+        skip_unreadable(name, parse_xml(self.parse_ctx, &bytes).map(Some))
     }
 
     /// Read and parse an XML part that must exist and parse for any
     /// meaningful output.
     pub fn required_xml_part(&mut self, name: &str) -> Result<Element, ConvertError> {
         let bytes = self.required_part(name)?;
-        parse_xml(&bytes)
+        parse_xml(self.parse_ctx, &bytes)
     }
 }
 
@@ -169,6 +190,7 @@ pub fn probe_ole(bytes: &[u8]) -> Option<ConvertError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::Limits;
     use std::io::Write;
 
     fn one_part_zip(name: &str, bytes: &[u8]) -> Vec<u8> {
@@ -271,7 +293,8 @@ mod tests {
             .data_start()
             .unwrap();
         data[usize::try_from(start).unwrap()] ^= 1;
-        let mut pkg = Package::open(&data).unwrap();
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("word/document.xml").unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. }));
         assert!(pkg.cache.is_empty());
@@ -284,7 +307,8 @@ mod tests {
     #[test]
     fn repeated_reads_are_cached_and_charged_once() {
         let data = one_part_zip("media/a.bin", &[7u8; 4096]);
-        let mut pkg = Package::open(&data).unwrap();
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         for _ in 0..5 {
             assert_eq!(pkg.part("media/a.bin").unwrap().unwrap().len(), 4096);
         }
@@ -299,22 +323,61 @@ mod tests {
             w.write_all(&[7u8; 4096]).unwrap();
         }
         let data = w.finish().unwrap().into_inner();
-        let mut pkg = Package::open(&data).unwrap();
+        let limits = Limits { max_total_bytes: 4096 + 100, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("a.bin").unwrap().is_some());
-        // Simulate a large archive having consumed almost the whole total
-        // budget across earlier entries; the next entry no longer fits.
-        pkg.total_read = limits::MAX_TOTAL_BYTES - 100;
         let err = pkg.part("b.bin").unwrap_err();
         assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, .. }),
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 4196 }),
             "expected max_total_bytes, got: {err}"
         );
     }
 
     #[test]
+    fn entry_count_and_size_limits_are_the_contexts() {
+        let data = one_part_zip("a.bin", &[7u8; 4096]);
+        let mut limits = Limits { max_entry_bytes: 4096, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        assert!(Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap().part("a.bin").is_ok());
+        limits.max_entry_bytes = 4095;
+        let parse_ctx = ParseCtx::new(&limits);
+        let err =
+            Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap().part("a.bin").unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 }));
+
+        let limits = Limits { max_entry_count: 1, ..Limits::default() };
+        assert!(Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).is_ok());
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["a.bin", "b.bin"] {
+            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        }
+        let two = w.finish().unwrap().into_inner();
+        let err = Package::open(&ParseCtx::new(&limits), &two, PackageKind::Opc).err().unwrap();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryCount, max: 1 }));
+    }
+
+    #[test]
+    fn an_entry_past_its_declared_size_is_held_to_the_contexts_entry_limit() {
+        let mut data = one_part_zip("a.bin", &[7u8; 4096]);
+        let understate =
+            |at: usize, data: &mut [u8]| data[at..at + 4].copy_from_slice(&16u32.to_le_bytes());
+        let local = data.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
+        understate(local + 22, &mut data);
+        let central = data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        understate(central + 24, &mut data);
+        let limits = Limits { max_entry_bytes: 64, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let err = pkg.part("a.bin").unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 64 }));
+    }
+
+    #[test]
     fn leading_slash_part_names_normalize() {
         let data = one_part_zip("word/document.xml", b"<x/>");
-        let mut pkg = Package::open(&data).unwrap();
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
     }
 }

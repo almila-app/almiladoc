@@ -8,8 +8,8 @@ mod lists;
 mod sprm;
 mod stsh;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits;
 use crate::model::{
     Block, Document, ImageSource, Inline, Note, NoteKind, Style, inlines_are_empty,
     inlines_to_plain_text,
@@ -30,12 +30,12 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use stsh::Stylesheet;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let cursor = Cursor::new(bytes);
     let mut ole = cfb::CompoundFile::open(cursor)
         .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
 
-    let word_doc = read_ole_stream(&mut ole, "WordDocument")?;
+    let word_doc = read_ole_stream(parse_ctx, &mut ole, "WordDocument")?;
     if get_u16(&word_doc, 0) != Some(0xA5EC) {
         return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic"));
     }
@@ -45,9 +45,9 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     }
     let (table_name, other_table) =
         if flags & 0x0200 != 0 { ("1Table", "0Table") } else { ("0Table", "1Table") };
-    let table = match optional_ole_stream(&mut ole, table_name)? {
+    let table = match optional_ole_stream(parse_ctx, &mut ole, table_name)? {
         Some(table) => table,
-        None => optional_ole_stream(&mut ole, other_table)?.unwrap_or_default(),
+        None => optional_ole_stream(parse_ctx, &mut ole, other_table)?.unwrap_or_default(),
     };
 
     let ccp_text = get_u32(&word_doc, 0x4C).unwrap_or(0) as usize;
@@ -75,7 +75,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     let encoding = lid_encoding(lid.unwrap_or(0));
     let text = extract_text(&word_doc, &pieces, total_cp, encoding);
 
-    let data = optional_ole_stream(&mut ole, "Data")?.unwrap_or_default();
+    let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.unwrap_or_default();
     let chpx_runs = parse_fkps(&word_doc, &table, 0xFA, FkpKind::Chpx, &data);
     let papx_runs = parse_fkps(&word_doc, &table, 0x102, FkpKind::Papx, &data);
     let stylesheet = stsh::parse(&word_doc, &table);
@@ -105,6 +105,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
 
     let piece_prcs: Vec<Option<usize>> = pieces.iter().map(|p| p.prm_prc).collect();
     let assembler = Assembler {
+        parse_ctx,
         text,
         chpx: Runs::new(chpx_runs),
         papx: Runs::new(papx_runs),
@@ -115,7 +116,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         note_refs,
         counters: std::cell::RefCell::new(Counters::default()),
         data,
-        assets: std::cell::RefCell::new(AssetSink::new()),
+        assets: std::cell::RefCell::new(AssetSink::new(parse_ctx)),
     };
     let blocks = assembler.build_blocks(0, main_end)?;
     let mut notes = Vec::new();
@@ -589,7 +590,8 @@ fn composite_label(
 // ---------------------------------------------------------------------------
 // Assembly: text stream + formatting runs -> model
 
-struct Assembler {
+struct Assembler<'c> {
+    parse_ctx: &'c ParseCtx<'c>,
     text: TextStream,
     chpx: Runs,
     papx: Runs,
@@ -693,7 +695,7 @@ impl ParaBuilder {
     }
 }
 
-impl Assembler {
+impl Assembler<'_> {
     fn build_blocks(&self, lo: usize, hi: usize) -> Result<Vec<Block>, ConvertError> {
         let mut blocks: Vec<Block> = Vec::new();
         let mut list_run: Vec<ListEntry> = Vec::new();
@@ -764,12 +766,7 @@ impl Assembler {
                             );
                         }
                     } else {
-                        Self::flush_table(
-                            &mut blocks,
-                            &mut table_rows,
-                            &mut row,
-                            &mut cell_blocks,
-                        )?;
+                        self.flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
                         self.emit_paragraph(&pap, inlines, &mut blocks, &mut list_run, &mut styled);
                     }
                 }
@@ -803,7 +800,7 @@ impl Assembler {
         }
         let inlines = para.finish();
         cell_styled.flush(&mut cell_blocks);
-        Self::flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
+        self.flush_table(&mut blocks, &mut table_rows, &mut row, &mut cell_blocks)?;
         if !inlines_are_empty(&inlines) {
             styled.flush(&mut blocks);
             flush_list(&mut blocks, &mut list_run);
@@ -964,9 +961,8 @@ impl Assembler {
             return Ok(None);
         };
         let art = &picf[cb_header.min(picf.len())..];
-        let Some(blip) =
-            crate::shared::officeart::first_blip(art, limits::MAX_ENTRY_BYTES as usize)
-        else {
+        let max_bytes = self.parse_ctx.limits().max_entry_bytes;
+        let Some(blip) = crate::shared::officeart::first_blip(art, max_bytes)? else {
             log::debug!("skipping picture with no supported blip payload");
             return Ok(None);
         };
@@ -994,12 +990,12 @@ impl Assembler {
     }
 
     fn flush_table(
+        &self,
         blocks: &mut Vec<Block>,
         table_rows: &mut Vec<DocRow>,
         row: &mut Vec<Vec<Block>>,
         cell_blocks: &mut Vec<Block>,
     ) -> Result<(), ConvertError> {
-        // (associated fn, no self)
         if !cell_blocks.is_empty() {
             row.push(std::mem::take(cell_blocks));
         }
@@ -1010,7 +1006,7 @@ impl Assembler {
             return Ok(());
         }
         let rows = std::mem::take(table_rows).into_iter().map(DocRow::into_grid_row).collect();
-        if let Some(block) = build_edge_table(rows)? {
+        if let Some(block) = build_edge_table(self.parse_ctx, rows)? {
             blocks.push(block);
         }
         Ok(())
@@ -1177,5 +1173,148 @@ mod tests {
         assert_eq!(tap.boundaries, vec![0, 4000, 8000]);
         assert!(tap.cells[0].vert_restart && !tap.cells[0].vert_cont);
         assert!(tap.cells[1].vert_cont && !tap.cells[1].vert_restart);
+    }
+
+    fn assembler<'c>(parse_ctx: &'c ParseCtx<'c>, runs: Vec<Run>, data: Vec<u8>) -> Assembler<'c> {
+        Assembler {
+            parse_ctx,
+            text: TextStream {
+                chars: Vec::new(),
+                fcs: Vec::new(),
+                cps: Vec::new(),
+                piece_of: Vec::new(),
+            },
+            chpx: Runs::new(runs),
+            papx: Runs::new(Vec::new()),
+            stylesheet: Stylesheet::default(),
+            lists: Lists::default(),
+            prcs: Vec::new(),
+            piece_prcs: Vec::new(),
+            note_refs: HashMap::new(),
+            counters: std::cell::RefCell::new(Counters::default()),
+            data,
+            assets: std::cell::RefCell::new(AssetSink::new(parse_ctx)),
+        }
+    }
+
+    fn picture_data(inflated: usize) -> Vec<u8> {
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&6u16.to_le_bytes());
+        data.extend_from_slice(&crate::shared::officeart::deflated_metafile_blip(inflated));
+        let lcb = u32::try_from(data.len()).unwrap();
+        data[..4].copy_from_slice(&lcb.to_le_bytes());
+        data
+    }
+
+    fn pic_location_chpx() -> Vec<u8> {
+        let mut chpx = vec![0x03, 0x6A];
+        chpx.extend_from_slice(&0u32.to_le_bytes());
+        chpx
+    }
+
+    fn doc_with_inline_picture(inflated: usize) -> Vec<u8> {
+        use std::io::Write;
+        const TEXT_FC: u32 = 0x600;
+        const FKP_PN: u32 = 2;
+        let mut word_doc = vec![0u8; TEXT_FC as usize];
+        let mut put =
+            |at: usize, value: u32| word_doc[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        put(0x18, TEXT_FC);
+        put(0x1C, TEXT_FC + 2);
+        put(0x4C, 2);
+        put(0xFA, 0);
+        put(0xFE, 12);
+        word_doc[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
+        let page = FKP_PN as usize * 512;
+        word_doc[page..page + 4].copy_from_slice(&TEXT_FC.to_le_bytes());
+        word_doc[page + 4..page + 8].copy_from_slice(&(TEXT_FC + 2).to_le_bytes());
+        word_doc[page + 8] = 0x80;
+        let chpx = pic_location_chpx();
+        word_doc[page + 0x100] = u8::try_from(chpx.len()).unwrap();
+        word_doc[page + 0x101..page + 0x101 + chpx.len()].copy_from_slice(&chpx);
+        word_doc[page + 511] = 1;
+        word_doc.extend_from_slice(b"\x01\r");
+        let mut table = Vec::new();
+        for value in [TEXT_FC, TEXT_FC + 2, FKP_PN] {
+            table.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        for (name, bytes) in
+            [("WordDocument", word_doc), ("0Table", table), ("Data", picture_data(inflated))]
+        {
+            ole.create_stream(name).unwrap().write_all(&bytes).unwrap();
+        }
+        ole.into_inner().into_inner()
+    }
+
+    fn inline_picture_bytes(
+        limits: &crate::limits::Limits,
+        inflated: usize,
+    ) -> Result<usize, ConvertError> {
+        let parse_ctx = ParseCtx::new(limits);
+        let run = Run {
+            fc_start: 0,
+            fc_end: 2,
+            props: RunProps { chpx: pic_location_chpx(), ..RunProps::default() },
+        };
+        let assembler = assembler(&parse_ctx, vec![run], picture_data(inflated));
+        assert!(assembler.picture_at(0)?.is_some());
+        Ok(assembler.assets.borrow().assets[0].bytes.len())
+    }
+
+    #[test]
+    fn an_inline_picture_inflating_past_the_contexts_entry_bytes_is_a_limit() {
+        let limits = crate::limits::Limits { max_entry_bytes: 4096, ..Default::default() };
+        assert_eq!(inline_picture_bytes(&limits, 4096).unwrap(), 4096);
+        let limits = crate::limits::Limits { max_entry_bytes: 4095, ..Default::default() };
+        let err = inline_picture_bytes(&limits, 4096).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::EntryBytes, max: 4095 }
+        ));
+    }
+
+    #[test]
+    fn an_inline_picture_past_the_contexts_asset_total_is_a_limit() {
+        let bytes = doc_with_inline_picture(4096);
+        let limits = crate::limits::Limits { max_asset_total_bytes: 4096, ..Default::default() };
+        let doc = parse(&ParseCtx::new(&limits), &bytes).unwrap();
+        assert_eq!(doc.assets[0].bytes.len(), 4096);
+        let limits = crate::limits::Limits { max_asset_total_bytes: 4095, ..Default::default() };
+        let err = parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::AssetTotalBytes, max: 4095 }
+        ));
+    }
+
+    fn flush_spanning_table(max_expansion: u64) -> Result<Vec<Block>, ConvertError> {
+        let limits = crate::limits::Limits { max_expansion, ..Default::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let row = |boundaries: Vec<i16>| {
+            let cells =
+                vec![vec![Block::Paragraph(vec![Inline::plain("x")])]; boundaries.len() - 1];
+            let tap = Tap { boundaries, ..Tap::default() };
+            DocRow { cells, tap: Some(tap) }
+        };
+        let mut table_rows = vec![row(vec![0, 1000, 2000, 3000]), row(vec![0, 3000])];
+        let mut blocks = Vec::new();
+        assembler(&parse_ctx, Vec::new(), Vec::new()).flush_table(
+            &mut blocks,
+            &mut table_rows,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+        Ok(blocks)
+    }
+
+    #[test]
+    fn a_table_cell_spanning_past_the_contexts_expansion_is_a_limit() {
+        assert_eq!(flush_spanning_table(2).unwrap().len(), 1);
+        let err = flush_spanning_table(1).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::Expansion, max: 1 }
+        ));
     }
 }

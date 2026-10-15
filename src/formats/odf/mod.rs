@@ -4,16 +4,17 @@ mod styles;
 mod table;
 mod text;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Document, Inline, inlines_are_empty};
-use crate::package::Package;
 use crate::package::xml::{Element, ns};
+use crate::package::{Package, PackageKind};
 use crate::shared::assets::AssetSink;
 use std::cell::RefCell;
 use text::{Ctx, parse_container};
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = RefCell::new(Package::open(bytes)?);
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
+    let pkg = RefCell::new(Package::open(parse_ctx, bytes, PackageKind::Odf)?);
 
     if is_encrypted(&pkg)? {
         return Err(ConvertError::Encrypted);
@@ -35,8 +36,8 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         .and_then(|d| d.find(ns::OFFICE, "body"))
         .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
 
-    let assets = RefCell::new(AssetSink::new());
-    let ctx = Ctx::new(&styles, &pkg, &assets);
+    let assets = RefCell::new(AssetSink::new(parse_ctx));
+    let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets);
 
     let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
         parse_container(text, &ctx)?
@@ -198,7 +199,7 @@ mod tests {
 
     #[test]
     fn corrupt_manifest_does_not_classify_as_encrypted() {
-        let doc = parse(&odt(b"<manifest:manifest <<< not xml")).unwrap();
+        let doc = parse(&ParseCtx::default(), &odt(b"<manifest:manifest <<< not xml")).unwrap();
         assert!(!doc.blocks.is_empty());
     }
 
@@ -230,7 +231,7 @@ mod tests {
             <table:table-cell><text:p>{fat}</text:p></table:table-cell>
             </table:table-row>"#
         );
-        let err = parse(&odt_with_content(&table_doc(&rows))).unwrap_err();
+        let err = parse(&ParseCtx::default(), &odt_with_content(&table_doc(&rows))).unwrap_err();
         assert!(
             matches!(err, ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, .. }),
             "expected the text-byte budget, got: {err}"
@@ -245,7 +246,7 @@ mod tests {
             <text:note-body><text:p>note body</text:p></text:note-body>
             </text:note></text:p></table:table-cell>
             </table:table-row>"#;
-        let doc = parse(&odt_with_content(&table_doc(rows))).unwrap();
+        let doc = parse(&ParseCtx::default(), &odt_with_content(&table_doc(rows))).unwrap();
         assert_eq!(doc.notes.len(), 1, "repeated rows must not duplicate notes");
     }
 
@@ -267,7 +268,7 @@ mod tests {
               <text:p>after table</text:p>
             </office:text></office:body>
             </office:document-content>"#;
-        let doc = parse(&odt_with_content(content)).unwrap();
+        let doc = parse(&ParseCtx::default(), &odt_with_content(content)).unwrap();
         let [Block::CodeBlock { text: before, .. }, Block::Table(table), Block::Paragraph(after)] =
             &doc.blocks[..]
         else {
@@ -287,10 +288,10 @@ mod tests {
     #[test]
     fn resource_limit_in_manifest_is_fatal() {
         let mut manifest = Vec::new();
-        for _ in 0..(crate::limits::MAX_NESTING_DEPTH + 2) {
+        for _ in 0..(crate::limits::Limits::default().max_nesting_depth + 2) {
             manifest.extend_from_slice(b"<d>");
         }
-        let err = parse(&odt(&manifest)).unwrap_err();
+        let err = parse(&ParseCtx::default(), &odt(&manifest)).unwrap_err();
         assert!(
             matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. }),
             "encryption probing must not swallow fatal errors, got: {err}"
@@ -319,7 +320,7 @@ mod tests {
             </table:table-row>
             </table:table></office:spreadsheet></office:body>
             </office:document-content>"#;
-        let doc = parse(&odt_with_content(content)).unwrap();
+        let doc = parse(&ParseCtx::default(), &odt_with_content(content)).unwrap();
         let md = crate::render::markdown::document_to_markdown(&doc);
         assert_eq!(md, "|  |  |  |\n| --- | --- | --- |\n| 14 | L/R [x] Roof | [ ] Wall |\n");
     }

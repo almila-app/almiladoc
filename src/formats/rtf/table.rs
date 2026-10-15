@@ -2,6 +2,7 @@
 //! row accumulation (nested tables live at `\itap` depth); the canonical
 //! grid construction is the shared edge-based assembly (`shared::grid`).
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Inline, inlines_are_empty};
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
@@ -28,15 +29,17 @@ struct TableBuild {
 
 /// Table builders indexed by nesting depth - 1, plus the per-depth pending
 /// cell content.
-pub struct TableState {
+pub struct TableState<'c> {
+    parse_ctx: &'c ParseCtx<'c>,
     tables: Vec<TableBuild>,
     cell_blocks: Vec<Vec<Block>>,
     cell_runs: Vec<StyledRun>,
 }
 
-impl TableState {
-    pub fn new() -> Self {
+impl<'c> TableState<'c> {
+    pub fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
         TableState {
+            parse_ctx,
             tables: Vec::new(),
             cell_blocks: vec![Vec::new()],
             cell_runs: vec![StyledRun::default()],
@@ -176,7 +179,7 @@ impl TableState {
         let t = std::mem::take(&mut self.tables[depth - 1]);
         let rows =
             t.rows.into_iter().map(|r| GridRow { cells: r.cells, header: r.header }).collect();
-        build_edge_table(rows)
+        build_edge_table(self.parse_ctx, rows)
     }
 
     /// Build a finished table at `depth` into cell blocks one level up.
@@ -203,7 +206,8 @@ mod tests {
 
     #[test]
     fn styled_paragraphs_are_grouped_within_one_cell() {
-        let mut state = TableState::new();
+        let parse_ctx = ParseCtx::default();
+        let mut state = TableState::new(&parse_ctx);
         state.begin_row(1);
         state.declare_cell(1, 1000);
         state.push_cell_paragraph(1, Some(BlockStyle::Code), vec![Inline::plain("first")]);

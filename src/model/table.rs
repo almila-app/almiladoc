@@ -1,4 +1,4 @@
-use crate::limits::{self, Limit, LimitExceeded};
+use crate::limits::{Limit, LimitExceeded};
 use crate::model::{Block, Inline, inlines_are_empty};
 use std::collections::HashMap;
 
@@ -89,7 +89,7 @@ impl Cell {
 impl Table {
     /// Build a plain span-less table from rows of cells (spreadsheets, CSV).
     pub fn from_rows(rows: Vec<Vec<Cell>>, header_rows: usize, kind: TableKind) -> Table {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(0);
         for row in rows {
             b.next_row();
             for cell in row {
@@ -114,23 +114,30 @@ impl Table {
 /// Sole constructor for [`Table`] grids. Enforces the exactly-once invariant:
 /// spans register their covered positions, later placements skip over them,
 /// and overlapping spans are clamped rather than double-counted.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GridBuilder {
     grid: Vec<Vec<CellSlot>>,
     /// Positions in future rows covered by an earlier row-spanning origin.
     pending: HashMap<(usize, usize), (usize, usize)>,
     /// Covered positions claimed by span expansion, charged against
-    /// [`limits::MAX_EXPANSION`] *before* any per-position work so a tiny
-    /// document carrying a huge span cannot force unbounded insertions.
+    /// `max_expansion` *before* any per-position work so a tiny document
+    /// carrying a huge span cannot force unbounded insertions.
     expansion: u64,
+    max_expansion: u64,
     /// Whether trailing rows holding only covered positions survive
     /// [`GridBuilder::finish`]; see [`GridBuilder::keep_covered_tail`].
     keep_covered_tail: bool,
 }
 
 impl GridBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(max_expansion: u64) -> Self {
+        GridBuilder {
+            grid: Vec::new(),
+            pending: HashMap::new(),
+            expansion: 0,
+            max_expansion,
+            keep_covered_tail: false,
+        }
     }
 
     pub fn next_row(&mut self) {
@@ -172,8 +179,8 @@ impl GridBuilder {
     pub fn place(&mut self, cell: Cell) -> Result<(), LimitExceeded> {
         let area = (cell.col_span.max(1) as u64) * (cell.row_span.max(1) as u64);
         self.expansion = self.expansion.saturating_add(area - 1);
-        if self.expansion > limits::MAX_EXPANSION {
-            return Err(LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
+        if self.expansion > self.max_expansion {
+            return Err(LimitExceeded { limit: Limit::Expansion, max: self.max_expansion });
         }
         let row = self.row_index();
         self.skip_pending(row);
@@ -284,6 +291,8 @@ impl GridBuilder {
 mod tests {
     use super::*;
 
+    const BUDGET: u64 = 4_000_000;
+
     fn text_cell(t: &str) -> Cell {
         Cell::from_inlines(vec![Inline::plain(t)])
     }
@@ -294,7 +303,7 @@ mod tests {
 
     #[test]
     fn col_span_covers_positions() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![], 2, 1)).unwrap();
         b.place(text_cell("end")).unwrap();
@@ -305,7 +314,7 @@ mod tests {
 
     #[test]
     fn row_span_skips_next_row_position() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![], 1, 2)).unwrap();
         b.place(text_cell("b1")).unwrap();
@@ -320,7 +329,7 @@ mod tests {
     #[test]
     fn explicit_covered_consumes_exactly_one() {
         // ODF shape: spanning cell followed by its explicit covered marker.
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![], 2, 1)).unwrap();
         assert!(b.covered());
@@ -332,7 +341,7 @@ mod tests {
     #[test]
     fn omitted_covered_positions_materialize() {
         // HTML/OOXML shape: no explicit covered cells at all.
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![], 2, 1)).unwrap();
         b.place(text_cell("end")).unwrap();
@@ -344,7 +353,7 @@ mod tests {
 
     #[test]
     fn covered_row_consumption() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![], 1, 2)).unwrap();
         b.place(text_cell("b1")).unwrap();
@@ -357,7 +366,7 @@ mod tests {
 
     #[test]
     fn stray_covered_becomes_empty_cell() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         assert!(!b.covered());
         b.place(text_cell("x")).unwrap();
@@ -398,7 +407,7 @@ mod tests {
 
     #[test]
     fn overlapping_spans_clamp_the_late_origin() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(spanning_text("tall", 1, 3)).unwrap();
         b.place(text_cell("a")).unwrap();
@@ -416,7 +425,7 @@ mod tests {
     fn conflicting_span_rectangles_stay_consistent() {
         // An origin placed where covered positions belong lands after them
         // and keeps a span consistent with what it owns.
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(spanning_text("block", 2, 2)).unwrap(); // owns (1,0),(1,1)
         b.next_row();
@@ -432,7 +441,7 @@ mod tests {
     fn trimmed_rows_clamp_surviving_spans() {
         // A row-span whose covered rows are trimmed as trailing filler must
         // not keep claiming them.
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("x")])], 1, 3)).unwrap();
         b.next_row();
@@ -444,30 +453,39 @@ mod tests {
     }
 
     #[test]
+    fn the_expansion_budget_is_the_builders() {
+        let mut b = GridBuilder::new(3);
+        b.next_row();
+        b.place(Cell::spanning(vec![], 2, 2)).unwrap();
+        let err = b.place(Cell::spanning(vec![], 2, 1)).unwrap_err();
+        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: 3 });
+    }
+
+    #[test]
     fn huge_span_hits_the_expansion_budget_before_expanding() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         let err = b.place(Cell::spanning(vec![], u32::MAX, u32::MAX)).unwrap_err();
-        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
+        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: BUDGET });
     }
 
     #[test]
     fn accumulated_spans_hit_the_expansion_budget() {
         // Preload the counter instead of allocating millions of real pending
         // entries (the global allocation counter feeds the R22 memory test).
-        let mut b = GridBuilder::new();
-        b.expansion = limits::MAX_EXPANSION - 10;
+        let mut b = GridBuilder::new(BUDGET);
+        b.expansion = BUDGET - 10;
         b.next_row();
         b.place(Cell::spanning(vec![], 3, 3)).unwrap(); // 8 more: still within
         let err = b.place(Cell::spanning(vec![], 2, 2)).unwrap_err(); // 3 more: over
-        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: limits::MAX_EXPANSION });
+        assert_eq!(err, LimitExceeded { limit: Limit::Expansion, max: BUDGET });
     }
 
     #[test]
     fn covered_tail_behind_short_row_gap_materializes() {
         // M5: a row-span at a late column must stay backed even when the
         // next row stops short of it — the gap fills with empty cells.
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         for _ in 0..5 {
             b.place(text_cell("h")).unwrap();
@@ -484,7 +502,7 @@ mod tests {
 
     #[test]
     fn trailing_empty_rows_trimmed() {
-        let mut b = GridBuilder::new();
+        let mut b = GridBuilder::new(BUDGET);
         b.next_row();
         b.place(text_cell("x")).unwrap();
         b.next_row();

@@ -6,8 +6,9 @@
 use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
 use super::{format_duration_days, format_float, format_time_of_day};
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::model::{Block, Cell, Document, GridBuilder, Inline, Table, TableKind};
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
@@ -25,7 +26,11 @@ pub(super) const SHARED_STRINGS_REL: &str =
 pub(super) const MAX_ROWS: u32 = 1_048_576;
 pub(super) const MAX_COLS: u32 = 16_384;
 
-pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, ConvertError> {
+pub(super) fn parse(
+    parse_ctx: &ParseCtx,
+    pkg: &mut Package,
+    wb_part: &str,
+) -> Result<Document, ConvertError> {
     let workbook = pkg.required_xml_part(wb_part)?;
     // Any OOXML main part resolves here; a document or presentation would
     // otherwise convert to an empty workbook.
@@ -84,7 +89,7 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
         };
         let mut content = read_sheet(worksheet, &shared, &styles, date1904);
         content.checkboxes = read_vml_checkboxes(pkg, part)?;
-        let Some(table) = build_table(content, &mut slots)? else {
+        let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
         if multi_sheet {
@@ -389,6 +394,7 @@ pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> String {
 /// only populated cell must survive at full size), and merges remapped onto
 /// the surviving rows and columns.
 pub(super) fn build_table(
+    parse_ctx: &ParseCtx,
     mut sheet: SheetContent,
     slots: &mut u64,
 ) -> Result<Option<Table>, ConvertError> {
@@ -462,9 +468,10 @@ pub(super) fn build_table(
     // Charged before materializing, and across the workbook rather than per
     // sheet: the extent comes from cell coordinates, so a handful of cells
     // describes a whole sheet and a handful of sheets multiplies it.
+    let limits = parse_ctx.limits();
     *slots = slots.saturating_add(row_map.len() as u64 * col_map.len() as u64);
-    if *slots > limits::MAX_GRID_SLOTS {
-        return Err(ConvertError::limit(Limit::GridSlots, limits::MAX_GRID_SLOTS));
+    if *slots > limits.max_grid_slots {
+        return Err(ConvertError::limit(Limit::GridSlots, limits.max_grid_slots));
     }
 
     // Remap merges onto the surviving coordinates. The covered-position set
@@ -485,8 +492,8 @@ pub(super) fn build_table(
             continue;
         }
         expansion = expansion.saturating_add((rn as u64) * (cn as u64) - 1);
-        if expansion > limits::MAX_EXPANSION {
-            return Err(ConvertError::limit(Limit::Expansion, limits::MAX_EXPANSION));
+        if expansion > limits.max_expansion {
+            return Err(ConvertError::limit(Limit::Expansion, limits.max_expansion));
         }
         origins.insert((r0, c0), (cn as u32, rn as u32));
         for r in r0..r0 + rn {
@@ -498,7 +505,7 @@ pub(super) fn build_table(
         }
     }
 
-    let mut builder = GridBuilder::new();
+    let mut builder = GridBuilder::new(limits.max_expansion);
     // A merge is real extent: trailing rows it covers stay in the grid.
     builder.keep_covered_tail();
     for (ri, &row) in row_map.iter().enumerate() {
@@ -697,7 +704,7 @@ mod tests {
     /// Route through the shared container dispatch, the only entry a caller
     /// has.
     fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-        super::super::parse(bytes)
+        super::super::parse(&ParseCtx::default(), bytes)
     }
 
     /// Assemble a workbook: (name, state, worksheet body) per sheet, plus
@@ -1071,5 +1078,18 @@ mod tests {
         };
         let doc = parse(&wb.build()).unwrap();
         assert_eq!(texts(first_table(&doc)), vec![vec!["14", "L/R [x] Roof", "[ ]"]]);
+    }
+
+    #[test]
+    fn merges_are_charged_against_the_contexts_expansion_before_placement() {
+        let bytes = one_sheet(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row><row r="3"><c r="C3" t="inlineStr"><is><t>c</t></is></c></row></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="B2:C3"/></mergeCells>"#,
+        )
+        .build();
+        let limits = crate::limits::Limits { max_expansion: 6, ..Default::default() };
+        assert!(super::super::parse(&ParseCtx::new(&limits), &bytes).is_ok());
+        let limits = crate::limits::Limits { max_expansion: 5, ..Default::default() };
+        let err = super::super::parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 5 }));
     }
 }

@@ -6,11 +6,11 @@
 //! Empty filler runs *inside* the used range materialize fully so every
 //! later cell keeps its source coordinates; only trailing filler (empty rows
 //! at the end, empty cells at a row's end) is elided. All materialization is
-//! charged against the fixed expansion budget.
+//! charged against the expansion budget.
 
 use crate::error::ConvertError;
 use crate::formats::odf::text::{Ctx, parse_container};
-use crate::limits::{self, Limit};
+use crate::limits::{Limit, Limits};
 use crate::model::{Block, Cell, GridBuilder, Inline, TableKind};
 use crate::package::xml::{Element, ns};
 use crate::shared::header::resolve_header_rows;
@@ -18,8 +18,10 @@ use crate::shared::text::clean_text;
 use std::collections::HashMap;
 
 pub fn parse_table(elem: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
+    let limits = ctx.parse_ctx.limits();
     let mut state = TableState {
-        builder: GridBuilder::new(),
+        limits,
+        builder: GridBuilder::new(limits.max_expansion),
         expansion: 0,
         expansion_bytes: 0,
         pending_rows: 0,
@@ -36,9 +38,10 @@ pub fn parse_table(elem: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError
     Ok(vec![Block::Table(table)])
 }
 
-struct TableState {
+struct TableState<'l> {
+    limits: &'l Limits,
     builder: GridBuilder,
-    /// Grid slots produced by expansion, checked against the fixed budget.
+    /// Grid slots produced by expansion, checked against its budget.
     expansion: u64,
     /// Text bytes duplicated by expansion, checked against their own budget.
     expansion_bytes: u64,
@@ -98,11 +101,12 @@ fn append_cell_checkboxes(
     }
 }
 
-impl TableState {
+impl TableState<'_> {
     fn charge(&mut self, cells: u64) -> Result<(), ConvertError> {
         self.expansion = self.expansion.saturating_add(cells);
-        if self.expansion > limits::MAX_EXPANSION {
-            return Err(ConvertError::limit(Limit::Expansion, limits::MAX_EXPANSION));
+        let max = self.limits.max_expansion;
+        if self.expansion > max {
+            return Err(ConvertError::limit(Limit::Expansion, max));
         }
         Ok(())
     }
@@ -111,11 +115,9 @@ impl TableState {
     /// bounds positions, this bounds the amplified content itself.
     fn charge_bytes(&mut self, bytes: u64) -> Result<(), ConvertError> {
         self.expansion_bytes = self.expansion_bytes.saturating_add(bytes);
-        if self.expansion_bytes > limits::MAX_EXPANSION_TEXT_BYTES {
-            return Err(ConvertError::limit(
-                Limit::ExpansionTextBytes,
-                limits::MAX_EXPANSION_TEXT_BYTES,
-            ));
+        let max = self.limits.max_expansion_text_bytes;
+        if self.expansion_bytes > max {
+            return Err(ConvertError::limit(Limit::ExpansionTextBytes, max));
         }
         Ok(())
     }

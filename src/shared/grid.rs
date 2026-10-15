@@ -4,6 +4,7 @@
 //! spans, and vertical chains start at an explicit restart flag and are
 //! continued by continuation cells whose boundaries match the chain's.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, GridBuilder, TableKind};
 use crate::shared::header::resolve_header_rows;
@@ -34,7 +35,10 @@ pub struct GridRow {
 }
 
 /// Assemble logical rows into the canonical grid.
-pub fn build_edge_table(rows: Vec<GridRow>) -> Result<Option<Block>, ConvertError> {
+pub fn build_edge_table(
+    parse_ctx: &ParseCtx,
+    rows: Vec<GridRow>,
+) -> Result<Option<Block>, ConvertError> {
     struct Origin {
         blocks: Vec<Block>,
         /// Half-open global column range.
@@ -128,7 +132,7 @@ pub fn build_edge_table(rows: Vec<GridRow>) -> Result<Option<Block>, ConvertErro
         active = next_active;
     }
 
-    let mut builder = GridBuilder::new();
+    let mut builder = GridBuilder::new(parse_ctx.limits().max_expansion);
     for row in rows {
         builder.next_row();
         for origin in row {

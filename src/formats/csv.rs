@@ -8,6 +8,7 @@
 //! format marks no header row, so the shape of the data decides whether the
 //! first record is one.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, Document, Inline, Table, TableKind};
 use crate::shared::header::resolve_header_rows;
@@ -15,7 +16,7 @@ use crate::shared::text::clean_text;
 use csv::ReaderBuilder;
 use std::borrow::Cow;
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(_parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let text = decode(bytes);
     let delimiter = sniff_delimiter(&text);
 
@@ -116,7 +117,7 @@ mod tests {
 
     #[test]
     fn quoted_fields_keep_padding() {
-        let doc = parse(b"a,b\n\"  padded  \",x\n").unwrap();
+        let doc = parse(&ParseCtx::default(), b"a,b\n\"  padded  \",x\n").unwrap();
         let Block::Table(t) = &doc.blocks[0] else { panic!() };
         let crate::model::CellSlot::Origin(cell) = &t.grid[1][0] else { panic!() };
         let Block::Paragraph(inlines) = &cell.blocks[0] else { panic!() };
@@ -147,7 +148,7 @@ mod tests {
         for u in "x,y\ncafé,90\n".encode_utf16() {
             bytes.extend_from_slice(&u.to_le_bytes());
         }
-        let doc = parse(&bytes).unwrap();
+        let doc = parse(&ParseCtx::default(), &bytes).unwrap();
         assert!(!doc.blocks.is_empty());
     }
 }

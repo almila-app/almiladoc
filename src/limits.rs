@@ -64,8 +64,7 @@ pub const MAX_WORK: u64 = u64::MAX;
 /// failing [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit)
 /// with its [`Limit`].
 ///
-/// The defaults admit ordinary large documents. Conversion charges the limits
-/// it enforces at their defaults; a value changed here is not yet read.
+/// The defaults admit ordinary large documents.
 ///
 /// Limits and cancellation stop at the PDF engine (pdf-inspector and lopdf),
 /// whose decoders allocate from stream headers: isolate PDF work in a
@@ -127,6 +126,25 @@ impl Limits {
     /// accepts, which its threads' stack is sized for.
     pub const MAX_NESTING_CEILING: u64 = 1024;
 
+    pub(crate) const DEFAULT: Limits = Limits {
+        max_entry_bytes: MAX_ENTRY_BYTES,
+        max_total_bytes: MAX_TOTAL_BYTES,
+        max_entry_count: MAX_ENTRY_COUNT as u64,
+        max_nesting_depth: MAX_NESTING_DEPTH as u64,
+        max_xml_nodes: MAX_XML_NODES as u64,
+        max_grid_slots: MAX_GRID_SLOTS,
+        max_expansion: MAX_EXPANSION,
+        max_expansion_text_bytes: MAX_EXPANSION_TEXT_BYTES,
+        max_asset_total_bytes: MAX_ASSET_TOTAL_BYTES as u64,
+        max_record_depth: MAX_RECORD_DEPTH as u64,
+        max_records: MAX_RECORDS,
+        max_input_bytes: MAX_INPUT_BYTES,
+        max_compression_ratio: MAX_COMPRESSION_RATIO,
+        max_pages: MAX_PAGES,
+        max_output_bytes: MAX_OUTPUT_BYTES,
+        max_work: MAX_WORK,
+    };
+
     pub(crate) fn fields(&self) -> [(Limit, u64); 16] {
         [
             (Limit::EntryBytes, self.max_entry_bytes),
@@ -158,24 +176,7 @@ impl Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits {
-            max_entry_bytes: MAX_ENTRY_BYTES,
-            max_total_bytes: MAX_TOTAL_BYTES,
-            max_entry_count: MAX_ENTRY_COUNT as u64,
-            max_nesting_depth: MAX_NESTING_DEPTH as u64,
-            max_xml_nodes: MAX_XML_NODES as u64,
-            max_grid_slots: MAX_GRID_SLOTS,
-            max_expansion: MAX_EXPANSION,
-            max_expansion_text_bytes: MAX_EXPANSION_TEXT_BYTES,
-            max_asset_total_bytes: MAX_ASSET_TOTAL_BYTES as u64,
-            max_record_depth: MAX_RECORD_DEPTH as u64,
-            max_records: MAX_RECORDS,
-            max_input_bytes: MAX_INPUT_BYTES,
-            max_compression_ratio: MAX_COMPRESSION_RATIO,
-            max_pages: MAX_PAGES,
-            max_output_bytes: MAX_OUTPUT_BYTES,
-            max_work: MAX_WORK,
-        }
+        Self::DEFAULT
     }
 }
 

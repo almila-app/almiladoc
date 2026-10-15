@@ -7,6 +7,7 @@ mod lexer;
 mod table;
 mod tables;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Document, Inline, Note, NoteKind, Style, inlines_are_empty};
 use crate::package::xml::{Element, Node, ns};
@@ -22,7 +23,7 @@ use std::rc::Rc;
 use table::TableState;
 use tables::{LIST_LEVELS, Prelude, codepage_encoding, parse_prelude};
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     if !bytes.starts_with(b"{\\rtf") {
         return Err(ConvertError::malformed("not an RTF file"));
     }
@@ -30,7 +31,7 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
     // header for \ansicpg first.
     let default_encoding = scan_codepage(bytes);
     let prelude = parse_prelude(bytes, default_encoding);
-    let mut parser = Parser::new(bytes, prelude, default_encoding);
+    let mut parser = Parser::new(parse_ctx, bytes, prelude, default_encoding);
     parser.run()?;
     parser.finish()
 }
@@ -618,13 +619,14 @@ struct Parser<'a> {
     list_run: Vec<ListEntry>,
     styled: StyledRun,
     counters: Counters,
-    table: TableState,
+    table: TableState<'a>,
     dest: Destinations,
     assets: crate::shared::assets::AssetSink,
 }
 
 impl<'a> Parser<'a> {
     fn new(
+        parse_ctx: &'a ParseCtx<'a>,
         bytes: &'a [u8],
         prelude: Prelude,
         default_encoding: &'static encoding_rs::Encoding,
@@ -641,9 +643,9 @@ impl<'a> Parser<'a> {
             list_run: Vec::new(),
             styled: StyledRun::default(),
             counters: Counters::default(),
-            table: TableState::new(),
+            table: TableState::new(parse_ctx),
             dest: Destinations::default(),
-            assets: crate::shared::assets::AssetSink::new(),
+            assets: crate::shared::assets::AssetSink::new(parse_ctx),
         }
     }
 
@@ -1334,6 +1336,7 @@ mod tests {
         // A \ls with no list-table definition degrades to a bullet, but the
         // captured \listtext (the marker Word displays) must stay visible.
         let doc = parse(
+            &ParseCtx::default(),
             br"{\rtf1 \pard{\listtext 1.\tab}\ls5 one\par \pard{\listtext 2.\tab}\ls5 two\par}",
         )
         .unwrap();
@@ -1347,8 +1350,9 @@ mod tests {
         // \page and \column carry no paragraph mark: without a break of
         // their own the text on either side would run together.
         for src in [r"{\rtf1 Alfa\page Beta\par}", r"{\rtf1 Alfa\column Beta\par}"] {
-            let markdown =
-                crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
+            let markdown = crate::render::markdown::document_to_markdown(
+                &parse(&ParseCtx::default(), src.as_bytes()).unwrap(),
+            );
             assert_eq!(markdown, "Alfa\\\nBeta\n", "source: {src}");
         }
     }
@@ -1359,8 +1363,9 @@ mod tests {
         for src in
             ["{\\rtf1 Alpha\\\nBeta\\\nGamma\\\n}", "{\\rtf1 Alpha\\\r\nBeta\\\rGamma\\\r\n}"]
         {
-            let markdown =
-                crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
+            let markdown = crate::render::markdown::document_to_markdown(
+                &parse(&ParseCtx::default(), src.as_bytes()).unwrap(),
+            );
             assert_eq!(markdown, "Alpha\n\nBeta\n\nGamma\n", "source: {src:?}");
         }
     }
@@ -1368,15 +1373,16 @@ mod tests {
     #[test]
     fn body_text_before_a_table_stays_out_of_the_first_cell() {
         let src = "{\\rtf1 Intro\\\n\\trowd\\cellx2000\\cellx4000 A\\cell B\\cell\\row}";
-        let markdown =
-            crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
+        let markdown = crate::render::markdown::document_to_markdown(
+            &parse(&ParseCtx::default(), src.as_bytes()).unwrap(),
+        );
         assert!(markdown.starts_with("Intro\n\n|"), "{markdown}");
     }
 
     #[test]
     fn styled_runs_stop_before_tables_and_work_inside_cells() {
         let src = br"{\rtf1\ansi{\stylesheet{\s0 Normal;}{\s1 Source Code;}}\pard\plain\s1 before table\par\trowd\cellx2000\pard\plain\intbl\s1 first\par second\cell\row}";
-        let doc = parse(src).unwrap();
+        let doc = parse(&ParseCtx::default(), src).unwrap();
         let [Block::CodeBlock { text: before, .. }, Block::Table(table)] = &doc.blocks[..] else {
             panic!("unexpected block order: {:?}", doc.blocks)
         };
@@ -1392,7 +1398,9 @@ mod tests {
 
     #[test]
     fn pict_hex_payload_becomes_an_asset() {
-        let doc = parse(br"{\rtf1 before {\pict\pngblip 89504e470d0a1a0a} after}").unwrap();
+        let doc =
+            parse(&ParseCtx::default(), br"{\rtf1 before {\pict\pngblip 89504e470d0a1a0a} after}")
+                .unwrap();
         assert_eq!(doc.assets.len(), 1, "assets: {:?}", doc.assets);
         assert_eq!(doc.assets[0].media_type, "image/png");
         assert!(doc.assets[0].bytes.starts_with(&[0x89, b'P', b'N', b'G']));
@@ -1400,7 +1408,7 @@ mod tests {
 
     #[test]
     fn pict_property_subgroups_do_not_contaminate_the_payload() {
-        let doc = parse(
+        let doc = parse(&ParseCtx::default(),
             br"{\rtf1 {\pict{\*\picprop{\sp{\sn wzDescription}{\sv abcdef}}}\pngblip 89504e470d0a1a0a}}",
         )
         .unwrap();
@@ -1411,6 +1419,7 @@ mod tests {
     #[test]
     fn nonshppict_fallback_is_not_extracted_twice() {
         let doc = parse(
+            &ParseCtx::default(),
             br"{\rtf1 {\*\shppict{\pict\pngblip 89504e47}}{\nonshppict{\pict\wmetafile8 0102}}}",
         )
         .unwrap();

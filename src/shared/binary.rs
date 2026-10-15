@@ -2,8 +2,9 @@
 //! checked little-endian integer readers and bounded compound-file stream
 //! reading.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::package::archive::read_capped;
 use std::io::Read;
 
@@ -23,17 +24,19 @@ pub(crate) fn utf16le_units(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
 }
 
 /// Read a named stream from an OLE2 compound file. A missing stream is
-/// `MissingPart`; the read is hard-capped at `MAX_ENTRY_BYTES` so a corrupt
+/// `MissingPart`; the read is hard-capped at `max_entry_bytes` so a corrupt
 /// sector chain cannot expand without bound.
 pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
+    parse_ctx: &ParseCtx,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<Vec<u8>, ConvertError> {
+    let max = parse_ctx.limits().max_entry_bytes;
     let stream = ole.open_stream(name).map_err(|_| ConvertError::missing_part(name))?;
     let declared = stream.len();
-    let bytes = read_capped(stream, declared, limits::MAX_ENTRY_BYTES, name, "unreadable stream")?;
-    if bytes.len() as u64 > limits::MAX_ENTRY_BYTES {
-        return Err(ConvertError::limit(Limit::EntryBytes, limits::MAX_ENTRY_BYTES));
+    let bytes = read_capped(stream, declared, max, name, "unreadable stream")?;
+    if bytes.len() as u64 > max {
+        return Err(ConvertError::limit(Limit::EntryBytes, max));
     }
     Ok(bytes)
 }
@@ -41,10 +44,11 @@ pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
 /// Read a stream the conversion can do without: absent or unreadable is
 /// `None`, and only a fatal error propagates.
 pub(crate) fn optional_ole_stream<R: Read + std::io::Seek>(
+    parse_ctx: &ParseCtx,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<Option<Vec<u8>>, ConvertError> {
-    unless_fatal(read_ole_stream(ole, name))
+    unless_fatal(read_ole_stream(parse_ctx, ole, name))
 }
 
 fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<Option<Vec<u8>>, ConvertError> {
@@ -75,14 +79,31 @@ mod tests {
     #[test]
     fn a_stream_read_reserves_its_declared_size() {
         let mut ole = one_stream_ole("Data", &[7u8; 1000]);
-        assert_eq!(read_ole_stream(&mut ole, "Data").unwrap().capacity(), 1000);
+        assert_eq!(
+            read_ole_stream(&ParseCtx::default(), &mut ole, "Data").unwrap().capacity(),
+            1000
+        );
+    }
+
+    #[test]
+    fn the_stream_cap_is_the_contexts() {
+        let mut ole = one_stream_ole("Data", &[7u8; 1000]);
+        let mut limits =
+            crate::limits::Limits { max_entry_bytes: 1000, ..crate::limits::Limits::default() };
+        assert!(read_ole_stream(&ParseCtx::new(&limits), &mut ole, "Data").is_ok());
+        limits.max_entry_bytes = 999;
+        let err = optional_ole_stream(&ParseCtx::new(&limits), &mut ole, "Data").unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 999 }));
     }
 
     #[test]
     fn an_optional_stream_is_none_when_absent() {
         let mut ole = one_stream_ole("Data", b"abc");
-        assert_eq!(optional_ole_stream(&mut ole, "Data").unwrap().as_deref(), Some(&b"abc"[..]));
-        assert_eq!(optional_ole_stream(&mut ole, "Pictures").unwrap(), None);
+        assert_eq!(
+            optional_ole_stream(&ParseCtx::default(), &mut ole, "Data").unwrap().as_deref(),
+            Some(&b"abc"[..])
+        );
+        assert_eq!(optional_ole_stream(&ParseCtx::default(), &mut ole, "Pictures").unwrap(), None);
     }
 
     #[test]

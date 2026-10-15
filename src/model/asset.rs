@@ -5,7 +5,7 @@ pub struct AssetId(pub usize);
 
 /// An embedded binary asset (image, object payload). Bytes are always
 /// retained so the document stays self-contained; total retained bytes are
-/// capped by the fixed `max_asset_total_bytes` limit at parse time.
+/// capped at parse time by the configured `max_asset_total_bytes` limit.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Asset {

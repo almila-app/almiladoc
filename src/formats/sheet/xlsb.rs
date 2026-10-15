@@ -10,8 +10,9 @@ use super::xlsx::{
     render_number, resolve_format, sibling_part_name,
 };
 use super::{error_literal, rk_number};
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
-use crate::limits::{self, Limit};
+use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
 use crate::package::relationships::{read_rels, rel_type, rels_part_for};
 use crate::package::{Package, path};
@@ -42,17 +43,23 @@ const BRT_MERGE_CELL: u16 = 176;
 const BRT_BEGIN_CELL_XFS: u16 = 617;
 const BRT_END_CELL_XFS: u16 = 618;
 
-pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, ConvertError> {
+pub(super) fn parse(
+    parse_ctx: &ParseCtx,
+    pkg: &mut Package,
+    wb_part: &str,
+) -> Result<Document, ConvertError> {
     let workbook = pkg.required_part(wb_part)?;
-    let (date1904, bundles) = read_workbook(&workbook)?;
+    let (date1904, bundles) = read_workbook(parse_ctx, &workbook)?;
     let wb_rels = read_rels(pkg, &rels_part_for(wb_part))?;
 
     let shared = read_optional(
+        parse_ctx,
         pkg,
         &sibling_part_name(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.bin"),
         read_shared_strings,
     )?;
     let xfs = read_optional(
+        parse_ctx,
         pkg,
         &sibling_part_name(&wb_rels, wb_part, rel_type::STYLES, "styles.bin"),
         read_styles,
@@ -78,8 +85,9 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
     for (name, part) in &sheets {
-        let content =
-            pkg.optional_part(part)?.map(|bytes| read_sheet(&bytes, &shared, &xfs, date1904));
+        let content = pkg
+            .optional_part(part)?
+            .map(|bytes| read_sheet(parse_ctx, &bytes, &shared, &xfs, date1904));
         let mut content = match content {
             Some(Ok(c)) => c,
             Some(Err(e)) if e.is_fatal() => return Err(e),
@@ -95,7 +103,7 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
             }
         };
         content.checkboxes = read_vml_checkboxes(pkg, part)?;
-        let Some(table) = build_table(content, &mut slots)? else {
+        let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
             continue;
         };
         if multi_sheet {
@@ -113,14 +121,15 @@ pub(super) fn parse(pkg: &mut Package, wb_part: &str) -> Result<Document, Conver
 /// corrupt yields the default with a log; fatal resource-limit errors always
 /// propagate.
 fn read_optional<T: Default>(
+    parse_ctx: &ParseCtx,
     pkg: &mut Package,
     part: &str,
-    read: fn(&[u8]) -> Result<T, ConvertError>,
+    read: fn(&ParseCtx, &[u8]) -> Result<T, ConvertError>,
 ) -> Result<T, ConvertError> {
     let Some(bytes) = pkg.optional_part(part)? else {
         return Ok(T::default());
     };
-    match read(&bytes) {
+    match read(parse_ctx, &bytes) {
         Ok(v) => Ok(v),
         Err(e) if e.is_fatal() => Err(e),
         Err(e) => {
@@ -132,10 +141,13 @@ fn read_optional<T: Default>(
 
 /// `xl/workbook.bin`: the 1904 date flag from BrtWbProp, and each visible
 /// sheet's name and relationship id from its BrtBundleSh.
-fn read_workbook(data: &[u8]) -> Result<(bool, Vec<(String, String)>), ConvertError> {
+fn read_workbook(
+    parse_ctx: &ParseCtx,
+    data: &[u8],
+) -> Result<(bool, Vec<(String, String)>), ConvertError> {
     let mut date1904 = false;
     let mut sheets = Vec::new();
-    let mut records = Records::new(data);
+    let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         match id {
             BRT_WB_PROP => date1904 = Fields::new(payload).u32()? & 1 != 0,
@@ -165,11 +177,11 @@ fn read_workbook(data: &[u8]) -> Result<(bool, Vec<(String, String)>), ConvertEr
 /// resolved to a parsed format. Only BrtXF records between BrtBeginCellXFs
 /// and BrtEndCellXFs are cell XFs; the cell-style XF collection also holds
 /// BrtXF records and must not shift the indices.
-fn read_styles(data: &[u8]) -> Result<Vec<CellFormat>, ConvertError> {
+fn read_styles(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<CellFormat>, ConvertError> {
     let mut codes: HashMap<u32, String> = HashMap::new();
     let mut fmt_ids: Vec<u32> = Vec::new();
     let mut in_cell_xfs = false;
-    let mut records = Records::new(data);
+    let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         match id {
             BRT_BEGIN_CELL_XFS => in_cell_xfs = true,
@@ -198,9 +210,9 @@ fn read_styles(data: &[u8]) -> Result<Vec<CellFormat>, ConvertError> {
 /// `sharedStrings.bin`: one cleaned entry per BrtSSTItem in order. The item
 /// is a RichStr; formatting runs and phonetic data trail the string and are
 /// not content.
-fn read_shared_strings(data: &[u8]) -> Result<Vec<String>, ConvertError> {
+fn read_shared_strings(parse_ctx: &ParseCtx, data: &[u8]) -> Result<Vec<String>, ConvertError> {
     let mut out = Vec::new();
-    let mut records = Records::new(data);
+    let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         if id == BRT_SST_ITEM {
             let mut f = Fields::new(payload);
@@ -215,6 +227,7 @@ fn read_shared_strings(data: &[u8]) -> Result<Vec<String>, ConvertError> {
 /// record carries only its column and cellXfs index in the common cell
 /// header (MS-XLSB 2.5.10).
 fn read_sheet(
+    parse_ctx: &ParseCtx,
     data: &[u8],
     shared: &[String],
     xfs: &[CellFormat],
@@ -222,7 +235,7 @@ fn read_sheet(
 ) -> Result<SheetContent, ConvertError> {
     let mut out = SheetContent::default();
     let mut row: Option<u32> = None;
-    let mut records = Records::new(data);
+    let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         let mut f = Fields::new(payload);
         match id {
@@ -336,11 +349,12 @@ struct Records<'a> {
     data: &'a [u8],
     pos: usize,
     seen: u64,
+    max: u64,
 }
 
 impl<'a> Records<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Records { data, pos: 0, seen: 0 }
+    fn new(parse_ctx: &ParseCtx, data: &'a [u8]) -> Self {
+        Records { data, pos: 0, seen: 0, max: parse_ctx.limits().max_records }
     }
 
     fn next(&mut self) -> Result<Option<(u16, &'a [u8])>, ConvertError> {
@@ -348,8 +362,8 @@ impl<'a> Records<'a> {
             return Ok(None);
         }
         self.seen += 1;
-        if self.seen > limits::MAX_RECORDS {
-            return Err(ConvertError::limit(Limit::Records, limits::MAX_RECORDS));
+        if self.seen > self.max {
+            return Err(ConvertError::limit(Limit::Records, self.max));
         }
         let b0 = self.byte()?;
         let id = if b0 & 0x80 != 0 {
@@ -469,7 +483,7 @@ mod tests {
     /// Route through the shared container dispatch, the only entry a caller
     /// has.
     fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
-        super::super::parse(bytes)
+        super::super::parse(&ParseCtx::default(), bytes)
     }
 
     /// One record in canonical (shortest) framing.
@@ -685,7 +699,7 @@ mod tests {
         let mut stream = rec(BRT_BUNDLE_SH, &[7u8; 300]);
         assert_eq!(&stream[..4], &[0x9C, 0x01, 0xAC, 0x02]);
         stream.extend(rec(BRT_CELL_RK, &[1, 2, 3]));
-        let mut records = Records::new(&stream);
+        let mut records = Records::new(&ParseCtx::default(), &stream);
         let (id, payload) = records.next().unwrap().unwrap();
         assert_eq!((id, payload.len()), (BRT_BUNDLE_SH, 300));
         let (id, payload) = records.next().unwrap().unwrap();
@@ -697,7 +711,7 @@ mod tests {
     fn truncated_record_stream_is_malformed() {
         let mut stream = rec(BRT_CELL_RK, &[0u8; 10]);
         stream.truncate(stream.len() - 1);
-        let mut records = Records::new(&stream);
+        let mut records = Records::new(&ParseCtx::default(), &stream);
         assert!(records.next().is_err(), "payload shorter than its declared size must error");
     }
 
@@ -757,6 +771,33 @@ mod tests {
         let doc = parse(&wb.build()).unwrap();
         // Untrimmed: leading/trailing whitespace in a cell is source content.
         assert_eq!(texts(first_table(&doc)), vec![vec!["shared", "  inline  "]]);
+    }
+
+    #[test]
+    fn every_part_counts_records_against_the_contexts_limit() {
+        let parse_under = |max_records, wb: &Wb| {
+            let limits = crate::limits::Limits { max_records, ..crate::limits::Limits::default() };
+            super::super::parse(&ParseCtx::new(&limits), &wb.build())
+        };
+        let three_cells = || {
+            let mut body = row_hdr(0, false);
+            for col in 0..3 {
+                body.extend(real_cell(col, 0, 1.0));
+            }
+            body
+        };
+        let shared = Wb { shared: Some(shared_strings(&["a", "b", "c"])), ..one_sheet(Vec::new()) };
+        assert!(parse_under(3, &shared).is_ok());
+        let err = parse_under(2, &shared).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 }));
+        let sheet = one_sheet(three_cells());
+        assert!(parse_under(4, &sheet).is_ok());
+        let err = parse_under(3, &sheet).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 3 }));
+        let styled = Wb { styles: Some(styles(&[], &[0; 5])), ..one_sheet(Vec::new()) };
+        assert!(parse_under(8, &styled).is_ok());
+        let err = parse_under(7, &styled).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 7 }));
     }
 
     #[test]

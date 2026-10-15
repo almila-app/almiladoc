@@ -21,9 +21,11 @@
 //! fallback (extension, then the frontend's own error) applies.
 
 use crate::Format;
-use crate::package::Package;
+use crate::ctx::ParseCtx;
+use crate::limits::Limits;
 use crate::package::relationships::{read_rels, rel_type};
 use crate::package::xml::{Element, ns};
+use crate::package::{Package, PackageKind};
 use std::io::Cursor;
 
 const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
@@ -72,7 +74,8 @@ fn detect_ole(bytes: &[u8]) -> Option<Format> {
 }
 
 fn detect_zip(bytes: &[u8]) -> Option<Format> {
-    let mut pkg = Package::open(bytes).ok()?;
+    let parse_ctx = ParseCtx::new(&Limits::DEFAULT);
+    let mut pkg = Package::open(&parse_ctx, bytes, PackageKind::Opc).ok()?;
 
     // ODF and EPUB designate the `mimetype` part as the package identity.
     if let Ok(Some(mime)) = pkg.optional_part("mimetype") {

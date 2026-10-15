@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::Format;
 use crate::config::{Config, ConfigError};
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::formats;
 use crate::model::Document;
@@ -40,7 +41,8 @@ impl Converter {
     /// or [`UnsupportedKind::FeatureDisabled`](crate::UnsupportedKind::FeatureDisabled)
     /// in a build without the `pdf` feature.
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
-        let document = self.on_pool(|| formats::parse(input.bytes, input.format))?;
+        let document =
+            self.on_pool(|| formats::parse(&self.parse_ctx(), input.bytes, input.format))?;
         Ok(Parsed { document, config: Arc::clone(&self.config) })
     }
 
@@ -55,10 +57,16 @@ impl Converter {
             let markdown = match input.format {
                 #[cfg(feature = "pdf")]
                 Format::Pdf => formats::pdf::to_markdown(input.bytes)?,
-                format => document_to_markdown(&formats::parse(input.bytes, format)?),
+                format => {
+                    document_to_markdown(&formats::parse(&self.parse_ctx(), input.bytes, format)?)
+                }
             };
             Ok(Conversion { markdown })
         })
+    }
+
+    fn parse_ctx(&self) -> ParseCtx<'_> {
+        ParseCtx::new(&self.config.limits)
     }
 
     fn on_pool<T: Send>(

@@ -6,6 +6,7 @@
 //! Tables build the canonical grid (`rowspan`/`colspan`); ordered lists honor
 //! `start`, `reversed`, `type`, and per-item `value`.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{
     AnchorId, Block, Cell, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
@@ -28,12 +29,19 @@ pub trait HtmlCtx {
 }
 
 pub fn to_blocks(
+    parse_ctx: &ParseCtx,
     body: &Element,
     css: &Stylesheet,
     ctx: &dyn HtmlCtx,
 ) -> Result<Vec<Block>, ConvertError> {
-    let mut builder =
-        Builder { blocks: Vec::new(), inlines: Vec::new(), css, ctx, start_boundary: true };
+    let mut builder = Builder {
+        blocks: Vec::new(),
+        inlines: Vec::new(),
+        css,
+        ctx,
+        parse_ctx,
+        start_boundary: true,
+    };
     builder.walk_children(body, StyleDelta::default())?;
     Ok(builder.finish())
 }
@@ -212,6 +220,7 @@ struct Builder<'e> {
     inlines: Vec<Inline>,
     css: &'e Stylesheet,
     ctx: &'e dyn HtmlCtx,
+    parse_ctx: &'e ParseCtx<'e>,
     /// Whether text appended while `inlines` is empty sits at a whitespace
     /// boundary (block start: leading whitespace collapses away; inline
     /// sub-builders inherit the surrounding run's state instead).
@@ -291,6 +300,7 @@ impl Builder<'_> {
             inlines: Vec::new(),
             css: self.css,
             ctx: self.ctx,
+            parse_ctx: self.parse_ctx,
             start_boundary,
         };
         b.walk_children(elem, delta)?;
@@ -648,7 +658,7 @@ impl Builder<'_> {
         for (i, &(_, _, g)) in row_elems.iter().enumerate() {
             group_end.insert(g, i);
         }
-        let mut builder = GridBuilder::new();
+        let mut builder = GridBuilder::new(self.parse_ctx.limits().max_expansion);
         let mut header_rows = 0usize;
         for (i, (tr, in_head, grp)) in row_elems.iter().enumerate() {
             builder.next_row();
@@ -800,15 +810,31 @@ mod tests {
     }
 
     fn blocks_with_css(html: &str, css: &str) -> Vec<Block> {
-        let tree = parse_xml(html.as_bytes()).unwrap();
+        let tree = parse_xml(&ParseCtx::default(), html.as_bytes()).unwrap();
         let body = tree.child_elems().next().unwrap();
         let mut sheet = Stylesheet::default();
         sheet.add(css);
-        to_blocks(body, &sheet, &NullCtx).unwrap()
+        to_blocks(&ParseCtx::default(), body, &sheet, &NullCtx).unwrap()
     }
 
     fn blocks(html: &str) -> Vec<Block> {
         blocks_with_css(html, "")
+    }
+
+    #[test]
+    fn table_spans_charge_the_contexts_expansion_budget() {
+        let html = r#"<body><table><tr><td colspan="3">wide</td></tr></table></body>"#;
+        let tree = parse_xml(&ParseCtx::default(), html.as_bytes()).unwrap();
+        let body = tree.child_elems().next().unwrap();
+        let mut limits =
+            crate::limits::Limits { max_expansion: 1, ..crate::limits::Limits::default() };
+        let err = to_blocks(&ParseCtx::new(&limits), body, &Stylesheet::default(), &NullCtx);
+        assert!(matches!(
+            err,
+            Err(ConvertError::ResourceLimit { limit: crate::limits::Limit::Expansion, max: 1 })
+        ));
+        limits.max_expansion = 2;
+        assert!(to_blocks(&ParseCtx::new(&limits), body, &Stylesheet::default(), &NullCtx).is_ok());
     }
 
     fn para_text(block: &Block) -> String {

@@ -1,5 +1,6 @@
 //! Block and inline walking for ODF text content.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::formats::odf::styles::{LIST_LEVELS, OdfStyles, parse_start};
 use crate::formats::odf::table::parse_table;
@@ -18,6 +19,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 pub struct Ctx<'a, 'b> {
+    pub parse_ctx: &'b ParseCtx<'b>,
     pub styles: &'b OdfStyles<'b>,
     pub pkg: &'b RefCell<Package<'a>>,
     pub assets: &'b RefCell<AssetSink>,
@@ -33,11 +35,13 @@ pub struct Ctx<'a, 'b> {
 
 impl<'a, 'b> Ctx<'a, 'b> {
     pub fn new(
+        parse_ctx: &'b ParseCtx<'b>,
         styles: &'b OdfStyles<'b>,
         pkg: &'b RefCell<Package<'a>>,
         assets: &'b RefCell<AssetSink>,
     ) -> Self {
         Ctx {
+            parse_ctx,
             styles,
             pkg,
             assets,

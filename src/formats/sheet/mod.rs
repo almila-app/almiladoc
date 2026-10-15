@@ -9,13 +9,14 @@ mod xls;
 mod xlsb;
 mod xlsx;
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::Document;
 use crate::package::archive::probe_ole;
 use crate::package::relationships::{read_rels, rel_type};
-use crate::package::{Package, path};
+use crate::package::{Package, PackageKind, path};
 
-pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
+pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     if bytes.starts_with(&OLE_MAGIC) {
         // An encrypted OOXML package is an OLE container carrying no BIFF
@@ -23,12 +24,12 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         // for one.
         return match probe_ole(bytes) {
             Some(e @ ConvertError::Encrypted) => Err(e),
-            _ => xls::parse(bytes),
+            _ => xls::parse(parse_ctx, bytes),
         };
     }
     // Failing to open as a ZIP means not a workbook; a resource limit
     // tripped by a valid archive still propagates.
-    let mut pkg = match Package::open(bytes) {
+    let mut pkg = match Package::open(parse_ctx, bytes, PackageKind::Opc) {
         Ok(pkg) => pkg,
         Err(ConvertError::Malformed { .. }) => return Err(not_a_workbook()),
         Err(e) => return Err(e),
@@ -37,8 +38,8 @@ pub fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         return Err(not_a_workbook());
     };
     match classify(&mut pkg, &wb_part)? {
-        Some(Container::Xml) => xlsx::parse(&mut pkg, &wb_part),
-        Some(Container::Bin) => xlsb::parse(&mut pkg, &wb_part),
+        Some(Container::Xml) => xlsx::parse(parse_ctx, &mut pkg, &wb_part),
+        Some(Container::Bin) => xlsb::parse(parse_ctx, &mut pkg, &wb_part),
         None => Err(not_a_workbook()),
     }
 }
@@ -184,7 +185,7 @@ mod tests {
         ole.create_stream("EncryptedPackage").unwrap();
         let bytes = ole.into_inner().into_inner();
 
-        assert!(matches!(parse(&bytes), Err(ConvertError::Encrypted)));
+        assert!(matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Encrypted)));
     }
 
     #[test]
@@ -207,6 +208,6 @@ mod tests {
         }
         let bytes = zip.finish().unwrap().into_inner();
 
-        assert!(matches!(parse(&bytes), Err(ConvertError::Malformed { .. })));
+        assert!(matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Malformed { .. })));
     }
 }

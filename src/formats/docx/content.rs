@@ -1,5 +1,6 @@
 //! Block and inline walking for WordprocessingML parts.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::formats::docx::numbering::{Counters, Numbering};
 use crate::formats::docx::styles::{Styles, on_off, rpr_delta};
@@ -38,6 +39,7 @@ const SUPPORTED_NS: &[&str] = &[
 use crate::shared::assets::AssetSink;
 
 pub(super) struct Ctx<'a, 'b> {
+    pub parse_ctx: &'b ParseCtx<'b>,
     pub pkg: &'b RefCell<Package<'a>>,
     pub rels: Relationships,
     pub base_part: String,
@@ -52,6 +54,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
     /// (notes parts): only the relationships and base path change.
     pub fn for_part(&self, rels: Relationships, base_part: String) -> Ctx<'a, 'b> {
         Ctx {
+            parse_ctx: self.parse_ctx,
             pkg: self.pkg,
             rels,
             base_part,
@@ -653,7 +656,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
             return Ok(Vec::new());
         };
-        match crate::package::xml::parse_xml(&bytes) {
+        match crate::package::xml::parse_xml(self.ctx.parse_ctx, &bytes) {
             Ok(root) => Ok(crate::shared::drawingml::chart_blocks(&root)),
             Err(e) if e.is_fatal() => Err(e),
             Err(e) => {
@@ -668,7 +671,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
             return Ok(Vec::new());
         };
-        match crate::package::xml::parse_xml(&bytes) {
+        match crate::package::xml::parse_xml(self.ctx.parse_ctx, &bytes) {
             Ok(root) => Ok(crate::shared::drawingml::diagram_blocks(&root)),
             Err(e) if e.is_fatal() => Err(e),
             Err(e) => {
@@ -841,7 +844,7 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
         .take_while(|tr| tr.find(ns::W, "trPr").and_then(|p| on_off(p, "tblHeader")) == Some(true))
         .count();
 
-    let mut builder = GridBuilder::new();
+    let mut builder = GridBuilder::new(ctx.parse_ctx.limits().max_expansion);
     for row in &matrix {
         builder.next_row();
         for tc in row {

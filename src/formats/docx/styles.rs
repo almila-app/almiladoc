@@ -201,7 +201,7 @@ mod tests {
 
     // parse_xml returns a synthetic root wrapping the document element.
     fn parse(doc: &str) -> Element {
-        parse_xml(doc.as_bytes()).unwrap()
+        parse_xml(&crate::ctx::ParseCtx::default(), doc.as_bytes()).unwrap()
     }
 
     #[test]
