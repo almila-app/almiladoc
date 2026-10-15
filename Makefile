@@ -76,6 +76,7 @@ doc:
 
 features:
 	$(CARGO) clippy --locked --workspace --all-targets --no-default-features
+	$(CARGO) clippy --locked -p almiladoc --all-targets --no-default-features
 	$(CARGO) test --locked --no-default-features
 	features=$$($(CARGO) metadata --locked --no-deps --format-version 1 \
 	  | python3 -I -c 'import json, sys; [print(p["name"], f) for p in json.load(sys.stdin)["packages"] for f in sorted(p["features"]) if f != "default"]')

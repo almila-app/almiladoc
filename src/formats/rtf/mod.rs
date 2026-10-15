@@ -1347,7 +1347,8 @@ mod tests {
         // \page and \column carry no paragraph mark: without a break of
         // their own the text on either side would run together.
         for src in [r"{\rtf1 Alfa\page Beta\par}", r"{\rtf1 Alfa\column Beta\par}"] {
-            let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
+            let markdown =
+                crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
             assert_eq!(markdown, "Alfa\\\nBeta\n", "source: {src}");
         }
     }
@@ -1358,7 +1359,8 @@ mod tests {
         for src in
             ["{\\rtf1 Alpha\\\nBeta\\\nGamma\\\n}", "{\\rtf1 Alpha\\\r\nBeta\\\rGamma\\\r\n}"]
         {
-            let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
+            let markdown =
+                crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
             assert_eq!(markdown, "Alpha\n\nBeta\n\nGamma\n", "source: {src:?}");
         }
     }
@@ -1366,7 +1368,8 @@ mod tests {
     #[test]
     fn body_text_before_a_table_stays_out_of_the_first_cell() {
         let src = "{\\rtf1 Intro\\\n\\trowd\\cellx2000\\cellx4000 A\\cell B\\cell\\row}";
-        let markdown = crate::to_markdown_bytes(src.as_bytes(), crate::Format::Rtf).unwrap();
+        let markdown =
+            crate::render::markdown::document_to_markdown(&parse(src.as_bytes()).unwrap());
         assert!(markdown.starts_with("Intro\n\n|"), "{markdown}");
     }
 

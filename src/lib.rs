@@ -1,5 +1,15 @@
 //! almiladoc converts documents to GitHub-Flavored Markdown.
 //!
+//! ```
+//! use almiladoc::{Config, Converter, Format, Input};
+//!
+//! let converter = Converter::new(Config::default())?;
+//! let csv = b"name,year\nAda,1843\n";
+//! let markdown = converter.convert(Input::new(csv, Format::Csv))?.into_markdown();
+//! assert_eq!(markdown, "| name | year |\n| --- | --- |\n| Ada | 1843 |\n");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! Recovery and skipped-content events are reported through the [`log`]
 //! facade (debug/warn level); logging never changes conversion behavior and
 //! its messages are not a stable API.
@@ -8,20 +18,23 @@
 
 pub mod model;
 
+mod config;
+mod converter;
 mod error;
 mod formats;
 mod limits;
 mod package;
+mod pool;
 mod render;
 mod shared;
 
+pub use config::{Config, ConfigError};
+pub use converter::{Conversion, Converter, Input, Parsed};
 pub use error::{ConvertError, PartName, UnsupportedKind};
-pub use limits::Limit;
-
-use render::markdown::document_to_markdown;
+pub use limits::{Limit, Limits};
 
 /// Input format. Selects the parser; container variants that share a parser
-/// (docm, xlsm, ...) map onto these via [`Format::from_bytes`] or
+/// (docm, xlsm, ...) map onto these via [`Format::sniff`] or
 /// [`Format::from_extension`].
 ///
 /// New formats are added over time, so a match outside this crate needs a
@@ -55,8 +68,9 @@ pub enum Format {
     /// OpenDocument Text (`.odt`).
     Odt,
     /// Converted with [pdf-inspector], which emits Markdown directly:
-    /// [`to_document`] is unsupported for PDFs. Scanned or image-only pages
-    /// need OCR, which almiladoc does not do: the document errors with
+    /// [`Converter::parse`] is unsupported for PDFs, and a build without the
+    /// `pdf` feature converts none. Scanned or image-only pages need OCR,
+    /// which almiladoc does not do: the document errors with
     /// [`ConvertError::NeedsOcr`] naming them.
     ///
     /// [pdf-inspector]: https://github.com/firecrawl/pdf-inspector
@@ -87,12 +101,14 @@ impl Format {
     /// OLE stream names, ZIP package mimetype/content types). Plain-text
     /// formats (CSV) carry no signature and return `None`; so does anything
     /// unrecognized.
-    pub fn from_bytes(bytes: &[u8]) -> Option<Format> {
+    #[must_use]
+    pub fn sniff(bytes: &[u8]) -> Option<Format> {
         formats::detect::from_bytes(bytes)
     }
 
     /// The format a bare extension names (no leading dot), matched
     /// case-insensitively. `None` for anything unrecognized.
+    #[must_use]
     pub fn from_extension(ext: &str) -> Option<Format> {
         Some(match ext.to_ascii_lowercase().as_str() {
             "doc" => Format::Doc,
@@ -110,38 +126,4 @@ impl Format {
             _ => return None,
         })
     }
-}
-
-/// Convert an in-memory document to Markdown. Pass a [`Format`] to select the
-/// parser, or `None` to detect it from the content ([`Format::from_bytes`]),
-/// which signature-less formats (CSV) have to name explicitly.
-pub fn to_markdown_bytes(
-    bytes: &[u8],
-    format: impl Into<Option<Format>>,
-) -> Result<String, ConvertError> {
-    let format = resolve_format(bytes, format.into())?;
-    // PDFs convert to Markdown directly (pdf-inspector) without passing
-    // through the document model.
-    if format == Format::Pdf {
-        return formats::pdf::to_markdown(bytes);
-    }
-    Ok(document_to_markdown(&to_document(bytes, format)?))
-}
-
-/// Parse an in-memory document into the document model. Pass a [`Format`] to
-/// select the parser, or `None` to detect it from the content.
-///
-/// Unsupported for [`Format::Pdf`]: PDF conversion produces Markdown
-/// directly and has no document-model form; use [`to_markdown_bytes`].
-pub fn to_document(
-    bytes: &[u8],
-    format: impl Into<Option<Format>>,
-) -> Result<model::Document, ConvertError> {
-    formats::parse(bytes, resolve_format(bytes, format.into())?)
-}
-
-fn resolve_format(bytes: &[u8], format: Option<Format>) -> Result<Format, ConvertError> {
-    format
-        .or_else(|| Format::from_bytes(bytes))
-        .ok_or(ConvertError::unsupported(UnsupportedKind::UnknownFormat))
 }

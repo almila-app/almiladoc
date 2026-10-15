@@ -51,6 +51,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "pptx"
+path = "fuzz_targets/pptx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ods"
+path = "fuzz_targets/ods.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "odp"
+path = "fuzz_targets/odp.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "epub"
 path = "fuzz_targets/epub.rs"
 test = false

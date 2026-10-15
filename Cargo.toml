@@ -39,10 +39,15 @@ csv = "1.4.0"
 flate2 = "1"
 encoding_rs = "0.8.35"
 log = "0.4"
-pdf-inspector = "1.25.2"
+pdf-inspector = { version = "1.25.2", optional = true }
 quick-xml = "0.42.0"
+rayon = "1.12.0"
 thiserror = "2.0.19"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[features]
+default = ["pdf"]
+pdf = ["dep:pdf-inspector"]
 
 [profile.release]
 lto = "thin"

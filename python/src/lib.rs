@@ -148,13 +148,25 @@ fn extension_format(path: &Path) -> Option<almiladoc::Format> {
     path.extension().and_then(|ext| ext.to_str()).and_then(almiladoc::Format::from_extension)
 }
 
+fn unknown_format() -> PyErr {
+    UnsupportedError::new_err(format!(
+        "unsupported input: {}",
+        almiladoc::UnsupportedKind::UnknownFormat
+    ))
+}
+
+fn converter() -> PyResult<almiladoc::Converter> {
+    almiladoc::Converter::new(almiladoc::Config::default())
+        .map_err(|e| InternalError::new_err(e.to_string()))
+}
+
 /// Detect the format from the content itself: the signature and identity each
 /// container specification designates (PDF header, RTF open group, OLE stream
 /// names, ZIP package mimetype/content types). Plain-text formats (CSV) carry
 /// no signature and return `None`; so does anything unrecognized.
 #[pyfunction]
 fn format_from_bytes(data: Vec<u8>) -> Option<&'static str> {
-    almiladoc::Format::from_bytes(&data).map(format_name)
+    almiladoc::Format::sniff(&data).map(format_name)
 }
 
 /// The format an extension names, with or without a leading dot.
@@ -174,12 +186,15 @@ fn format_from_path(path: PathBuf) -> Option<&'static str> {
 /// and unrecognizable containers.
 #[pyfunction]
 fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
+    let converter = converter()?;
     let converted = py.detach(|| {
         let data = std::fs::read(&path)?;
-        let format = almiladoc::Format::from_bytes(&data).or_else(|| extension_format(&path));
-        Ok::<_, std::io::Error>(almiladoc::to_markdown_bytes(&data, format))
+        let format = almiladoc::Format::sniff(&data).or_else(|| extension_format(&path));
+        Ok::<_, std::io::Error>(format.map(|format| {
+            converter.convert(almiladoc::Input::new(&data, format)).map(|c| c.into_markdown())
+        }))
     })?;
-    converted.map_err(|e| convert_error(py, e))
+    converted.ok_or_else(unknown_format)?.map_err(|e| convert_error(py, e))
 }
 
 /// Convert an in-memory document to Markdown. Without a format, it is
@@ -188,8 +203,11 @@ fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (data, format=None))]
 fn to_markdown_bytes(py: Python<'_>, data: Vec<u8>, format: Option<&str>) -> PyResult<String> {
-    let format = format.map(parse_format).transpose()?;
-    py.detach(|| almiladoc::to_markdown_bytes(&data, format)).map_err(|e| convert_error(py, e))
+    let converter = converter()?;
+    let format = resolve_format(&data, format)?;
+    py.detach(|| converter.convert(almiladoc::Input::new(&data, format)))
+        .map(almiladoc::Conversion::into_markdown)
+        .map_err(|e| convert_error(py, e))
 }
 
 /// Parse an in-memory document into the document model, which also carries
@@ -204,10 +222,19 @@ fn to_document(
     data: Vec<u8>,
     format: Option<&str>,
 ) -> PyResult<document::Document> {
-    let format = format.map(parse_format).transpose()?;
-    let parsed =
-        py.detach(|| almiladoc::to_document(&data, format)).map_err(|e| convert_error(py, e))?;
-    document::document(py, parsed)
+    let converter = converter()?;
+    let format = resolve_format(&data, format)?;
+    let parsed = py
+        .detach(|| converter.parse(almiladoc::Input::new(&data, format)))
+        .map_err(|e| convert_error(py, e))?;
+    document::document(py, parsed.into_document())
+}
+
+fn resolve_format(data: &[u8], format: Option<&str>) -> PyResult<almiladoc::Format> {
+    match format {
+        Some(name) => parse_format(name),
+        None => almiladoc::Format::sniff(data).ok_or_else(unknown_format),
+    }
 }
 
 /// Convert documents to GitHub-Flavored Markdown.

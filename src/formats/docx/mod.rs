@@ -282,7 +282,7 @@ mod tests {
         for (body, expected) in cases {
             let document = format!(r#"<w:document {W}><w:body>{body}</w:body></w:document>"#);
             let bytes = docx_parts(&[("word/document.xml", &document)]);
-            let markdown = crate::to_markdown_bytes(&bytes, crate::Format::Docx).unwrap();
+            let markdown = crate::render::markdown::document_to_markdown(&parse(&bytes).unwrap());
             assert_eq!(markdown, expected, "body: {body}");
         }
     }

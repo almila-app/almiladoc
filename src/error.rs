@@ -68,7 +68,8 @@ pub enum ConvertError {
     /// The caller cancelled the conversion.
     #[error("conversion cancelled")]
     Cancelled,
-    /// The converter failed in a way no input should cause; the caller
+    /// The converter failed in a way no input should cause, a panic
+    /// included, or the host could not start the call's threads; the caller
     /// recycles the worker.
     #[error("internal error")]
     Internal,

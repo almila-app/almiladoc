@@ -6,6 +6,7 @@ mod doc;
 mod docx;
 mod epub;
 mod odf;
+#[cfg(feature = "pdf")]
 pub mod pdf;
 mod ppt;
 mod pptx;
@@ -16,7 +17,7 @@ use crate::Format;
 use crate::error::{ConvertError, UnsupportedKind};
 use crate::model::Document;
 
-pub fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
+pub(crate) fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
     match format {
         Format::Excel => sheet::parse(bytes),
         Format::Csv => csv::parse(bytes),
@@ -29,8 +30,11 @@ pub fn parse(bytes: &[u8], format: Format) -> Result<Document, ConvertError> {
         Format::Doc if bytes.starts_with(b"{\\rtf") => rtf::parse(bytes),
         Format::Doc => doc::parse(bytes),
         Format::Ppt => ppt::parse(bytes),
-        // pdf-inspector produces Markdown directly; there is no document
-        // model for PDFs. `to_markdown_bytes` routes them to `pdf`.
+        #[cfg(feature = "pdf")]
         Format::Pdf => Err(ConvertError::unsupported(UnsupportedKind::PdfDocumentModel)),
+        #[cfg(not(feature = "pdf"))]
+        Format::Pdf => {
+            Err(ConvertError::unsupported(UnsupportedKind::FeatureDisabled { feature: "pdf" }))
+        }
     }
 }

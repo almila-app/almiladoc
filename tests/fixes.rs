@@ -1,4 +1,4 @@
-use almiladoc::{ConvertError, Format, to_markdown_bytes};
+use almiladoc::{Config, Converter, Format, Input};
 use std::error::Error;
 use std::io::{Cursor, Write};
 
@@ -16,8 +16,9 @@ fn docx(body: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn body_markdown(body: &str) -> Result<String, Box<dyn Error>> {
     let bytes = docx(body)?;
-    let markdown: Result<String, ConvertError> = to_markdown_bytes(&bytes, Format::Docx);
-    Ok(markdown?.trim_end().to_owned())
+    let converter = Converter::new(Config::default())?;
+    let conversion = converter.convert(Input::new(&bytes, Format::Docx))?;
+    Ok(conversion.markdown().trim_end().to_owned())
 }
 
 fn markdown(run_content: &str) -> Result<String, Box<dyn Error>> {

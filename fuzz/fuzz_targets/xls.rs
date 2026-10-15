@@ -1,5 +1,6 @@
 #![no_main]
 
+use almiladoc::{Config, Converter, Format, Input};
 use libfuzzer_sys::fuzz_target;
 use std::io::{Cursor, Write};
 
@@ -18,5 +19,8 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     }
     let bytes = ole.into_inner().into_inner();
-    let _ = almiladoc::to_markdown_bytes(&bytes, almiladoc::Format::Excel);
+    let Ok(converter) = Converter::new(Config::default()) else {
+        return;
+    };
+    let _ = converter.convert(Input::new(&bytes, Format::Excel));
 });

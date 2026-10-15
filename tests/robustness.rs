@@ -5,7 +5,8 @@
 
 mod common;
 
-use common::{fixture_root, format_of, walk};
+use almiladoc::{ConvertError, Input};
+use common::{converter, fixture_root, format_of, walk};
 
 struct Rng(u64);
 
@@ -26,6 +27,7 @@ fn mutated_fixtures_never_panic() {
     let root = fixture_root();
     let mut files = Vec::new();
     walk(&root, &mut files);
+    let converter = converter(1);
     let mut rng = Rng(0x5EED_1234_5678_9ABC);
     for path in files {
         let rel = path.strip_prefix(&root).unwrap();
@@ -51,7 +53,12 @@ fn mutated_fixtures_never_panic() {
                 let cut = (rng.next() as usize) % bytes.len();
                 bytes.truncate(cut.max(1));
             }
-            let _ = almiladoc::to_markdown_bytes(&bytes, format);
+            let result = converter.convert(Input::new(&bytes, format));
+            assert!(
+                !matches!(result, Err(ConvertError::Internal)),
+                "{}: a panic or internal failure",
+                rel.display()
+            );
         }
     }
 }

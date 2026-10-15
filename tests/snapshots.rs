@@ -9,14 +9,21 @@
 
 mod common;
 
-use common::{fixture_root, format_of, walk};
+use almiladoc::{Conversion, ConvertError, Format, Input, model::Document};
+use common::{converter, fixture_root, format_of, walk};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-fn convert_file(path: &Path) -> Result<String, almiladoc::ConvertError> {
+fn convert_file(path: &Path) -> Result<String, ConvertError> {
     let bytes = std::fs::read(path).unwrap();
-    almiladoc::to_markdown_bytes(&bytes, format_of(path, &bytes))
+    let format = format_of(path, &bytes).unwrap();
+    converter(1).convert(Input::new(&bytes, format)).map(Conversion::into_markdown)
+}
+
+fn document(path: &Path, format: Format) -> Document {
+    let bytes = std::fs::read(path).unwrap();
+    converter(1).parse(Input::new(&bytes, format)).unwrap().into_document()
 }
 
 /// Convert one file, capturing panics so a bad parser records a baseline
@@ -99,6 +106,7 @@ fn corpus() {
 
 /// PDF output is pinned on the reference target alone.
 #[test]
+#[cfg(feature = "pdf")]
 #[cfg_attr(
     not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")),
     ignore = "PDF snapshots are byte-compared on x86_64-unknown-linux-gnu only"
@@ -131,7 +139,6 @@ const STRICT_ANNOTATIONS: bool = true;
 /// extension fallback.
 #[test]
 fn fixtures_detect_from_content() {
-    use almiladoc::Format;
     let expected = [
         ("doc", Some(Format::Doc)),
         ("docx", Some(Format::Docx)),
@@ -155,12 +162,7 @@ fn fixtures_detect_from_content() {
         assert!(!files.is_empty(), "no fixtures under {dir}/");
         for path in files {
             let bytes = std::fs::read(&path).unwrap();
-            assert_eq!(
-                Format::from_bytes(&bytes),
-                format,
-                "detection mismatch for {}",
-                path.display()
-            );
+            assert_eq!(Format::sniff(&bytes), format, "detection mismatch for {}", path.display());
         }
     }
 }
@@ -168,10 +170,10 @@ fn fixtures_detect_from_content() {
 /// A PDF with scanned pages is reported, not silently shortened: the error
 /// names the pages that need OCR.
 #[test]
+#[cfg(feature = "pdf")]
 fn scanned_pages_are_reported_not_dropped() {
-    let mixed = std::fs::read(fixture_root().join("pdf/handmade-mixed.pdf")).unwrap();
-    match almiladoc::to_markdown_bytes(&mixed, almiladoc::Format::Pdf) {
-        Err(almiladoc::ConvertError::NeedsOcr { pages, page_count, .. }) => {
+    match convert_file(&fixture_root().join("pdf/handmade-mixed.pdf")) {
+        Err(ConvertError::NeedsOcr { pages, page_count, .. }) => {
             assert_eq!((pages, page_count), (vec![2], 2));
         }
         other => panic!("expected NeedsOcr, got {other:?}"),
@@ -182,9 +184,7 @@ fn scanned_pages_are_reported_not_dropped() {
 /// and media type (the Markdown output shows only the alt text).
 #[test]
 fn embedded_ole_payload_is_retained() {
-    let path = fixture_root().join("pptx").join("handmade-order.pptx");
-    let bytes = std::fs::read(&path).unwrap();
-    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Pptx).unwrap();
+    let doc = document(&fixture_root().join("pptx").join("handmade-order.pptx"), Format::Pptx);
     let ole = doc
         .assets
         .iter()
@@ -197,9 +197,7 @@ fn embedded_ole_payload_is_retained() {
 /// `o:OLEObject`; the object payload (not the preview) must be retained.
 #[test]
 fn docx_ole_payload_wins_over_its_preview_image() {
-    let path = fixture_root().join("docx").join("handmade-ole.docx");
-    let bytes = std::fs::read(&path).unwrap();
-    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Docx).unwrap();
+    let doc = document(&fixture_root().join("docx").join("handmade-ole.docx"), Format::Docx);
     let ole = doc
         .assets
         .iter()
@@ -212,9 +210,7 @@ fn docx_ole_payload_wins_over_its_preview_image() {
 /// archive budget nor duplicate the retained asset (S12).
 #[test]
 fn repeated_part_references_convert_and_dedupe() {
-    let path = fixture_root().join("docx").join("handmade-manyrefs.docx");
-    let bytes = std::fs::read(&path).unwrap();
-    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Docx).unwrap();
+    let doc = document(&fixture_root().join("docx").join("handmade-manyrefs.docx"), Format::Docx);
     assert_eq!(doc.assets.len(), 1, "one shared asset for seventy references");
 }
 
@@ -222,8 +218,7 @@ fn repeated_part_references_convert_and_dedupe() {
 /// the Data stream) is retained as an asset.
 #[test]
 fn doc_inline_picture_is_retained() {
-    let bytes = std::fs::read(fixture_root().join("doc").join("text.doc")).unwrap();
-    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Doc).unwrap();
+    let doc = document(&fixture_root().join("doc").join("text.doc"), Format::Doc);
     assert!(
         doc.assets.iter().any(|a| a.media_type.starts_with("image/")),
         "expected an extracted picture asset, got {:?}",
@@ -235,8 +230,7 @@ fn doc_inline_picture_is_retained() {
 /// shows only the alt text, which is empty for pictures without one).
 #[test]
 fn rtf_inline_picture_is_retained() {
-    let bytes = std::fs::read(fixture_root().join("rtf").join("text.rtf")).unwrap();
-    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Rtf).unwrap();
+    let doc = document(&fixture_root().join("rtf").join("text.rtf"), Format::Rtf);
     let png = doc.assets.iter().find(|a| a.media_type == "image/png");
     let png = png.expect("png pict retained as an asset");
     assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']), "payload decodes from hex");
@@ -254,7 +248,7 @@ fn abuse_fixtures_hard_fail() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let result = convert_file(&path);
         assert!(
-            matches!(result, Err(almiladoc::ConvertError::ResourceLimit { .. })),
+            matches!(result, Err(ConvertError::ResourceLimit { .. })),
             "{name}: expected a ResourceLimit error, got {result:?}"
         );
     }

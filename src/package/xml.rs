@@ -216,8 +216,11 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element, ConvertError> {
         let event = reader.read_event().map_err(|_| ConvertError::malformed("unparseable xml"))?;
         match event {
             Event::Start(e) => {
-                if stack.len() >= limits::MAX_XML_DEPTH {
-                    return Err(ConvertError::limit(Limit::XmlDepth, limits::MAX_XML_DEPTH as u64));
+                if stack.len() >= limits::MAX_NESTING_DEPTH {
+                    return Err(ConvertError::limit(
+                        Limit::NestingDepth,
+                        limits::MAX_NESTING_DEPTH as u64,
+                    ));
                 }
                 bump_nodes(&mut nodes)?;
                 stack.push(start_to_element(&e, &reader, &mut interner));
@@ -634,17 +637,17 @@ mod tests {
     #[test]
     fn depth_limit_is_hard_error() {
         let mut xml = Vec::new();
-        for _ in 0..(limits::MAX_XML_DEPTH + 2) {
+        for _ in 0..(limits::MAX_NESTING_DEPTH + 2) {
             xml.extend_from_slice(b"<d>");
         }
         let err = parse_xml(&xml).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlDepth, .. }));
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. }));
     }
 
     #[test]
     fn deep_dom_traversal_is_iterative() {
         // Just under the cap: descendants/text must not overflow the stack.
-        let depth = limits::MAX_XML_DEPTH - 1;
+        let depth = limits::MAX_NESTING_DEPTH - 1;
         let mut xml = Vec::new();
         for _ in 0..depth {
             xml.extend_from_slice(b"<d>");

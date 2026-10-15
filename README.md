@@ -51,16 +51,20 @@ Every conversion failure subclasses `almiladoc.ConvertError`: `UnsupportedError`
 ## Rust
 
 ```rust
-use almiladoc::{ConvertError, Format};
+use almiladoc::{Config, Converter, Format, Input};
 
-fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), ConvertError> {
-    let report = almiladoc::to_markdown_bytes(report, None)?;
-    let table = almiladoc::to_markdown_bytes(csv, Format::Csv)?;
+fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let converter = Converter::new(Config::default())?;
+    let format = Format::sniff(report).ok_or("unrecognized format")?;
+    let report = converter.convert(Input::new(report, format))?.into_markdown();
+    let table = converter.convert(Input::new(csv, Format::Csv))?.into_markdown();
     Ok((report, table))
 }
 ```
 
-The crate reads no file: pass the bytes and name the format, or leave it to `Format::from_bytes`; CSV carries no signature and has to be named. `to_document` stops at the document model, which also carries the embedded assets; on a PDF it returns `Unsupported`. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name.
+The crate reads no file: pass the bytes and name the format, from `Format::sniff` or `Format::from_extension`; CSV carries no signature and has to be named. A `Converter` is built once from a `Config` (its `Limits` and `threads`, default 1), which `Converter::new` validates, and is shared across threads. `convert` returns the Markdown; `parse` stops at the document model, which also carries the embedded assets, and `Parsed::render` finishes it; on a PDF, `parse` returns `Unsupported`. Each call runs on a pool of its own `threads` threads. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name. A panic inside a call is `Internal`: recycle the worker that raised it.
+
+PDF support is the default `pdf` feature; without it, a PDF is `Unsupported`. Limits and cancellation stop at the PDF engine (pdf-inspector and lopdf), whose decoders allocate from stream headers: isolate PDF work in a memory-capped worker that is recycled after a failure.
 
 ## Development
 

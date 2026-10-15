@@ -1,5 +1,6 @@
 #![no_main]
 
+use almiladoc::{Config, Converter, Format, Input};
 use libfuzzer_sys::fuzz_target;
 use std::io::{Cursor, Write};
 
@@ -43,7 +44,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(bytes) = zip.finish() else {
         return;
     };
-    let _ = almiladoc::to_markdown_bytes(bytes.into_inner().as_slice(), almiladoc::Format::Excel);
+    let Ok(converter) = Converter::new(Config::default()) else {
+        return;
+    };
+    let _ = converter.convert(Input::new(bytes.into_inner().as_slice(), Format::Excel));
 });
 
 const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";

@@ -54,6 +54,7 @@ dependencies = [
  "log",
  "pdf-inspector",
  "quick-xml",
+ "rayon",
  "thiserror",
  "zip",
 ]

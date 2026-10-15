@@ -2,6 +2,7 @@
 
 import ast
 import io
+import tempfile
 import unittest
 import zipfile
 from importlib.metadata import distribution
@@ -122,6 +123,16 @@ class AlmiladocTest(unittest.TestCase):
             almiladoc.to_markdown_bytes(package.getvalue(), "docx")
         self.assertEqual(caught.exception.part, "word/doc\\u{202e}ument.xml")
         self.assertNotIn("\u202e", str(caught.exception))
+
+    def test_content_and_extension_that_name_no_format_are_unsupported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sheet.unknown"
+            path.write_bytes(CSV.read_bytes())
+            with self.assertRaisesRegex(almiladoc.UnsupportedError, "unrecognized content"):
+                almiladoc.to_markdown(path)
+        with self.assertRaisesRegex(almiladoc.UnsupportedError, "unrecognized content"):
+            almiladoc.to_document(CSV.read_bytes())
+        self.assertEqual(len(almiladoc.to_document(CSV.read_bytes(), "csv").blocks), 1)
 
     def test_unreadable_files_and_bad_arguments_raise_the_python_exception(self):
         with self.assertRaises(FileNotFoundError):
