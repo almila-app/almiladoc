@@ -22,11 +22,9 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #91 PR, `to_markdown_pages` for per-page extraction: per-page results come from `inspect` and page units in the model (ADR 0001 decisions 4 and 6) rather than a separate PDF-only function.
 - #94 issue, slide boundaries for PPTX and PPT: covered by slide units and milestones (ADR 0001 decisions 4 and 5).
 - #95 PR, slide boundary anchors: its design, ordinals that survive empty slides and PPT coverage, is taken as typed slide milestones in the model instead of string anchors (ADR 0001 decision 5).
-- #96 issue, heading numbering in DOCM: list counters continue across numbering instances that share an abstract definition, fixed through #129; inferring heading numbers from text is not taken.
 - #104 issue, unbounded CSV and RTF cell and text materialisation: charged against the conversion-wide work budget and failing as `ResourceLimit` (ADR 0001 decision 12), taken through #107.
 - #107 PR, bound CSV and RTF materialisation: the approach chosen for #104, rewritten onto the single budget of ADR 0001 decision 12 with fallible charges.
 - #127 issue, EPUB title page missing: a chapter that cannot be read is reported instead of silently skipped (ADR 0001 decision 10); #158 removes one cause.
-- #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id.
 - #144 issue, one image-only page empties the whole PDF: a page that needs OCR becomes a gap in the model, so the readable pages keep their text under `on_loss = Report` or once OCR fills the gap (ADR 0001 decisions 5 and 10).
 - #146 issue, built-in local OCR: local CPU OCR is the PP-OCRv6 adapter on rten (ADR 0002 decision 8); standalone image input stays out, as ADR 0001 rejects an image format.
 - #148 PR, bound parser paths reachable from a crafted document: real crashes in the PPT, DOC and number-format paths, taken under the nesting and work limits of ADR 0001 decision 12 with its silent caps reported as diagnostics; its RTF part is replaced by #47.
@@ -51,6 +49,11 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #187 issue, a bare `<` truncates a DOCX and returns success: truncation becomes a typed error or a reported loss, never a silent success (ADR 0001 decisions 9 and 10).
 - #188 PR, reject delimiters that silently truncate text: the detector is taken, and skipped optional parts become diagnostics so its error is not swallowed (ADR 0001 decision 10).
 - #189 issue, process abort on a PDF with an inline image: the lopdf upgrade in the dependency step (ADR 0001 decision 19, step 2) returns an error instead of panicking.
+
+## Taken
+
+- #96 issue, heading numbering in DOCM: list counters continue across numbering instances that share an abstract definition, fixed through #129; inferring heading numbers from text is not taken.
+- #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id; a start override restarts its level once per instance, and a level override without one continues the count.
 
 ## Already fixed
 

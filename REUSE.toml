@@ -89,15 +89,30 @@ path = [
     "tests/fixturegen/pptx.py",
     "tests/fixturegen/rtf.py",
     "tests/fixturegen/sheet.py",
+    "tests/fixtures/docx/handmade-numbering.docx",
     "tests/fixtures/rtf/text.rtf",
     "tests/gen_fixtures.py",
     "tests/robustness.rs",
     "tests/snapshots.rs",
+    "tests/snapshots/snapshots__docx__handmade-numbering.docx.snap",
+    "tests/snapshots/snapshots__docx__text.docx.snap",
+    "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.snap",
     "tests/snapshots/snapshots__rtf__text.rtf.snap",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/docx/numbering.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 hari <64578610+Mr-Neutr0n@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

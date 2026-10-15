@@ -122,7 +122,7 @@ def numbering_docx(out):
         numpara("One-three", 1),
         para("Interruption paragraph."),
         numpara("One-four continues the count", 1),
-        numpara("Two-one independent counter", 2),
+        numpara("Two-one continues the shared abstract", 2),
         numpara("Ten-start via override", 3),
         numpara("Letter-A via numStyleLink", 5),
         numpara("Level replaced and start overridden together", 6),

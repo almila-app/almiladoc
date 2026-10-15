@@ -6,7 +6,7 @@ use crate::error::ConvertError;
 use crate::package::xml::{Element, ns};
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, composite_label, parse_percent_pattern};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const LEVELS: usize = 9;
 
@@ -34,8 +34,13 @@ impl Default for LevelDef {
     }
 }
 
+/// Identity of one `w:abstractNum`; the instances that resolve to it share one counter sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AbstractId(usize);
+
 #[derive(Debug, Clone)]
 struct AbstractNum {
+    id: AbstractId,
     levels: [LevelDef; LEVELS],
     /// Paragraph style each level binds to via `w:lvl > w:pStyle`.
     pstyles: [Option<String>; LEVELS],
@@ -46,6 +51,8 @@ struct AbstractNum {
 pub struct Instance {
     pub levels: [LevelDef; LEVELS],
     pstyles: [Option<String>; LEVELS],
+    abstract_id: AbstractId,
+    start_overrides: [bool; LEVELS],
 }
 
 impl Instance {
@@ -74,7 +81,7 @@ pub fn parse(
     style_num_id: &impl Fn(&str) -> Option<u64>,
 ) -> Result<Numbering, ConvertError> {
     let mut abstracts: HashMap<&str, AbstractNum> = HashMap::new();
-    for abs in root.find_all(ns::W, "abstractNum") {
+    for (ordinal, abs) in root.find_all(ns::W, "abstractNum").enumerate() {
         let Some(id) = abs.attr(ns::W, "abstractNumId") else {
             continue;
         };
@@ -89,7 +96,8 @@ pub fn parse(
         }
         let num_style_link =
             abs.find(ns::W, "numStyleLink").and_then(|e| e.attr(ns::W, "val")).map(str::to_string);
-        abstracts.insert(id, AbstractNum { levels, pstyles, num_style_link });
+        abstracts
+            .insert(id, AbstractNum { id: AbstractId(ordinal), levels, pstyles, num_style_link });
     }
 
     // First pass: direct abstract references per numId.
@@ -112,26 +120,32 @@ pub fn parse(
         };
         let mut levels = abs.levels.clone();
         let mut pstyles = abs.pstyles.clone();
+        let mut start_overrides = [false; LEVELS];
         for over in num_elem.find_all(ns::W, "lvlOverride") {
             let ilvl: usize = over.attr(ns::W, "ilvl").and_then(|v| v.parse().ok()).unwrap_or(0);
-            if ilvl >= LEVELS {
+            let (Some(level), Some(pstyle), Some(start_override)) =
+                (levels.get_mut(ilvl), pstyles.get_mut(ilvl), start_overrides.get_mut(ilvl))
+            else {
                 continue;
-            }
+            };
             // A nested w:lvl replaces the level wholesale; startOverride is
             // applied last so it survives the replacement.
             if let Some(lvl) = over.find(ns::W, "lvl") {
-                levels[ilvl] = parse_level(lvl);
-                pstyles[ilvl] = level_pstyle(lvl);
+                *level = parse_level(lvl);
+                *pstyle = level_pstyle(lvl);
             }
             if let Some(start) = over
                 .find(ns::W, "startOverride")
                 .and_then(|e| e.attr(ns::W, "val"))
                 .and_then(parse_start)
             {
-                levels[ilvl].start = start;
+                level.start = start;
+                *start_override = true;
             }
         }
-        numbering.instances.insert(num_id, Instance { levels, pstyles });
+        numbering
+            .instances
+            .insert(num_id, Instance { levels, pstyles, abstract_id: abs.id, start_overrides });
     }
     Ok(numbering)
 }
@@ -214,15 +228,17 @@ fn parse_level(lvl: &Element) -> LevelDef {
     LevelDef { marker, start, restart, pattern: NumberPattern { text, legal } }
 }
 
-/// Document-order numbering state: one counter array per instance, shared
-/// across interruptions so continuation works, with `lvlRestart` semantics.
+/// Document-order numbering state: one counter array per abstract definition,
+/// shared by its instances and across interruptions so continuation works,
+/// with `lvlRestart` semantics and each `startOverride` applied once.
 #[derive(Default)]
 pub struct Counters {
-    state: HashMap<u64, InstanceState>,
+    state: HashMap<AbstractId, ListState>,
+    overrides_applied: HashSet<(u64, usize)>,
 }
 
 #[derive(Default)]
-struct InstanceState {
+struct ListState {
     value: [u64; LEVELS],
     initialized: [bool; LEVELS],
     restart_pending: [bool; LEVELS],
@@ -234,7 +250,13 @@ impl Counters {
     /// reproducible from the marker kind alone, the composite label.
     pub fn next(&mut self, num_id: u64, ilvl: usize, instance: &Instance) -> (u64, Option<String>) {
         let ilvl = ilvl.min(LEVELS - 1);
-        let state = self.state.entry(num_id).or_default();
+        let state = self.state.entry(instance.abstract_id).or_default();
+        if instance.start_overrides.get(ilvl) == Some(&true)
+            && self.overrides_applied.insert((num_id, ilvl))
+            && let Some(pending) = state.restart_pending.get_mut(ilvl)
+        {
+            *pending = true;
+        }
         let def = &instance.levels[ilvl];
         if !state.initialized[ilvl] || state.restart_pending[ilvl] {
             state.value[ilvl] = def.start;
@@ -273,5 +295,148 @@ impl Counters {
             )
         });
         (value, label)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::xml::parse_xml;
+
+    const ABSTRACT: &str = r#"<w:abstractNum w:abstractNumId="7">
+        <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+        <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlRestart w:val="0"/></w:lvl>
+    </w:abstractNum>"#;
+
+    fn numbers(
+        nums: &str,
+        style_num_id: &impl Fn(&str) -> Option<u64>,
+        paragraphs: &[(u64, usize)],
+    ) -> Result<Vec<u64>, ConvertError> {
+        let xml = format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{ABSTRACT}{nums}</w:numbering>"#
+        );
+        let tree = parse_xml(xml.as_bytes())?;
+        let root = tree
+            .find(ns::W, "numbering")
+            .ok_or_else(|| ConvertError::malformed("no w:numbering root"))?;
+        let numbering = parse(root, style_num_id)?;
+        let mut counters = Counters::default();
+        paragraphs
+            .iter()
+            .map(|&(num_id, ilvl)| {
+                let instance = numbering.instance(num_id).ok_or_else(|| {
+                    ConvertError::malformed(format!("no numbering instance {num_id}"))
+                })?;
+                Ok(counters.next(num_id, ilvl, instance).0)
+            })
+            .collect()
+    }
+
+    fn no_styles(_: &str) -> Option<u64> {
+        None
+    }
+
+    const SHARED: &str = r#"
+        <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+        <w:num w:numId="2"><w:abstractNumId w:val="7"/></w:num>
+        <w:num w:numId="3"><w:abstractNumId w:val="7"/>
+            <w:lvlOverride w:ilvl="0"><w:startOverride w:val="10"/></w:lvlOverride>
+        </w:num>"#;
+
+    #[test]
+    fn instances_of_one_abstract_continue_one_sequence() -> Result<(), ConvertError> {
+        let got = numbers(SHARED, &no_styles, &[(1, 0), (1, 0), (2, 0), (3, 0)])?;
+        assert_eq!(got, [1, 2, 3, 10]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_start_override_restarts_only_on_its_instances_first_use() -> Result<(), ConvertError> {
+        let got = numbers(SHARED, &no_styles, &[(3, 0), (1, 0), (3, 0)])?;
+        assert_eq!(got, [10, 11, 12]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_override_on_an_unused_level_restarts_nothing() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:num w:numId="18446744073709551615"><w:abstractNumId w:val="7"/></w:num>
+            <w:num w:numId="2"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="10"/></w:lvlOverride>
+            </w:num>
+            <w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>"#;
+        let got = numbers(nums, &no_styles, &[(u64::MAX, 0), (2, 1), (3, 0)])?;
+        assert_eq!(got, [1, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_start_override_restarts_its_level_alone() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+            <w:num w:numId="2"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="1"><w:startOverride w:val="4"/></w:lvlOverride>
+            </w:num>"#;
+        let got = numbers(nums, &no_styles, &[(1, 0), (1, 1), (1, 1), (2, 1), (2, 0)])?;
+        assert_eq!(got, [1, 1, 2, 4, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn each_overridden_level_restarts_on_its_own_first_use() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+            <w:num w:numId="2"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="10"/></w:lvlOverride>
+                <w:lvlOverride w:ilvl="1"><w:startOverride w:val="4"/></w:lvlOverride>
+            </w:num>"#;
+        let got = numbers(nums, &no_styles, &[(1, 0), (1, 1), (2, 1), (2, 0)])?;
+        assert_eq!(got, [1, 1, 4, 10]);
+        Ok(())
+    }
+
+    #[test]
+    fn each_overriding_instance_restarts_its_level() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:num w:numId="2"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="10"/></w:lvlOverride>
+            </w:num>
+            <w:num w:numId="3"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="10"/></w:lvlOverride>
+            </w:num>"#;
+        let got = numbers(nums, &no_styles, &[(2, 0), (2, 0), (3, 0)])?;
+        assert_eq!(got, [10, 11, 10]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_level_override_without_start_override_continues() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+            <w:num w:numId="2"><w:abstractNumId w:val="7"/>
+                <w:lvlOverride w:ilvl="0">
+                    <w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="upperLetter"/></w:lvl>
+                </w:lvlOverride>
+            </w:num>"#;
+        assert_eq!(numbers(nums, &no_styles, &[(1, 0), (1, 0), (2, 0), (1, 0)])?, [1, 2, 3, 4]);
+        assert_eq!(numbers(nums, &no_styles, &[(2, 0), (1, 0), (2, 0)])?, [5, 6, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn instances_share_the_abstract_a_numbering_style_links_to() -> Result<(), ConvertError> {
+        let nums = r#"
+            <w:abstractNum w:abstractNumId="8"><w:numStyleLink w:val="Outline"/></w:abstractNum>
+            <w:abstractNum w:abstractNumId="9">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
+            <w:num w:numId="4"><w:abstractNumId w:val="9"/></w:num>
+            <w:num w:numId="5"><w:abstractNumId w:val="8"/></w:num>"#;
+        let outline = |style: &str| (style == "Outline").then_some(4);
+        let got = numbers(nums, &outline, &[(4, 0), (5, 0), (1, 0), (4, 0)])?;
+        assert_eq!(got, [1, 2, 1, 3]);
+        Ok(())
     }
 }
