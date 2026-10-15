@@ -1,6 +1,9 @@
 # Fuzzing
 
-    cargo +nightly fuzz run xlsx fuzz/corpus/xlsx fuzz/seeds/xlsx
+    cd fuzz
+    cargo fuzz run xlsx corpus/xlsx seeds/xlsx
+
+`rust-toolchain.toml` here pins the nightly that cargo-fuzz needs; run it from this directory.
 
 `fuzz/seeds/` holds checked-in starting inputs; `fuzz/corpus/` is the working
 directory libfuzzer writes to and is not checked in.

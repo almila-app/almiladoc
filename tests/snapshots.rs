@@ -10,8 +10,9 @@
 mod common;
 
 use common::{fixture_root, walk};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Convert one file, capturing panics so a bad parser records a baseline
 /// instead of aborting the whole harness.
@@ -36,17 +37,32 @@ fn expected_outcome(path: &Path) -> Option<&'static str> {
     }
 }
 
-#[test]
-fn corpus() {
+fn corpus_cases() -> Vec<(PathBuf, String)> {
     let root = fixture_root();
     let mut files = Vec::new();
     walk(&root, &mut files);
-    for path in files {
-        let rel = path.strip_prefix(&root).unwrap();
-        if rel.starts_with("abuse") {
-            continue;
-        }
-        let name = rel.to_string_lossy().replace(['\\', '/'], "__");
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let rel = path.strip_prefix(&root).unwrap();
+            if rel.starts_with("abuse") {
+                return None;
+            }
+            let name = rel.to_string_lossy().replace(['\\', '/'], "__");
+            Some((path, name))
+        })
+        .collect()
+}
+
+fn is_pdf(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+fn sweep(pdf: bool) {
+    let cases: Vec<_> =
+        corpus_cases().into_iter().filter(|(path, _)| is_pdf(path) == pdf).collect();
+    assert!(!cases.is_empty(), "no fixtures in this sweep");
+    for (path, name) in cases {
         let output = convert(&path);
         // Once the unified recovery policy exists (P1), annotated malformed
         // fixtures must match their single expected outcome.
@@ -68,6 +84,36 @@ fn corpus() {
         }
         insta::assert_snapshot!(name, output);
     }
+}
+
+/// Non-PDF output is byte-identical on every tested target.
+#[test]
+fn corpus() {
+    sweep(false);
+}
+
+/// PDF output is pinned on the reference target alone.
+#[test]
+#[cfg_attr(
+    not(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu")),
+    ignore = "PDF snapshots are byte-compared on x86_64-unknown-linux-gnu only"
+)]
+fn corpus_pdf() {
+    sweep(true);
+}
+
+/// Every snapshot belongs to a corpus fixture and none is pending review.
+#[test]
+fn snapshots_match_the_corpus() {
+    let expected: BTreeSet<String> =
+        corpus_cases().into_iter().map(|(_, name)| format!("snapshots__{name}.snap")).collect();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("snapshots");
+    let actual: BTreeSet<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with("snapshots__sample__"))
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 /// Annotated malformed fixtures must produce their single expected outcome:

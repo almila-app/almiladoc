@@ -11,6 +11,11 @@ publish = false
 [lib]
 name = "_almiladoc"
 crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[lints]
+workspace = true
 
 [dependencies]
 almiladoc = { path = ".." }

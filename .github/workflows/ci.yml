@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: ["land/owner/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ci:
+    name: ci
+    permissions:
+      contents: read # checkout in every gate
+    uses: $/.github/workflows/gates.yml

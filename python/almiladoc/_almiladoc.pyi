@@ -1,10 +1,38 @@
 # Hand-written stubs for the compiled module. `tests/test_almiladoc.py` checks
 # they stay in step with what the module actually exports.
+import builtins
 import os
 from typing import Literal, final
 
-Format = Literal[
-    "doc", "docx", "odt", "pdf", "ppt", "pptx", "rtf", "epub", "xlsx", "ods", "odp", "csv"
+from almiladoc import Format
+
+__all__ = [
+    "Asset",
+    "Block",
+    "Cell",
+    "CellSlot",
+    "ConvertError",
+    "Document",
+    "EncryptedError",
+    "ImageSource",
+    "Inline",
+    "LinkTarget",
+    "List",
+    "ListItem",
+    "MalformedError",
+    "MissingPartError",
+    "NeedsOcrError",
+    "Note",
+    "ResourceLimitError",
+    "Style",
+    "Table",
+    "UnsupportedError",
+    "format_from_bytes",
+    "format_from_extension",
+    "format_from_path",
+    "to_document",
+    "to_markdown",
+    "to_markdown_bytes",
 ]
 
 class ConvertError(Exception):
@@ -98,7 +126,7 @@ class Block:
     """heading, paragraph."""
     list: List | None
     table: Table | None
-    blocks: list[Block] | None
+    blocks: builtins.list[Block] | None
     """block_quote."""
     lang: str | None
     """code_block."""

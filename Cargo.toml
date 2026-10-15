@@ -10,6 +10,9 @@ rust-version = "1.99"
 license = "FSL-1.1-MIT AND MIT"
 repository = "https://github.com/almila-app/almiladoc"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [package]
 name = "almiladoc"
 version.workspace = true
@@ -22,6 +25,9 @@ readme = "README.md"
 keywords = ["markdown", "docx", "pdf", "converter", "document"]
 categories = ["parser-implementations", "text-processing"]
 include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.toml"]
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 insta = "1"

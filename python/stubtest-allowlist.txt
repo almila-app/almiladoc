@@ -1,0 +1,2 @@
+# stubtest compares a Literal alias of several values as a Union, which its runtime Literal object is not.
+almiladoc.Format

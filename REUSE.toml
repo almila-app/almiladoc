@@ -17,6 +17,13 @@ path = [
     ".github/dependabot.yml",
     "docs/adr/**",
     "docs/upstream.md",
+    ".github/workflows/**",
+    "Makefile",
+    "fuzz/rust-toolchain.toml",
+    "python/stubtest-allowlist.txt",
+    "rust-toolchain.toml",
+    "scripts/check_dist.py",
+    "uv.lock",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Harun Erkurt"
@@ -30,6 +37,7 @@ path = [
     "Cargo.toml",
     "README.md",
     "fuzz/Cargo.toml",
+    "fuzz/README.md",
     "fuzz/fuzz_targets/csv.rs",
     "fuzz/fuzz_targets/doc.rs",
     "fuzz/fuzz_targets/docx.rs",

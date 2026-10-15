@@ -64,22 +64,7 @@ fn convert(path: &str, csv: &[u8]) -> Result<(String, String), ConvertError> {
 
 ## Development
 
-On Linux, macOS or Windows:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --locked
-```
-
-The Python tests run from the repository root against an installed wheel:
-
-```sh
-pip install 'maturin>=1.15,<2'
-maturin build --release
-pip install --no-index --find-links target/wheels almiladoc
-python -m unittest discover -s python/tests
-```
+`make ci` runs every gate CI runs, with the toolchain `rust-toolchain.toml` pins; it needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs the locked Python tools and CPython 3.11 and 3.15. Each gate is also a target of its own: `fmt`, `clippy`, `test`, `doc`, `features` and `python`, which builds the wheel from the sdist and tests it installed. A target the host cannot run reports `NOT RUN` and its reason.
 
 ## Licence
 

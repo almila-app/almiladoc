@@ -13,5 +13,5 @@ Sign off every commit (`git commit -s`). The `Signed-off-by` line certifies the 
 ## Changes
 
 - One change per pull request, with a test that fails without it.
-- `cargo fmt --check` and `cargo test` pass.
+- `make ci` passes.
 - A fixture is a file you may publish; never a confidential document.
