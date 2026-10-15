@@ -8,7 +8,7 @@ permissions: {}
 jobs:
   rust:
     name: rust
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read # checkout
@@ -21,7 +21,7 @@ jobs:
 
   rust-arm:
     name: rust-arm
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     permissions:
       contents: read # checkout
@@ -34,7 +34,7 @@ jobs:
 
   features:
     name: features
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read # checkout
@@ -47,7 +47,7 @@ jobs:
 
   python:
     name: python
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read # checkout
@@ -64,7 +64,7 @@ jobs:
 
   policy:
     name: policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read # checkout; zizmor resolves action refs with the run's token
@@ -84,7 +84,7 @@ jobs:
 
   dco:
     name: dco
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read # checkout
@@ -104,7 +104,7 @@ jobs:
 
   fuzz:
     name: fuzz
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read # checkout
@@ -120,7 +120,7 @@ jobs:
     name: required
     if: always()
     needs: [rust, rust-arm, features, python, policy, dco, fuzz]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:

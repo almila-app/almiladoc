@@ -12,16 +12,16 @@ Date: 2026-10-14
 
 1. **Topology.** ADR 0004 decision 4's `ci.yml` cancels superseded runs; its job `ci` calls `gates.yml`, whose `required` needs every gate. Jobs hold least privilege. Release and scheduled runs never cancel.
 
-2. **Gates** are Makefile targets, `make ci` the pre-flight; jobs run on `ubuntu-24.04` unless named. `LICENCE_SET` is `LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES`.
+2. **Gates** are Makefile targets, `make ci` the pre-flight; jobs run on `ubuntu-26.04` unless named. `LICENCE_SET` is `LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES`.
    - `rust`: fmt, clippy, locked tests and docs, all features, `-D warnings`; snapshots byte-compared and never updated; proptest seeds fixed.
-   - `rust-arm`: `make test` on `ubuntu-24.04-arm`, byte-comparing non-PDF snapshots only.
+   - `rust-arm`: `make test` on `ubuntu-26.04-arm`, byte-comparing non-PDF snapshots only.
    - `features`: clippy and tests without default features; each feature alone.
    - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `FSL-1.1-MIT AND MIT` metadata.
    - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq`, `hyper`, `reqwest`, `libloading` and `rten` from the default and `render` graphs; a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
    - `dco`: `make dco provenance` (ADR 0004).
    - `fuzz`: every target builds, with each declared feature; an empty seed directory fails; seeds and `fuzz/regressions/` replay once; the docs.rs build passes.
 
-3. **Tools.** `rust-toolchain.toml` pins the latest stable, `1.99.0`. Cargo tools are sha256-pinned release binaries. Python tools, maturin and ziglang included, are locked `uv` groups. `ci.yml` and `release.yml` use no cache.
+3. **Tools.** `rust-toolchain.toml` pins the latest stable release; `rust-version` equals its minor. Cargo tools are sha256-pinned release binaries. Python tools, maturin and ziglang included, are locked `uv` groups. `ci.yml` and `release.yml` use no cache.
 
 4. **Schedules.** `scheduled.yml` runs daily per-target fuzz campaigns and random-seed proptests, and weekly `cargo fuzz cmin` and a staleness check of pinned binaries, image digests and, while ADR 0001 decision 6's fork is in use, upstream pdf-inspector releases and advisories; it alone saves the corpus cache. Public logs name only target, exit kind and input hash; failing inputs upload only encrypted, committed as reproducers after the fix's release.
 

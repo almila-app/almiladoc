@@ -71,7 +71,7 @@ Date: 2026-10-14
 
 13. **Tests.**
     - **Pull requests:** `FakeOcr` checks routing, blank scans, poisoning and hand-run phases against `convert`; fuzzing covers untrusted input.
-    - **Scheduled and release** (ADR 0003 decision 5): goldens per kernel class on `ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-26` demand exact text at 1 and 3 threads and no surviving pool thread; a class without a golden reports not run, and publishing needs every class to pass. Raster hashes add `windows-2025`; PaddleX parity skips document preprocessing.
+    - **Scheduled and release** (ADR 0003 decision 5): goldens per kernel class on `ubuntu-26.04`, `ubuntu-26.04-arm` and `macos-26` demand exact text at 1 and 3 threads and no surviving pool thread; a class without a golden reports not run, and publishing needs every class to pass. Raster hashes add `windows-2025`; PaddleX parity skips document preprocessing.
     - **Measurement** on a public Turkish and English scanned corpus picks the cheapest tier, DPI and detector side limit within 1 CER point of the best, with Turkish-diacritic recall ≥ 0.95, p95 ≤ 2 s per page, RSS ≤ 1 GiB.
 
 ## Consequences
