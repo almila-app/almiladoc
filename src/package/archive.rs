@@ -1,6 +1,7 @@
 //! ZIP archive access with decompression limits.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::package::xml::{Element, parse_xml};
@@ -17,6 +18,65 @@ pub enum PackageKind {
     Odf,
     /// EPUB's Open Container Format.
     Epub,
+}
+
+/// What a part's loss costs the output, named by the reader that asks for
+/// it: it decides what an unreadable, recovered or undecodable part reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Content that renders in the region: losing it is `part_unreadable`.
+    Content(Region),
+    /// A part whose loss changes formatting alone.
+    Formatting,
+    /// A part whose loss the reader, or each consumer of the part, reports;
+    /// its recovery and decoding still report in the region.
+    Reported(Region),
+    /// A part no content depends on.
+    Probe,
+}
+
+impl Role {
+    pub(crate) fn unreadable(self) -> Option<(DiagnosticCode, Region)> {
+        match self {
+            Role::Content(region) => Some((DiagnosticCode::PartUnreadable, region)),
+            Role::Formatting => Some((DiagnosticCode::StylePartUnreadable, Region::Container)),
+            Role::Reported(_) | Role::Probe => None,
+        }
+    }
+
+    pub(crate) fn recovered(self) -> Option<(DiagnosticCode, Region)> {
+        match self {
+            Role::Content(region) | Role::Reported(region) => {
+                Some((DiagnosticCode::RecoveredXml, region))
+            }
+            Role::Formatting => Some((DiagnosticCode::StylePartUnreadable, Region::Container)),
+            Role::Probe => None,
+        }
+    }
+
+    pub(crate) fn undecodable(self) -> Option<(DiagnosticCode, Region)> {
+        match self {
+            Role::Content(region) | Role::Reported(region) => {
+                Some((DiagnosticCode::InvalidEncoding, region))
+            }
+            Role::Formatting => Some((DiagnosticCode::InvalidStyleEncoding, Region::Container)),
+            Role::Probe => None,
+        }
+    }
+}
+
+pub(crate) fn report(parse_ctx: &ParseCtx, diagnostic: Option<(DiagnosticCode, Region)>) {
+    if let Some((code, region)) = diagnostic {
+        parse_ctx.emit(code, region);
+    }
+}
+
+/// Whether an absent part is a loss: it is once a relationship or reference
+/// names it, and never when only its conventional name pointed at it.
+#[derive(Clone, Copy)]
+enum Absent {
+    Valid,
+    Lost,
 }
 
 /// A ZIP-based document package (OOXML, ODF, EPUB).
@@ -51,8 +111,8 @@ impl<'a> Package<'a> {
 
     /// Read a part's bytes. `Ok(None)` means the part is absent (a valid
     /// state for optional parts); `Err` means it exists but cannot be read.
-    /// Callers apply the unified policy: skip + log when useful output
-    /// remains, propagate when the part is the primary content.
+    /// Callers apply the unified policy: skip and report by role when useful
+    /// output remains, propagate when the part is the primary content.
     pub fn part(&mut self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
         // OPC part URIs may carry a leading slash; entries never do.
         let name = name.trim_start_matches('/');
@@ -88,38 +148,87 @@ impl<'a> Package<'a> {
         Ok(Some(bytes))
     }
 
-    /// Read a part that must exist for any meaningful output.
     /// True when a part exists, without reading (or budget-charging) it.
     pub fn has_part(&self, name: &str) -> bool {
         self.zip.index_for_name(name.trim_start_matches('/')).is_some()
     }
 
+    /// Read a part that must exist for any meaningful output.
     pub fn required_part(&mut self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::missing_part(name))
     }
 
-    /// Read an optional part under the unified recovery policy: absent is a
-    /// valid state (`Ok(None)`, silent); an unreadable part is skipped with a
-    /// log (`Ok(None)`); fatal resource-limit errors always propagate.
-    pub fn optional_part(&mut self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
-        skip_unreadable(name, self.part(name))
+    /// Read an optional part a conventional name points at: absent is a
+    /// valid state, and an unreadable part reports by `role` and reads as
+    /// absent; a fatal error propagates.
+    pub fn optional_part(
+        &mut self,
+        name: &str,
+        role: Role,
+    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+        self.read_part(name, role, Absent::Valid)
     }
 
-    /// Read and parse an optional XML part under the unified recovery policy:
-    /// absent -> `Ok(None)`; unreadable or corrupt -> skipped with a log;
-    /// fatal resource-limit errors always propagate.
-    pub fn optional_xml_part(&mut self, name: &str) -> Result<Option<Element>, ConvertError> {
-        let Some(bytes) = self.optional_part(name)? else {
-            return Ok(None);
-        };
-        skip_unreadable(name, parse_xml(self.parse_ctx, &bytes).map(Some))
+    /// Read a part a relationship or reference names: absent or unreadable,
+    /// it reports by `role` and reads as absent; a fatal error propagates.
+    pub fn related_part(
+        &mut self,
+        name: &str,
+        role: Role,
+    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+        self.read_part(name, role, Absent::Lost)
+    }
+
+    /// [`Package::optional_part`], parsed as XML: a part that does not parse
+    /// reports by `role` and reads as absent.
+    pub fn optional_xml_part(
+        &mut self,
+        name: &str,
+        role: Role,
+    ) -> Result<Option<Element>, ConvertError> {
+        self.read_xml_part(name, role, Absent::Valid)
+    }
+
+    /// [`Package::related_part`], parsed as XML: a part that does not parse
+    /// reports by `role` and reads as absent.
+    pub fn related_xml_part(
+        &mut self,
+        name: &str,
+        role: Role,
+    ) -> Result<Option<Element>, ConvertError> {
+        self.read_xml_part(name, role, Absent::Lost)
     }
 
     /// Read and parse an XML part that must exist and parse for any
-    /// meaningful output.
-    pub fn required_xml_part(&mut self, name: &str) -> Result<Element, ConvertError> {
+    /// meaningful output; its recovery and decoding report by `role`.
+    pub fn required_xml_part(&mut self, name: &str, role: Role) -> Result<Element, ConvertError> {
         let bytes = self.required_part(name)?;
-        parse_xml(self.parse_ctx, &bytes)
+        parse_xml(self.parse_ctx, &bytes, role)
+    }
+
+    fn read_part(
+        &mut self,
+        name: &str,
+        role: Role,
+        absent: Absent,
+    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+        let read = self.part(name);
+        if matches!((&read, absent), (Ok(None), Absent::Lost)) {
+            report(self.parse_ctx, role.unreadable());
+        }
+        skip_unreadable(self.parse_ctx, role, read)
+    }
+
+    fn read_xml_part(
+        &mut self,
+        name: &str,
+        role: Role,
+        absent: Absent,
+    ) -> Result<Option<Element>, ConvertError> {
+        let Some(bytes) = self.read_part(name, role, absent)? else {
+            return Ok(None);
+        };
+        skip_unreadable(self.parse_ctx, role, parse_xml(self.parse_ctx, &bytes, role).map(Some))
     }
 }
 
@@ -150,13 +259,14 @@ impl<R: Read> Read for Counted<R> {
 }
 
 fn skip_unreadable<T>(
-    name: &str,
+    parse_ctx: &ParseCtx,
+    role: Role,
     read: Result<Option<T>, ConvertError>,
 ) -> Result<Option<T>, ConvertError> {
     match read {
         Err(e) if e.is_fatal() => Err(e),
-        Err(e) => {
-            log::warn!("skipping unreadable part {name}: {e}");
+        Err(_) => {
+            report(parse_ctx, role.unreadable());
             Ok(None)
         }
         read => read,
@@ -281,44 +391,138 @@ mod tests {
         assert_eq!(bytes.len(), 10);
     }
 
-    #[test]
-    fn optional_reads_propagate_fatal_errors_and_skip_the_rest() {
-        let refused = || Err::<Option<()>, _>(ConvertError::limit(Limit::Allocation, 64));
-        assert!(matches!(
-            skip_unreadable("a.xml", refused()),
-            Err(ConvertError::ResourceLimit { limit: Limit::Allocation, max: 64 })
-        ));
-        for fatal in [ConvertError::Cancelled, ConvertError::Internal] {
-            assert!(skip_unreadable::<()>("a.xml", Err(fatal)).is_err());
-        }
-        let corrupt = Err(ConvertError::malformed_part("a.xml", "corrupt"));
-        assert!(matches!(skip_unreadable::<()>("a.xml", corrupt), Ok(None)));
-        assert!(matches!(skip_unreadable("a.xml", Ok(Some(1))), Ok(Some(1))));
+    fn reported(parse_ctx: &ParseCtx) -> Vec<(DiagnosticCode, Region, u64)> {
+        parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect()
     }
 
     #[test]
-    fn a_corrupt_entry_is_neither_cached_nor_charged() {
+    fn optional_reads_propagate_fatal_errors_and_skip_the_rest() {
+        let parse_ctx = ParseCtx::default();
+        let role = Role::Content(Region::Note);
+        let refused = || Err::<Option<()>, _>(ConvertError::limit(Limit::Allocation, 64));
+        assert!(matches!(
+            skip_unreadable(&parse_ctx, role, refused()),
+            Err(ConvertError::ResourceLimit { limit: Limit::Allocation, max: 64 })
+        ));
+        for fatal in [ConvertError::Cancelled, ConvertError::Internal] {
+            assert!(skip_unreadable::<()>(&parse_ctx, role, Err(fatal)).is_err());
+        }
+        assert!(matches!(skip_unreadable(&parse_ctx, role, Ok(Some(1))), Ok(Some(1))));
+        assert!(matches!(skip_unreadable::<()>(&parse_ctx, role, Ok(None)), Ok(None)));
+        assert_eq!(reported(&parse_ctx), []);
+        let corrupt = Err(ConvertError::malformed_part("a.xml", "corrupt"));
+        assert!(matches!(skip_unreadable::<()>(&parse_ctx, role, corrupt), Ok(None)));
+        assert_eq!(reported(&parse_ctx), [(DiagnosticCode::PartUnreadable, Region::Note, 1)]);
+    }
+
+    fn package_of(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in parts {
+            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    fn corrupt_entry(name: &str) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let stored = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        writer.start_file("word/document.xml", stored).unwrap();
+        writer.start_file(name, stored).unwrap();
         writer.write_all(b"<document/>").unwrap();
         let mut data = writer.finish().unwrap().into_inner();
         let start = zip::ZipArchive::new(Cursor::new(data.as_slice()))
             .unwrap()
-            .by_name("word/document.xml")
+            .by_name(name)
             .unwrap()
             .data_start()
             .unwrap();
         data[usize::try_from(start).unwrap()] ^= 1;
+        data
+    }
+
+    const ROLES: [(Role, Option<(DiagnosticCode, Region)>); 5] = [
+        (Role::Content(Region::Note), Some((DiagnosticCode::PartUnreadable, Region::Note))),
+        (Role::Content(Region::Body), Some((DiagnosticCode::PartUnreadable, Region::Body))),
+        (Role::Formatting, Some((DiagnosticCode::StylePartUnreadable, Region::Container))),
+        (Role::Reported(Region::Note), None),
+        (Role::Probe, None),
+    ];
+
+    #[test]
+    fn an_unreadable_part_reports_by_its_role_once_per_read() {
+        let corrupt = corrupt_entry("word/a.xml");
+        let unparseable = package_of(&[("word/a.xml", b"<a></b></a></c>")]);
+        for (role, expected) in ROLES {
+            let expected: Vec<_> =
+                expected.map(|(code, region)| (code, region, 1)).into_iter().collect();
+            for read in 0..4 {
+                let data = if read < 2 { &corrupt } else { &unparseable };
+                let parse_ctx = ParseCtx::default();
+                let mut pkg = Package::open(&parse_ctx, data, PackageKind::Opc).unwrap();
+                match read {
+                    0 => assert!(pkg.optional_part("word/a.xml", role).unwrap().is_none()),
+                    1 => assert!(pkg.related_part("word/a.xml", role).unwrap().is_none()),
+                    2 => assert!(pkg.optional_xml_part("word/a.xml", role).unwrap().is_none()),
+                    _ => assert!(pkg.related_xml_part("word/a.xml", role).unwrap().is_none()),
+                }
+                assert_eq!(reported(&parse_ctx), expected, "{role:?} read {read}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_absent_part_is_a_loss_only_when_a_reference_names_it() {
+        let data = package_of(&[("word/document.xml", b"<document/>")]);
+        for (role, expected) in ROLES {
+            let parse_ctx = ParseCtx::default();
+            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            assert!(pkg.optional_part("word/a.xml", role).unwrap().is_none());
+            assert!(pkg.optional_xml_part("word/a.xml", role).unwrap().is_none());
+            assert_eq!(reported(&parse_ctx), [], "{role:?}");
+            assert!(pkg.related_part("word/a.xml", role).unwrap().is_none());
+            assert!(pkg.related_xml_part("word/a.xml", role).unwrap().is_none());
+            let expected: Vec<_> =
+                expected.map(|(code, region)| (code, region, 2)).into_iter().collect();
+            assert_eq!(reported(&parse_ctx), expected, "{role:?}");
+            assert!(pkg.related_part("word/document.xml", role).unwrap().is_some());
+            assert!(pkg.related_xml_part("word/document.xml", role).unwrap().is_some());
+            assert_eq!(reported(&parse_ctx), expected, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn a_recovered_part_reports_by_the_reading_role() {
+        let data = package_of(&[("word/a.xml", b"<a><b>text</a>")]);
+        let cases = [
+            (Role::Content(Region::Note), vec![(DiagnosticCode::RecoveredXml, Region::Note, 1)]),
+            (Role::Reported(Region::Body), vec![(DiagnosticCode::RecoveredXml, Region::Body, 1)]),
+            (Role::Formatting, vec![(DiagnosticCode::StylePartUnreadable, Region::Container, 1)]),
+            (Role::Probe, vec![]),
+        ];
+        for (role, expected) in cases {
+            let parse_ctx = ParseCtx::default();
+            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            assert!(pkg.optional_xml_part("word/a.xml", role).unwrap().is_some());
+            assert_eq!(reported(&parse_ctx), expected, "{role:?}");
+            let parse_ctx = ParseCtx::default();
+            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            assert!(pkg.required_xml_part("word/a.xml", role).is_ok());
+            assert_eq!(reported(&parse_ctx), expected, "{role:?} required");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_entry_is_neither_cached_nor_charged() {
+        let data = corrupt_entry("word/document.xml");
         let parse_ctx = ParseCtx::default();
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("word/document.xml").unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. }));
         assert!(pkg.cache.is_empty());
         assert_eq!(pkg.total_read, 0);
-        assert!(pkg.optional_part("word/document.xml").unwrap().is_none());
-        assert!(pkg.optional_xml_part("word/document.xml").unwrap().is_none());
+        assert!(pkg.optional_part("word/document.xml", Role::Probe).unwrap().is_none());
+        assert!(pkg.optional_xml_part("word/document.xml", Role::Probe).unwrap().is_none());
         assert_eq!(pkg.total_read, 0);
     }
 
@@ -426,13 +630,13 @@ mod tests {
         }
         let parse_ctx = ParseCtx::default();
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
-        assert!(pkg.optional_part("word/comments.xml").unwrap().is_none());
-        assert!(pkg.optional_part("word/comments.xml").unwrap().is_none());
+        assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
+        assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
         assert_eq!(parse_ctx.fuel(), 8);
         let limits = Limits { max_work: 3, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
-        let read = pkg.optional_part("word/comments.xml");
+        let read = pkg.optional_part("word/comments.xml", Role::Content(Region::Comment));
         assert!(
             matches!(read, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3 })),
             "{read:?}"
@@ -447,11 +651,13 @@ mod tests {
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("word/comments.xml").unwrap().is_some());
         token.cancel();
-        let read = pkg.optional_xml_part("word/comments.xml");
+        let role = Role::Content(Region::Comment);
+        let read = pkg.optional_xml_part("word/comments.xml", role);
         assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
-        let read = pkg.optional_part("word/comments.xml");
+        let read = pkg.related_part("word/comments.xml", role);
         assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
+        assert_eq!(reported(&parse_ctx), []);
     }
 
     #[test]

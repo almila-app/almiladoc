@@ -2,7 +2,7 @@ mod common;
 
 use almiladoc::{
     CancelToken, Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits,
-    UnsupportedKind,
+    OnLoss, UnsupportedKind,
 };
 use common::{converter, fixture_root, format_of, walk};
 
@@ -14,7 +14,13 @@ fn every_fixture_converts_identically_on_one_and_three_threads() {
     let root = fixture_root();
     let mut files = Vec::new();
     walk(&root, &mut files);
-    let (one, three) = (converter(1), converter(3));
+    let reporting = |threads| {
+        let mut config = Config::default();
+        config.threads = threads;
+        config.on_loss = OnLoss::Report;
+        Converter::new(config).unwrap()
+    };
+    let (one, three) = (reporting(1), reporting(3));
     let mut pdfs = 0;
     for path in files {
         if path.strip_prefix(&root).unwrap().starts_with("abuse") {

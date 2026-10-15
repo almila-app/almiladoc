@@ -197,11 +197,12 @@ pub fn on_off(parent: &Element, name: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
 
     // parse_xml returns a synthetic root wrapping the document element.
     fn parse(doc: &str) -> Element {
-        parse_xml(&crate::ctx::ParseCtx::default(), doc.as_bytes()).unwrap()
+        parse_xml(&crate::ctx::ParseCtx::default(), doc.as_bytes(), Role::Probe).unwrap()
     }
 
     #[test]

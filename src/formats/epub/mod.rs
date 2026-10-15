@@ -2,8 +2,10 @@
 //! chapter-scoped anchors so intra-book navigation survives.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::{AnchorId, Block, Document, ImageSource, Inline, LinkTarget};
+use crate::package::archive::Role;
 use crate::package::xml::Element;
 use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::{AssetSink, media_type_for};
@@ -15,7 +17,9 @@ use std::collections::{HashMap, HashSet};
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let pkg = RefCell::new(Package::open(parse_ctx, bytes, PackageKind::Epub)?);
 
-    let container = pkg.borrow_mut().required_xml_part("META-INF/container.xml")?;
+    let container = pkg
+        .borrow_mut()
+        .required_xml_part("META-INF/container.xml", Role::Content(Region::Body))?;
     let opf_path = container
         .descendants_any("rootfile")
         .next()
@@ -23,7 +27,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .ok_or_else(|| ConvertError::malformed_part("META-INF/container.xml", "no rootfile entry"))?
         .to_string();
 
-    let opf = pkg.borrow_mut().required_xml_part(&opf_path)?;
+    let opf = pkg.borrow_mut().required_xml_part(&opf_path, Role::Content(Region::Body))?;
 
     let mut doc = Document::default();
     if let Some(title) = opf.descendants_any("title").next().map(|t| t.text()) {
@@ -72,8 +76,11 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let assets = RefCell::new(AssetSink::new(parse_ctx));
     let mut css_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut converted = 0usize;
-    for chapter_path in &spine_paths {
-        let Some(tree) = pkg.borrow_mut().optional_xml_part(chapter_path)? else {
+    for (position, chapter_path) in spine_paths.iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(position);
+        let Some(tree) =
+            pkg.borrow_mut().related_xml_part(chapter_path, Role::Reported(Region::Body))?
+        else {
             log::warn!("skipping unusable chapter {chapter_path}");
             continue;
         };
@@ -85,7 +92,10 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
             log::warn!("skipping chapter {chapter_path}: no body element");
             continue;
         };
-        let css = chapter_stylesheet(&tree, chapter_path, &pkg, &mut css_cache)?;
+        let css = {
+            let _shared = parse_ctx.outside_units();
+            chapter_stylesheet(&tree, chapter_path, &pkg, &mut css_cache)?
+        };
         let ctx = ChapterCtx {
             pkg: &pkg,
             assets: &assets,
@@ -128,7 +138,7 @@ fn chapter_stylesheet(
                     if !cache.contains_key(&target.path) {
                         let text = pkg
                             .borrow_mut()
-                            .optional_part(&target.path)?
+                            .related_part(&target.path, Role::Formatting)?
                             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
                         cache.insert(target.path.clone(), text);
                     }
@@ -188,7 +198,7 @@ impl HtmlCtx for ChapterCtx<'_, '_> {
         let Ok(target) = path::resolve(&self.chapter_path, src) else {
             return Ok(None);
         };
-        match self.pkg.borrow_mut().optional_part(&target.path)? {
+        match self.pkg.borrow_mut().related_part(&target.path, Role::Reported(Region::Body))? {
             Some(bytes) => {
                 let media = media_type_for(&target.path);
                 let id = self.assets.borrow_mut().add(media, target.path, &bytes)?;

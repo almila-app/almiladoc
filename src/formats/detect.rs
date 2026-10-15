@@ -23,6 +23,7 @@
 use crate::Format;
 use crate::ctx::ParseCtx;
 use crate::limits::Limits;
+use crate::package::archive::Role;
 use crate::package::relationships::{read_rels, rel_type};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, PackageKind};
@@ -78,18 +79,18 @@ fn detect_zip(bytes: &[u8]) -> Option<Format> {
     let mut pkg = Package::open(&parse_ctx, bytes, PackageKind::Opc).ok()?;
 
     // ODF and EPUB designate the `mimetype` part as the package identity.
-    if let Ok(Some(mime)) = pkg.optional_part("mimetype") {
+    if let Ok(Some(mime)) = pkg.optional_part("mimetype", Role::Probe) {
         let mime = std::str::from_utf8(&mime).ok()?.trim();
         return mimetype_format(mime);
     }
 
     // OPC: the package-level officeDocument relationship designates the
     // main part; its content type names the document kind.
-    if let Ok(rels) = read_rels(&mut pkg, "_rels/.rels")
+    if let Ok(rels) = read_rels(&mut pkg, "_rels/.rels", Role::Probe)
         && let Some(rel) = rels.first_of_type(rel_type::OFFICE_DOCUMENT)
         && let Ok(target) = crate::package::path::resolve("", &rel.target)
     {
-        if let Ok(Some(types)) = pkg.optional_xml_part("[Content_Types].xml")
+        if let Ok(Some(types)) = pkg.optional_xml_part("[Content_Types].xml", Role::Probe)
             && let Some(ct) = content_type_of(&types, &target.path)
             && let Some(format) = opc_format(&ct)
         {
@@ -98,7 +99,7 @@ fn detect_zip(bytes: &[u8]) -> Option<Format> {
         // Content types can be stale or generic; the main part's mandated
         // root element (`w:document`, `p:presentation`, `workbook`) is the
         // next authority.
-        if let Ok(Some(tree)) = pkg.optional_xml_part(&target.path)
+        if let Ok(Some(tree)) = pkg.optional_xml_part(&target.path, Role::Probe)
             && let Some(format) = tree.child_elems().next().and_then(root_element_format)
         {
             return Some(format);
@@ -122,7 +123,7 @@ fn detect_zip(bytes: &[u8]) -> Option<Format> {
 
     // ODF without its mandatory `mimetype`: the manifest's root file entry
     // carries the same media type.
-    if let Ok(Some(manifest)) = pkg.optional_xml_part("META-INF/manifest.xml")
+    if let Ok(Some(manifest)) = pkg.optional_xml_part("META-INF/manifest.xml", Role::Probe)
         && let Some(root) = manifest
             .descendants(MANIFEST_NS, "file-entry")
             .find(|e| e.attr(MANIFEST_NS, "full-path") == Some("/"))

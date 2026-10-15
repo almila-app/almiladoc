@@ -1,7 +1,8 @@
 //! OPC relationship parts, typed.
 
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
-use crate::package::archive::Package;
+use crate::package::archive::{Package, Role};
 use crate::package::xml::{normalize_ooxml_uri, ns};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -36,26 +37,39 @@ pub struct Relationship {
 }
 
 #[derive(Debug, Default)]
-pub struct Relationships(HashMap<String, Relationship>);
+pub struct Relationships {
+    map: HashMap<String, Relationship>,
+    reported: bool,
+}
 
 impl Relationships {
     pub fn get(&self, id: &str) -> Option<&Relationship> {
-        self.0.get(id)
+        self.map.get(id)
     }
 
     /// Internal-mode target for an id, the common case for parts.
     pub fn internal_target(&self, id: &str) -> Option<&str> {
-        self.0.get(id).filter(|r| r.mode == TargetMode::Internal).map(|r| r.target.as_str())
+        self.map.get(id).filter(|r| r.mode == TargetMode::Internal).map(|r| r.target.as_str())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Relationship)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v))
+        self.map.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// True when the part exists but could not be read and its read reported
+    /// the loss by role, so the sites that resolve through it stay silent.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the relationship sites that stay silent report nothing yet")
+    )]
+    pub(crate) fn reported(&self) -> bool {
+        self.reported
     }
 
     /// The internal-mode relationship of a given type, lowest id first so
     /// the pick is deterministic when a producer emits duplicates.
     pub fn first_of_type(&self, rel_type: &str) -> Option<&Relationship> {
-        self.0
+        self.map
             .iter()
             .filter(|(_, r)| r.rel_type == rel_type && r.mode == TargetMode::Internal)
             .min_by(|(a, _), (b, _)| a.cmp(b))
@@ -65,11 +79,14 @@ impl Relationships {
 
 /// Read a relationships part. An absent, unreadable, or corrupt part yields
 /// an empty map (absent is valid - many parts simply have no relationships;
-/// the rest degrade per the unified policy with a log). Resource-limit
-/// errors always propagate.
-pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, ConvertError> {
-    let Some(root) = pkg.optional_xml_part(part)? else {
-        return Ok(Relationships::default());
+/// an unreadable one whose `role` reports it is marked
+/// [`reported`](Relationships::reported)). Fatal errors always propagate.
+pub fn read_rels(pkg: &mut Package, part: &str, role: Role) -> Result<Relationships, ConvertError> {
+    let Some(root) = pkg.optional_xml_part(part, role)? else {
+        return Ok(Relationships {
+            map: HashMap::new(),
+            reported: role.unreadable().is_some() && pkg.has_part(part),
+        });
     };
     let mut map = HashMap::new();
     for rel in root.descendants(ns::PKG_RELS, "Relationship") {
@@ -84,7 +101,7 @@ pub fn read_rels(pkg: &mut Package, part: &str) -> Result<Relationships, Convert
         let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
         map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
     }
-    Ok(Relationships(map))
+    Ok(Relationships { map, reported: false })
 }
 
 /// A loaded internal relationship target: its resolved part path and bytes.
@@ -92,8 +109,8 @@ pub type RelTarget = (String, Rc<[u8]>);
 
 /// Load an internal relationship target's bytes, resolved against the part
 /// the relationship appears in. Unknown ids, external targets, and
-/// unresolvable or unreadable targets degrade (log + `None`) per the unified
-/// policy; fatal resource-limit errors always propagate.
+/// unresolvable or unreadable targets read as `None`, whose loss the caller
+/// reports; fatal errors always propagate.
 pub fn rel_target_bytes(
     pkg: &RefCell<Package>,
     rels: &Relationships,
@@ -106,20 +123,11 @@ pub fn rel_target_bytes(
     if rel.mode != TargetMode::Internal {
         return Ok(None);
     }
-    let target = match crate::package::path::resolve(base_part, &rel.target) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("skipping unresolvable relationship target {:?}: {e}", rel.target);
-            return Ok(None);
-        }
+    let Ok(target) = crate::package::path::resolve(base_part, &rel.target) else {
+        return Ok(None);
     };
-    match pkg.borrow_mut().optional_part(&target.path)? {
-        Some(bytes) => Ok(Some((target.path, bytes))),
-        None => {
-            log::warn!("relationship target {} is missing", target.path);
-            Ok(None)
-        }
-    }
+    let bytes = pkg.borrow_mut().related_part(&target.path, Role::Reported(Region::Body))?;
+    Ok(bytes.map(|bytes| (target.path, bytes)))
 }
 
 /// Conventional rels part name for a part (`word/document.xml` ->
@@ -128,5 +136,55 @@ pub fn rels_part_for(part: &str) -> String {
     match part.rsplit_once('/') {
         Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
         None => format!("_rels/{part}.rels"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctx::ParseCtx;
+    use crate::diagnostics::DiagnosticCode;
+    use crate::package::archive::PackageKind;
+    use std::io::{Cursor, Write};
+
+    const RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="t" Target="a.xml"/></Relationships>"#;
+
+    fn package(parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in parts {
+            w.start_file(*name, stored).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        let mut data = w.finish().unwrap().into_inner();
+        let start = zip::ZipArchive::new(Cursor::new(data.as_slice()))
+            .unwrap()
+            .by_name("bad.rels")
+            .unwrap()
+            .data_start()
+            .unwrap();
+        data[usize::try_from(start).unwrap()] ^= 1;
+        data
+    }
+
+    #[test]
+    fn only_a_reported_unreadable_part_is_marked() {
+        let bytes = package(&[("good.rels", RELS.as_bytes()), ("bad.rels", RELS.as_bytes())]);
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &bytes, PackageKind::Opc).unwrap();
+        let role = Role::Content(Region::Body);
+        let good = read_rels(&mut pkg, "good.rels", role).unwrap();
+        assert_eq!((good.internal_target("rId1"), good.reported()), (Some("a.xml"), false));
+        let bad = read_rels(&mut pkg, "bad.rels", role).unwrap();
+        assert_eq!((bad.iter().count(), bad.reported()), (0, true));
+        let absent = read_rels(&mut pkg, "absent.rels", role).unwrap();
+        assert_eq!((absent.iter().count(), absent.reported()), (0, false));
+        let silent = read_rels(&mut pkg, "bad.rels", Role::Reported(Region::Body)).unwrap();
+        assert_eq!((silent.iter().count(), silent.reported()), (0, false));
+        drop(pkg);
+        let codes: Vec<_> =
+            parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.count)).collect();
+        assert_eq!(codes, [(DiagnosticCode::PartUnreadable, 1)]);
     }
 }

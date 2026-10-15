@@ -6,14 +6,16 @@
 
 use super::controls::read_vml_checkboxes;
 use super::xlsx::{
-    CellFormat, MAX_COLS, MAX_ROWS, SHARED_STRINGS_REL, SheetContent, build_table, format_as_text,
-    render_number, resolve_format, sibling_part_name,
+    CellFormat, MAX_COLS, MAX_ROWS, SHARED_STRINGS_REL, SheetContent, Sibling, build_table,
+    format_as_text, render_number, resolve_format,
 };
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
+use crate::package::archive::Role;
 use crate::package::relationships::{read_rels, rel_type, rels_part_for};
 use crate::package::{Package, path};
 use crate::shared::binary::utf16le_units;
@@ -50,18 +52,20 @@ pub(super) fn parse(
 ) -> Result<Document, ConvertError> {
     let workbook = pkg.required_part(wb_part)?;
     let (date1904, bundles) = read_workbook(parse_ctx, &workbook)?;
-    let wb_rels = read_rels(pkg, &rels_part_for(wb_part))?;
+    let wb_rels = read_rels(pkg, &rels_part_for(wb_part), Role::Content(Region::Body))?;
 
     let shared = read_optional(
         parse_ctx,
         pkg,
-        &sibling_part_name(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.bin"),
+        &Sibling::of(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.bin"),
+        Role::Reported(Region::Body),
         read_shared_strings,
     )?;
     let xfs = read_optional(
         parse_ctx,
         pkg,
-        &sibling_part_name(&wb_rels, wb_part, rel_type::STYLES, "styles.bin"),
+        &Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.bin"),
+        Role::Content(Region::Body),
         read_styles,
     )?;
 
@@ -84,9 +88,10 @@ pub(super) fn parse(
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (name, part) in &sheets {
+    for (position, (name, part)) in sheets.iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(position);
         let content = pkg
-            .optional_part(part)?
+            .related_part(part, Role::Reported(Region::Body))?
             .map(|bytes| read_sheet(parse_ctx, &bytes, &shared, &xfs, date1904));
         let mut content = match content {
             Some(Ok(c)) => c,
@@ -123,17 +128,18 @@ pub(super) fn parse(
 fn read_optional<T: Default>(
     parse_ctx: &ParseCtx,
     pkg: &mut Package,
-    part: &str,
+    part: &Sibling,
+    role: Role,
     read: fn(&ParseCtx, &[u8]) -> Result<T, ConvertError>,
 ) -> Result<T, ConvertError> {
-    let Some(bytes) = pkg.optional_part(part)? else {
+    let Some(bytes) = part.read(pkg, role)? else {
         return Ok(T::default());
     };
     match read(parse_ctx, &bytes) {
         Ok(v) => Ok(v),
         Err(e) if e.is_fatal() => Err(e),
         Err(e) => {
-            log::warn!("skipping corrupt part {part}: {e}");
+            log::warn!("skipping corrupt part {}: {e}", part.path);
             Ok(T::default())
         }
     }

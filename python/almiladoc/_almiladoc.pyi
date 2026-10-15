@@ -16,6 +16,7 @@ __all__ = [
     "Document",
     "EncryptedError",
     "ImageSource",
+    "IncompleteError",
     "Inline",
     "InternalError",
     "LinkTarget",
@@ -82,6 +83,15 @@ class MissingPartError(ConvertError):
 
     part: str
     """The part or stream that is missing."""
+
+class IncompleteError(ConvertError):
+    """Content the source document shows could not be converted, so no
+    output is returned that would read as complete."""
+
+    diagnostics: list[tuple[str, str, str, int | None, int]]
+    """Every diagnostic as a `(code, class, region, unit, count)` tuple:
+    `class` is `omitted`, `deferred`, `lost` or `info`, and `unit` a 1-based
+    page, slide, sheet or chapter, or `None`."""
 
 class CancelledError(ConvertError):
     """The conversion was cancelled."""

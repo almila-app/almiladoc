@@ -8,10 +8,12 @@ mod numbering;
 mod styles;
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::{Document, Note, NoteKind};
+use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
-use crate::package::xml::ns;
+use crate::package::xml::{Element, ns};
 use crate::package::{Package, PackageKind};
 use crate::shared::assets::AssetSink;
 use content::Ctx;
@@ -29,28 +31,34 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     // officeDocument relationship; its own parts (styles, numbering, notes)
     // from the main part's typed relationships. Conventional paths are the
     // fallback for packages with missing or unusable rels.
-    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels")?;
+    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels", Role::Reported(Region::Body))?;
     let main_part = root_rels
         .first_of_type(rel_type::OFFICE_DOCUMENT)
         .and_then(|rel| crate::package::path::resolve("", &rel.target).ok())
         .map(|t| t.path)
         .unwrap_or_else(|| "word/document.xml".to_string());
-    let doc_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(&main_part))?;
-
-    let styles_part = typed_part_path(&doc_rels, &main_part, rel_type::STYLES, "styles.xml");
-    let styles_tree = pkg.borrow_mut().optional_xml_part(&styles_part)?;
-    let styles =
-        styles::Styles::parse_opt(styles_tree.as_ref().and_then(|t| t.find(ns::W, "styles")));
+    let doc_rels =
+        read_rels(&mut pkg.borrow_mut(), &rels_part_for(&main_part), Role::Content(Region::Body))?;
 
     let numbering_part =
         typed_part_path(&doc_rels, &main_part, rel_type::NUMBERING, "numbering.xml");
-    let numbering_tree = pkg.borrow_mut().optional_xml_part(&numbering_part)?;
+    let styles_part = typed_part_path(&doc_rels, &main_part, rel_type::STYLES, "styles.xml");
+    let styles_role = if pkg.borrow().has_part(&numbering_part.path) {
+        Role::Content(Region::Body)
+    } else {
+        Role::Formatting
+    };
+    let styles_tree = styles_part.read(&pkg, styles_role)?;
+    let styles =
+        styles::Styles::parse_opt(styles_tree.as_ref().and_then(|t| t.find(ns::W, "styles")));
+
+    let numbering_tree = numbering_part.read(&pkg, Role::Content(Region::Body))?;
     let numbering = match numbering_tree.as_ref().and_then(|t| t.find(ns::W, "numbering")) {
         Some(root) => numbering::parse(root, &|style_id| styles.direct_num_id(style_id))?,
         None => Default::default(),
     };
 
-    let doc_tree = pkg.borrow_mut().required_xml_part(&main_part)?;
+    let doc_tree = pkg.borrow_mut().required_xml_part(&main_part, Role::Content(Region::Body))?;
     let body = doc_tree
         .find(ns::W, "document")
         .and_then(|d| d.find(ns::W, "body"))
@@ -68,6 +76,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         pkg: &pkg,
         rels: doc_rels,
         base_part: main_part,
+        region: Region::Body,
         styles: &styles,
         numbering: &numbering,
         counters: &counters,
@@ -80,14 +89,18 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         (footnotes_part, "footnotes", "footnote", "fn", NoteKind::Footnote),
         (endnotes_part, "endnotes", "endnote", "en", NoteKind::Endnote),
     ] {
-        let Some(tree) = pkg.borrow_mut().optional_xml_part(&part)? else {
+        let Some(tree) = part.read(&pkg, Role::Content(Region::Note))? else {
             continue;
         };
         let Some(root) = tree.find(ns::W, root_name) else {
             continue;
         };
-        let note_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(&part))?;
-        let note_ctx = ctx.for_part(note_rels, part);
+        let note_rels = read_rels(
+            &mut pkg.borrow_mut(),
+            &rels_part_for(&part.path),
+            Role::Content(Region::Note),
+        )?;
+        let note_ctx = ctx.for_part(note_rels, part.path, Region::Note);
         for note in root.find_all(ns::W, elem_name) {
             if matches!(
                 note.attr(ns::W, "type"),
@@ -108,11 +121,30 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     Ok(Document { blocks, notes, assets })
 }
 
+/// A typed part of the main part, and whether a relationship of its type
+/// names it.
+struct TypedPart {
+    path: String,
+    related: bool,
+}
+
+impl TypedPart {
+    fn read(&self, pkg: &RefCell<Package>, role: Role) -> Result<Option<Element>, ConvertError> {
+        let mut pkg = pkg.borrow_mut();
+        if self.related {
+            pkg.related_xml_part(&self.path, role)
+        } else {
+            pkg.optional_xml_part(&self.path, role)
+        }
+    }
+}
+
 /// Path of a typed related part, resolved against the main part; falls back
 /// to the conventional sibling name when the relationship is absent.
-fn typed_part_path(rels: &Relationships, base: &str, rel_type: &str, fallback: &str) -> String {
-    let reference = rels.first_of_type(rel_type).map(|rel| rel.target.as_str()).unwrap_or(fallback);
-    match crate::package::path::resolve(base, reference) {
+fn typed_part_path(rels: &Relationships, base: &str, rel_type: &str, fallback: &str) -> TypedPart {
+    let related = rels.first_of_type(rel_type).map(|rel| rel.target.as_str());
+    let reference = related.unwrap_or(fallback);
+    let path = match crate::package::path::resolve(base, reference) {
         Ok(target) => target.path,
         Err(e) => {
             log::warn!("skipping unresolvable related-part target {reference:?}: {e}");
@@ -120,7 +152,8 @@ fn typed_part_path(rels: &Relationships, base: &str, rel_type: &str, fallback: &
                 .map(|t| t.path)
                 .unwrap_or_else(|_| fallback.to_string())
         }
-    }
+    };
+    TypedPart { path, related: related.is_some() }
 }
 
 #[cfg(test)]

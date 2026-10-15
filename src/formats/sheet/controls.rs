@@ -3,9 +3,11 @@
 //! the worksheet's legacy VML drawing part; BIFF keeps them in OBJ records.
 //! Either way a checkbox lands in the cell its anchor starts in.
 
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::Inline;
 use crate::package::Package;
+use crate::package::archive::Role;
 use crate::package::path;
 use crate::package::relationships::{TargetMode, read_rels, rels_part_for};
 use crate::package::xml::{Element, ns};
@@ -44,7 +46,7 @@ pub(super) fn read_vml_checkboxes(
     pkg: &mut Package,
     sheet_part: &str,
 ) -> Result<Checkboxes, ConvertError> {
-    let rels = read_rels(pkg, &rels_part_for(sheet_part))?;
+    let rels = read_rels(pkg, &rels_part_for(sheet_part), Role::Content(Region::Body))?;
     let mut out = Checkboxes::new();
     let mut targets: Vec<String> = rels
         .iter()
@@ -55,7 +57,7 @@ pub(super) fn read_vml_checkboxes(
     targets.sort();
     targets.dedup();
     for target in targets {
-        if let Some(root) = pkg.optional_xml_part(&target)? {
+        if let Some(root) = pkg.related_xml_part(&target, Role::Content(Region::Body))? {
             vml_checkboxes(&root, &mut out);
         }
     }

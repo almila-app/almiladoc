@@ -1,17 +1,19 @@
 use super::*;
+use crate::package::archive::Role;
 use crate::package::xml::{Element, parse_xml};
 
 fn omml(body: &str) -> String {
     let xml = format!(
         r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">{body}</m:oMath>"#
     );
-    let root = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes()).unwrap();
+    let root = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
     omath_to_tex(root.child_elems().next().unwrap())
 }
 
 fn mathml(body: &str) -> String {
     let xml = format!(r#"<math xmlns="http://www.w3.org/1998/Math/MathML">{body}</math>"#);
-    let root: Element = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes()).unwrap();
+    let root: Element =
+        parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
     mathml_to_tex(root.child_elems().next().unwrap())
 }
 
@@ -83,6 +85,6 @@ fn mathml_presentation_tree_converts() {
 fn mathml_display_attribute_selects_block_layout() {
     let xml =
         r#"<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mi>x</mi></math>"#;
-    let root = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes()).unwrap();
+    let root = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
     assert!(mathml_is_display(root.child_elems().next().unwrap()));
 }

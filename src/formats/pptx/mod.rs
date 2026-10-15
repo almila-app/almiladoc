@@ -6,16 +6,18 @@
 mod cascade;
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::{
     Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind,
     inlines_are_empty,
 };
+use crate::package::archive::{Role, probe_ole};
 use crate::package::relationships::{
     RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_type, rels_part_for,
 };
 use crate::package::xml::{Element, ns, parse_xml};
-use crate::package::{Package, PackageKind, archive::probe_ole, path};
+use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::AssetSink;
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::classify_rel_target;
@@ -60,14 +62,15 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
 
     // OPC part discovery: the presentation part comes from the package-level
     // officeDocument relationship, with the conventional path as fallback.
-    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels")?;
+    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels", Role::Reported(Region::Body))?;
     let pres_part = root_rels
         .first_of_type(rel_type::OFFICE_DOCUMENT)
         .and_then(|rel| path::resolve("", &rel.target).ok())
         .map(|t| t.path)
         .unwrap_or_else(|| "ppt/presentation.xml".to_string());
-    let pres = pkg.borrow_mut().required_xml_part(&pres_part)?;
-    let pres_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(&pres_part))?;
+    let pres = pkg.borrow_mut().required_xml_part(&pres_part, Role::Content(Region::Body))?;
+    let pres_rels =
+        read_rels(&mut pkg.borrow_mut(), &rels_part_for(&pres_part), Role::Content(Region::Body))?;
 
     let default_text =
         cascade::parse_level_styles(pres.first_descendant(ns::P, "defaultTextStyle"));
@@ -101,8 +104,13 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .map(|(i, p)| (p.clone(), format!("slide-{}", i + 1)))
         .collect();
     let mut all_rels: Vec<Relationships> = Vec::with_capacity(slide_paths.len());
-    for p in &slide_paths {
-        all_rels.push(read_rels(&mut pkg.borrow_mut(), &rels_part_for(p))?);
+    for (slide_index, p) in slide_paths.iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(slide_index);
+        all_rels.push(read_rels(
+            &mut pkg.borrow_mut(),
+            &rels_part_for(p),
+            Role::Content(Region::Body),
+        )?);
     }
     let targeted: std::collections::HashSet<String> = slide_paths
         .iter()
@@ -116,14 +124,16 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .collect();
 
     for (slide_index, slide_path) in slide_paths.iter().enumerate() {
-        let tree = match pkg.borrow_mut().optional_xml_part(slide_path)? {
-            Some(t) => t,
-            None => {
-                log::warn!("skipping unusable slide {slide_path}");
-                failed += 1;
-                continue;
-            }
-        };
+        let _unit = parse_ctx.enter_unit(slide_index);
+        let tree =
+            match pkg.borrow_mut().related_xml_part(slide_path, Role::Reported(Region::Body))? {
+                Some(t) => t,
+                None => {
+                    log::warn!("skipping unusable slide {slide_path}");
+                    failed += 1;
+                    continue;
+                }
+            };
         let Some(sp_tree) = tree
             .find(ns::P, "sld")
             .and_then(|s| s.find(ns::P, "cSld"))
@@ -139,6 +149,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         if let Some(lp) = &layout_path
             && !layouts.contains_key(lp)
         {
+            let _shared = parse_ctx.outside_units();
             let info = load_layout(&pkg, lp)?;
             if let Some(mp) = info.master_path.clone()
                 && !masters.contains_key(&mp)
@@ -175,13 +186,18 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         // held across the body.
         let notes = match rel_target_of_type(slide_rels, slide_path, NOTES_REL) {
             Some(notes_path) => {
-                let tree = pkg.borrow_mut().optional_xml_part(&notes_path)?;
+                let tree =
+                    pkg.borrow_mut().related_xml_part(&notes_path, Role::Content(Region::Note))?;
                 tree.map(|t| (notes_path, t))
             }
             None => None,
         };
         if let Some((notes_path, notes_tree)) = notes {
-            let notes_rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(&notes_path))?;
+            let notes_rels = read_rels(
+                &mut pkg.borrow_mut(),
+                &rels_part_for(&notes_path),
+                Role::Content(Region::Note),
+            )?;
             let notes_ctx = SlideCtx {
                 rels: &notes_rels,
                 base_part: &notes_path,
@@ -224,14 +240,16 @@ fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Optio
 }
 
 fn load_layout(pkg: &RefCell<Package>, layout_path: &str) -> Result<LayoutInfo, ConvertError> {
-    let placeholders = match pkg.borrow_mut().optional_xml_part(layout_path)? {
-        Some(tree) => tree
-            .first_descendant(ns::P, "spTree")
-            .map(cascade::collect_placeholders)
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(layout_path))?;
+    let placeholders =
+        match pkg.borrow_mut().related_xml_part(layout_path, Role::Content(Region::Body))? {
+            Some(tree) => tree
+                .first_descendant(ns::P, "spTree")
+                .map(cascade::collect_placeholders)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+    let rels =
+        read_rels(&mut pkg.borrow_mut(), &rels_part_for(layout_path), Role::Content(Region::Body))?;
     let master_path = rel_target_of_type(&rels, layout_path, MASTER_REL);
     Ok(LayoutInfo { placeholders, master_path })
 }
@@ -243,7 +261,9 @@ fn load_master(pkg: &RefCell<Package>, master_path: &str) -> Result<MasterInfo, 
         other: LevelStyle::default(),
         placeholders: Vec::new(),
     };
-    if let Some(tree) = pkg.borrow_mut().optional_xml_part(master_path)? {
+    if let Some(tree) =
+        pkg.borrow_mut().related_xml_part(master_path, Role::Content(Region::Body))?
+    {
         if let Some(tx_styles) = tree.first_descendant(ns::P, "txStyles") {
             info.title = cascade::parse_level_styles(tx_styles.find(ns::P, "titleStyle"));
             info.body = cascade::parse_level_styles(tx_styles.find(ns::P, "bodyStyle"));
@@ -594,7 +614,7 @@ fn parse_graphic_frame(
         && let Some(rid) = chart_ref.attr_qualified(ns::R, "id")
         && let Some((part, bytes)) = ctx.rel_part(rid)?
     {
-        match parse_xml(ctx.parse_ctx, &bytes) {
+        match parse_xml(ctx.parse_ctx, &bytes, Role::Reported(Region::Body)) {
             Ok(root) => blocks.extend(crate::shared::drawingml::chart_blocks(&root)),
             Err(e) if e.is_fatal() => return Err(e),
             Err(e) => log::warn!("skipping corrupt chart part {part}: {e}"),
@@ -605,7 +625,7 @@ fn parse_graphic_frame(
         && let Some(rid) = rel_ids.attr_qualified(ns::R, "dm")
         && let Some((part, bytes)) = ctx.rel_part(rid)?
     {
-        match parse_xml(ctx.parse_ctx, &bytes) {
+        match parse_xml(ctx.parse_ctx, &bytes, Role::Reported(Region::Body)) {
             Ok(root) => blocks.extend(crate::shared::drawingml::diagram_blocks(&root)),
             Err(e) if e.is_fatal() => return Err(e),
             Err(e) => log::warn!("skipping corrupt diagram part {part}: {e}"),

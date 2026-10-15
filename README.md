@@ -46,7 +46,7 @@ except almiladoc.NeedsOcrError as error:
     print(error.pages, error.page_count)
 ```
 
-Every conversion failure subclasses `almiladoc.ConvertError`: `UnsupportedError`, `NeedsOcrError`, `MalformedError`, `EncryptedError`, `ResourceLimitError` (with `limit` and `max`), `MissingPartError`, `CancelledError` and `InternalError`. An unreadable file raises `OSError`.
+Every conversion failure subclasses `almiladoc.ConvertError`: `UnsupportedError`, `NeedsOcrError`, `MalformedError`, `EncryptedError`, `ResourceLimitError` (with `limit` and `max`), `MissingPartError`, `IncompleteError` (with `diagnostics`, a list of `(code, class, region, unit, count)` tuples), `CancelledError` and `InternalError`. An unreadable file raises `OSError`.
 
 ## Rust
 
@@ -62,9 +62,15 @@ fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), Box<dyn std::e
 }
 ```
 
-The crate reads no file: pass the bytes and name the format, from `Format::sniff` or `Format::from_extension`; CSV carries no signature and has to be named. A `Converter` is built once from a `Config` (its `Limits` and `threads`, default 1), which `Converter::new` validates, and is shared across threads. `convert` returns the Markdown; `parse` stops at the document model, which also carries the embedded assets, and `Parsed::render` finishes it; on a PDF, `parse` returns `Unsupported`. Each call runs on a pool of its own `threads` threads. `Limits::max_input_bytes` refuses an input before parsing starts, and `Limits::max_work` bounds each call by deterministic units of work. `Input::with_cancel` takes a `CancelToken`, which any thread may cancel: the call then fails `Cancelled` at its next unit of work, or before a PDF's extraction starts. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name. A panic inside a call is `Internal`: recycle the worker that raised it.
+The crate reads no file: pass the bytes and name the format, from `Format::sniff` or `Format::from_extension`; CSV carries no signature and has to be named. A `Converter` is built once from a `Config` (its `Limits`, `threads`, default 1, and `on_loss`), which `Converter::new` validates, and is shared across threads. `convert` returns a `Conversion` with the Markdown; `parse` stops at the document model, which also carries the embedded assets, and `Parsed::render` finishes it; on a PDF, `parse` returns `Unsupported`. Each call runs on a pool of its own `threads` threads. `Limits::max_input_bytes` refuses an input before parsing starts, and `Limits::max_work` bounds each call by deterministic units of work. `Input::with_cancel` takes a `CancelToken`, which any thread may cancel: the call then fails `Cancelled` at its next unit of work, or before a PDF's extraction starts. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Incomplete`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name. A panic inside a call is `Internal`: recycle the worker that raised it.
+
+What a conversion cannot carry into its output is reported as `Diagnostics`: each `Diagnostic` is a `DiagnosticCode` with its fixed `LossClass` (`Omitted` by a policy, `Deferred` behind a placeholder or gap, `Lost`, or `Info`), the `Region` it sat in, an optional unit and a count, and holds no input text. Under the default `Config::on_loss`, `OnLoss::Fail`, a conversion that lost content fails `Incomplete` with its diagnostics; `OnLoss::Report` returns the `Conversion`, whose `diagnostics()` lists them and whose `is_complete()` is false. `parse` never fails on a loss: `Parsed::diagnostics` lists them and `Parsed::render` decides.
 
 PDF support is the default `pdf` feature; without it, a PDF is `Unsupported`. Limits and cancellation stop at the PDF engine (pdf-inspector and lopdf), whose decoders allocate from stream headers: isolate PDF work in a memory-capped worker that is recycled after a failure.
+
+### Identity
+
+`Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures. Identity does not hold while pdf-inspector's `PI_NO_MERGE` or `PDF_INSPECTOR_BCMAPS_DIR` environment variable is set, until a pinned release reads neither.
 
 ## Development
 

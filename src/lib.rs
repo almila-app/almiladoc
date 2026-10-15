@@ -10,9 +10,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Recovery and skipped-content events are reported through the [`log`]
-//! facade (debug/warn level); logging never changes conversion behavior and
-//! its messages are not a stable API.
+//! What a conversion cannot carry into its output is reported as
+//! [`Diagnostics`]: content [`Lost`](LossClass::Lost) fails the conversion
+//! with [`ConvertError::Incomplete`] under the default [`OnLoss::Fail`], and
+//! [`OnLoss::Report`] returns it beside the Markdown. Recovery and
+//! skipped-content events not yet reported that way go through the [`log`]
+//! facade, whose messages are not a stable API.
 
 #![warn(missing_docs)]
 
@@ -21,8 +24,10 @@ pub mod model;
 mod config;
 mod converter;
 mod ctx;
+mod diagnostics;
 mod error;
 mod formats;
+mod identity;
 mod ledger;
 mod limits;
 mod package;
@@ -32,7 +37,9 @@ mod shared;
 
 pub use config::{Config, ConfigError};
 pub use converter::{Conversion, Converter, Input, Parsed};
+pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, LossClass, OnLoss, Region};
 pub use error::{ConvertError, PartName, UnsupportedKind};
+pub use identity::EngineIdentity;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 

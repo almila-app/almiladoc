@@ -7,9 +7,11 @@ use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
 use super::{format_duration_days, format_float, format_time_of_day};
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Cell, Document, GridBuilder, Inline, Table, TableKind};
+use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, path};
@@ -31,25 +33,28 @@ pub(super) fn parse(
     pkg: &mut Package,
     wb_part: &str,
 ) -> Result<Document, ConvertError> {
-    let workbook = pkg.required_xml_part(wb_part)?;
+    let workbook = pkg.required_xml_part(wb_part, Role::Content(Region::Body))?;
     // Any OOXML main part resolves here; a document or presentation would
     // otherwise convert to an empty workbook.
     if !workbook.child_elems().next().is_some_and(|e| e.is(ns::SML, "workbook")) {
         return Err(ConvertError::malformed("main part is not a workbook"));
     }
-    let wb_rels = read_rels(pkg, &rels_part_for(wb_part))?;
+    let wb_rels = read_rels(pkg, &rels_part_for(wb_part), Role::Content(Region::Body))?;
     let date1904 = workbook
         .first_descendant(ns::SML, "workbookPr")
         .and_then(|e| e.attr_unqualified("date1904"))
         .is_some_and(bool_attr);
 
-    let shared =
-        match sibling_part(pkg, &wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.xml")? {
-            Some(root) => shared_strings(&root),
-            None => Vec::new(),
-        };
-    let styles =
-        Styles::read(sibling_part(pkg, &wb_rels, wb_part, rel_type::STYLES, "styles.xml")?);
+    let shared = match Sibling::of(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.xml")
+        .read_xml(pkg, Role::Reported(Region::Body))?
+    {
+        Some(root) => shared_strings(&root),
+        None => Vec::new(),
+    };
+    let styles = Styles::read(
+        Sibling::of(&wb_rels, wb_part, rel_type::STYLES, "styles.xml")
+            .read_xml(pkg, Role::Content(Region::Body))?,
+    );
 
     // Visible sheets in workbook order; hidden and veryHidden sheets are
     // omitted entirely, heading included.
@@ -80,8 +85,9 @@ pub(super) fn parse(
     let mut failed = 0usize;
     // One budget for the workbook, so sheets cannot multiply the cap.
     let mut slots = 0u64;
-    for (name, part) in &sheets {
-        let worksheet = pkg.optional_xml_part(part)?;
+    for (position, (name, part)) in sheets.iter().enumerate() {
+        let _unit = parse_ctx.enter_unit(position);
+        let worksheet = pkg.related_xml_part(part, Role::Reported(Region::Body))?;
         let Some(worksheet) = worksheet.as_ref().and_then(|r| r.find(ns::SML, "worksheet")) else {
             log::warn!("skipping unreadable sheet {name:?}");
             failed += 1;
@@ -103,33 +109,45 @@ pub(super) fn parse(
     Ok(doc)
 }
 
-/// Part name for a workbook-level sibling: the relationship of the given
-/// type when present, else the conventional name next to the workbook part.
-pub(super) fn sibling_part_name(
-    rels: &Relationships,
-    base: &str,
-    rel: &str,
-    conventional: &str,
-) -> String {
-    rels.first_of_type(rel)
-        .and_then(|r| path::resolve(base, &r.target).ok())
-        .map(|t| t.path)
-        .unwrap_or_else(|| match base.rsplit_once('/') {
-            Some((dir, _)) => format!("{dir}/{conventional}"),
-            None => conventional.to_string(),
-        })
+/// A workbook-level sibling part: the relationship of the given type when
+/// present, else the conventional name next to the workbook part.
+pub(super) struct Sibling {
+    pub(super) path: String,
+    related: bool,
 }
 
-/// Load a workbook-level XML part by relationship type, falling back to the
-/// conventional name next to the workbook part.
-fn sibling_part(
-    pkg: &mut Package,
-    rels: &Relationships,
-    base: &str,
-    rel: &str,
-    conventional: &str,
-) -> Result<Option<Element>, ConvertError> {
-    pkg.optional_xml_part(&sibling_part_name(rels, base, rel, conventional))
+impl Sibling {
+    pub(super) fn of(rels: &Relationships, base: &str, rel: &str, conventional: &str) -> Self {
+        let related = rels.first_of_type(rel);
+        let path = related
+            .and_then(|r| path::resolve(base, &r.target).ok())
+            .map(|t| t.path)
+            .unwrap_or_else(|| match base.rsplit_once('/') {
+                Some((dir, _)) => format!("{dir}/{conventional}"),
+                None => conventional.to_string(),
+            });
+        Sibling { path, related: related.is_some() }
+    }
+
+    pub(super) fn read(
+        &self,
+        pkg: &mut Package,
+        role: Role,
+    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+        if self.related {
+            pkg.related_part(&self.path, role)
+        } else {
+            pkg.optional_part(&self.path, role)
+        }
+    }
+
+    fn read_xml(&self, pkg: &mut Package, role: Role) -> Result<Option<Element>, ConvertError> {
+        if self.related {
+            pkg.related_xml_part(&self.path, role)
+        } else {
+            pkg.optional_xml_part(&self.path, role)
+        }
+    }
 }
 
 /// The shared string table, one cleaned entry per `si` in order.

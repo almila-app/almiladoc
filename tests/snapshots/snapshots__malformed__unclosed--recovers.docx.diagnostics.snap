@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+recovered_xml lost body count=1
+under fail: incomplete

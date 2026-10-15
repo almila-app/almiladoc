@@ -791,6 +791,7 @@ fn has_block_children(elem: &Element) -> bool {
 mod tests {
     use super::*;
     use crate::model::{CellSlot, ImageSource, Style};
+    use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
 
     struct NullCtx;
@@ -810,7 +811,7 @@ mod tests {
     }
 
     fn blocks_with_css(html: &str, css: &str) -> Vec<Block> {
-        let tree = parse_xml(&ParseCtx::default(), html.as_bytes()).unwrap();
+        let tree = parse_xml(&ParseCtx::default(), html.as_bytes(), Role::Probe).unwrap();
         let body = tree.child_elems().next().unwrap();
         let mut sheet = Stylesheet::default();
         sheet.add(css);
@@ -824,7 +825,7 @@ mod tests {
     #[test]
     fn table_spans_charge_the_contexts_expansion_budget() {
         let html = r#"<body><table><tr><td colspan="3">wide</td></tr></table></body>"#;
-        let tree = parse_xml(&ParseCtx::default(), html.as_bytes()).unwrap();
+        let tree = parse_xml(&ParseCtx::default(), html.as_bytes(), Role::Probe).unwrap();
         let body = tree.child_elems().next().unwrap();
         let mut limits =
             crate::limits::Limits { max_expansion: 1, ..crate::limits::Limits::default() };

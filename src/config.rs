@@ -1,5 +1,6 @@
 //! What a [`Converter`](crate::Converter) is built from, and why it may refuse it.
 
+use crate::diagnostics::OnLoss;
 use crate::limits::{Limit, Limits};
 
 /// The configuration of one [`Converter`](crate::Converter), checked by
@@ -12,6 +13,8 @@ pub struct Config {
     /// Threads each call runs on, from 1 to [`Config::MAX_THREADS`]; only PDF
     /// extraction works on more than one.
     pub threads: usize,
+    /// What a conversion does once some content was lost.
+    pub on_loss: OnLoss,
 }
 
 impl Config {
@@ -37,7 +40,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { limits: Limits::default(), threads: 1 }
+        Config { limits: Limits::default(), threads: 1, on_loss: OnLoss::Fail }
     }
 }
 
@@ -83,6 +86,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.threads, 1);
         assert_eq!(config.limits, Limits::default());
+        assert_eq!(config.on_loss, OnLoss::Fail);
         assert_eq!(config.validate(), Ok(()));
     }
 

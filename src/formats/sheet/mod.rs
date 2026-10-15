@@ -10,9 +10,10 @@ mod xlsb;
 mod xlsx;
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::Document;
-use crate::package::archive::probe_ole;
+use crate::package::archive::{Role, probe_ole};
 use crate::package::relationships::{read_rels, rel_type};
 use crate::package::{Package, PackageKind, path};
 
@@ -57,7 +58,7 @@ enum Container {
 /// lives, so it decides ahead of the conventional locations, which a
 /// package may also contain as leftovers.
 fn main_part(pkg: &mut Package) -> Result<Option<String>, ConvertError> {
-    if let Some(target) = read_rels(pkg, "_rels/.rels")?
+    if let Some(target) = read_rels(pkg, "_rels/.rels", Role::Reported(Region::Body))?
         .first_of_type(rel_type::OFFICE_DOCUMENT)
         .and_then(|rel| path::resolve("", &rel.target).ok())
     {

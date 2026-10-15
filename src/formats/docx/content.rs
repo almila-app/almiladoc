@@ -1,6 +1,7 @@
 //! Block and inline walking for WordprocessingML parts.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::formats::docx::numbering::{Counters, Numbering};
 use crate::formats::docx::styles::{Styles, on_off, rpr_delta};
@@ -8,8 +9,9 @@ use crate::model::{
     Block, Cell, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind, inlines_are_empty,
 };
 use crate::package::Package;
+use crate::package::archive::Role;
 use crate::package::relationships::{RelTarget, Relationships, TargetMode, rel_target_bytes};
-use crate::package::xml::{Element, ns};
+use crate::package::xml::{Element, ns, parse_xml};
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::{FieldFrame, field_result};
@@ -43,6 +45,7 @@ pub(super) struct Ctx<'a, 'b> {
     pub pkg: &'b RefCell<Package<'a>>,
     pub rels: Relationships,
     pub base_part: String,
+    pub region: Region,
     pub styles: &'b Styles<'b>,
     pub numbering: &'b Numbering,
     pub counters: &'b RefCell<Counters>,
@@ -51,13 +54,14 @@ pub(super) struct Ctx<'a, 'b> {
 
 impl<'a, 'b> Ctx<'a, 'b> {
     /// The same document-wide dependencies scoped to another package part
-    /// (notes parts): only the relationships and base path change.
-    pub fn for_part(&self, rels: Relationships, base_part: String) -> Ctx<'a, 'b> {
+    /// (notes parts): only the relationships, base path and region change.
+    pub fn for_part(&self, rels: Relationships, base_part: String, region: Region) -> Ctx<'a, 'b> {
         Ctx {
             parse_ctx: self.parse_ctx,
             pkg: self.pkg,
             rels,
             base_part,
+            region,
             styles: self.styles,
             numbering: self.numbering,
             counters: self.counters,
@@ -656,7 +660,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
             return Ok(Vec::new());
         };
-        match crate::package::xml::parse_xml(self.ctx.parse_ctx, &bytes) {
+        match parse_xml(self.ctx.parse_ctx, &bytes, Role::Reported(self.ctx.region)) {
             Ok(root) => Ok(crate::shared::drawingml::chart_blocks(&root)),
             Err(e) if e.is_fatal() => Err(e),
             Err(e) => {
@@ -671,7 +675,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
             return Ok(Vec::new());
         };
-        match crate::package::xml::parse_xml(self.ctx.parse_ctx, &bytes) {
+        match parse_xml(self.ctx.parse_ctx, &bytes, Role::Reported(self.ctx.region)) {
             Ok(root) => Ok(crate::shared::drawingml::diagram_blocks(&root)),
             Err(e) if e.is_fatal() => Err(e),
             Err(e) => {

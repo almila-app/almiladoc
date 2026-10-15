@@ -299,6 +299,7 @@ impl Counters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
 
     const ABSTRACT: &str = r#"<w:abstractNum w:abstractNumId="7">
@@ -314,7 +315,7 @@ mod tests {
         let xml = format!(
             r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{ABSTRACT}{nums}</w:numbering>"#
         );
-        let tree = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes())?;
+        let tree = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe)?;
         let root = tree
             .find(ns::W, "numbering")
             .ok_or_else(|| ConvertError::malformed("no w:numbering root"))?;

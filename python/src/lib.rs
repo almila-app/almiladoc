@@ -67,6 +67,16 @@ create_exception!(
     "A part required for any meaningful output is absent. `part` names it."
 );
 
+create_exception!(
+    almiladoc,
+    IncompleteError,
+    ConvertError,
+    "Content the source document shows could not be converted, so no output \
+     is returned that would read as complete. `diagnostics` lists every \
+     diagnostic as a `(code, class, region, unit, count)` tuple, `unit` being \
+     a 1-based page, slide, sheet or chapter or `None`."
+);
+
 create_exception!(almiladoc, CancelledError, ConvertError, "The conversion was cancelled.");
 
 create_exception!(
@@ -124,6 +134,7 @@ fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
         almiladoc::ConvertError::Encrypted => EncryptedError::new_err(message),
         almiladoc::ConvertError::ResourceLimit { .. } => ResourceLimitError::new_err(message),
         almiladoc::ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
+        almiladoc::ConvertError::Incomplete { .. } => IncompleteError::new_err(message),
         almiladoc::ConvertError::Cancelled => CancelledError::new_err(message),
         _ => InternalError::new_err(message),
     };
@@ -139,9 +150,24 @@ fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
             value.setattr("limit", limit.as_str()).and_then(|()| value.setattr("max", *max))
         }
         almiladoc::ConvertError::MissingPart { part, .. } => value.setattr("part", part.as_str()),
+        almiladoc::ConvertError::Incomplete { diagnostics, .. } => {
+            value.setattr("diagnostics", diagnostic_tuples(diagnostics))
+        }
         _ => Ok(()),
     };
     detail.err().unwrap_or(raised)
+}
+
+type DiagnosticTuple = (&'static str, &'static str, &'static str, Option<u32>, u64);
+
+fn diagnostic_tuples(diagnostics: &almiladoc::Diagnostics) -> Vec<DiagnosticTuple> {
+    diagnostics
+        .iter()
+        .map(|d| {
+            let unit = d.unit.map(std::num::NonZeroU32::get);
+            (d.code.as_str(), d.class.as_str(), d.region.as_str(), unit, d.count)
+        })
+        .collect()
 }
 
 fn extension_format(path: &Path) -> Option<almiladoc::Format> {
@@ -262,6 +288,7 @@ fn _almiladoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     m.add("ConvertError", m.py().get_type::<ConvertError>())?;
     m.add("EncryptedError", m.py().get_type::<EncryptedError>())?;
+    m.add("IncompleteError", m.py().get_type::<IncompleteError>())?;
     m.add("InternalError", m.py().get_type::<InternalError>())?;
     m.add("MalformedError", m.py().get_type::<MalformedError>())?;
     m.add("MissingPartError", m.py().get_type::<MissingPartError>())?;

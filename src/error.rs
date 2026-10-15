@@ -1,14 +1,16 @@
 //! Typed conversion errors.
 //!
 //! An error means a complete conversion was impossible: the input was
-//! unreadable or structurally unusable, encrypted, or crossed a safety
-//! limit. Recoverable producer quirks never surface here - they are
-//! recovered or skipped (and logged via the `log` facade) while conversion
-//! continues. No message carries input text beyond a [`PartName`].
+//! unreadable or structurally unusable, encrypted, crossed a safety limit,
+//! or lost content under [`OnLoss::Fail`](crate::OnLoss::Fail). Recoverable
+//! producer quirks are recovered or skipped, and reported as [`Diagnostics`]
+//! or through the `log` facade. No message carries input text beyond a
+//! [`PartName`].
 
 use std::fmt;
 
 use crate::Format;
+use crate::diagnostics::Diagnostics;
 use crate::limits::{Limit, LimitExceeded};
 
 /// Why a conversion could not produce a useful result.
@@ -64,6 +66,14 @@ pub enum ConvertError {
         pages: Vec<u32>,
         /// Pages in the document.
         page_count: u32,
+    },
+    /// Content was lost, and the configuration's
+    /// [`OnLoss`](crate::OnLoss) is `Fail`.
+    #[error("{}", incomplete(diagnostics))]
+    #[non_exhaustive]
+    Incomplete {
+        /// Every diagnostic of the conversion, the losses among them.
+        diagnostics: Diagnostics,
     },
     /// The caller cancelled the conversion.
     #[error("conversion cancelled")]
@@ -176,6 +186,7 @@ impl ConvertError {
             ConvertError::Encrypted => "encrypted",
             ConvertError::ResourceLimit { .. } => "resourceLimit",
             ConvertError::MissingPart { .. } => "missingPart",
+            ConvertError::Incomplete { .. } => "incomplete",
             ConvertError::Cancelled => "cancelled",
             ConvertError::Internal => "internal",
         }
@@ -225,6 +236,11 @@ fn resource_limit(limit: Limit, max: u64) -> String {
     }
 }
 
+fn incomplete(diagnostics: &Diagnostics) -> String {
+    let lost: Vec<&str> = diagnostics.lost_codes().map(|code| code.as_str()).collect();
+    format!("incomplete conversion, content lost: {}", lost.join(", "))
+}
+
 fn needs_ocr(pages: &[u32], page_count: u32) -> String {
     match pages {
         [page] => format!("page {page} of {page_count} needs OCR"),
@@ -259,9 +275,20 @@ mod tests {
             ConvertError::Encrypted,
             ConvertError::limit(Limit::EntryBytes, 1),
             ConvertError::missing_part("word/document.xml"),
+            ConvertError::Incomplete { diagnostics: lost() },
             ConvertError::Cancelled,
             ConvertError::Internal,
         ]
+    }
+
+    fn lost() -> Diagnostics {
+        use crate::diagnostics::{DiagnosticCode, Region};
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.add(DiagnosticCode::RecoveredXml, Region::Note, None, 2);
+        diagnostics.add(DiagnosticCode::StyleCycle, Region::Container, None, 1);
+        diagnostics.add(DiagnosticCode::PartUnreadable, Region::Body, None, 1);
+        diagnostics.add(DiagnosticCode::PartUnreadable, Region::Note, None, 1);
+        diagnostics
     }
 
     /// The message alone has to name the pages.
@@ -288,6 +315,7 @@ mod tests {
                 "encrypted",
                 "resourceLimit",
                 "missingPart",
+                "incomplete",
                 "cancelled",
                 "internal"
             ]
@@ -297,7 +325,7 @@ mod tests {
     #[test]
     fn recovery_never_swallows_limits_cancellation_or_internal_faults() {
         let fatal: Vec<bool> = every_variant().iter().map(ConvertError::is_fatal).collect();
-        assert_eq!(fatal, [false, false, false, false, true, false, true, true]);
+        assert_eq!(fatal, [false, false, false, false, true, false, false, true, true]);
         assert!(ConvertError::limit(Limit::Allocation, 64).is_fatal());
     }
 
@@ -344,6 +372,10 @@ mod tests {
                 "unsupported input: a PDF has no document model; convert it to Markdown",
             ),
             (ConvertError::Encrypted, "document is encrypted"),
+            (
+                ConvertError::Incomplete { diagnostics: lost() },
+                "incomplete conversion, content lost: part_unreadable, recovered_xml",
+            ),
             (ConvertError::Cancelled, "conversion cancelled"),
             (ConvertError::Internal, "internal error"),
         ];

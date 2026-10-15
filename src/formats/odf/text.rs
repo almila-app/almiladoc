@@ -1,6 +1,7 @@
 //! Block and inline walking for ODF text content.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::formats::odf::styles::{LIST_LEVELS, OdfStyles, parse_start};
 use crate::formats::odf::table::parse_table;
@@ -9,6 +10,7 @@ use crate::model::{
     inlines_are_empty,
 };
 use crate::package::Package;
+use crate::package::archive::Role;
 use crate::package::xml::{Element, Node, ns};
 use crate::shared::assets::{AssetSink, media_type_for};
 use crate::shared::blockstyle::StyledRun;
@@ -472,7 +474,9 @@ pub(super) fn formula_tex(ctx: &Ctx, object: &Element) -> Result<Option<String>,
             return Ok(None);
         }
     };
-    let Some(tree) = ctx.pkg.borrow_mut().optional_xml_part(&target.path)? else {
+    let Some(tree) =
+        ctx.pkg.borrow_mut().related_xml_part(&target.path, Role::Reported(Region::Body))?
+    else {
         return Ok(None);
     };
     let Some(math) = tree.first_descendant(ns::MATHML, "math") else {
@@ -497,7 +501,7 @@ fn load_image(ctx: &Ctx, href: &str) -> Result<Option<ImageSource>, ConvertError
             return Ok(None);
         }
     };
-    match ctx.pkg.borrow_mut().optional_part(&target.path)? {
+    match ctx.pkg.borrow_mut().related_part(&target.path, Role::Reported(Region::Body))? {
         Some(bytes) => {
             let media = media_type_for(&target.path);
             let id = ctx.assets.borrow_mut().add(media, target.path, &bytes)?;

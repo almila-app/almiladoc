@@ -4,16 +4,19 @@
 //! bypass the document model and the shared GFM writer. OCR is out of scope
 //! here: a document with scanned or image-only pages errors naming them,
 //! whether that is every page or one of a hundred, because output missing
-//! those pages would read as complete.
+//! those pages would read as complete. Text from broken font encodings is
+//! reported as `garbled_font_encoding`.
 //!
 //! [pdf-inspector]: https://github.com/firecrawl/pdf-inspector
 
+use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use pdf_inspector::PdfError;
 use std::io::ErrorKind;
 
-pub fn to_markdown(bytes: &[u8]) -> Result<String, ConvertError> {
+pub fn to_markdown(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<String, ConvertError> {
     let result = pdf_inspector::process_pdf_mem(bytes).map_err(map_error)?;
     if !result.pages_needing_ocr.is_empty() {
         // Detection samples content streams and over-reports short or
@@ -27,7 +30,7 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String, ConvertError> {
         }
     }
     if result.has_encoding_issues {
-        log::warn!("broken font encodings detected; extracted text may be garbled");
+        parse_ctx.emit(DiagnosticCode::GarbledFontEncoding, Region::Body);
     }
     match result.markdown {
         Some(mut markdown) if !markdown.trim().is_empty() => {
@@ -61,11 +64,16 @@ fn map_error(e: PdfError) -> ConvertError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const HELVETICA: &str =
         "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+
+    fn stream(data: &[u8]) -> Vec<u8> {
+        [format!("<< /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream"]
+            .concat()
+    }
 
     fn pdf(page_count: usize, resources: &str, content: &[u8]) -> Vec<u8> {
         let kids: Vec<String> = (0..page_count).map(|i| format!("{} 0 R", 4 + i)).collect();
@@ -73,17 +81,16 @@ mod tests {
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             format!("<< /Type /Pages /Kids [{}] /Count {page_count} >>", kids.join(" "))
                 .into_bytes(),
-            [
-                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
-                content,
-                b"\nendstream",
-            ]
-            .concat(),
+            stream(content),
         ];
         let page = format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 3 0 R {resources} >>"
         );
         objects.extend((0..page_count).map(|_| page.clone().into_bytes()));
+        build(&objects)
+    }
+
+    fn build(objects: &[Vec<u8>]) -> Vec<u8> {
         let mut out = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (i, object) in objects.iter().enumerate() {
@@ -105,15 +112,80 @@ mod tests {
         out
     }
 
+    /// One page of `sentence` in a composite font whose `ToUnicode` maps every
+    /// character of it, followed by `unmapped` codes it does not map.
+    pub(crate) fn composite_font_pdf(sentence: &str, unmapped: &[u16]) -> Vec<u8> {
+        let mut chars: Vec<char> = sentence.chars().collect();
+        chars.sort_unstable();
+        chars.dedup();
+        let code = |c: char| chars.iter().position(|d| *d == c).map_or(0, |i| i + 1);
+        let mut shown: String = sentence.chars().map(|c| format!("{:04X}", code(c))).collect();
+        shown.extend(unmapped.iter().map(|code| format!("{code:04X}")));
+        let mut cmap = String::from(
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /T def \
+             1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+        );
+        cmap.push_str(&format!("{} beginbfchar\n", chars.len()));
+        for &c in &chars {
+            cmap.push_str(&format!("<{:04X}> <{:04X}>\n", code(c), u32::from(c)));
+        }
+        cmap.push_str("endbfchar endcmap CMapName currentdict /CMap defineresource pop end end");
+        build(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_vec(),
+            stream(format!("BT /F1 12 Tf 20 100 Td <{shown}> Tj ET").as_bytes()),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 200] /Contents 3 0 R \
+              /Resources << /Font << /F1 5 0 R >> >> >>"
+                .to_vec(),
+            b"<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H \
+              /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"
+                .to_vec(),
+            b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo \
+              << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>"
+                .to_vec(),
+            stream(cmap.as_bytes()),
+        ])
+    }
+
     #[test]
     fn a_page_with_text_converts() {
         let bytes = pdf(1, HELVETICA, b"BT /F1 12 Tf 20 100 Td (Hello) Tj ET");
-        assert!(to_markdown(&bytes).unwrap().contains("Hello"));
+        let parse_ctx = ParseCtx::default();
+        assert!(to_markdown(&parse_ctx, &bytes).unwrap().contains("Hello"));
+        assert!(parse_ctx.into_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn a_code_no_cmap_maps_is_garbled_font_encoding_lost_in_the_body() {
+        let sentence = "The board approved the plan for the coming season after a long review.";
+        let parse_ctx = ParseCtx::default();
+        let markdown = to_markdown(&parse_ctx, &composite_font_pdf(sentence, &[])).unwrap();
+        assert_eq!(markdown, format!("{sentence}\n"));
+        assert!(parse_ctx.into_diagnostics().is_empty());
+
+        let parse_ctx = ParseCtx::default();
+        let markdown = to_markdown(&parse_ctx, &composite_font_pdf(sentence, &[0x0200])).unwrap();
+        assert!(markdown.starts_with(sentence), "{markdown}");
+        let diagnostics: Vec<_> = parse_ctx
+            .into_diagnostics()
+            .iter()
+            .map(|d| (d.code, d.class, d.region, d.unit, d.count))
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [(
+                DiagnosticCode::GarbledFontEncoding,
+                crate::diagnostics::LossClass::Lost,
+                Region::Body,
+                None,
+                1
+            )]
+        );
     }
 
     #[test]
     fn a_textless_pdf_needs_ocr_on_every_page() {
-        let err = to_markdown(&pdf(2, "", b"0 0 m 100 100 l S")).unwrap_err();
+        let err = to_markdown(&ParseCtx::default(), &pdf(2, "", b"0 0 m 100 100 l S")).unwrap_err();
         assert!(
             matches!(&err, ConvertError::NeedsOcr { pages, page_count: 2 } if pages == &[1, 2]),
             "{err:?}"
@@ -131,7 +203,7 @@ mod tests {
 
     #[test]
     fn a_pdf_without_pages_is_malformed() {
-        let err = to_markdown(&pdf(0, "", b"")).unwrap_err();
+        let err = to_markdown(&ParseCtx::default(), &pdf(0, "", b"")).unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { part: None, .. }), "{err:?}");
         let err = textless(0);
         assert!(

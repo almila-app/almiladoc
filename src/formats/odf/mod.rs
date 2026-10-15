@@ -5,8 +5,10 @@ mod table;
 mod text;
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::model::{Block, Document, Inline, inlines_are_empty};
+use crate::package::archive::Role;
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, PackageKind};
 use crate::shared::assets::AssetSink;
@@ -20,21 +22,24 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         return Err(ConvertError::Encrypted);
     }
 
-    // styles.xml is optional; corrupt -> skipped (default styling).
-    let styles_tree = pkg.borrow_mut().optional_xml_part("styles.xml")?;
+    let content_tree =
+        pkg.borrow_mut().required_xml_part("content.xml", Role::Content(Region::Body))?;
+    let body = content_tree
+        .find(ns::OFFICE, "document-content")
+        .and_then(|d| d.find(ns::OFFICE, "body"))
+        .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
 
-    let content_tree = pkg.borrow_mut().required_xml_part("content.xml")?;
-
+    let styles_role = if body.find(ns::OFFICE, "spreadsheet").is_some() {
+        Role::Formatting
+    } else {
+        Role::Content(Region::Body)
+    };
+    let styles_tree = pkg.borrow_mut().optional_xml_part("styles.xml", styles_role)?;
     let mut styles = styles::OdfStyles::default();
     if let Some(tree) = &styles_tree {
         styles.collect(tree);
     }
     styles.collect(&content_tree);
-
-    let body = content_tree
-        .find(ns::OFFICE, "document-content")
-        .and_then(|d| d.find(ns::OFFICE, "body"))
-        .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
 
     let assets = RefCell::new(AssetSink::new(parse_ctx));
     let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets);
@@ -63,7 +68,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
 /// unreadable manifest proves nothing (content parsing decides), but fatal
 /// resource-limit errors propagate.
 fn is_encrypted(pkg: &RefCell<Package>) -> Result<bool, ConvertError> {
-    let Some(tree) = pkg.borrow_mut().optional_xml_part("META-INF/manifest.xml")? else {
+    let Some(tree) = pkg.borrow_mut().optional_xml_part("META-INF/manifest.xml", Role::Probe)?
+    else {
         return Ok(false);
     };
     Ok(tree.first_descendant(ns::MANIFEST, "encryption-data").is_some())

@@ -1,7 +1,10 @@
 //! Fixture corpus snapshot harness.
 //!
-//! One snapshot per fixture of the single conversion result: the Markdown
-//! output, or the terminal error. Logs are never snapshotted. Fixtures under
+//! One snapshot per fixture of the single conversion result under
+//! `OnLoss::Report`: the Markdown output, or the terminal error. A fixture
+//! with diagnostics has a second snapshot, `<name>.diagnostics`, of each
+//! diagnostic and the verdict under `OnLoss::Fail`. Logs are never
+//! snapshotted. Fixtures under
 //! `abuse/` are resource-abuse shapes, each asserted against its limit in
 //! `tests/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
 //! expected outcome as `name--<outcome>.ext` where outcome is one of
@@ -9,16 +12,21 @@
 
 mod common;
 
-use almiladoc::{Conversion, ConvertError, Format, Input, model::Document};
+use almiladoc::{
+    Config, Conversion, ConvertError, Converter, Diagnostics, Format, Input, OnLoss,
+    model::Document,
+};
 use common::{converter, fixture_root, format_of, walk};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-fn convert_file(path: &Path) -> Result<String, ConvertError> {
+fn convert_file(path: &Path) -> Result<Conversion, ConvertError> {
     let bytes = std::fs::read(path).unwrap();
     let format = format_of(path, &bytes).unwrap();
-    converter(1).convert(Input::new(&bytes, format)).map(Conversion::into_markdown)
+    let mut config = Config::default();
+    config.on_loss = OnLoss::Report;
+    Converter::new(config).unwrap().convert(Input::new(&bytes, format))
 }
 
 fn document(path: &Path, format: Format) -> Document {
@@ -28,13 +36,32 @@ fn document(path: &Path, format: Format) -> Document {
 
 /// Convert one file, capturing panics so a bad parser records a baseline
 /// instead of aborting the whole harness.
-fn convert(path: &Path) -> String {
+fn convert(path: &Path) -> (String, Diagnostics) {
     let result = std::panic::catch_unwind(|| convert_file(path));
     match result {
-        Ok(Ok(md)) => md,
-        Ok(Err(e)) => format!("ERROR: {e:#}"),
-        Err(_) => "PANIC".to_string(),
+        Ok(Ok(conversion)) => (conversion.markdown().to_string(), conversion.diagnostics().clone()),
+        Ok(Err(e)) => (format!("ERROR: {e:#}"), Diagnostics::default()),
+        Err(_) => ("PANIC".to_string(), Diagnostics::default()),
     }
+}
+
+/// Each diagnostic on a line, then what `OnLoss::Fail` makes of them.
+fn diagnostics_snapshot(diagnostics: &Diagnostics) -> String {
+    let mut out = String::new();
+    for d in diagnostics.iter() {
+        write!(out, "{} {} {}", d.code.as_str(), d.class.as_str(), d.region.as_str()).unwrap();
+        if let Some(unit) = d.unit {
+            write!(out, " unit={unit}").unwrap();
+        }
+        writeln!(out, " count={}", d.count).unwrap();
+    }
+    let verdict = if diagnostics.has_loss() { "incomplete" } else { "complete" };
+    writeln!(out, "under fail: {verdict}").unwrap();
+    out
+}
+
+fn snapshot_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("snapshots")
 }
 
 fn expected_outcome(path: &Path) -> Option<&'static str> {
@@ -75,7 +102,7 @@ fn sweep(pdf: bool) {
         corpus_cases().into_iter().filter(|(path, _)| is_pdf(path) == pdf).collect();
     assert!(!cases.is_empty(), "no fixtures in this sweep");
     for (path, name) in cases {
-        let output = convert(&path);
+        let (output, diagnostics) = convert(&path);
         // Once the unified recovery policy exists (P1), annotated malformed
         // fixtures must match their single expected outcome.
         if let Some(outcome) = expected_outcome(&path) {
@@ -94,7 +121,14 @@ fn sweep(pdf: bool) {
                 _ => {}
             }
         }
-        insta::assert_snapshot!(name, output);
+        insta::assert_snapshot!(name.as_str(), output);
+        let diagnostics_name = format!("{name}.diagnostics");
+        if diagnostics.is_empty() {
+            let stale = snapshot_dir().join(format!("snapshots__{diagnostics_name}.snap"));
+            assert!(!stale.exists(), "{name} reports nothing, yet {} exists", stale.display());
+        } else {
+            insta::assert_snapshot!(diagnostics_name, diagnostics_snapshot(&diagnostics));
+        }
     }
 }
 
@@ -115,18 +149,25 @@ fn corpus_pdf() {
     sweep(true);
 }
 
-/// Every snapshot belongs to a corpus fixture and none is pending review.
+/// Every snapshot belongs to a corpus fixture and none is pending review; a
+/// fixture's diagnostics snapshot sits beside its Markdown one.
 #[test]
 fn snapshots_match_the_corpus() {
-    let expected: BTreeSet<String> =
-        corpus_cases().into_iter().map(|(_, name)| format!("snapshots__{name}.snap")).collect();
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("snapshots");
-    let actual: BTreeSet<String> = std::fs::read_dir(dir)
+    let corpus: BTreeSet<String> = corpus_cases().into_iter().map(|(_, name)| name).collect();
+    let actual: BTreeSet<String> = std::fs::read_dir(snapshot_dir())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| !name.starts_with("snapshots__sample__"))
         .collect();
-    assert_eq!(actual, expected);
+    let markdown: BTreeSet<String> =
+        corpus.iter().map(|name| format!("snapshots__{name}.snap")).collect();
+    assert!(markdown.is_subset(&actual), "{:?}", markdown.difference(&actual));
+    for file in actual.difference(&markdown) {
+        let name = file
+            .strip_prefix("snapshots__")
+            .and_then(|name| name.strip_suffix(".diagnostics.snap"));
+        assert!(name.is_some_and(|name| corpus.contains(name)), "{file} belongs to no fixture");
+    }
 }
 
 /// Annotated malformed fixtures must produce their single expected outcome:
@@ -172,7 +213,9 @@ fn fixtures_detect_from_content() {
 #[test]
 #[cfg(feature = "pdf")]
 fn scanned_pages_are_reported_not_dropped() {
-    match convert_file(&fixture_root().join("pdf/handmade-mixed.pdf")) {
+    match convert_file(&fixture_root().join("pdf/handmade-mixed.pdf"))
+        .map(Conversion::into_markdown)
+    {
         Err(ConvertError::NeedsOcr { pages, page_count, .. }) => {
             assert_eq!((pages, page_count), (vec![2], 2));
         }
@@ -256,7 +299,7 @@ fn samples_sweep() {
             continue; // pdf is an output target, not an input format
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let output = convert(&path);
+        let (output, _) = convert(&path);
         let digest = digest(&output);
         insta::assert_snapshot!(format!("sample__{name}"), digest);
     }
