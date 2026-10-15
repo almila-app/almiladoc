@@ -46,13 +46,13 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 ## Taken
 
 - #96 issue, heading numbering in DOCM: list counters continue across numbering instances that share an abstract definition, fixed through #129; inferring heading numbers from text is not taken.
-- #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id; a start override restarts its level once per instance, and a level override without one continues the count.
+- #129 PR, continue counters across numbering instances of one abstract: the fix for #96, rewritten with a typed abstract id; a start override restarts its level once per instance, and a level override without one continues the count. Authored by hari (@Mr-Neutr0n).
 - #170 issue, pdf-inspector 1.14.2 lacks the right-to-left extraction fix: fixed by the pdf-inspector 1.25.2 upgrade through #181; an Arabic line painted in visual order, its words, number and brackets included (`handmade-arabic.pdf`), now reads in logical order.
 - #172 issue, ligature characters dropped from PDF text: fixed by the pdf-inspector 1.25.2 upgrade through #181, which reads ligature glyph names such as `f_t` and `uni00660069` as their letters when a font has no ToUnicode map.
-- #177 PR, preserve DOCX symbol checkbox states: a Wingdings or Wingdings 2 ballot-box `w:sym` is read as the model's checkbox inline rather than as glyph text, with the strict hex validation kept; other symbols wait for a symbol-font map.
-- #179 PR, keep non-breaking hyphens: `w:noBreakHyphen` renders as a hyphen in its run's style, as the DOC and RTF readers already do; `w:softHyphen` stays dropped.
-- #180 PR, slug a heading line break as the space it renders: a heading's slug reads each line break as the space the heading renders, so a table-of-contents link to a multi-line heading resolves.
-- #181 PR, update pdf-inspector for the right-to-left fix: taken as the upgrade to pdf-inspector 1.25.2 and lopdf 0.45 with the PDF snapshot it left stale regenerated, and fixtures for #170, #172 and #189.
+- #177 PR, preserve DOCX symbol checkbox states: a Wingdings or Wingdings 2 ballot-box `w:sym` is read as the model's checkbox inline rather than as glyph text, with the strict hex validation kept; other symbols wait for a symbol-font map. Authored by HanZephyr (@HanZephyr).
+- #179 PR, keep non-breaking hyphens: `w:noBreakHyphen` renders as a hyphen in its run's style, as the DOC and RTF readers already do; `w:softHyphen` stays dropped. Authored by breken (@breken-ai).
+- #180 PR, slug a heading line break as the space it renders: a heading's slug reads each line break as the space the heading renders, so a table-of-contents link to a multi-line heading resolves. Authored by breken (@breken-ai).
+- #181 PR, update pdf-inspector for the right-to-left fix: taken as the upgrade to pdf-inspector 1.25.2 and lopdf 0.45 with the PDF snapshot it left stale regenerated, and fixtures for #170, #172 and #189. Authored by Aashish Mahato (@aashish254).
 - #189 issue, process abort on a PDF with an inline image: lopdf 0.45 returns an error where 0.42 panicked on an inline image without a colour space, so the page is reported as needing OCR.
 
 ## Already fixed
