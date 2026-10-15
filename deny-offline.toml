@@ -1,0 +1,21 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[bans]
+multiple-versions = "allow"
+deny = [
+    { crate = "ureq", reason = "the default build makes no network call" },
+    { crate = "hyper", reason = "the default build makes no network call" },
+    { crate = "reqwest", reason = "the default build makes no network call" },
+    { crate = "libloading", reason = "the default build loads no library at run time" },
+    { crate = "rten", reason = "local OCR is opt-in" },
+]

@@ -62,10 +62,64 @@ jobs:
           enable-cache: false
       - run: make python
 
+  policy:
+    name: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # checkout; zizmor resolves action refs with the run's token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.1
+          enable-cache: false
+      - run: make policy locks licences reuse hygiene
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: make actions
+
+  dco:
+    name: dco
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.1
+          enable-cache: false
+      - env:
+          DCO_BASE: ${{ github.event.pull_request.base.sha }}
+          DCO_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: make dco provenance
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+        working-directory: fuzz
+      - run: make fuzz
+
   required:
     name: required
     if: always()
-    needs: [rust, rust-arm, features, python]
+    needs: [rust, rust-arm, features, python, policy, dco, fuzz]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}

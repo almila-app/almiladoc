@@ -24,7 +24,7 @@ description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations,
 readme = "README.md"
 keywords = ["markdown", "docx", "pdf", "converter", "document"]
 categories = ["parser-implementations", "text-processing"]
-include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.toml"]
+include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.toml", "/THIRD-PARTY-LICENSES"]
 
 [lints]
 workspace = true

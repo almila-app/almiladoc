@@ -64,7 +64,7 @@ fn convert(path: &str, csv: &[u8]) -> Result<(String, String), ConvertError> {
 
 ## Development
 
-`make ci` runs every gate CI runs, with the toolchain `rust-toolchain.toml` pins; it needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs the locked Python tools and CPython 3.11 and 3.15. Each gate is also a target of its own: `fmt`, `clippy`, `test`, `doc`, `features` and `python`, which builds the wheel from the sdist and tests it installed. A target the host cannot run reports `NOT RUN` and its reason.
+`make ci` runs every gate CI runs, with the toolchain `rust-toolchain.toml` pins; it needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs the locked Python tools and CPython 3.11 and 3.15. Each gate is also a target of its own: `fmt`, `clippy`, `test`, `doc`, `features` and `python`, which builds the wheel from the sdist and tests it installed; `policy` (cargo-deny), `locks`, `licences` (regenerates `THIRD-PARTY-LICENSES`), `reuse`, `hygiene`, `actions` (zizmor, online when `GH_TOKEN` is set), `dco`, `provenance` and `fuzz`. `make tools` fetches the sha256-pinned cargo-deny, cargo-about and cargo-fuzz binaries into the build directory. A target the host cannot run reports `NOT RUN` and its reason.
 
 ## Licence
 

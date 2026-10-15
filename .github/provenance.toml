@@ -1,0 +1,9 @@
+base = "261fc257d17c3eab0f673be31c408fd9fdc2171a"
+upstream = "Sideguide Technologies Inc."
+licensor = "Harun Erkurt"
+
+[named]
+"pyproject.toml" = "python/pyproject.toml"
+"python/almiladoc/__init__.py" = "python/anydoc/__init__.py"
+"python/tests/test_almiladoc.py" = "python/tests/test_anydoc.py"
+"fuzz/Cargo.lock" = "Cargo.lock"

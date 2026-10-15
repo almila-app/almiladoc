@@ -6,6 +6,12 @@ SPDX-FileCopyrightText = "2026 Sideguide Technologies Inc."
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = "src/render/markdown/anchors.rs"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Sideguide Technologies Inc."
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = [
     "NOTICE",
     "REUSE.toml",
@@ -15,11 +21,19 @@ path = [
     ".github/ISSUE_TEMPLATE/**",
     ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/dependabot.yml",
+    ".github/provenance.toml",
+    ".github/scripts/**",
     "docs/adr/**",
     "docs/upstream.md",
     ".github/workflows/**",
     "Makefile",
+    "THIRD-PARTY-LICENSES",
+    "about.hbs",
+    "about.toml",
+    "deny-offline.toml",
+    "deny.toml",
     "fuzz/rust-toolchain.toml",
+    "fuzz/regressions/**",
     "python/stubtest-allowlist.txt",
     "rust-toolchain.toml",
     "scripts/check_dist.py",
@@ -31,11 +45,14 @@ SPDX-License-Identifier = "FSL-1.1-MIT"
 
 [[annotations]]
 path = [
+    ".gitattributes",
     ".gitignore",
     ".github/ISSUE_TEMPLATE/config.yml",
     "Cargo.lock",
     "Cargo.toml",
     "README.md",
+    "fuzz/.gitignore",
+    "fuzz/Cargo.lock",
     "fuzz/Cargo.toml",
     "fuzz/README.md",
     "fuzz/fuzz_targets/csv.rs",
