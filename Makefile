@@ -148,6 +148,7 @@ hygiene:
 	$(call need_uv)
 	$(policy_env)
 	$(POLICY_PYTHON) .github/scripts/hygiene.py --self-test
+	$(POLICY_PYTHON) .github/scripts/staleness.py --self-test
 	$(POLICY_PYTHON) .github/scripts/hygiene.py
 
 actions:
