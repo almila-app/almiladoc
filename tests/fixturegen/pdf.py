@@ -1,13 +1,16 @@
-# A minimal PDF: Helvetica as /F1 and a 1x1 gray image as /Im1 on every page,
-# one content stream per page. Object numbers are fixed by position, so the
-# xref table is exact rather than reconstructed by the reader.
-def handmade_pdf(pages):
+HELVETICA = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+
+# A minimal PDF: a font as /F1 and a 1x1 gray image as /Im1 on every page, one
+# content stream per page. Object numbers are fixed by position, so the xref
+# table is exact rather than reconstructed by the reader.
+def handmade_pdf(pages, font=HELVETICA):
     n = len(pages)
     objs = {
         1: b"<< /Type /Catalog /Pages 2 0 R >>",
         2: b"<< /Type /Pages /Kids [" + b" ".join(b"%d 0 R" % (5 + 2 * i) for i in range(n))
            + b"] /Count %d >>" % n,
-        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        3: font,
         4: b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
            b" /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream",
     }
@@ -41,5 +44,54 @@ def ocr_pdfs(out):
     (out / "pdf" / "handmade-mixed.pdf").write_bytes(handmade_pdf([TEXT_PAGE, IMAGE_PAGE]))
 
 
+# Ligature glyphs named by /Differences and no ToUnicode map: an underscore
+# name (T_h, f_t, s_t) and a uni name of two code points (uni00660069).
+# One Tj per word: pdf-inspector takes a page with an image resource and fewer
+# than ten text operators for a scan.
+LIGATURE_FONT = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding"
+                 b" /BaseEncoding /WinAnsiEncoding /Differences [128 /T_h /uni00660069 /f_t /s_t] >> >>")
+LIGATURE_WORDS = [b"\\200e", b" model", b" classi\\201es", b" the", b" input", b" a\\202er",
+                  b" it", b" is", b" \\203ated", b"."]
+LIGATURE_PAGE = (b"BT /F1 18 Tf 72 700 Td "
+                 + b" ".join(b"(" + word + b") Tj" for word in LIGATURE_WORDS) + b" ET")
+
+INLINE_IMAGE_PAGE = b"q 8 0 0 8 0 0 cm BI /W 8 /H 8 /BPC 8 /G true ID " + bytes(64) + b" EI Q"
+
+
+# A right-to-left line painted in visual order, as a producer that applied the
+# bidi algorithm draws it: the words last to first and each spelled backwards,
+# the number left to right, the brackets mirrored. Arabic glyphs are uniXXXX
+# names in /Differences, with no ToUnicode map.
+ARABIC_VISUAL = ["موي", " لك", " ةبتكملا", " يف", " (", "12", " لصفلا", ")", " باتكلا",
+                 " بلاطلا", " أرقي"]
+
+
+def arabic_page():
+    letters = sorted({c for item in ARABIC_VISUAL for c in item if ord(c) > 127})
+    code = {c: 128 + i for i, c in enumerate(letters)}
+    names = b" ".join(b"/uni%04X" % ord(c) for c in letters)
+    font = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding"
+            b" /BaseEncoding /WinAnsiEncoding /Differences [128 " + names + b"] >> >>")
+    escaped = (bytes(code.get(c, ord(c)) for c in item).replace(b"(", b"\\(").replace(b")", b"\\)")
+               for item in ARABIC_VISUAL)
+    shows = b" ".join(b"(" + item + b") Tj" for item in escaped)
+    return handmade_pdf([b"BT /F1 18 Tf 72 700 Td " + shows + b" ET"], font=font)
+
+
+def text_pdfs(out):
+    """Ligature glyph names that read as their letters, and Arabic that reads in logical order."""
+    (out / "pdf" / "handmade-ligatures.pdf").write_bytes(
+        handmade_pdf([LIGATURE_PAGE], font=LIGATURE_FONT))
+    (out / "pdf" / "handmade-arabic.pdf").write_bytes(arabic_page())
+
+
+def inline_image_pdfs(out):
+    """An inline image with no /CS, which needs OCR rather than aborting."""
+    (out / "pdf" / "handmade-inline-image-no-colorspace.pdf").write_bytes(
+        handmade_pdf([INLINE_IMAGE_PAGE]))
+
+
 def generate(out):
     ocr_pdfs(out)
+    text_pdfs(out)
+    inline_image_pdfs(out)

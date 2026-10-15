@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: output
+---
+The model classifies the input after it is stated.
