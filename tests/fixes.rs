@@ -1,4 +1,4 @@
-use almiladoc::{Config, Converter, Format, Input};
+use almiladoc::{Config, Converter, Format, Input, OnLoss};
 use std::error::Error;
 use std::io::{Cursor, Write};
 
@@ -16,7 +16,9 @@ fn docx(body: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn body_markdown(body: &str) -> Result<String, Box<dyn Error>> {
     let bytes = docx(body)?;
-    let converter = Converter::new(Config::default())?;
+    let mut config = Config::default();
+    config.on_loss = OnLoss::Report;
+    let converter = Converter::new(config)?;
     let conversion = converter.convert(Input::new(&bytes, Format::Docx))?;
     Ok(conversion.markdown().trim_end().to_owned())
 }

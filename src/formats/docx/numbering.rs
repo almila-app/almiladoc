@@ -115,7 +115,6 @@ pub fn parse(
     let mut numbering = Numbering::default();
     for (&num_id, &(abs_id, num_elem)) in &direct {
         let Some(abs) = resolve_abstract(abs_id, &abstracts, &direct, style_num_id)? else {
-            log::warn!("numbering instance {num_id} references unknown abstract {abs_id:?}");
             continue;
         };
         let mut levels = abs.levels.clone();

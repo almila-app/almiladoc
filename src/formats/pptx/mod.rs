@@ -615,7 +615,11 @@ fn parse_graphic_frame(
         && let Some((part, bytes)) = ctx.rel_part(rid)?
     {
         match parse_xml(ctx.parse_ctx, &bytes, Role::Reported(Region::Body)) {
-            Ok(root) => blocks.extend(crate::shared::drawingml::chart_blocks(&root)),
+            Ok(root) => blocks.extend(crate::shared::drawingml::chart_blocks(
+                ctx.parse_ctx,
+                &root,
+                Region::Body,
+            )),
             Err(e) if e.is_fatal() => return Err(e),
             Err(e) => log::warn!("skipping corrupt chart part {part}: {e}"),
         }

@@ -145,12 +145,44 @@ fn graphic_pptx() -> Vec<u8> {
             r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>"#.to_string(),
         ),
     ];
+    zipped(&parts)
+}
+
+fn zipped(parts: &[(&str, String)]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, content) in parts {
-        writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
         writer.write_all(content.as_bytes()).unwrap();
     }
     writer.finish().unwrap().into_inner()
+}
+
+/// A DOCX whose body draws one chart and one diagram, both empty, so that
+/// nothing is lost before an edit.
+fn graphic_docx() -> Vec<u8> {
+    let drawing = |reference: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData>{reference}</a:graphicData></a:graphic></w:drawing></w:r></w:p>"#
+        )
+    };
+    let chart = drawing(
+        r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId8"/>"#,
+    );
+    let diagram = drawing(
+        r#"<dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId9"/>"#,
+    );
+    let document = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="{RELS}"><w:body>{chart}{diagram}</w:body></w:document>"#
+    );
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId8" Type="{RELS}/chart" Target="charts/chart1.xml"/><Relationship Id="rId9" Type="{RELS}/diagramData" Target="diagrams/data1.xml"/></Relationships>"#
+    );
+    zipped(&[
+        ("word/document.xml", document),
+        ("word/_rels/document.xml.rels", rels),
+        ("word/charts/chart1.xml", CHART.to_string()),
+        ("word/diagrams/data1.xml", DIAGRAM.to_string()),
+    ])
 }
 
 const SHEET_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/></Relationships>"#;
@@ -187,6 +219,7 @@ struct Case {
 enum Source {
     Fixture(&'static str),
     GraphicPptx,
+    GraphicDocx,
 }
 
 const PART: DiagnosticCode = DiagnosticCode::PartUnreadable;
@@ -194,6 +227,8 @@ const RECOVERED: DiagnosticCode = DiagnosticCode::RecoveredXml;
 const STYLE: DiagnosticCode = DiagnosticCode::StylePartUnreadable;
 const CELL: DiagnosticCode = DiagnosticCode::CellValueUnreadable;
 const UNIT: DiagnosticCode = DiagnosticCode::UnitUnreadable;
+const CONVENTIONAL: DiagnosticCode = DiagnosticCode::ConventionalPartUsed;
+const GRAPHIC: DiagnosticCode = DiagnosticCode::GraphicUnread;
 
 const fn case(
     source: Source,
@@ -206,14 +241,19 @@ const fn case(
 
 use Edit::{Corrupt, Put, Recover, Remove, Set};
 use Region::{Body, Container, Note};
-use Source::{Fixture, GraphicPptx};
+use Source::{Fixture, GraphicDocx, GraphicPptx};
 
 /// One case per site that names a part's role: each corrupts, removes or
 /// leaves unclosed the part it reads, and expects that role's report in its
 /// unit. A role that parses bytes another read fetched shows only in the
 /// recovery case, which `Content` and `Reported` report alike.
 const CASES: &[Case] = &[
-    case(Fixture("docx/text.docx"), Format::Docx, &[("_rels/.rels", Corrupt)], &[]),
+    case(
+        Fixture("docx/text.docx"),
+        Format::Docx,
+        &[("_rels/.rels", Corrupt)],
+        &[(CONVENTIONAL, Container, None, 1)],
+    ),
     case(
         Fixture("docx/text.docx"),
         Format::Docx,
@@ -278,28 +318,28 @@ const CASES: &[Case] = &[
         &[(PART, Note, None, 1)],
     ),
     case(
-        Fixture("docx/handmade-rich.docx"),
+        GraphicDocx,
         Format::Docx,
         &[("word/charts/chart1.xml", Recover)],
         &[(RECOVERED, Body, None, 1)],
     ),
     case(
-        Fixture("docx/handmade-rich.docx"),
+        GraphicDocx,
         Format::Docx,
         &[("word/diagrams/data1.xml", Recover)],
         &[(RECOVERED, Body, None, 1)],
     ),
     case(
-        Fixture("docx/handmade-rich.docx"),
+        GraphicDocx,
         Format::Docx,
         &[("word/charts/chart1.xml", Corrupt)],
-        &[],
+        &[(GRAPHIC, Body, None, 1)],
     ),
     case(
-        Fixture("docx/handmade-rich.docx"),
+        GraphicDocx,
         Format::Docx,
         &[("word/diagrams/data1.xml", Corrupt)],
-        &[],
+        &[(GRAPHIC, Body, None, 1)],
     ),
     case(
         Fixture("docx/text.docx"),
@@ -621,11 +661,14 @@ fn every_part_reports_by_the_role_its_reader_names() {
         let original = match case.source {
             Source::Fixture(path) => fixture(path),
             Source::GraphicPptx => graphic_pptx(),
+            Source::GraphicDocx => graphic_docx(),
         };
         let clean = report.convert(Input::new(&original, case.format)).unwrap();
         match case.source {
             Source::Fixture(_) => assert!(clean.is_complete(), "case {index} before its edit"),
-            Source::GraphicPptx => assert_eq!(reported(&clean), [], "case {index} before its edit"),
+            Source::GraphicPptx | Source::GraphicDocx => {
+                assert_eq!(reported(&clean), [], "case {index} before its edit")
+            }
         }
         let bytes = repack(&original, case.edits);
         let reporting = report.convert(Input::new(&bytes, case.format));

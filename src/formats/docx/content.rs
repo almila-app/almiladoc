@@ -1,7 +1,7 @@
 //! Block and inline walking for WordprocessingML parts.
 
 use crate::ctx::ParseCtx;
-use crate::diagnostics::Region;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::formats::docx::numbering::{Counters, Numbering};
 use crate::formats::docx::styles::{Styles, on_off, rpr_delta};
@@ -16,6 +16,7 @@ use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::{FieldFrame, field_result};
 use crate::shared::header::resolve_header_rows;
+use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
 use crate::shared::math::{omath_para_to_tex, omath_to_tex};
 use crate::shared::text::clean_text;
@@ -38,6 +39,8 @@ const SUPPORTED_NS: &[&str] = &[
     ns::WPG,
 ];
 
+const CHARTEX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+
 use crate::shared::assets::AssetSink;
 
 pub(super) struct Ctx<'a, 'b> {
@@ -48,6 +51,9 @@ pub(super) struct Ctx<'a, 'b> {
     pub region: Region,
     pub styles: &'b Styles<'b>,
     pub numbering: &'b Numbering,
+    /// The numbering part's loss was reported, so a paragraph naming an
+    /// instance it would define is not reported again.
+    pub numbering_reported: bool,
     pub counters: &'b RefCell<Counters>,
     pub assets: &'b RefCell<AssetSink>,
 }
@@ -64,14 +70,14 @@ impl<'a, 'b> Ctx<'a, 'b> {
             region,
             styles: self.styles,
             numbering: self.numbering,
+            numbering_reported: self.numbering_reported,
             counters: self.counters,
             assets: self.assets,
         }
     }
 
     /// Load an internal relationship target's bytes, resolved against this
-    /// part. Failures degrade (log + `None`) per the unified policy;
-    /// resource-limit errors always propagate.
+    /// part: `None` when it cannot be loaded, whose loss the caller reports.
     fn rel_part(&self, rel_id: &str) -> Result<Option<RelTarget>, ConvertError> {
         rel_target_bytes(self.pkg, &self.rels, &self.base_part, rel_id)
     }
@@ -85,10 +91,57 @@ impl<'a, 'b> Ctx<'a, 'b> {
         self.assets.borrow_mut().add(media_type, part, bytes)
     }
 
-    /// Pick the branch of an `mc:AlternateContent` to process.
-    fn alternate_branch<'e>(&self, alt: &'e Element) -> Option<&'e Element> {
-        crate::shared::mc::alternate_branch(alt, SUPPORTED_NS)
+    fn emit(&self, code: DiagnosticCode) {
+        self.parse_ctx.emit(code, self.region);
     }
+
+    /// Report a loss whose cause is a relationship, unless the relationships
+    /// part itself was reported.
+    fn emit_related(&self, code: DiagnosticCode) {
+        if !self.rels.reported() {
+            self.emit(code);
+        }
+    }
+
+    /// Pick the branch of an `mc:AlternateContent` to process, reporting
+    /// what the declined choices hold when no choice is taken: a chart,
+    /// diagram or ink always, and a picture or text only when the fallback
+    /// shows none.
+    fn alternate_branch<'e>(&self, alt: &'e Element) -> Option<&'e Element> {
+        let branch = crate::shared::mc::alternate_branch(alt, SUPPORTED_NS);
+        if branch.is_none_or(|b| b.is(ns::MC, "Fallback")) {
+            let declined: Vec<&Element> = alt.find_all(ns::MC, "Choice").collect();
+            let fallback_lacks = |holds: fn(&Element) -> bool| !branch.is_some_and(holds);
+            if declined.iter().any(|c| holds_graphic(c)) {
+                self.emit(DiagnosticCode::GraphicUnread);
+            }
+            if declined.iter().any(|c| holds_picture(c)) && fallback_lacks(holds_picture) {
+                self.emit(DiagnosticCode::ImageUnplaced);
+            }
+            if declined.iter().any(|c| shows_text(c)) && fallback_lacks(shows_text) {
+                self.emit(DiagnosticCode::BlockUnread);
+            }
+        }
+        branch
+    }
+}
+
+fn holds_graphic(elem: &Element) -> bool {
+    elem.descendant_elems().any(|e| {
+        e.is(ns::CHART, "chart")
+            || e.is(CHARTEX, "chart")
+            || e.is(ns::DGM, "relIds")
+            || e.local == "contentPart"
+    })
+}
+
+fn holds_picture(elem: &Element) -> bool {
+    elem.descendant_elems().any(|e| e.is(ns::A, "blip") || e.is(ns::VML, "imagedata"))
+}
+
+fn shows_text(elem: &Element) -> bool {
+    elem.descendant_elems()
+        .any(|e| (e.is(ns::W, "t") || e.is(ns::A, "t")) && !e.text().trim().is_empty())
 }
 
 pub(super) enum ParaKind {
@@ -114,15 +167,19 @@ pub(super) enum ParaKind {
 
 /// Block runs a following paragraph may extend: a list being built, and a
 /// styled container. Only one is ever open, so starting either closes the
-/// other.
+/// other. A paragraph whose mark is deleted waits to join the next one.
 #[derive(Default)]
 pub(super) struct Runs {
     list: Vec<ListEntry>,
     styled: StyledRun,
+    joining: Option<(ParaKind, Vec<Piece>)>,
 }
 
 impl Runs {
     fn flush(&mut self, blocks: &mut Vec<Block>) {
+        if let Some((kind, pieces)) = self.joining.take() {
+            emit_paragraph(kind, pieces, blocks, self);
+        }
         self.styled.flush(blocks);
         flush_list(blocks, &mut self.list);
     }
@@ -166,8 +223,15 @@ fn collect_blocks(
         }
         match child.local.as_str() {
             "p" => {
-                let (kind, pieces) = parse_paragraph(child, ctx)?;
-                emit_paragraph(kind, pieces, blocks, runs);
+                let (kind, mut pieces) = parse_paragraph(child, ctx)?;
+                if let Some((_, held)) = runs.joining.take() {
+                    pieces = joined(held, pieces);
+                }
+                if mark_deleted(child) {
+                    runs.joining = Some((kind, pieces));
+                } else {
+                    emit_paragraph(kind, pieces, blocks, runs);
+                }
             }
             "tbl" => {
                 runs.flush(blocks);
@@ -179,10 +243,37 @@ fn collect_blocks(
                 }
             }
             "customXml" => collect_blocks(child, ctx, blocks, runs)?,
+            "altChunk" => ctx.emit(DiagnosticCode::ImportedPartUnread),
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Whether a paragraph's mark is a tracked deletion, which joins it to the
+/// next paragraph once the revisions are accepted.
+fn mark_deleted(p: &Element) -> bool {
+    p.find(ns::W, "pPr")
+        .and_then(|pr| pr.find(ns::W, "rPr"))
+        .and_then(|r| r.find(ns::W, "del"))
+        .is_some()
+}
+
+/// A paragraph whose mark is deleted followed by the next, which keeps its
+/// own properties: the inline runs where they meet become one.
+fn joined(mut first: Vec<Piece>, second: Vec<Piece>) -> Vec<Piece> {
+    for piece in second {
+        if let Piece::Inlines(mut head) = piece {
+            if let Some(Piece::Inlines(tail)) = first.last_mut() {
+                tail.append(&mut head);
+            } else {
+                first.push(Piece::Inlines(head));
+            }
+        } else {
+            first.push(piece);
+        }
+    }
+    first
 }
 
 fn emit_paragraph(kind: ParaKind, pieces: Vec<Piece>, blocks: &mut Vec<Block>, runs: &mut Runs) {
@@ -260,7 +351,7 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
 
     // Numbering resolves independently of heading semantics: a numbered
     // heading advances its sequence and keeps its number visible.
-    let numbering = resolve_numbering(ppr, pstyle_id, ctx)?;
+    let numbering = if mark_deleted(p) { None } else { resolve_numbering(ppr, pstyle_id, ctx)? };
 
     // Toggle properties: the paragraph style chain's true-parity flips the
     // docDefaults base. Headings use the same resolution as body text.
@@ -330,7 +421,9 @@ fn resolve_numbering(
         return Ok(None);
     }
     let Some(instance) = ctx.numbering.instance(num_id) else {
-        log::debug!("paragraph references undefined numbering instance {num_id}");
+        if !ctx.numbering_reported {
+            ctx.emit(DiagnosticCode::NumberingUnresolved);
+        }
         return Ok(None);
     };
     let ilvl = match (direct_ilvl, pstyle_id) {
@@ -416,6 +509,15 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     let mut inner = InlineWalker::new(self.ctx, self.base);
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
+                    let unknown = target.is_none()
+                        && child
+                            .attr_qualified(ns::R, "id")
+                            .is_some_and(|id| self.ctx.rels.get(id).is_none());
+                    if unknown
+                        && !label_is_absolute_url(&crate::model::inlines_to_plain_text(&content))
+                    {
+                        self.ctx.emit_related(DiagnosticCode::LinkTargetUnread);
+                    }
                     if let Some(target) = target {
                         // An empty label still keeps a resolved target: the
                         // renderer shows the URL as the link text.
@@ -450,6 +552,8 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 // `moveTo` is moved-in text — part of the final document;
                 // `customXml` wraps ordinary run content.
                 "smartTag" | "ins" | "bdo" | "dir" | "moveTo" | "customXml" => self.walk(child)?,
+                "del" | "moveFrom" => self.ctx.emit(DiagnosticCode::RevisionOmitted),
+                "subDoc" => self.ctx.emit(DiagnosticCode::ImportedPartUnread),
                 _ => {}
             }
         }
@@ -510,11 +614,14 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "tab" | "ptab" => self.push(Inline::Text { text: " ".into(), style: Style::PLAIN }),
                 "noBreakHyphen" => self.push(Inline::Text { text: "-".into(), style }),
-                "sym" => {
-                    if let Some(checked) = symbol_checkbox(child) {
-                        self.push(Inline::Checkbox(checked));
-                    }
-                }
+                "sym" => match symbol_checkbox(child) {
+                    Some(checked) => self.push(Inline::Checkbox(checked)),
+                    None => self.ctx.emit(DiagnosticCode::UnmappedSymbol),
+                },
+                "ruby" => self.ctx.emit(DiagnosticCode::RubyUnread),
+                "contentPart" => self.ctx.emit(DiagnosticCode::GraphicUnread),
+                "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
+                | "yearLong" => self.ctx.emit(DiagnosticCode::FieldValueUnread),
                 // Markdown has no pages or columns, but every w:br still
                 // separates the runs around it: dropping a page break
                 // outright would join the words on either side. One left at
@@ -533,7 +640,15 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "drawing" | "pict" | "object" => self.walk_drawing(child)?,
                 "fldChar" => match child.attr(ns::W, "fldCharType") {
-                    Some("begin") => self.fields.push(FieldFrame::default()),
+                    Some("begin") => {
+                        if child.find(ns::W, "ffData").is_some_and(|data| {
+                            data.find(ns::W, "checkBox").is_some()
+                                || data.find(ns::W, "ddList").is_some()
+                        }) {
+                            self.ctx.emit(DiagnosticCode::FormControlUnread);
+                        }
+                        self.fields.push(FieldFrame::default());
+                    }
                     Some("separate") => {
                         if let Some(f) = self.fields.last_mut() {
                             f.in_result = true;
@@ -558,18 +673,48 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     }
 
     /// Drawings, VML picts, and embedded objects: text boxes become block
-    /// attachments at this position; images/charts/diagrams/objects resolve
-    /// through relationships.
+    /// attachments at this position, and otherwise the first chart, else
+    /// diagram, else object, else picture is read. Every other graphic and
+    /// any shape text is reported, an object's own preview picture excepted.
     fn walk_drawing(&mut self, elem: &Element) -> Result<(), ConvertError> {
-        // Text boxes first: their content is the drawing's content.
-        let mut boxes = Vec::new();
-        collect_text_boxes(elem, &mut boxes);
-        if !boxes.is_empty() {
-            let mut blocks = Vec::new();
-            for tb in boxes {
-                blocks.extend(parse_blocks(tb, self.ctx)?);
+        let mut contents = Contents::default();
+        contents.collect(elem, self.ctx, None);
+        let Contents { boxes, graphics, shape_text } = contents;
+        let boxed = !boxes.is_empty();
+        let mut blocks = Vec::new();
+        for tb in boxes {
+            blocks.extend(parse_blocks(tb, self.ctx)?);
+        }
+        self.push_blocks(blocks);
+        if shape_text {
+            self.ctx.emit(DiagnosticCode::GraphicUnread);
+        }
+        let read =
+            [Graphic::is_chart, Graphic::is_diagram, Graphic::is_object, Graphic::is_picture]
+                .iter()
+                .find_map(|kind| graphics.iter().position(kind))
+                .filter(|_| !boxed);
+        let previews: Vec<&str> = graphics
+            .iter()
+            .filter_map(|graphic| match graphic {
+                Graphic::Object(ole) => ole.attr_unqualified("ShapeID"),
+                _ => None,
+            })
+            .collect();
+        for (index, graphic) in graphics.iter().enumerate() {
+            if Some(index) == read {
+                continue;
             }
-            self.push_blocks(blocks);
+            match graphic {
+                Graphic::Chart(_) | Graphic::Diagram(_) | Graphic::WordArt => {
+                    self.ctx.emit(DiagnosticCode::GraphicUnread)
+                }
+                Graphic::Object(_) => self.ctx.emit(DiagnosticCode::EmbeddedObject),
+                Graphic::Picture { shape: Some(shape), .. } if previews.contains(shape) => {}
+                Graphic::Picture { .. } => self.ctx.emit(DiagnosticCode::ImageUnplaced),
+            }
+        }
+        if boxed {
             return Ok(());
         }
 
@@ -578,109 +723,113 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             .and_then(|d| d.attr(ns::WP, "descr"))
             .map(clean_text)
             .unwrap_or_default();
-
-        // Charts and SmartArt render their textual content.
-        if let Some(chart_ref) = elem.first_descendant(ns::CHART, "chart")
-            && let Some(rel_id) = chart_ref.attr_qualified(ns::R, "id")
-        {
-            self.push_blocks(self.chart_blocks(rel_id)?);
-            return Ok(());
+        match read.and_then(|index| graphics.get(index)) {
+            Some(Graphic::Chart(Some(rel_id))) => {
+                let blocks = self.chart_blocks(rel_id)?;
+                self.push_blocks(blocks);
+            }
+            Some(Graphic::Diagram(Some(rel_id))) => {
+                let blocks = self.diagram_blocks(rel_id)?;
+                self.push_blocks(blocks);
+            }
+            Some(Graphic::Object(ole)) => self.embedded_object(ole, descr)?,
+            Some(Graphic::Picture { rel_id, .. }) => self.picture(*rel_id, descr)?,
+            _ => {
+                if !descr.trim().is_empty() {
+                    self.push(Inline::Image { alt: descr, source: ImageSource::Unavailable });
+                }
+            }
         }
-        if let Some(rel_ids) = elem.first_descendant(ns::DGM, "relIds")
-            && let Some(rel_id) = rel_ids.attr_qualified(ns::R, "dm")
-        {
-            self.push_blocks(self.diagram_blocks(rel_id)?);
-            return Ok(());
-        }
+        Ok(())
+    }
 
-        // Embedded OLE objects come before images: standard Word OLE markup
-        // carries a VML preview image next to the o:OLEObject, and the
-        // object's identity and payload must win over its preview.
-        if let Some(ole) = elem.first_descendant(ns::O_VML, "OLEObject") {
-            let prog_id = ole.attr(ns::O_VML, "ProgID").unwrap_or("object").to_string();
-            let alt = if descr.trim().is_empty() {
-                format!("Embedded object: {prog_id}")
-            } else {
-                descr.clone()
-            };
-            let source = match ole.attr_qualified(ns::R, "id") {
-                Some(rel_id) => match self.ctx.rel_part(rel_id)? {
-                    Some((part, bytes)) => Some(ImageSource::Asset(self.ctx.add_asset(
-                        "application/vnd.ms-ole-object".into(),
-                        part,
-                        &bytes,
-                    )?)),
-                    None => None,
-                },
+    /// An embedded OLE object as its payload asset; its content is not
+    /// converted.
+    fn embedded_object(&mut self, ole: &Element, descr: String) -> Result<(), ConvertError> {
+        self.ctx.emit(DiagnosticCode::EmbeddedObject);
+        let prog_id = ole.attr(ns::O_VML, "ProgID").unwrap_or("object").to_string();
+        let alt =
+            if descr.trim().is_empty() { format!("Embedded object: {prog_id}") } else { descr };
+        let source = match ole.attr_qualified(ns::R, "id") {
+            Some(rel_id) => match self.ctx.rel_part(rel_id)? {
+                Some((part, bytes)) => Some(ImageSource::Asset(self.ctx.add_asset(
+                    "application/vnd.ms-ole-object".into(),
+                    part,
+                    &bytes,
+                )?)),
                 None => None,
-            };
-            self.push(Inline::Image { alt, source: source.unwrap_or(ImageSource::Unavailable) });
-            return Ok(());
-        }
+            },
+            None => None,
+        };
+        self.push(Inline::Image { alt, source: source.unwrap_or(ImageSource::Unavailable) });
+        Ok(())
+    }
 
-        // Bitmap images: DrawingML blip or VML imagedata.
-        let image_rel = elem
-            .first_descendant(ns::A, "blip")
-            .and_then(|b| {
-                b.attr_qualified(ns::R, "embed").or_else(|| b.attr_qualified(ns::R, "link"))
-            })
-            .or_else(|| {
-                elem.first_descendant(ns::VML, "imagedata")
-                    .and_then(|i| i.attr_qualified(ns::R, "id"))
-            });
-        if let Some(rel_id) = image_rel {
-            // External-mode targets (`r:link`) become external image
-            // sources; embedded targets are retained as assets.
-            let source = crate::shared::assets::rel_image_source(
+    /// A picture: an external-mode target (`r:link`) becomes an external
+    /// source, and an embedded one is retained as an asset.
+    fn picture(&mut self, rel_id: Option<&str>, descr: String) -> Result<(), ConvertError> {
+        let source = match rel_id {
+            Some(rel_id) => crate::shared::assets::rel_image_source(
                 self.ctx.pkg,
                 &self.ctx.rels,
                 &self.ctx.base_part,
                 self.ctx.assets,
                 rel_id,
-            )?;
-            match source {
-                Some(source) => self.push(Inline::Image { alt: descr, source }),
-                None => {
-                    if !descr.trim().is_empty() {
-                        self.push(Inline::Image { alt: descr, source: ImageSource::Unavailable });
-                    }
+            )?,
+            None => None,
+        };
+        match source {
+            Some(source) => self.push(Inline::Image { alt: descr, source }),
+            None => {
+                if rel_id.is_some() {
+                    self.ctx.emit_related(DiagnosticCode::ImageUnavailable);
+                } else {
+                    self.ctx.emit(DiagnosticCode::ImageUnavailable);
+                }
+                if !descr.trim().is_empty() {
+                    self.push(Inline::Image { alt: descr, source: ImageSource::Unavailable });
                 }
             }
-            return Ok(());
-        }
-
-        if !descr.trim().is_empty() {
-            self.push(Inline::Image { alt: descr, source: ImageSource::Unavailable });
         }
         Ok(())
     }
 
     /// Textual extraction of a chart part via `shared::drawingml`.
     fn chart_blocks(&self, rel_id: &str) -> Result<Vec<Block>, ConvertError> {
-        let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
-            return Ok(Vec::new());
-        };
-        match parse_xml(self.ctx.parse_ctx, &bytes, Role::Reported(self.ctx.region)) {
-            Ok(root) => Ok(crate::shared::drawingml::chart_blocks(&root)),
-            Err(e) if e.is_fatal() => Err(e),
-            Err(e) => {
-                log::warn!("skipping corrupt chart part {part}: {e}");
-                Ok(Vec::new())
-            }
-        }
+        let parse_ctx = self.ctx.parse_ctx;
+        let region = self.ctx.region;
+        Ok(self
+            .graphic_part(rel_id, ns::CHART, "chartSpace")?
+            .map(|root| crate::shared::drawingml::chart_blocks(parse_ctx, &root, region))
+            .unwrap_or_default())
     }
 
     /// Textual extraction of a SmartArt data part via `shared::drawingml`.
     fn diagram_blocks(&self, rel_id: &str) -> Result<Vec<Block>, ConvertError> {
-        let Some((part, bytes)) = self.ctx.rel_part(rel_id)? else {
-            return Ok(Vec::new());
+        Ok(self
+            .graphic_part(rel_id, ns::DGM, "dataModel")?
+            .map(|root| crate::shared::drawingml::diagram_blocks(&root))
+            .unwrap_or_default())
+    }
+
+    /// A chart or diagram part's tree, rooted at `namespace:root`; one that
+    /// is absent, does not parse or is rooted elsewhere is reported.
+    fn graphic_part(
+        &self,
+        rel_id: &str,
+        namespace: &str,
+        root: &str,
+    ) -> Result<Option<Element>, ConvertError> {
+        let Some((_, bytes)) = self.ctx.rel_part(rel_id)? else {
+            self.ctx.emit_related(DiagnosticCode::GraphicUnread);
+            return Ok(None);
         };
         match parse_xml(self.ctx.parse_ctx, &bytes, Role::Reported(self.ctx.region)) {
-            Ok(root) => Ok(crate::shared::drawingml::diagram_blocks(&root)),
+            Ok(tree) if tree.find(namespace, root).is_some() => Ok(Some(tree)),
             Err(e) if e.is_fatal() => Err(e),
-            Err(e) => {
-                log::warn!("skipping corrupt diagram part {part}: {e}");
-                Ok(Vec::new())
+            Ok(_) | Err(_) => {
+                self.ctx.emit(DiagnosticCode::GraphicUnread);
+                Ok(None)
             }
         }
     }
@@ -758,19 +907,88 @@ fn pieces_into_blocks(pieces: Vec<Piece>) -> Vec<Block> {
     blocks
 }
 
-/// Find text-box content (`w:txbxContent`) in a drawing or VML pict, skipping
-/// `mc:Fallback` so AlternateContent shapes aren't collected twice.
-fn collect_text_boxes<'e>(elem: &'e Element, out: &mut Vec<&'e Element>) {
-    for child in elem.child_elems() {
-        if child.is(ns::MC, "Fallback") {
-            continue;
-        }
-        if child.is(ns::W, "txbxContent") {
-            out.push(child);
-        } else {
-            collect_text_boxes(child, out);
+/// A graphic a drawing shows outside its text boxes.
+enum Graphic<'e> {
+    Chart(Option<&'e str>),
+    Diagram(Option<&'e str>),
+    Object(&'e Element),
+    /// A picture, with the id of the VML shape that holds it.
+    Picture {
+        rel_id: Option<&'e str>,
+        shape: Option<&'e str>,
+    },
+    WordArt,
+}
+
+impl Graphic<'_> {
+    fn is_chart(&self) -> bool {
+        matches!(self, Graphic::Chart(Some(_)))
+    }
+
+    fn is_diagram(&self) -> bool {
+        matches!(self, Graphic::Diagram(Some(_)))
+    }
+
+    fn is_object(&self) -> bool {
+        matches!(self, Graphic::Object(_))
+    }
+
+    fn is_picture(&self) -> bool {
+        matches!(self, Graphic::Picture { .. })
+    }
+}
+
+/// What a drawing or VML pict holds, in document order: text-box content
+/// (`w:txbxContent`), whose own drawings its blocks walk, and the graphics
+/// and shape text outside it, through the branch each
+/// `mc:AlternateContent` takes.
+#[derive(Default)]
+struct Contents<'e> {
+    boxes: Vec<&'e Element>,
+    graphics: Vec<Graphic<'e>>,
+    shape_text: bool,
+}
+
+impl<'e> Contents<'e> {
+    fn collect(&mut self, elem: &'e Element, ctx: &Ctx, shape: Option<&'e str>) {
+        for child in elem.child_elems() {
+            if child.is(ns::MC, "AlternateContent") {
+                if let Some(branch) = ctx.alternate_branch(child) {
+                    self.collect(branch, ctx, shape);
+                }
+                continue;
+            }
+            if child.is(ns::W, "txbxContent") {
+                self.boxes.push(child);
+                continue;
+            }
+            self.shape_text |= child.is(ns::A, "t") && !child.text().trim().is_empty();
+            if let Some(graphic) = graphic(child, shape) {
+                self.graphics.push(graphic);
+            }
+            let shape =
+                if child.is(ns::VML, "shape") { child.attr_unqualified("id") } else { shape };
+            self.collect(child, ctx, shape);
         }
     }
+}
+
+fn graphic<'e>(elem: &'e Element, shape: Option<&'e str>) -> Option<Graphic<'e>> {
+    let rel_id = |name| elem.attr_qualified(ns::R, name);
+    Some(match elem.ns.as_deref()? {
+        ns::CHART if elem.local == "chart" => Graphic::Chart(rel_id("id")),
+        ns::DGM if elem.local == "relIds" => Graphic::Diagram(rel_id("dm")),
+        ns::O_VML if elem.local == "OLEObject" => Graphic::Object(elem),
+        ns::A if elem.local == "blip" => {
+            Graphic::Picture { rel_id: rel_id("embed").or_else(|| rel_id("link")), shape: None }
+        }
+        ns::VML if elem.local == "imagedata" => Graphic::Picture { rel_id: rel_id("id"), shape },
+        ns::VML if elem.local == "textpath" => {
+            elem.attr_unqualified("string").filter(|text| !text.trim().is_empty())?;
+            Graphic::WordArt
+        }
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -806,12 +1024,13 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
     // Collect the raw cell matrix first so vertical merges can be resolved
     // into row spans before the grid is built. gridBefore/gridAfter filler
     // materializes as empty cells so every cell keeps its grid column.
+    let rows = collect_rows(tbl, ctx);
     let mut matrix: Vec<Vec<TcInfo>> = Vec::new();
-    for tr in tbl.find_all(ns::W, "tr") {
+    for &tr in &rows {
         let trpr = tr.find(ns::W, "trPr");
         let mut row = Vec::new();
         row.extend((0..grid_filler(trpr, "gridBefore")).map(|_| TcInfo::filler()));
-        collect_row_cells(tr, &mut row);
+        collect_row_cells(tr, ctx, &mut row);
         row.extend((0..grid_filler(trpr, "gridAfter")).map(|_| TcInfo::filler()));
         matrix.push(row);
     }
@@ -843,8 +1062,8 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
     }
 
     // tblHeader is ST_OnOff: an explicit false value is not a header row.
-    let header_rows = tbl
-        .find_all(ns::W, "tr")
+    let header_rows = rows
+        .iter()
         .take_while(|tr| tr.find(ns::W, "trPr").and_then(|p| on_off(p, "tblHeader")) == Some(true))
         .count();
 
@@ -876,12 +1095,40 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
     Ok(vec![Block::Table(table)])
 }
 
-fn collect_row_cells<'e>(parent: &'e Element, cells: &mut Vec<TcInfo<'e>>) {
+/// A table's rows: a deleted row is reported and left out, as accepting the
+/// revisions removes it, and rows behind a content control, custom XML or
+/// alternate content are reported unread.
+fn collect_rows<'e>(tbl: &'e Element, ctx: &Ctx) -> Vec<&'e Element> {
+    let mut rows = Vec::new();
+    for child in tbl.child_elems() {
+        if !child.is(ns::W, "tr") {
+            if child.first_descendant(ns::W, "tr").is_some() {
+                ctx.emit(DiagnosticCode::BlockUnread);
+            }
+        } else if child.find(ns::W, "trPr").and_then(|p| p.find(ns::W, "del")).is_some() {
+            ctx.emit(DiagnosticCode::RevisionOmitted);
+        } else {
+            rows.push(child);
+        }
+    }
+    rows
+}
+
+fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx, cells: &mut Vec<TcInfo<'e>>) {
     for child in parent.child_elems() {
+        if child.is(ns::MC, "AlternateContent") {
+            if child.first_descendant(ns::W, "tc").is_some() {
+                ctx.emit(DiagnosticCode::BlockUnread);
+            }
+            continue;
+        }
         if child.ns.as_deref().is_none_or(|n| n != ns::W) {
             continue;
         }
         match child.local.as_str() {
+            "tc" if child.find(ns::W, "tcPr").and_then(|p| p.find(ns::W, "cellDel")).is_some() => {
+                ctx.emit(DiagnosticCode::RevisionOmitted)
+            }
             "tc" => {
                 let tcpr = child.find(ns::W, "tcPr");
                 let covered = tcpr
@@ -916,10 +1163,10 @@ fn collect_row_cells<'e>(parent: &'e Element, cells: &mut Vec<TcInfo<'e>>) {
             }
             "sdt" => {
                 if let Some(content) = child.find(ns::W, "sdtContent") {
-                    collect_row_cells(content, cells);
+                    collect_row_cells(content, ctx, cells);
                 }
             }
-            "customXml" => collect_row_cells(child, cells),
+            "customXml" => collect_row_cells(child, ctx, cells),
             _ => {}
         }
     }

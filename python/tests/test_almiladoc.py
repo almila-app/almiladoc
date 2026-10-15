@@ -13,6 +13,7 @@ import almiladoc
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 OUTLINE = FIXTURES / "docx" / "handmade-outline.docx"
 RICH = FIXTURES / "docx" / "handmade-rich.docx"
+TABLES = FIXTURES / "docx" / "handmade-tables.docx"
 CSV = FIXTURES / "csv" / "sheet.csv"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
@@ -29,12 +30,12 @@ class AlmiladocTest(unittest.TestCase):
         self.assertIn("| --- |", almiladoc.to_markdown(CSV))
 
     def test_to_markdown_bytes_converts_in_memory(self):
-        markdown = almiladoc.to_markdown_bytes(RICH.read_bytes(), "docx")
-        self.assertIn("| Quarter | Widgets |", markdown)
+        markdown = almiladoc.to_markdown_bytes(TABLES.read_bytes(), "docx")
+        self.assertIn("| Head A | Head B | Head C |", markdown)
 
     def test_to_markdown_bytes_detects_the_format_when_none_is_named(self):
-        markdown = almiladoc.to_markdown_bytes(RICH.read_bytes())
-        self.assertIn("| Quarter | Widgets |", markdown)
+        markdown = almiladoc.to_markdown_bytes(TABLES.read_bytes())
+        self.assertIn("| Head A | Head B | Head C |", markdown)
         # CSV carries no signature, so it has to be named.
         with self.assertRaisesRegex(almiladoc.ConvertError, "unrecognized content"):
             almiladoc.to_markdown_bytes(CSV.read_bytes())
