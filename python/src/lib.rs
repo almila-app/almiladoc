@@ -1,4 +1,4 @@
-//! Python bindings for anydoc.
+//! Python bindings for almiladoc.
 
 use std::path::PathBuf;
 
@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 mod document;
 
 create_exception!(
-    anydoc,
+    almiladoc,
     ConvertError,
     PyException,
     "A complete conversion was impossible. Catch this to handle every kind of \
@@ -18,23 +18,23 @@ create_exception!(
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     UnsupportedError,
     ConvertError,
     "The format is unknown, or cannot be converted at all."
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     NeedsOcrError,
     ConvertError,
-    "Pages of a PDF are scanned or image-only and need OCR, which anydoc does \
+    "Pages of a PDF are scanned or image-only and need OCR, which almiladoc does \
      not do. `pages` lists them (1-indexed) and `page_count` is the length of \
      the document."
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     MalformedError,
     ConvertError,
     "The document is structurally unusable: no meaningful content could be \
@@ -43,14 +43,14 @@ create_exception!(
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     EncryptedError,
     ConvertError,
     "The document is encrypted or password-protected."
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     ResourceLimitError,
     ConvertError,
     "A fixed safety limit was crossed: decompression, nesting depth, node \
@@ -58,7 +58,7 @@ create_exception!(
 );
 
 create_exception!(
-    anydoc,
+    almiladoc,
     MissingPartError,
     ConvertError,
     "A part required for any meaningful output is absent. `part` names it."
@@ -67,22 +67,22 @@ create_exception!(
 /// Format names, as the extension that identifies each format. Container
 /// variants that share a parser (`.docm`, `.xlsm`, `.ppsx`, ...) map onto
 /// these via `format_from_bytes` or `format_from_extension`.
-const FORMATS: [(&str, anydoc::Format); 12] = [
-    ("doc", anydoc::Format::Doc),
-    ("docx", anydoc::Format::Docx),
-    ("odt", anydoc::Format::Odt),
-    ("pdf", anydoc::Format::Pdf),
-    ("ppt", anydoc::Format::Ppt),
-    ("pptx", anydoc::Format::Pptx),
-    ("rtf", anydoc::Format::Rtf),
-    ("epub", anydoc::Format::Epub),
-    ("xlsx", anydoc::Format::Excel),
-    ("ods", anydoc::Format::Ods),
-    ("odp", anydoc::Format::Odp),
-    ("csv", anydoc::Format::Csv),
+const FORMATS: [(&str, almiladoc::Format); 12] = [
+    ("doc", almiladoc::Format::Doc),
+    ("docx", almiladoc::Format::Docx),
+    ("odt", almiladoc::Format::Odt),
+    ("pdf", almiladoc::Format::Pdf),
+    ("ppt", almiladoc::Format::Ppt),
+    ("pptx", almiladoc::Format::Pptx),
+    ("rtf", almiladoc::Format::Rtf),
+    ("epub", almiladoc::Format::Epub),
+    ("xlsx", almiladoc::Format::Excel),
+    ("ods", almiladoc::Format::Ods),
+    ("odp", almiladoc::Format::Odp),
+    ("csv", almiladoc::Format::Csv),
 ];
 
-fn parse_format(name: &str) -> PyResult<anydoc::Format> {
+fn parse_format(name: &str) -> PyResult<almiladoc::Format> {
     FORMATS.iter().find(|(n, _)| *n == name).map(|(_, format)| *format).ok_or_else(|| {
         let names: Vec<&str> = FORMATS.iter().map(|(n, _)| *n).collect();
         PyValueError::new_err(format!(
@@ -92,7 +92,7 @@ fn parse_format(name: &str) -> PyResult<anydoc::Format> {
     })
 }
 
-fn format_name(format: anydoc::Format) -> &'static str {
+fn format_name(format: almiladoc::Format) -> &'static str {
     FORMATS
         .iter()
         .find(|(_, f)| *f == format)
@@ -103,34 +103,34 @@ fn format_name(format: anydoc::Format) -> &'static str {
 /// Raise the subclass that names the failure, carrying the part or limit at
 /// fault where the variant knows one. An unreadable file raises the `OSError`
 /// subclass any other read of it would.
-fn convert_error(py: Python<'_>, error: anydoc::ConvertError) -> PyErr {
+fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
     let error = match error {
-        anydoc::ConvertError::Io(e) => return e.into(),
+        almiladoc::ConvertError::Io(e) => return e.into(),
         other => other,
     };
     let message = error.to_string();
     // A variant added later raises the base class until it is named here.
     let raised = match &error {
-        anydoc::ConvertError::Unsupported(_) => UnsupportedError::new_err(message),
-        anydoc::ConvertError::NeedsOcr { .. } => NeedsOcrError::new_err(message),
-        anydoc::ConvertError::Malformed { .. } => MalformedError::new_err(message),
-        anydoc::ConvertError::Encrypted => EncryptedError::new_err(message),
-        anydoc::ConvertError::ResourceLimit { .. } => ResourceLimitError::new_err(message),
-        anydoc::ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
+        almiladoc::ConvertError::Unsupported(_) => UnsupportedError::new_err(message),
+        almiladoc::ConvertError::NeedsOcr { .. } => NeedsOcrError::new_err(message),
+        almiladoc::ConvertError::Malformed { .. } => MalformedError::new_err(message),
+        almiladoc::ConvertError::Encrypted => EncryptedError::new_err(message),
+        almiladoc::ConvertError::ResourceLimit { .. } => ResourceLimitError::new_err(message),
+        almiladoc::ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
         _ => ConvertError::new_err(message),
     };
     let detail = match &error {
-        anydoc::ConvertError::NeedsOcr { pages, page_count } => raised
+        almiladoc::ConvertError::NeedsOcr { pages, page_count } => raised
             .value(py)
             .setattr("pages", pages.clone())
             .and_then(|()| raised.value(py).setattr("page_count", *page_count)),
-        anydoc::ConvertError::Malformed { part, .. } => {
+        almiladoc::ConvertError::Malformed { part, .. } => {
             raised.value(py).setattr("part", part.as_deref())
         }
-        anydoc::ConvertError::ResourceLimit { limit, .. } => {
+        almiladoc::ConvertError::ResourceLimit { limit, .. } => {
             raised.value(py).setattr("limit", *limit)
         }
-        anydoc::ConvertError::MissingPart { part } => {
+        almiladoc::ConvertError::MissingPart { part } => {
             raised.value(py).setattr("part", part.as_str())
         }
         _ => Ok(()),
@@ -144,19 +144,19 @@ fn convert_error(py: Python<'_>, error: anydoc::ConvertError) -> PyErr {
 /// no signature and return `None`; so does anything unrecognized.
 #[pyfunction]
 fn format_from_bytes(data: Vec<u8>) -> Option<&'static str> {
-    anydoc::Format::from_bytes(&data).map(format_name)
+    almiladoc::Format::from_bytes(&data).map(format_name)
 }
 
 /// The format an extension names, with or without a leading dot.
 #[pyfunction]
 fn format_from_extension(extension: &str) -> Option<&'static str> {
-    anydoc::Format::from_extension(extension.trim_start_matches('.')).map(format_name)
+    almiladoc::Format::from_extension(extension.trim_start_matches('.')).map(format_name)
 }
 
 /// The format a path's extension names.
 #[pyfunction]
 fn format_from_path(path: PathBuf) -> Option<&'static str> {
-    anydoc::Format::from_path(&path).map(format_name)
+    almiladoc::Format::from_path(&path).map(format_name)
 }
 
 /// Convert a document file to Markdown. The format is detected from the file
@@ -164,7 +164,7 @@ fn format_from_path(path: PathBuf) -> Option<&'static str> {
 /// and unrecognizable containers.
 #[pyfunction]
 fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
-    py.detach(|| anydoc::to_markdown(&path)).map_err(|e| convert_error(py, e))
+    py.detach(|| almiladoc::to_markdown(&path)).map_err(|e| convert_error(py, e))
 }
 
 /// Convert an in-memory document to Markdown. Without a format, it is
@@ -174,7 +174,7 @@ fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
 #[pyo3(signature = (data, format=None))]
 fn to_markdown_bytes(py: Python<'_>, data: Vec<u8>, format: Option<&str>) -> PyResult<String> {
     let format = format.map(parse_format).transpose()?;
-    py.detach(|| anydoc::to_markdown_bytes(&data, format)).map_err(|e| convert_error(py, e))
+    py.detach(|| almiladoc::to_markdown_bytes(&data, format)).map_err(|e| convert_error(py, e))
 }
 
 /// Parse an in-memory document into the document model, which also carries
@@ -191,13 +191,13 @@ fn to_document(
 ) -> PyResult<document::Document> {
     let format = format.map(parse_format).transpose()?;
     let parsed =
-        py.detach(|| anydoc::to_document(&data, format)).map_err(|e| convert_error(py, e))?;
+        py.detach(|| almiladoc::to_document(&data, format)).map_err(|e| convert_error(py, e))?;
     document::document(py, parsed)
 }
 
 /// Convert documents to GitHub-Flavored Markdown.
 #[pymodule]
-fn _anydoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _almiladoc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_from_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(format_from_extension, m)?)?;
     m.add_function(wrap_pyfunction!(format_from_path, m)?)?;

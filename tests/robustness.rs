@@ -32,7 +32,7 @@ fn mutated_fixtures_never_panic() {
         if rel.starts_with("abuse") {
             continue; // abuse shapes are asserted separately; mutating them is slow
         }
-        let Some(format) = anydoc::Format::from_path(&path) else {
+        let Some(format) = almiladoc::Format::from_path(&path) else {
             continue;
         };
         let original = std::fs::read(&path).unwrap();
@@ -51,7 +51,7 @@ fn mutated_fixtures_never_panic() {
                 let cut = (rng.next() as usize) % bytes.len();
                 bytes.truncate(cut.max(1));
             }
-            let _ = anydoc::to_markdown_bytes(&bytes, format);
+            let _ = almiladoc::to_markdown_bytes(&bytes, format);
         }
     }
 }

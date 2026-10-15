@@ -16,7 +16,7 @@ use std::path::Path;
 /// Convert one file, capturing panics so a bad parser records a baseline
 /// instead of aborting the whole harness.
 fn convert(path: &Path) -> String {
-    let result = std::panic::catch_unwind(|| anydoc::to_markdown(path));
+    let result = std::panic::catch_unwind(|| almiladoc::to_markdown(path));
     match result {
         Ok(Ok(md)) => md,
         Ok(Err(e)) => format!("ERROR: {e:#}"),
@@ -80,7 +80,7 @@ const STRICT_ANNOTATIONS: bool = true;
 /// extension fallback.
 #[test]
 fn fixtures_detect_from_content() {
-    use anydoc::Format;
+    use almiladoc::Format;
     let expected = [
         ("doc", Some(Format::Doc)),
         ("docx", Some(Format::Docx)),
@@ -119,8 +119,8 @@ fn fixtures_detect_from_content() {
 #[test]
 fn scanned_pages_are_reported_not_dropped() {
     let mixed = std::fs::read(fixture_root().join("pdf/handmade-mixed.pdf")).unwrap();
-    match anydoc::to_markdown_bytes(&mixed, anydoc::Format::Pdf) {
-        Err(anydoc::ConvertError::NeedsOcr { pages, page_count }) => {
+    match almiladoc::to_markdown_bytes(&mixed, almiladoc::Format::Pdf) {
+        Err(almiladoc::ConvertError::NeedsOcr { pages, page_count }) => {
             assert_eq!((pages, page_count), (vec![2], 2));
         }
         other => panic!("expected NeedsOcr, got {other:?}"),
@@ -133,7 +133,7 @@ fn scanned_pages_are_reported_not_dropped() {
 fn embedded_ole_payload_is_retained() {
     let path = fixture_root().join("pptx").join("handmade-order.pptx");
     let bytes = std::fs::read(&path).unwrap();
-    let doc = anydoc::to_document(&bytes, anydoc::Format::Pptx).unwrap();
+    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Pptx).unwrap();
     let ole = doc
         .assets
         .iter()
@@ -148,7 +148,7 @@ fn embedded_ole_payload_is_retained() {
 fn docx_ole_payload_wins_over_its_preview_image() {
     let path = fixture_root().join("docx").join("handmade-ole.docx");
     let bytes = std::fs::read(&path).unwrap();
-    let doc = anydoc::to_document(&bytes, anydoc::Format::Docx).unwrap();
+    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Docx).unwrap();
     let ole = doc
         .assets
         .iter()
@@ -163,7 +163,7 @@ fn docx_ole_payload_wins_over_its_preview_image() {
 fn repeated_part_references_convert_and_dedupe() {
     let path = fixture_root().join("docx").join("handmade-manyrefs.docx");
     let bytes = std::fs::read(&path).unwrap();
-    let doc = anydoc::to_document(&bytes, anydoc::Format::Docx).unwrap();
+    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Docx).unwrap();
     assert_eq!(doc.assets.len(), 1, "one shared asset for seventy references");
 }
 
@@ -172,7 +172,7 @@ fn repeated_part_references_convert_and_dedupe() {
 #[test]
 fn doc_inline_picture_is_retained() {
     let bytes = std::fs::read(fixture_root().join("doc").join("text.doc")).unwrap();
-    let doc = anydoc::to_document(&bytes, anydoc::Format::Doc).unwrap();
+    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Doc).unwrap();
     assert!(
         doc.assets.iter().any(|a| a.media_type.starts_with("image/")),
         "expected an extracted picture asset, got {:?}",
@@ -185,7 +185,7 @@ fn doc_inline_picture_is_retained() {
 #[test]
 fn rtf_inline_picture_is_retained() {
     let bytes = std::fs::read(fixture_root().join("rtf").join("text.rtf")).unwrap();
-    let doc = anydoc::to_document(&bytes, anydoc::Format::Rtf).unwrap();
+    let doc = almiladoc::to_document(&bytes, almiladoc::Format::Rtf).unwrap();
     let png = doc.assets.iter().find(|a| a.media_type == "image/png");
     let png = png.expect("png pict retained as an asset");
     assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']), "payload decodes from hex");
@@ -201,9 +201,9 @@ fn abuse_fixtures_hard_fail() {
     assert!(!files.is_empty(), "abuse fixture set is missing");
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let result = anydoc::to_markdown(&path);
+        let result = almiladoc::to_markdown(&path);
         assert!(
-            matches!(result, Err(anydoc::ConvertError::ResourceLimit { .. })),
+            matches!(result, Err(almiladoc::ConvertError::ResourceLimit { .. })),
             "{name}: expected a ResourceLimit error, got {result:?}"
         );
     }

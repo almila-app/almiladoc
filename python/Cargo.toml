@@ -1,19 +1,17 @@
-# The wheel version: pyproject.toml reads `version` from here (maturin's
-# dynamic version), so bump it together with the workspace release version.
 [package]
-name = "anydoc-python"
-version = "0.2.4"
-edition = "2024"
-description = "Python bindings for anydoc"
-license = "MIT"
-repository = "https://github.com/firecrawl/anydoc"
+name = "almiladoc-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python binding for almiladoc"
 publish = false
 
 [lib]
+name = "_almiladoc"
 crate-type = ["cdylib"]
 
 [dependencies]
-anydoc = { path = ".." }
-# abi3-py310 pins the stable ABI: one wheel per platform covers every
-# CPython from 3.10 up.
-pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }
+almiladoc = { path = ".." }
+pyo3 = { version = "0.29.3", features = ["abi3-py311"] }

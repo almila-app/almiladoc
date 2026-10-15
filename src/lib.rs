@@ -1,4 +1,4 @@
-//! anydoc converts documents to GitHub-Flavored Markdown.
+//! almiladoc converts documents to GitHub-Flavored Markdown.
 //!
 //! Recovery and skipped-content events are reported through the [`log`]
 //! facade (debug/warn level); logging never changes conversion behavior and
@@ -33,7 +33,7 @@ pub enum Format {
     Odt,
     /// Converted with [pdf-inspector], which emits Markdown directly:
     /// [`to_document`] is unsupported for PDFs. Scanned or image-only pages
-    /// need OCR, which anydoc does not do: the document errors with
+    /// need OCR, which almiladoc does not do: the document errors with
     /// [`ConvertError::NeedsOcr`] naming them.
     ///
     /// [pdf-inspector]: https://github.com/firecrawl/pdf-inspector

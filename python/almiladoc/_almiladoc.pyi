@@ -1,4 +1,4 @@
-# Hand-written stubs for the compiled module. `tests/test_anydoc.py` checks
+# Hand-written stubs for the compiled module. `tests/test_almiladoc.py` checks
 # they stay in step with what the module actually exports.
 import os
 from typing import Literal, final
@@ -16,7 +16,7 @@ class UnsupportedError(ConvertError):
     """The format is unknown, or cannot be converted at all."""
 
 class NeedsOcrError(ConvertError):
-    """Pages of a PDF are scanned or image-only and need OCR, which anydoc
+    """Pages of a PDF are scanned or image-only and need OCR, which almiladoc
     does not do."""
 
     pages: list[int]

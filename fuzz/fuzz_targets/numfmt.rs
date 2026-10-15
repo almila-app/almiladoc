@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(bytes) = zip.finish() else {
         return;
     };
-    let _ = anydoc::to_markdown_bytes(bytes.into_inner().as_slice(), anydoc::Format::Excel);
+    let _ = almiladoc::to_markdown_bytes(bytes.into_inner().as_slice(), almiladoc::Format::Excel);
 });
 
 const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";

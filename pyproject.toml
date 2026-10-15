@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "almiladoc"
+description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown"
+readme = "README.md"
+license = "FSL-1.1-MIT AND MIT"
+license-files = ["LICENSE", "LICENSES/*.txt", "NOTICE", "REUSE.toml"]
+requires-python = ">=3.11"
+keywords = ["markdown", "docx", "pdf", "pptx", "xlsx", "epub", "converter", "document"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/almila-app/almiladoc#readme"
+Repository = "https://github.com/almila-app/almiladoc"
+Issues = "https://github.com/almila-app/almiladoc/issues"
+
+[tool.maturin]
+manifest-path = "python/Cargo.toml"
+python-source = "python"
+module-name = "almiladoc._almiladoc"

@@ -1,2 +1,0 @@
-docling
-unstructured[all-docs]

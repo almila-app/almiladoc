@@ -10,8 +10,28 @@ updates:
       cargo:
         patterns: ["*"]
         update-types: [minor, patch]
-  - package-ecosystem: pip
-    directory: /python
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-name: libfuzzer-sys
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: rust-toolchain
+    directory: /fuzz
     schedule:
       interval: weekly
     cooldown:

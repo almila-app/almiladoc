@@ -7,7 +7,6 @@ SPDX-License-Identifier = "MIT"
 
 [[annotations]]
 path = [
-    "README.md",
     "NOTICE",
     "REUSE.toml",
     "SECURITY.md",
@@ -23,7 +22,40 @@ SPDX-FileCopyrightText = "2026 Harun Erkurt"
 SPDX-License-Identifier = "FSL-1.1-MIT"
 
 [[annotations]]
-path = ".gitignore"
+path = [
+    ".gitignore",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "fuzz/Cargo.toml",
+    "fuzz/fuzz_targets/csv.rs",
+    "fuzz/fuzz_targets/doc.rs",
+    "fuzz/fuzz_targets/docx.rs",
+    "fuzz/fuzz_targets/epub.rs",
+    "fuzz/fuzz_targets/numfmt.rs",
+    "fuzz/fuzz_targets/odf.rs",
+    "fuzz/fuzz_targets/pdf.rs",
+    "fuzz/fuzz_targets/ppt.rs",
+    "fuzz/fuzz_targets/rtf.rs",
+    "fuzz/fuzz_targets/xls.rs",
+    "fuzz/fuzz_targets/xlsb.rs",
+    "fuzz/fuzz_targets/xlsx.rs",
+    "pyproject.toml",
+    "python/Cargo.toml",
+    "python/almiladoc/__init__.py",
+    "python/almiladoc/_almiladoc.pyi",
+    "python/src/document.rs",
+    "python/src/lib.rs",
+    "python/tests/test_almiladoc.py",
+    "src/error.rs",
+    "src/lib.rs",
+    "tests/fixtures/rtf/text.rtf",
+    "tests/gen_fixtures.py",
+    "tests/robustness.rs",
+    "tests/snapshots.rs",
+    "tests/snapshots/snapshots__rtf__text.rtf.snap",
+]
 precedence = "override"
 SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",

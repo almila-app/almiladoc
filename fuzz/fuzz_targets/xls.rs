@@ -18,5 +18,5 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     }
     let bytes = ole.into_inner().into_inner();
-    let _ = anydoc::to_markdown_bytes(&bytes, anydoc::Format::Excel);
+    let _ = almiladoc::to_markdown_bytes(&bytes, almiladoc::Format::Excel);
 });

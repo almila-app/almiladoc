@@ -15,7 +15,7 @@ pub enum ConvertError {
     /// The format is unknown or cannot be converted at all.
     Unsupported(String),
     /// Some pages of a PDF are scanned or image-only and need OCR, which
-    /// anydoc does not do. Nothing is returned for the document, so output
+    /// almiladoc does not do. Nothing is returned for the document, so output
     /// missing those pages never passes as complete.
     NeedsOcr {
         /// 1-indexed pages that need OCR.
@@ -95,8 +95,7 @@ impl From<std::io::Error> for ConvertError {
 
 impl ConvertError {
     /// Stable, machine-readable name for the variant: what a caller branches
-    /// on, where the `Display` message carries the detail. The Node and wasm
-    /// bindings publish it as `error.code`.
+    /// on, where the `Display` message carries the detail.
     pub fn code(&self) -> &'static str {
         match self {
             ConvertError::Unsupported(_) => "unsupported",
@@ -142,7 +141,7 @@ fn page_ranges(pages: &[u32]) -> String {
 mod tests {
     use super::*;
 
-    /// The CLI shows only the message, so it has to name the pages.
+    /// The message alone has to name the pages.
     #[test]
     fn needs_ocr_names_the_pages() {
         let scattered = ConvertError::NeedsOcr { pages: vec![2, 5, 6, 7, 12], page_count: 20 };
@@ -151,8 +150,7 @@ mod tests {
         assert_eq!(all.to_string(), "all 2 pages need OCR");
     }
 
-    /// The bindings publish these verbatim as `error.code`, so changing one
-    /// breaks every caller that branches on it.
+    /// Callers branch on these strings, so changing one breaks them.
     #[test]
     fn codes_name_every_variant() {
         assert_eq!(ConvertError::Unsupported(String::new()).code(), "unsupported");

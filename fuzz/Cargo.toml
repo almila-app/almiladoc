@@ -1,15 +1,16 @@
 [package]
-name = "anydoc-fuzz"
+name = "almiladoc-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "FSL-1.1-MIT AND MIT"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-anydoc = { path = ".." }
+almiladoc = { path = ".." }
 cfb = "0.14.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
