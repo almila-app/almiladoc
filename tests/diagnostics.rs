@@ -26,7 +26,7 @@ fn repack(bytes: &[u8], edits: &[(&str, Edit)]) -> Vec<u8> {
             let mut file = archive.by_index(i).unwrap();
             let mut content = Vec::new();
             file.read_to_end(&mut content).unwrap();
-            (file.name().to_string(), content)
+            (file.name().unwrap().into_owned(), content)
         })
         .collect();
     for &(name, edit) in edits {

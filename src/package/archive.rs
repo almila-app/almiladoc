@@ -128,19 +128,14 @@ impl<'a> Package<'a> {
         if file.size() > limits.max_entry_bytes {
             return Err(ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes));
         }
-        // The declared size can lie; read through a hard-capped reader. The
-        // cap is whichever budget has less room: the per-entry limit or what
-        // remains of the whole-archive total.
+        // zip fails a read past the declared size, so only the whole-archive
+        // total can still run out mid-entry.
         let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read);
         let cap = limits.max_entry_bytes.min(remaining_total);
         let bytes = read_entry(self.parse_ctx, &mut file, cap, name)?;
         let read = bytes.len() as u64;
         if read > cap {
-            return Err(if remaining_total < limits.max_entry_bytes {
-                ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes)
-            } else {
-                ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes)
-            });
+            return Err(ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes));
         }
         self.total_read += read;
         let bytes: Rc<[u8]> = Rc::from(bytes);
@@ -580,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_past_its_declared_size_is_held_to_the_contexts_entry_limit() {
+    fn an_entry_past_its_declared_size_is_malformed() {
         let mut data = one_part_zip("a.bin", &[7u8; 4096]);
         let understate =
             |at: usize, data: &mut [u8]| data[at..at + 4].copy_from_slice(&16u32.to_le_bytes());
@@ -592,7 +587,11 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("a.bin").unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 64 }));
+        assert!(
+            matches!(&err, ConvertError::Malformed { part: Some(part), reason: "corrupt archive entry" }
+                if part.as_str() == "a.bin"),
+            "{err:?}"
+        );
     }
 
     #[test]

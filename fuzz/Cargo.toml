@@ -12,7 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 almiladoc = { path = ".." }
 cfb = "0.15.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [[bin]]
 name = "docx"
