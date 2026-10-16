@@ -42,7 +42,7 @@ pdf-inspector = { version = "1.25.2", optional = true }
 quick-xml = "0.42.0"
 rayon = "1.12.0"
 sha2 = "0.11"
-thiserror = "2.0.19"
+thiserror = "2.0.21"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [features]
