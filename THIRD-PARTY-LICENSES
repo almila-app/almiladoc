@@ -661,7 +661,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- cfg-if 1.0.4
+- cfg-if 1.0.5
 
 Copyright (c) 2014 Alex Crichton
 
@@ -694,10 +694,10 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- bitflags 2.13.1
+- bitflags 2.13.2
 - log 0.4.34
 - num-traits 0.2.19
-- regex-automata 0.4.16
+- regex-automata 0.4.18
 - regex-syntax 0.8.11
 - regex 1.13.1
 
@@ -732,7 +732,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- uuid 1.24.0
+- uuid 1.27.0
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -827,7 +827,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- either 1.17.0
+- either 1.19.0
 
 Copyright (c) 2015
 
@@ -962,7 +962,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- indexmap 2.14.0
+- indexmap 2.14.2
 
 Copyright (c) 2016--2017
 
@@ -1554,40 +1554,8 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- cpufeatures 0.3.0
-
-Copyright (c) 2020-2025 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-
-Used by:
 - const-oid 0.10.2
+- cpufeatures 0.3.1
 
 Copyright (c) 2020-2026 The RustCrypto Project Developers
 
@@ -1687,7 +1655,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- hybrid-array 0.4.14
+- hybrid-array 0.4.15
 
 Copyright (c) 2022-2026 The RustCrypto Project Developers
 
@@ -1859,7 +1827,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- libc 0.2.189
+- libc 0.2.190
 
 Copyright (c) The Rust Project Developers
 
@@ -1892,7 +1860,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- rand 0.10.2
+- rand 0.10.3
 
 Copyright 2018 Developers of the Rand project
 Copyright (c) 2014 The Rust Project Developers
@@ -1926,7 +1894,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- rangemap 1.7.1
+- rangemap 1.8.0
 
 Copyright 2019 Jeffrey Parsons
 
@@ -2033,40 +2001,11 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- crc32fast 1.5.0
+- crc32fast 1.5.2
 
 MIT License
 
 Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-
-Used by:
-- tinyvec_macros 0.1.1
-
-MIT License
-
-Copyright (c) 2020 Soveu
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -2341,11 +2280,11 @@ Used by:
 - quote 1.0.47
 - serde_core 1.0.229
 - syn 2.0.119
-- syn 3.0.3
-- thiserror-impl 2.0.19
-- thiserror 2.0.19
+- syn 3.0.6
+- thiserror-impl 2.0.21
+- thiserror 2.0.21
 - typed-path 0.12.3
-- unicode-ident 1.0.24
+- unicode-ident 1.0.26
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -2376,7 +2315,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- tinyvec 1.12.0
+- tinyvec 1.13.3
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -2450,8 +2389,8 @@ Used by:
 - aho-corasick 1.1.5
 - csv-core 0.1.13
 - csv 1.4.0
-- jiff-core 0.1.0
-- jiff 0.2.35
+- jiff-core 0.1.1
+- jiff 0.2.38
 - memchr 2.8.3
 
 The MIT License (MIT)
@@ -2512,9 +2451,9 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- crossbeam-deque 0.8.7
-- crossbeam-epoch 0.9.20
-- crossbeam-utils 0.8.22
+- crossbeam-deque 0.8.8
+- crossbeam-epoch 0.9.21
+- crossbeam-utils 0.8.23
 
 The MIT License (MIT)
 
@@ -2579,7 +2518,7 @@ SOFTWARE.
 Unicode License v3 (Unicode-3.0)
 
 Used by:
-- unicode-ident 1.0.24
+- unicode-ident 1.0.26
 
 UNICODE LICENSE V3
 
@@ -2626,7 +2565,7 @@ authorization of the copyright holder.
 zlib License (Zlib)
 
 Used by:
-- zlib-rs 0.6.6
+- zlib-rs 0.6.8
 
 (C) 2024 Trifecta Tech Foundation 
 
