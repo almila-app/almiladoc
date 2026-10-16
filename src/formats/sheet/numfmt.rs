@@ -790,18 +790,19 @@ fn render_number(spec: &NumSpec, v_abs: f64, minus: bool) -> Option<String> {
     } else if spec.num_places > 0 {
         render_fraction(spec, v)?
     } else {
-        let (int_digits, frac_digits) = split_digits(v, spec.frac_places)?;
+        let (int_digits, frac_digits) = split_digits(v, spec.frac_places, 0)?;
         emit(spec, &int_digits, &frac_digits, "", 0)
     };
     Some(if minus { format!("-{body}") } else { body })
 }
 
-/// The rounded value's digits: the integer part (empty when zero, so `#`
-/// can drop it) and exactly `dp` fractional digits. Rounding happens on the
-/// 15-significant-digit decimal form, half away from zero, the way a
-/// spreadsheet displays - binary arithmetic would round 5.255 at two
-/// decimals to 5.25.
-fn split_digits(v: f64, dp: usize) -> Option<(String, String)> {
+/// The digits of `v / 10^exp10`, rounded: the integer part (empty when
+/// zero, so `#` can drop it) and exactly `dp` fractional digits. Rounding
+/// happens on the 15-significant-digit decimal form, half away from zero,
+/// the way a spreadsheet displays - binary arithmetic would round 5.255 at
+/// two decimals to 5.25 - and the power of ten only moves the decimal
+/// point.
+fn split_digits(v: f64, dp: usize, exp10: i64) -> Option<(String, String)> {
     if !v.is_finite() || v < 0.0 || dp > 512 {
         return None;
     }
@@ -814,8 +815,8 @@ fn split_digits(v: f64, dp: usize) -> Option<(String, String)> {
     let (mantissa, e) = repr.split_once('e')?;
     let e: i64 = e.parse().ok()?;
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    // Digits of round(v * 10^dp), by shifting or by decimal rounding.
-    let shift = e - 14 + dp as i64;
+    // Digits of round(v * 10^(dp - exp10)), by shifting or by decimal rounding.
+    let shift = e - 14 + i64::try_from(dp).ok()? - exp10;
     let scaled = if shift >= 0 {
         format!("{digits}{}", "0".repeat(usize::try_from(shift).ok()?))
     } else {
@@ -969,24 +970,22 @@ fn emit(
 fn render_scientific(spec: &NumSpec, v: f64) -> Option<String> {
     let n_int = spec.int_places.max(1) as i64;
     let (int_digits, frac_digits, exp10) = if v == 0.0 {
-        let (i, f) = split_digits(0.0, spec.frac_places)?;
+        let (i, f) = split_digits(0.0, spec.frac_places, 0)?;
         (i, f, 0i64)
     } else {
-        // The decimal exponent comes from the shortest round-trip
-        // formatting; the float log10 misplaces boundaries like 1000.
-        let repr = format!("{v:e}");
+        // The decimal exponent comes from the 15-digit form split_digits
+        // rounds; the float log10 misplaces boundaries like 1000.
+        let repr = format!("{v:.14e}");
         let mut e: i64 = repr.split('e').nth(1)?.parse().ok()?;
         // The exponent stays a multiple of the integer placeholder count
         // (engineering notation for `##0.0E+0`).
         e = e.div_euclid(n_int) * n_int;
-        let m = v / 10f64.powi(i32::try_from(e).ok()?);
-        let (mut i, mut f) = split_digits(m, spec.frac_places)?;
+        let (mut i, mut f) = split_digits(v, spec.frac_places, e)?;
         // Rounding at the display precision can carry into a new digit
         // (9.99 -> 10.0): renormalize.
         if i.len() > usize::try_from(n_int).ok()? {
             e += n_int;
-            let m = v / 10f64.powi(i32::try_from(e).ok()?);
-            (i, f) = split_digits(m, spec.frac_places)?;
+            (i, f) = split_digits(v, spec.frac_places, e)?;
         }
         (i, f, e)
     };
@@ -1011,7 +1010,7 @@ fn render_fraction(spec: &NumSpec, v: f64) -> Option<String> {
         // A zero integer part still shows when the whole value is zero.
         if num == 0 { "0".to_string() } else { String::new() }
     } else {
-        split_digits(whole, 0)?.0
+        split_digits(whole, 0, 0)?.0
     };
     // A zero numerator blanks the fraction: "5", not "5 0/1".
     let hide = has_int && num == 0;
@@ -1325,6 +1324,26 @@ mod tests {
         assert_eq!(fmt("0.00E+00", 0.0001234), "1.23E-04");
         assert_eq!(fmt("##0.0E+0", 0.0000123), "12.3E-6");
         assert_eq!(fmt("0.00E+00", 0.0), "0.00E+00");
+    }
+
+    #[test]
+    fn scientific_notation_keeps_decimal_boundaries() {
+        assert_eq!(fmt("0.00E+00", 1000.0), "1.00E+03");
+        assert_eq!(fmt("0.00E+00", 999.9995), "1.00E+03");
+        assert_eq!(fmt("0.00E+00", 1e15), "1.00E+15");
+        assert_eq!(fmt("0.00E+00", f64::MAX), "1.80E+308");
+        assert_eq!(fmt("##0.0E+0", 999_950.0), "1.0E+6");
+    }
+
+    #[test]
+    fn scientific_notation_reaches_subnormal_values() {
+        assert_eq!(fmt("0.00E+00", 5e-324), "4.94E-324");
+        assert_eq!(fmt("0.00E+00", 9.9999e-310), "1.00E-309");
+        assert_eq!(fmt("0.00E+00", f64::MIN_POSITIVE), "2.23E-308");
+        assert_eq!(fmt("##0.0E+0", 5e-324), "4.9E-324");
+        assert_eq!(fmt("##0.0E+0", 1e-320), "10.0E-321");
+        assert_eq!(fmt("##0.0E+0", 9.9999e-322), "998.0E-324");
+        assert_eq!(fmt("0.00E+00", 1e-322), "9.88E-323");
     }
 
     #[test]
