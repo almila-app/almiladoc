@@ -470,8 +470,18 @@ const CASES: &[Case] = &[
         &[("EPUB/text/ch001.xhtml", Recover)],
         &[(RECOVERED, Body, Some(2), 1)],
     ),
-    case(Fixture("epub/book.epub"), Format::Epub, &[("EPUB/text/ch001.xhtml", Corrupt)], &[]),
-    case(Fixture("epub/book.epub"), Format::Epub, &[("EPUB/media/file0.png", Corrupt)], &[]),
+    case(
+        Fixture("epub/book.epub"),
+        Format::Epub,
+        &[("EPUB/text/ch001.xhtml", Corrupt)],
+        &[(UNIT, Body, Some(2), 1)],
+    ),
+    case(
+        Fixture("epub/book.epub"),
+        Format::Epub,
+        &[("EPUB/media/file0.png", Corrupt)],
+        &[(DiagnosticCode::ImageUnavailable, Body, Some(2), 1)],
+    ),
     case(
         Fixture("epub/book.epub"),
         Format::Epub,

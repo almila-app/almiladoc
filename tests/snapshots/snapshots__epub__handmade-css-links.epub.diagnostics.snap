@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+hidden_omitted omitted body unit=4 count=2
+under fail: complete

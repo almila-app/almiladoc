@@ -7,6 +7,7 @@
 //! `start`, `reversed`, `type`, and per-item `value`.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::model::{
     AnchorId, Block, Cell, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
@@ -370,6 +371,9 @@ impl Builder<'_> {
     fn walk_elem(&mut self, elem: &Element, delta: StyleDelta) -> Result<(), ConvertError> {
         let props = self.element_props(elem);
         if props.hidden == Some(true) {
+            if holds_content(elem) {
+                self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+            }
             return Ok(());
         }
         // Cascade order: inherited delta, then the tag's presentational
@@ -464,7 +468,7 @@ impl Builder<'_> {
                     self.walk_children(elem, delta)?;
                 }
             }
-            "script" | "style" | "head" | "template" | "noscript" => {}
+            name if renders_nothing(name) => {}
             _ => self.walk_inline(elem, delta)?,
         }
         Ok(())
@@ -498,6 +502,14 @@ impl Builder<'_> {
                     Some(target) => self.inlines.push(Inline::Link { content, target }),
                     None => self.inlines.extend(content),
                 }
+            }
+            "video" | "audio" => {
+                self.parse_ctx.emit(DiagnosticCode::GraphicUnread, Region::Body);
+                self.walk_children(elem, delta)?;
+            }
+            "object" | "embed" | "iframe" => {
+                self.parse_ctx.emit(DiagnosticCode::EmbeddedObject, Region::Body);
+                self.walk_children(elem, delta)?;
             }
             _ => self.walk_children(elem, delta)?,
         }
@@ -549,6 +561,7 @@ impl Builder<'_> {
         delta: StyleDelta,
     ) -> Result<Vec<Block>, ConvertError> {
         let ordered = elem.local == "ol";
+        self.report_unread(elem, &["li"], false);
         let items: Vec<&Element> = elem.child_elems().filter(|e| e.local == "li").collect();
         if items.is_empty() {
             return Ok(Vec::new());
@@ -619,6 +632,46 @@ impl Builder<'_> {
         Ok(out)
     }
 
+    /// Reports each child of a list, table, row group or row that holds
+    /// content outside the children it reads (`read`): reading systems
+    /// render it unless it, or `elem` when `hidden`, is under `display: none`.
+    fn report_unread(&self, elem: &Element, read: &[&str], hidden: bool) {
+        for node in &elem.children {
+            let shown = match node {
+                Node::Text(text) if !text.trim().is_empty() => !hidden,
+                Node::Elem(child)
+                    if !read.contains(&child.local.as_str()) && holds_content(child) =>
+                {
+                    !hidden && self.shows_content(child)
+                }
+                _ => continue,
+            };
+            let code =
+                if shown { DiagnosticCode::BlockUnread } else { DiagnosticCode::HiddenOmitted };
+            self.parse_ctx.emit(code, Region::Body);
+        }
+    }
+
+    fn shows_content(&self, elem: &Element) -> bool {
+        let mut stack = vec![elem];
+        while let Some(elem) = stack.pop() {
+            if renders_nothing(&elem.local) || self.element_props(elem).hidden == Some(true) {
+                continue;
+            }
+            if matches!(elem.local.as_str(), "img" | "image") {
+                return true;
+            }
+            for node in &elem.children {
+                match node {
+                    Node::Text(text) if !text.trim().is_empty() => return true,
+                    Node::Text(_) => {}
+                    Node::Elem(child) => stack.push(child),
+                }
+            }
+        }
+        false
+    }
+
     fn parse_table(
         &mut self,
         elem: &Element,
@@ -630,6 +683,11 @@ impl Builder<'_> {
         let mut row_elems: Vec<(&Element, bool, usize)> = Vec::new();
         let mut group = 0usize;
         let mut in_implicit_group = false;
+        self.report_unread(
+            elem,
+            &["thead", "tbody", "tfoot", "tr", "caption", "colgroup", "col"],
+            false,
+        );
         for child in elem.child_elems() {
             match child.local.as_str() {
                 "thead" | "tbody" | "tfoot" => {
@@ -638,13 +696,19 @@ impl Builder<'_> {
                         group += 1;
                     }
                     let in_head = child.local == "thead";
+                    let hidden = self.element_props(child).hidden == Some(true);
+                    self.report_unread(child, &["tr"], hidden);
                     for tr in child.child_elems().filter(|e| e.local == "tr") {
+                        let row_hidden = hidden || self.element_props(tr).hidden == Some(true);
+                        self.report_unread(tr, &["td", "th"], row_hidden);
                         row_elems.push((tr, in_head, group));
                     }
                     group += 1;
                 }
                 "tr" => {
                     in_implicit_group = true;
+                    let hidden = self.element_props(child).hidden == Some(true);
+                    self.report_unread(child, &["td", "th"], hidden);
                     row_elems.push((child, false, group));
                 }
                 _ => {}
@@ -698,6 +762,31 @@ impl Builder<'_> {
         table.header_rows = resolve_header_rows(&table, header_rows);
         Ok(Some(Block::Table(table)))
     }
+}
+
+/// Elements whose content no reading system renders in the page.
+fn renders_nothing(name: &str) -> bool {
+    matches!(name, "script" | "style" | "head" | "template" | "noscript")
+}
+
+fn holds_content(elem: &Element) -> bool {
+    let mut stack = vec![elem];
+    while let Some(elem) = stack.pop() {
+        if renders_nothing(&elem.local) {
+            continue;
+        }
+        if matches!(elem.local.as_str(), "img" | "image") {
+            return true;
+        }
+        for node in &elem.children {
+            match node {
+                Node::Text(text) if !text.trim().is_empty() => return true,
+                Node::Text(_) => {}
+                Node::Elem(child) => stack.push(child),
+            }
+        }
+    }
+    false
 }
 
 fn merge_inline_tag(elem: &Element, mut delta: StyleDelta) -> StyleDelta {
@@ -790,6 +879,7 @@ fn has_block_children(elem: &Element) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::{DiagnosticCode, Region};
     use crate::model::{CellSlot, ImageSource, Style};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
@@ -836,6 +926,147 @@ mod tests {
         ));
         limits.max_expansion = 2;
         assert!(to_blocks(&ParseCtx::new(&limits), body, &Stylesheet::default(), &NullCtx).is_ok());
+    }
+
+    type Reported = (DiagnosticCode, Region, u64);
+
+    fn diagnose(html: &str, css: &str) -> Vec<Reported> {
+        let tree = parse_xml(&ParseCtx::default(), html.as_bytes(), Role::Probe).unwrap();
+        let body = tree.child_elems().next().unwrap();
+        let mut sheet = Stylesheet::default();
+        sheet.add(css);
+        let parse_ctx = ParseCtx::default();
+        to_blocks(&parse_ctx, body, &sheet, &NullCtx).unwrap();
+        parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect()
+    }
+
+    #[test]
+    fn content_left_unread_or_hidden_reports_once_per_element() {
+        use DiagnosticCode::{BlockUnread, EmbeddedObject, GraphicUnread, HiddenOmitted};
+        const BODY: Region = Region::Body;
+        let cases: &[(&str, &str, &str, &[Reported])] = &[
+            (
+                "hidden paragraph",
+                r#"<p style="display: none">x</p>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "hidden picture",
+                r#"<div style="display: none"><img src="a.png"/></div>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "hidden by a rule",
+                r#"<p class="h">x</p><p class="h">y</p>"#,
+                ".h { display: none }",
+                &[(HiddenOmitted, BODY, 2)],
+            ),
+            ("hidden and empty", r#"<div style="display: none"> <br/></div>"#, "", &[]),
+            ("hidden template", "<template><p>x</p></template>", "template { display: none }", &[]),
+            (
+                "hidden script only",
+                r#"<div style="display: none"><script>x</script></div>"#,
+                "",
+                &[],
+            ),
+            (
+                "list in a list",
+                "<ul><li>a</li><ul><li>b</li></ul></ul>",
+                "",
+                &[(BlockUnread, BODY, 1)],
+            ),
+            ("paragraph in a list", "<ol><li>a</li><p>b</p></ol>", "", &[(BlockUnread, BODY, 1)]),
+            ("text in a list", "<ul><li>a</li>b</ul>", "", &[(BlockUnread, BODY, 1)]),
+            ("list without items", "<ul><div>a</div></ul>", "", &[(BlockUnread, BODY, 1)]),
+            (
+                "hidden child of a list",
+                r#"<ul><p class="h">x</p><li>a</li></ul>"#,
+                ".h { display: none }",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "hidden content in a division in a list",
+                r#"<ul><div><p style="display: none">x</p></div><li>a</li></ul>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "hidden text beside shown text in a list",
+                r#"<ul><li>a</li><div>b<span style="display: none">x</span></div></ul>"#,
+                "",
+                &[(BlockUnread, BODY, 1)],
+            ),
+            (
+                "script, space and a break in a list",
+                "<ul> <script>x</script><br/><li>a</li></ul>",
+                "",
+                &[],
+            ),
+            (
+                "paragraph in a table",
+                "<table><p>x</p><tr><td>a</td></tr></table>",
+                "",
+                &[(BlockUnread, BODY, 1)],
+            ),
+            (
+                "text in a row group",
+                "<table><tbody>x<tr><td>a</td></tr></tbody></table>",
+                "",
+                &[(BlockUnread, BODY, 1)],
+            ),
+            (
+                "division in a row",
+                "<table><tr><div>x</div><td>a</td></tr></table>",
+                "",
+                &[(BlockUnread, BODY, 1)],
+            ),
+            (
+                "division in a hidden row group",
+                r#"<table><tbody style="display: none"><div>x</div><tr><td>a</td></tr></tbody></table>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "text in a row of a hidden row group",
+                r#"<table><tbody class="h"><tr>x<td>a</td></tr></tbody></table>"#,
+                ".h { display: none }",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "division in a hidden row",
+                r#"<table><tr style="display: none"><div>x</div><td>a</td></tr></table>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            (
+                "division in a hidden row of a row group",
+                r#"<table><tbody><tr style="display: none"><div>x</div><td>a</td></tr></tbody></table>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
+            ("video", r#"<video src="a.mp4">fallback</video>"#, "", &[(GraphicUnread, BODY, 1)]),
+            ("audio", r#"<p><audio src="a.mp3"/></p>"#, "", &[(GraphicUnread, BODY, 1)]),
+            (
+                "object",
+                r#"<object data="a.svg">fallback</object>"#,
+                "",
+                &[(EmbeddedObject, BODY, 1)],
+            ),
+            ("embed", r#"<embed src="a.swf"/>"#, "", &[(EmbeddedObject, BODY, 1)]),
+            ("iframe", r#"<iframe src="a.xhtml"/>"#, "", &[(EmbeddedObject, BODY, 1)]),
+            (
+                "caption and columns",
+                "<table><caption>c</caption><colgroup><col/></colgroup><thead><tr><th>h</th></tr></thead><tr><td>a</td></tr></table>",
+                "",
+                &[],
+            ),
+        ];
+        for (name, body, css, expected) in cases {
+            let reported = diagnose(&format!("<body>{body}</body>"), css);
+            assert_eq!(reported, *expected, "{name}");
+        }
     }
 
     fn para_text(block: &Block) -> String {

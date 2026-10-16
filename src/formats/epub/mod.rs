@@ -2,10 +2,10 @@
 //! chapter-scoped anchors so intra-book navigation survives.
 
 use crate::ctx::ParseCtx;
-use crate::diagnostics::Region;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::model::{AnchorId, Block, Document, ImageSource, Inline, LinkTarget};
-use crate::package::archive::Role;
+use crate::package::archive::{Role, report};
 use crate::package::xml::Element;
 use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::{AssetSink, media_type_for};
@@ -63,8 +63,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         spine_entries += 1;
         let target = match path::resolve(&opf_path, href) {
             Ok(t) => t,
-            Err(e) => {
-                log::warn!("skipping chapter with unresolvable href {href:?}: {e}");
+            Err(_) => {
+                parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
                 continue;
             }
         };
@@ -74,14 +74,14 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     }
 
     let assets = RefCell::new(AssetSink::new(parse_ctx));
-    let mut css_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut sheets = Sheets::default();
     let mut converted = 0usize;
     for (position, chapter_path) in spine_paths.iter().enumerate() {
         let _unit = parse_ctx.enter_unit(position);
         let Some(tree) =
             pkg.borrow_mut().related_xml_part(chapter_path, Role::Reported(Region::Body))?
         else {
-            log::warn!("skipping unusable chapter {chapter_path}");
+            parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             continue;
         };
         let Some(body) = tree
@@ -89,14 +89,15 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
             .find(|e| e.local == "html")
             .and_then(|h| h.child_elems().find(|e| e.local == "body"))
         else {
-            log::warn!("skipping chapter {chapter_path}: no body element");
+            parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             continue;
         };
         let css = {
             let _shared = parse_ctx.outside_units();
-            chapter_stylesheet(&tree, chapter_path, &pkg, &mut css_cache)?
+            chapter_stylesheet(parse_ctx, &tree, chapter_path, &pkg, &mut sheets)?
         };
         let ctx = ChapterCtx {
+            parse_ctx,
             pkg: &pkg,
             assets: &assets,
             chapter_path: chapter_path.clone(),
@@ -115,13 +116,22 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     Ok(doc)
 }
 
+/// Linked stylesheets across chapters: each part is read, and each
+/// unresolvable href reported, once.
+#[derive(Default)]
+struct Sheets {
+    parts: HashMap<String, Option<String>>,
+    unresolvable: HashSet<String>,
+}
+
 /// A chapter's CSS cascade: its linked stylesheets and inline `<style>`
-/// blocks, in document order. Stylesheet parts are cached across chapters.
+/// blocks, in document order.
 fn chapter_stylesheet(
+    parse_ctx: &ParseCtx,
     tree: &Element,
     chapter_path: &str,
     pkg: &RefCell<Package>,
-    cache: &mut HashMap<String, Option<String>>,
+    sheets: &mut Sheets,
 ) -> Result<Stylesheet, ConvertError> {
     let mut css = Stylesheet::default();
     let mut stack: Vec<&Element> = tree.child_elems().collect();
@@ -133,16 +143,25 @@ fn chapter_stylesheet(
                 let is_sheet = rel.split_whitespace().any(|r| r.eq_ignore_ascii_case("stylesheet"));
                 if is_sheet && let Some(href) = elem.attr_any("href") {
                     let Ok(target) = path::resolve(chapter_path, href) else {
+                        if sheets.unresolvable.insert(href.to_string()) {
+                            report(parse_ctx, Role::Formatting.unreadable());
+                        }
                         continue;
                     };
-                    if !cache.contains_key(&target.path) {
+                    if !sheets.parts.contains_key(&target.path) {
                         let text = pkg
                             .borrow_mut()
                             .related_part(&target.path, Role::Formatting)?
-                            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-                        cache.insert(target.path.clone(), text);
+                            .map(|bytes| match std::str::from_utf8(&bytes) {
+                                Ok(text) => text.to_string(),
+                                Err(_) => {
+                                    report(parse_ctx, Role::Formatting.undecodable());
+                                    String::from_utf8_lossy(&bytes).into_owned()
+                                }
+                            });
+                        sheets.parts.insert(target.path.clone(), text);
                     }
-                    if let Some(Some(text)) = cache.get(&target.path) {
+                    if let Some(Some(text)) = sheets.parts.get(&target.path) {
                         css.add(text);
                     }
                 }
@@ -159,6 +178,7 @@ fn chapter_stylesheet(
 }
 
 struct ChapterCtx<'a, 'b> {
+    parse_ctx: &'b ParseCtx<'a>,
     pkg: &'b RefCell<Package<'a>>,
     assets: &'b RefCell<AssetSink>,
     chapter_path: String,
@@ -195,17 +215,21 @@ impl HtmlCtx for ChapterCtx<'_, '_> {
         if is_absolute_uri(src) {
             return Ok(Some(ImageSource::External(src.to_string())));
         }
-        let Ok(target) = path::resolve(&self.chapter_path, src) else {
+        let bytes = match path::resolve(&self.chapter_path, src) {
+            Ok(target) => self
+                .pkg
+                .borrow_mut()
+                .related_part(&target.path, Role::Reported(Region::Body))?
+                .map(|bytes| (target.path, bytes)),
+            Err(_) => None,
+        };
+        let Some((path, bytes)) = bytes else {
+            self.parse_ctx.emit(DiagnosticCode::ImageUnavailable, Region::Body);
             return Ok(None);
         };
-        match self.pkg.borrow_mut().related_part(&target.path, Role::Reported(Region::Body))? {
-            Some(bytes) => {
-                let media = media_type_for(&target.path);
-                let id = self.assets.borrow_mut().add(media, target.path, &bytes)?;
-                Ok(Some(ImageSource::Asset(id)))
-            }
-            None => Ok(None),
-        }
+        let media = media_type_for(&path);
+        let id = self.assets.borrow_mut().add(media, path, &bytes)?;
+        Ok(Some(ImageSource::Asset(id)))
     }
 
     fn anchor_id(&self, raw: &str) -> AnchorId {
@@ -226,6 +250,120 @@ fn scoped(chapter_path: &str, fragment: Option<&str>) -> AnchorId {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    type Reported = (DiagnosticCode, Region, Option<u32>, u64);
+
+    fn book(spine: &[&str], parts: &[(&str, &[u8])]) -> Vec<u8> {
+        let items: String = spine
+            .iter()
+            .enumerate()
+            .map(|(i, href)| {
+                format!(r#"<item id="i{i}" href="{href}" media-type="application/xhtml+xml"/>"#)
+            })
+            .collect();
+        let refs: String =
+            (0..spine.len()).map(|i| format!(r#"<itemref idref="i{i}"/>"#)).collect();
+        let container = r#"<?xml version="1.0"?>
+            <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+            <rootfiles><rootfile full-path="c.opf"/></rootfiles></container>"#;
+        let opf = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/>
+            <manifest>{items}</manifest><spine>{refs}</spine></package>"#
+        );
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let fixed: [(&str, &[u8]); 2] =
+            [("META-INF/container.xml", container.as_bytes()), ("c.opf", opf.as_bytes())];
+        for (name, body) in fixed.iter().chain(parts) {
+            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    fn chapter(head: &str, body: &str) -> Vec<u8> {
+        format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>{head}</head><body><p>text</p>{body}</body></html>"#
+        )
+        .into_bytes()
+    }
+
+    fn diagnose(epub: &[u8]) -> Vec<Reported> {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, epub).unwrap();
+        let unit = |d: &crate::diagnostics::Diagnostic| d.unit.map(std::num::NonZeroU32::get);
+        parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, unit(&d), d.count)).collect()
+    }
+
+    #[test]
+    fn each_lost_site_reports_its_code_once_where_it_sits() {
+        use DiagnosticCode::{ImageUnavailable, UnitUnreadable};
+        const BODY: Region = Region::Body;
+        let plain = chapter("", "");
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><text>page</text></svg>"#;
+        let unresolvable = chapter("", r#"<img src="a%2Fb.png" alt="a"/>"#);
+        let absent = chapter("", r#"<img src="gone.png"/>"#);
+        let present = chapter("", r#"<img src="pic.png"/><img src="https://example.org/p.png"/>"#);
+        let cases: Vec<(&str, Vec<u8>, Vec<Reported>)> = vec![
+            (
+                "chapter href unresolvable",
+                book(&["a%2Fb.xhtml", "ch.xhtml"], &[("ch.xhtml", &plain)]),
+                vec![(UnitUnreadable, BODY, None, 1)],
+            ),
+            (
+                "chapter part absent",
+                book(&["gone.xhtml", "ch.xhtml"], &[("ch.xhtml", &plain)]),
+                vec![(UnitUnreadable, BODY, Some(1), 1)],
+            ),
+            (
+                "spine item with no body",
+                book(&["ch.xhtml", "page.svg"], &[("ch.xhtml", &plain), ("page.svg", svg)]),
+                vec![(UnitUnreadable, BODY, Some(2), 1)],
+            ),
+            (
+                "image src unresolvable",
+                book(&["ch.xhtml"], &[("ch.xhtml", &unresolvable)]),
+                vec![(ImageUnavailable, BODY, Some(1), 1)],
+            ),
+            (
+                "image part absent",
+                book(&["ch.xhtml"], &[("ch.xhtml", &absent)]),
+                vec![(ImageUnavailable, BODY, Some(1), 1)],
+            ),
+            (
+                "image present or outside the package",
+                book(&["ch.xhtml"], &[("ch.xhtml", &present), ("pic.png", b"png")]),
+                vec![],
+            ),
+        ];
+        for (name, epub, expected) in cases {
+            assert_eq!(diagnose(&epub), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_linked_stylesheet_reports_once_however_many_chapters_link_it() {
+        use DiagnosticCode::{InvalidStyleEncoding, StylePartUnreadable};
+        const CONTAINER: Region = Region::Container;
+        let cases: [(&str, &str, &[u8], &[Reported]); 4] = [
+            ("href unresolvable", "a%2Fb.css", b"", &[(StylePartUnreadable, CONTAINER, None, 1)]),
+            ("part absent", "gone.css", b"", &[(StylePartUnreadable, CONTAINER, None, 1)]),
+            (
+                "not UTF-8",
+                "s.css",
+                b"p { font-weight: bold }\xff",
+                &[(InvalidStyleEncoding, CONTAINER, None, 1)],
+            ),
+            ("UTF-8", "s.css", "p::before { content: \"\u{e9}\" }".as_bytes(), &[]),
+        ];
+        for (name, href, sheet, expected) in cases {
+            let linking = chapter(&format!(r#"<link rel="stylesheet" href="{href}"/>"#), "");
+            let epub = book(
+                &["one.xhtml", "two.xhtml"],
+                &[("one.xhtml", &linking), ("two.xhtml", &linking), ("s.css", sheet)],
+            );
+            assert_eq!(diagnose(&epub), expected, "{name}");
+        }
+    }
 
     #[test]
     fn a_part_repeated_across_the_spine_is_read_once() {

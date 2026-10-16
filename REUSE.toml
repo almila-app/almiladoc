@@ -57,6 +57,8 @@ path = [
     "tests/limits.rs",
     "tests/snapshots/snapshots__doc__text.doc.diagnostics.snap",
     "tests/snapshots/snapshots__docx__handmade-run-marks.docx.snap",
+    "tests/snapshots/snapshots__epub__handmade-css-links.epub.diagnostics.snap",
+    "tests/snapshots/snapshots__epub__handmade-features.epub.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__brokenpersist--recovers.ppt.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__mismatched--recovers.docx.diagnostics.snap",
