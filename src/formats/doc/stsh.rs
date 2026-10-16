@@ -2,13 +2,14 @@
 //! `istdBase` inheritance chains and UPX formatting payloads, resolved into
 //! effective per-style character formatting and paragraph properties.
 
+use super::Fib;
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::formats::doc::sprm::{PapDelta, apply_pap_sprms, apply_style_chpx};
 use crate::model::Style;
-use crate::shared::binary::{decode_utf16, get_u16, get_u32, utf16le_units};
+use crate::shared::binary::{decode_utf16, get_u16, utf16le_units};
 use crate::shared::blockstyle::{self, BlockStyle};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const ISTD_NIL: u16 = 0x0FFF;
 
@@ -52,13 +53,11 @@ struct Std {
 /// The style sheet; one that does not read in full is `part_unreadable`
 /// when the document has list tables, whose labels styles can carry, and
 /// `style_part_unreadable` otherwise.
-pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], has_lists: bool) -> Stylesheet {
-    let lcb = get_u32(word_doc, 0xA6).unwrap_or(0) as usize;
-    let fc = get_u32(word_doc, 0xA2).unwrap_or(0) as usize;
-    let (stds, complete) = match table.get(fc..fc.saturating_add(lcb)) {
-        _ if lcb == 0 => (HashMap::new(), true),
+pub fn parse(parse_ctx: &ParseCtx, fib: Fib<'_>, table: &[u8], has_lists: bool) -> Stylesheet {
+    let (stds, complete) = match fib.table_range(table, 0xA2) {
+        Some([]) => (BTreeMap::new(), true),
         Some(stsh) => parse_stds(parse_ctx, stsh),
-        None => (HashMap::new(), false),
+        None => (BTreeMap::new(), false),
     };
     if !complete {
         if has_lists {
@@ -67,18 +66,12 @@ pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], has_lists: boo
             parse_ctx.emit(DiagnosticCode::StylePartUnreadable, Region::Container);
         }
     }
-    let mut sheet = Stylesheet::default();
-    let mut memo: HashMap<u16, ResolvedStyle> = HashMap::new();
-    for &istd in stds.keys() {
-        let resolved = resolve(parse_ctx, istd, &stds, &mut memo);
-        sheet.resolved.insert(istd, resolved);
-    }
-    sheet
+    resolve_all(parse_ctx, &stds)
 }
 
 /// The style records of an `STSH`, and whether every one read.
-fn parse_stds(parse_ctx: &ParseCtx, stsh: &[u8]) -> (HashMap<u16, Std>, bool) {
-    let mut stds: HashMap<u16, Std> = HashMap::new();
+fn parse_stds(parse_ctx: &ParseCtx, stsh: &[u8]) -> (BTreeMap<u16, Std>, bool) {
+    let mut stds = BTreeMap::new();
     let (Some(cb_stshi), Some(cstd), Some(cb_std_base)) =
         (get_u16(stsh, 0), get_u16(stsh, 2), get_u16(stsh, 4))
     else {
@@ -164,56 +157,87 @@ fn parse_std(parse_ctx: &ParseCtx, record: &[u8], cb_std_base: usize) -> Option<
     })
 }
 
-/// Resolve one style's `istdBase` chain, memoized across styles. Cycles
-/// (self-referencing bases exist in corrupt files) are cut by a visited set
-/// and resolve from their acyclic prefix; valid chains of any depth resolve
-/// fully.
-fn resolve(
-    parse_ctx: &ParseCtx,
-    istd: u16,
-    stds: &HashMap<u16, Std>,
-    memo: &mut HashMap<u16, ResolvedStyle>,
-) -> ResolvedStyle {
-    if let Some(hit) = memo.get(&istd) {
-        return hit.clone();
+/// Every style resolved over its `istdBase` chain. Each cycle is cut once,
+/// at its lowest istd, which then resolves with no base, so a cyclic sheet
+/// resolves one way whatever order its styles are visited in.
+fn resolve_all(parse_ctx: &ParseCtx, stds: &BTreeMap<u16, Std>) -> Stylesheet {
+    let bases = acyclic_bases(parse_ctx, stds);
+    let mut resolved = HashMap::with_capacity(stds.len());
+    for &istd in stds.keys() {
+        resolve(istd, stds, &bases, &mut resolved);
     }
-    // Walk root-ward collecting the unresolved suffix of the chain.
-    let mut chain: Vec<u16> = Vec::new();
-    let mut visiting: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    Stylesheet { resolved, default: ResolvedStyle::default() }
+}
+
+/// Each style's base among the parsed styles, with every cycle cut at its
+/// lowest istd and reported once as `style_cycle`; a style based on itself
+/// has no base.
+fn acyclic_bases(parse_ctx: &ParseCtx, stds: &BTreeMap<u16, Std>) -> HashMap<u16, u16> {
+    let mut bases: HashMap<u16, u16> = stds
+        .iter()
+        .filter(|&(&istd, std)| {
+            ![ISTD_NIL, istd].contains(&std.istd_base) && stds.contains_key(&std.istd_base)
+        })
+        .map(|(&istd, std)| (istd, std.istd_base))
+        .collect();
+    let mut walked: HashMap<u16, (usize, usize)> = HashMap::with_capacity(stds.len());
+    for (walk, &start) in stds.keys().enumerate() {
+        let mut path = Vec::new();
+        let mut cursor = Some(start);
+        while let Some(cur) = cursor {
+            match walked.get(&cur) {
+                Some(&(seen, at)) if seen == walk => {
+                    if let Some(&lowest) = path.get(at..).and_then(|cycle| cycle.iter().min()) {
+                        bases.remove(&lowest);
+                    }
+                    parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
+                    break;
+                }
+                Some(_) => break,
+                None => {}
+            }
+            walked.insert(cur, (walk, path.len()));
+            path.push(cur);
+            cursor = bases.get(&cur).copied();
+        }
+    }
+    bases
+}
+
+/// Resolve `istd` over its acyclic chain, memoised in `resolved`.
+fn resolve(
+    istd: u16,
+    stds: &BTreeMap<u16, Std>,
+    bases: &HashMap<u16, u16>,
+    resolved: &mut HashMap<u16, ResolvedStyle>,
+) {
+    let mut chain = Vec::new();
     let mut base = ResolvedStyle::default();
     let mut cursor = Some(istd);
     while let Some(cur) = cursor {
-        if let Some(hit) = memo.get(&cur) {
+        if let Some(hit) = resolved.get(&cur) {
             base = hit.clone();
-            break;
-        }
-        if !visiting.insert(cur) {
-            parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
             break;
         }
         let Some(std) = stds.get(&cur) else {
             break;
         };
-        chain.push(cur);
-        cursor = (std.istd_base != ISTD_NIL && std.istd_base != cur).then_some(std.istd_base);
+        chain.push((cur, std));
+        cursor = bases.get(&cur).copied();
     }
-    // Apply the chain root-to-leaf over the resolved base.
-    for &cur in chain.iter().rev() {
-        let std = &stds[&cur];
-        if std.is_paragraph && std.upx_papx.len() >= 2 {
-            // The paragraph UPX starts with the style's own istd.
+    for &(cur, std) in chain.iter().rev() {
+        if let Some(papx) = std.upx_papx.get(2..).filter(|_| std.is_paragraph) {
             let mut delta = PapDelta::default();
-            apply_pap_sprms(&std.upx_papx[2..], &[], &mut delta);
+            apply_pap_sprms(papx, &[], &mut delta);
             base.pap = base.pap.merge(delta);
         }
         base.chp = apply_style_chpx(&std.upx_chpx, base.chp);
         if let sti @ 1..=9 = std.sti {
-            base.heading = Some(sti as u8);
+            base.heading = u8::try_from(sti).ok();
         }
         base.block = std.block.or(base.block);
-        memo.insert(cur, base.clone());
+        resolved.insert(cur, base.clone());
     }
-    base
 }
 
 #[cfg(test)]
@@ -231,32 +255,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deep_istd_base_chains_resolve_fully() {
-        // A valid chain far beyond the old 16-style cutoff must still
-        // inherit from its root.
-        let mut stds = HashMap::new();
-        stds.insert(0u16, style(3, ISTD_NIL)); // built-in heading 3
-        for i in 1u16..=40 {
-            stds.insert(i, style(0x0FFE, i - 1));
-        }
-        let mut memo = HashMap::new();
-        assert_eq!(resolve(&ParseCtx::default(), 40, &stds, &mut memo).heading, Some(3));
+    const BOLD: [u8; 3] = [0x35, 0x08, 0x01];
+
+    fn bold(mut std: Std) -> Std {
+        std.upx_chpx = BOLD.to_vec();
+        std
+    }
+
+    fn cycles(parse_ctx: &ParseCtx) -> u64 {
+        let diagnostics = parse_ctx.diagnostics();
+        let cycles = diagnostics
+            .iter()
+            .filter(|d| (d.code, d.region) == (DiagnosticCode::StyleCycle, Region::Container));
+        cycles.map(|d| d.count).sum()
     }
 
     #[test]
-    fn istd_base_cycles_resolve_from_the_acyclic_prefix() {
-        let mut stds = HashMap::new();
-        stds.insert(0u16, style(2, 1)); // based on a member of the cycle
-        stds.insert(1u16, style(0x0FFE, 2));
-        stds.insert(2u16, style(0x0FFE, 1));
+    fn deep_istd_base_chains_resolve_fully() {
+        let mut stds = BTreeMap::new();
+        stds.insert(0u16, style(3, ISTD_NIL));
+        for i in 1u16..=40 {
+            stds.insert(i, style(0x0FFE, i - 1));
+        }
+        assert_eq!(resolve_all(&ParseCtx::default(), &stds).get(40).heading, Some(3));
+    }
+
+    #[test]
+    fn a_cycle_is_cut_at_its_lowest_istd_and_reported_once() {
+        let stds = BTreeMap::from([
+            (0u16, style(2, 3)),
+            (3, style(0x0FFE, 5)),
+            (5, bold(style(0x0FFE, 1))),
+            (1, style(4, 3)),
+            (7, style(0x0FFE, 7)),
+            (8, style(0x0FFE, ISTD_NIL)),
+        ]);
         let parse_ctx = ParseCtx::default();
-        let mut memo = HashMap::new();
-        assert_eq!(resolve(&parse_ctx, 0, &stds, &mut memo).heading, Some(2));
-        assert_eq!(resolve(&parse_ctx, 1, &stds, &mut memo).heading, None);
-        let reported: Vec<_> =
-            parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
-        assert_eq!(reported, [(DiagnosticCode::StyleCycle, Region::Container, 1)]);
+        let sheet = resolve_all(&parse_ctx, &stds);
+        let shown = |istd| (sheet.get(istd).heading, sheet.get(istd).chp.bold);
+        assert_eq!(shown(1), (Some(4), false));
+        assert_eq!(shown(5), (Some(4), true));
+        assert_eq!(shown(3), (Some(4), true));
+        assert_eq!(shown(0), (Some(2), true));
+        assert_eq!(shown(7), (None, false));
+        assert_eq!(cycles(&parse_ctx), 1);
+    }
+
+    #[test]
+    fn every_member_of_many_cycles_resolves_from_the_cut() {
+        let pairs = 64u16;
+        let stds: BTreeMap<u16, Std> = (0..pairs)
+            .flat_map(|k| [(2 * k, style(1, 2 * k + 1)), (2 * k + 1, bold(style(0x0FFE, 2 * k)))])
+            .collect();
+        let parse_ctx = ParseCtx::default();
+        let sheet = resolve_all(&parse_ctx, &stds);
+        for k in 0..pairs {
+            let [cut, based] = [2 * k, 2 * k + 1].map(|istd| sheet.get(istd));
+            assert_eq!((cut.heading, cut.chp.bold), (Some(1), false), "istd {}", 2 * k);
+            assert_eq!((based.heading, based.chp.bold), (Some(1), true), "istd {}", 2 * k + 1);
+        }
+        assert_eq!(cycles(&parse_ctx), u64::from(pairs));
     }
 
     #[test]

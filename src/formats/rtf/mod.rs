@@ -153,16 +153,35 @@ struct NoteFrame {
     kind: NoteKind,
 }
 
-/// Per-instance numbering counters with restart-on-shallower semantics.
+/// The numbering sequence a list paragraph continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Sequence {
+    /// A list-table list, by its `\lsN`.
+    Table(i32),
+    /// Legacy `\pn` numbering, one sequence for the document.
+    Legacy,
+}
+
+/// The list identity of legacy `\pn` paragraphs, above every `\lsN`'s.
+const LEGACY_LIST: u64 = u64::MAX;
+/// The list identity of a bare `\listtext`, above every `\lsN`'s.
+const LISTTEXT_LIST: u64 = u64::MAX - 1;
+
+/// The list identity of `\lsN`: every `i32` keeps its own.
+fn table_list(ls: i32) -> u64 {
+    u64::from(ls.cast_unsigned())
+}
+
+/// Per-sequence numbering counters with restart-on-shallower semantics.
 #[derive(Default)]
 struct Counters {
-    state: HashMap<i32, ([u64; LIST_LEVELS], [bool; LIST_LEVELS])>,
+    state: HashMap<Sequence, ([u64; LIST_LEVELS], [bool; LIST_LEVELS])>,
 }
 
 impl Counters {
-    fn next(&mut self, ls: i32, level: usize, start: u64) -> u64 {
+    fn next(&mut self, sequence: Sequence, level: usize, start: u64) -> u64 {
         let level = level.min(LIST_LEVELS - 1);
-        let (values, started) = self.state.entry(ls).or_default();
+        let (values, started) = self.state.entry(sequence).or_default();
         let value = if started[level] { values[level].saturating_add(1) } else { start };
         values[level] = value;
         started[level] = true;
@@ -184,8 +203,9 @@ impl Counters {
     ) -> (u64, Option<String>, TextLoss) {
         let level = level.min(LIST_LEVELS - 1);
         let def = &levels[level];
-        let value = self.next(ls, level, def.start);
-        let (values, started) = self.state.entry(ls).or_default();
+        let sequence = Sequence::Table(ls);
+        let value = self.next(sequence, level, def.start);
+        let (values, started) = self.state.entry(sequence).or_default();
         let label = def.marker.and_then(|marker| {
             crate::shared::numbering::composite_label(
                 &def.pattern,
@@ -202,9 +222,9 @@ impl Counters {
     }
 
     /// Pin a counter to a number taken from the source (legacy `\pn` labels).
-    fn seed(&mut self, ls: i32, level: usize, value: u64) {
+    fn seed(&mut self, sequence: Sequence, level: usize, value: u64) {
         let level = level.min(LIST_LEVELS - 1);
-        let (values, started) = self.state.entry(ls).or_default();
+        let (values, started) = self.state.entry(sequence).or_default();
         values[level] = value;
         started[level] = true;
         for s in started.iter_mut().skip(level + 1) {
@@ -275,15 +295,14 @@ impl TextDecoder {
             return (None, false);
         };
         let code = if n < 0 { (n + 65536) as u32 } else { n as u32 };
-        let out = match (self.surrogate.take(), code as u16) {
+        let out = match (self.surrogate.take(), u16::try_from(code).ok()) {
             // High surrogate: hold for its pair.
-            (None, unit @ 0xD800..=0xDBFF) => {
+            (None, Some(unit @ 0xD800..=0xDBFF)) => {
                 self.surrogate = Some(unit);
                 (None, false)
             }
-            (Some(high), low @ 0xDC00..=0xDFFF) => {
-                let combined = 0x10000 + ((high as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
-                (char::from_u32(combined), false)
+            (Some(high), Some(low @ 0xDC00..=0xDFFF)) => {
+                (char::decode_utf16([high, low]).next().and_then(Result::ok), false)
             }
             (held, _) => {
                 let c = char::from_u32(code);
@@ -1600,7 +1619,7 @@ impl<'a> Parser<'a> {
                     self.report(loss, self.region());
                 }
                 return Some((
-                    ListKey { instance: ls as u64, marker },
+                    ListKey { instance: table_list(ls), marker },
                     level,
                     number,
                     label,
@@ -1612,7 +1631,7 @@ impl<'a> Parser<'a> {
             // the item's literal label over a bullet base.
             let (label, loss) = Self::listtext_label(listtext, listtext_loss);
             return Some((
-                ListKey { instance: ls as u64, marker: MarkerKind::Bullet },
+                ListKey { instance: table_list(ls), marker: MarkerKind::Bullet },
                 level,
                 0,
                 label,
@@ -1629,16 +1648,16 @@ impl<'a> Parser<'a> {
                 });
                 match parsed {
                     Some(n) => {
-                        self.counters.seed(i32::MAX, self.state.ilvl, n);
+                        self.counters.seed(Sequence::Legacy, self.state.ilvl, n);
                         n
                     }
-                    None => self.counters.next(i32::MAX, self.state.ilvl, 1),
+                    None => self.counters.next(Sequence::Legacy, self.state.ilvl, 1),
                 }
             } else {
                 0
             };
             return Some((
-                ListKey { instance: u64::MAX, marker },
+                ListKey { instance: LEGACY_LIST, marker },
                 self.state.ilvl,
                 number,
                 None,
@@ -1650,7 +1669,7 @@ impl<'a> Parser<'a> {
         if listtext.is_some_and(|t| !t.trim().is_empty()) {
             let (label, loss) = Self::listtext_label(listtext, listtext_loss);
             return Some((
-                ListKey { instance: u64::MAX - 1, marker: MarkerKind::Bullet },
+                ListKey { instance: LISTTEXT_LIST, marker: MarkerKind::Bullet },
                 self.state.ilvl,
                 0,
                 label,
@@ -1845,6 +1864,39 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         parse(&parse_ctx, src.as_bytes()).unwrap();
         assert_eq!(parse_ctx.fuel(), tokens(&src) + tokens(body));
+    }
+
+    fn list_starts(src: &str) -> Vec<(MarkerKind, u64, usize)> {
+        let doc = parse(&ParseCtx::default(), src.as_bytes()).unwrap();
+        let lists = doc.blocks.iter().map(|block| match block {
+            Block::List(list) => (list.marker, list.start, list.items.len()),
+            other => panic!("{other:?}"),
+        });
+        lists.collect()
+    }
+
+    #[test]
+    fn a_negative_ls_keeps_its_own_list_beside_legacy_bullets() {
+        let src = r"{\rtf1 \pard\ls-1 a\par \pard\pnlvlblt b\par}";
+        let bullet = (MarkerKind::Bullet, 1, 1);
+        assert_eq!(list_starts(src), [bullet, bullet]);
+    }
+
+    #[test]
+    fn the_highest_ls_numbers_apart_from_legacy_numbering() {
+        let table = r"{\*\listtable{\list{\listlevel\levelnfc0{\leveltext\'02\'00.;}{\levelnumbers\'01;}}\listid7}}{\*\listoverridetable{\listoverride\listid7\ls2147483647}}";
+        let src = format!(
+            r"{{\rtf1{table}\pard{{\pntext 5.}}\pnlvlbody a\par \pard\ls2147483647 b\par}}"
+        );
+        let decimal = |start| (MarkerKind::Decimal, start, 1);
+        assert_eq!(list_starts(&src), [decimal(5), decimal(1)]);
+    }
+
+    #[test]
+    fn a_unicode_value_past_the_bmp_keeps_its_scalar_whatever_its_low_bits() {
+        let src = r"{\rtf1 \u120832?\par}";
+        assert_eq!(markdown(src), "\u{1D800}\n");
+        assert_eq!(reported(src), []);
     }
 
     #[test]

@@ -58,9 +58,10 @@ fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
         return Vec::new();
     };
     let mut out: Vec<Block> = Vec::new();
-    let mut current: Option<(List, ListKey, u64)> = None; // list, key, last number
+    let mut current: Option<(List, Option<ListKey>, u64)> = None; // list, key, last number
 
-    let flush_current = |current: &mut Option<(List, ListKey, u64)>, out: &mut Vec<Block>| {
+    let flush_current = |current: &mut Option<(List, Option<ListKey>, u64)>,
+                         out: &mut Vec<Block>| {
         if let Some((list, _, _)) = current.take()
             && !list.items.is_empty()
         {
@@ -74,7 +75,7 @@ fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
             let entry = iter.next().unwrap();
             let split = match &current {
                 Some((_, cur_key, last_number)) => {
-                    *cur_key != key
+                    *cur_key != Some(key)
                         || (key.marker.ordered() && last_number.checked_add(1) != Some(number))
                 }
                 None => true,
@@ -86,7 +87,7 @@ fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
                     start: if key.marker.ordered() { number } else { 1 },
                     items: Vec::new(),
                 };
-                current = Some((list, key, number));
+                current = Some((list, Some(key), number));
             }
             let (list, _, last) = current.as_mut().unwrap();
             list.items.push(ListItem { blocks: entry.blocks, marker_label: entry.label });
@@ -101,12 +102,9 @@ fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
                 continue;
             }
             if current.is_none() {
-                // Sub-level content with no parent item yet: host it in an
-                // anonymous item so nesting is preserved.
-                let key = ListKey { instance: u64::MAX, marker: MarkerKind::Bullet };
                 current = Some((
                     List { marker: MarkerKind::Bullet, start: 1, items: Vec::new() },
-                    key,
+                    None,
                     0,
                 ));
             }
@@ -215,6 +213,16 @@ mod tests {
         let Block::List(l) = &out[0] else { panic!() };
         assert_eq!(l.items.len(), 2);
         assert!(matches!(l.items[0].blocks.last(), Some(Block::List(sub)) if sub.ordered()));
+    }
+
+    #[test]
+    fn no_entry_continues_the_anonymous_host_of_a_leading_sublist() {
+        let out = lists(vec![
+            entry(1, u64::MAX, MarkerKind::Bullet, 0, "nested"),
+            entry(0, u64::MAX, MarkerKind::Bullet, 0, "top"),
+        ]);
+        let [Block::List(host), Block::List(top)] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!((host.items.len(), top.items.len()), (1, 1));
     }
 
     #[test]

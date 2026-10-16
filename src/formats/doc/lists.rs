@@ -6,6 +6,7 @@
 //! apply when their LFO is first used, and the number text (`xst` with
 //! `rgbxchNums` placeholders) is preserved for composite markers.
 
+use super::Fib;
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::shared::binary::{get_u16, get_u32};
@@ -44,11 +45,30 @@ impl Default for LevelDef {
     }
 }
 
+/// The numbering sequence a list continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListId {
+    /// A list the `PlfLst` defines, by its `lsid`.
+    Lsid(u32),
+    /// The stand-in for an ilfo whose list no table defines.
+    UnknownLfo(u16),
+}
+
+impl ListId {
+    /// The list's assembly identity, every stand-in above every `lsid`.
+    pub fn instance(self) -> u64 {
+        match self {
+            ListId::Lsid(lsid) => u64::from(lsid),
+            ListId::UnknownLfo(ilfo) => 1 << 32 | u64::from(ilfo),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ListDef {
     /// List identity: numbering state is keyed by this, not the ilfo, so
     /// every override referencing the same list continues its sequence.
-    pub lsid: u32,
+    pub id: ListId,
     pub levels: [LevelDef; LEVELS],
     /// LFOLVL start-at overrides; each restarts the shared sequence at its
     /// value when this LFO is first used at that level.
@@ -56,11 +76,11 @@ pub struct ListDef {
 }
 
 impl ListDef {
-    /// Fallback definition for an ilfo with no parsed list behind it; the
-    /// synthetic identity keeps it distinct from every real `lsid`.
+    /// Fallback definition for an ilfo with no parsed list behind it, under
+    /// an identity of its own.
     pub fn unknown(ilfo: u16) -> ListDef {
         ListDef {
-            lsid: u32::MAX ^ u32::from(ilfo),
+            id: ListId::UnknownLfo(ilfo),
             levels: std::array::from_fn(|_| LevelDef::default()),
             start_override: [None; LEVELS],
         }
@@ -83,11 +103,11 @@ impl Lists {
 /// List tables that do not read in full are `part_unreadable`: the labels
 /// of the lists they lose do not render. A level's undecodable number text
 /// is reported where a paragraph shows it, not here.
-pub fn parse(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8]) -> Lists {
-    let lst_fc = get_u32(word_doc, 0x2E2).unwrap_or(0) as usize;
-    let lst_lcb = get_u32(word_doc, 0x2E6).unwrap_or(0) as usize;
-    let lfo_fc = get_u32(word_doc, 0x2EA).unwrap_or(0) as usize;
-    let lfo_lcb = get_u32(word_doc, 0x2EE).unwrap_or(0) as usize;
+pub fn parse(parse_ctx: &ParseCtx, fib: Fib<'_>, table: &[u8]) -> Lists {
+    let lst_fc = fib.size(0x2E2);
+    let lst_lcb = fib.size(0x2E6);
+    let lfo_fc = fib.size(0x2EA);
+    let lfo_lcb = fib.size(0x2EE);
 
     let mut lists = Lists::default();
     if lst_lcb == 0 {
@@ -254,9 +274,11 @@ fn parse_plf_lfo(
     for (i, (lsid, clfolvl)) in lfos.into_iter().enumerate() {
         let ilfo = (i + 1) as u16;
         let mut def = match by_lsid.get(&lsid) {
-            Some(levels) => {
-                ListDef { lsid, levels: levels.clone(), start_override: [None; LEVELS] }
-            }
+            Some(levels) => ListDef {
+                id: ListId::Lsid(lsid),
+                levels: levels.clone(),
+                start_override: [None; LEVELS],
+            },
             None => ListDef::unknown(ilfo),
         };
         pos = pos.saturating_add(4);
@@ -478,7 +500,7 @@ mod tests {
         let first = lists.get(1).unwrap();
         assert_eq!((first.levels[0].start, first.start_override[0]), (1, None));
         let second = lists.get(2).unwrap();
-        assert_eq!(second.lsid, 9);
+        assert_eq!(second.id, ListId::Lsid(9));
         assert_eq!(second.levels[0].marker, Some(MarkerKind::Decimal));
         assert_eq!((second.levels[0].start, second.start_override[0]), (7, Some(7)));
         assert_eq!(second.levels[0].damaged_at, Some(1000 + overriding.len()));

@@ -27,7 +27,7 @@ use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 use crate::shared::list::MarkerKind;
 use crate::shared::list::{ListEntry, ListKey, flush_list};
 use crate::shared::officeart::{self, record_at, records};
-use lists::{LEVELS, ListDef, Lists};
+use lists::{LEVELS, ListDef, ListId, Lists};
 use sprm::{PapDelta, Tap, apply_chpx, apply_pap_sprms, chpx_istd};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -39,10 +39,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .map_err(|_| ConvertError::malformed("not an OLE2 compound file"))?;
 
     let word_doc = read_ole_stream(parse_ctx, &mut ole, "WordDocument")?;
-    if get_u16(&word_doc, 0) != Some(0xA5EC) {
-        return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic"));
-    }
-    let flags = get_u16(&word_doc, 0x0A).unwrap_or(0);
+    let fib = Fib::read(&word_doc)?;
+    let flags = fib.u16(0x0A);
     if flags & 0x0100 != 0 {
         return Err(ConvertError::Encrypted);
     }
@@ -53,16 +51,16 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         stream => stream.or_empty(),
     };
 
-    let ccp = |off| get_u32(&word_doc, off).unwrap_or(0) as usize;
+    let ccp = |off| fib.size(off);
     let (ccp_text, ccp_ftn, ccp_hdd) = (ccp(0x4C), ccp(0x50), ccp(0x54));
     let (ccp_mcr, ccp_atn, ccp_edn) = (ccp(0x58), ccp(0x5C), ccp(0x60));
-    let fc_clx = get_u32(&word_doc, 0x1A2).unwrap_or(0) as usize;
-    let lcb_clx = get_u32(&word_doc, 0x1A6).unwrap_or(0) as usize;
+    let fc_clx = fib.size(0x1A2);
+    let lcb_clx = fib.size(0x1A6);
 
     let (pieces, prcs) = if lcb_clx > 0 {
         parse_clx(parse_ctx, &table, fc_clx, lcb_clx)?
     } else {
-        (legacy_single_piece(&word_doc), Vec::new())
+        (legacy_single_piece(fib), Vec::new())
     };
     let total_cp = ccp_text + ccp_ftn + ccp_hdd + ccp_mcr + ccp_atn + ccp_edn;
     let edn_base = ccp_text + ccp_ftn + ccp_hdd + ccp_mcr + ccp_atn;
@@ -72,21 +70,20 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     };
     // Compressed (8-bit) piece text decodes in the document's ANSI code
     // page: FibBase.lid, or FibRgW97.lidFE when fFarEast is set.
-    let lid = if flags & 0x4000 != 0 {
-        get_u16(&word_doc, 0x3C).filter(|&l| l != 0).or_else(|| get_u16(&word_doc, 0x06))
-    } else {
-        get_u16(&word_doc, 0x06)
+    let lid = match fib.u16(0x3C) {
+        lid_fe @ 1.. if flags & 0x4000 != 0 => lid_fe,
+        _ => fib.u16(0x06),
     };
-    let encoding = lid_encoding(lid.unwrap_or(0));
+    let encoding = lid_encoding(lid);
     let text = extract_text(parse_ctx, &word_doc, &pieces, total_cp, encoding, &stories);
 
     let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.or_empty();
-    let chpx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &data)?;
-    let papx_runs = parse_fkps(parse_ctx, &word_doc, &table, 0x102, FkpKind::Papx, &data)?;
-    let has_lists = get_u32(&word_doc, 0x2E6).is_some_and(|lcb| lcb > 0);
-    let stylesheet = stsh::parse(parse_ctx, &word_doc, &table, has_lists);
-    let list_tables = lists::parse(parse_ctx, &word_doc, &table);
-    report_unread_stories(parse_ctx, &word_doc, &table, [ccp_hdd, ccp_atn, ccp(0x64)]);
+    let chpx_runs = parse_fkps(parse_ctx, fib, &word_doc, &table, 0xFA, FkpKind::Chpx, &data)?;
+    let papx_runs = parse_fkps(parse_ctx, fib, &word_doc, &table, 0x102, FkpKind::Papx, &data)?;
+    let has_lists = fib.size(0x2E6) > 0;
+    let stylesheet = stsh::parse(parse_ctx, fib, &table, has_lists);
+    let list_tables = lists::parse(parse_ctx, fib, &table);
+    report_unread_stories(parse_ctx, fib, &table, [ccp_hdd, ccp_atn, ccp(0x64)]);
 
     // Note references (CP-indexed) and note body ranges.
     let mut note_refs: HashMap<usize, String> = HashMap::new();
@@ -96,7 +93,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         (0x20A, 0x212, edn_base, "en", NoteKind::Endnote),
     ] {
         let [refs, txts] = [(ref_off, 2), (txt_off, 0)].map(|(fib_off, data_size)| {
-            read_plc(&word_doc, &table, fib_off, data_size).unwrap_or_else(|| {
+            read_plc(fib, &table, fib_off, data_size).unwrap_or_else(|| {
                 parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Note);
                 Plc::EMPTY
             })
@@ -113,7 +110,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let main_end = text.index_of_cp(ccp_text);
 
     let piece_prcs: Vec<Option<usize>> = pieces.iter().map(|p| p.prm_prc).collect();
-    let shapes = floating_shapes(parse_ctx, &word_doc, &table)?;
+    let shapes = floating_shapes(parse_ctx, fib, &table)?;
     let assembler = Assembler {
         parse_ctx,
         text,
@@ -182,16 +179,59 @@ impl<'t> Plc<'t> {
     }
 }
 
+/// The bytes of a Word 97 FIB through `fibRgFcLcb97`, which holds every
+/// field this reader reads.
+const FIB_MIN: usize = 0x382;
+
+/// The FIB at the start of the WordDocument stream, read whole.
+#[derive(Clone, Copy)]
+struct Fib<'a>(&'a [u8; FIB_MIN]);
+
+impl<'a> Fib<'a> {
+    /// The FIB of `word_doc`; a stream too short for one or without its
+    /// magic is `Malformed`.
+    fn read(word_doc: &'a [u8]) -> Result<Self, ConvertError> {
+        if get_u16(word_doc, 0) != Some(0xA5EC) {
+            return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic"));
+        }
+        word_doc
+            .first_chunk::<FIB_MIN>()
+            .map(Fib)
+            .ok_or_else(|| ConvertError::malformed_part("WordDocument", "FIB cut short"))
+    }
+
+    /// The field at `off`, which lies inside the FIB.
+    fn u16(self, off: usize) -> u16 {
+        get_u16(self.0, off).unwrap_or_default()
+    }
+
+    /// The 32-bit position, length or count at `off`, which lies inside
+    /// the FIB.
+    fn size(self, off: usize) -> usize {
+        get_u32(self.0, off).and_then(|v| usize::try_from(v).ok()).unwrap_or_default()
+    }
+
+    /// The table-stream bytes the `fc`/`lcb` pair at `off` names: empty when
+    /// `lcb` is 0, `None` when they do not lie in the table stream.
+    fn table_range(self, table: &[u8], off: usize) -> Option<&[u8]> {
+        let (fc, lcb) = (self.size(off), self.size(off + 4));
+        if lcb == 0 {
+            return Some(&[]);
+        }
+        table.get(fc..fc.saturating_add(lcb))
+    }
+}
+
 /// The PLC whose FIB `fc`/`lcb` pair sits at `fib_off`: empty when `lcb` is
 /// 0, `None` when it does not lie in the table stream or holds no whole
 /// number of records.
 fn read_plc<'t>(
-    word_doc: &[u8],
+    fib: Fib<'_>,
     table: &'t [u8],
     fib_off: usize,
     data_size: usize,
 ) -> Option<Plc<'t>> {
-    let bytes = table_range(word_doc, table, fib_off)?;
+    let bytes = fib.table_range(table, fib_off)?;
     if bytes.is_empty() {
         return Some(Plc::EMPTY);
     }
@@ -200,24 +240,13 @@ fn read_plc<'t>(
     (records % (4 + data_size) == 0).then_some(Plc { bytes, n, data_size })
 }
 
-/// The table-stream bytes the FIB `fc`/`lcb` pair at `fib_off` names: empty
-/// when `lcb` is 0, `None` when they do not lie in the table stream.
-fn table_range<'t>(word_doc: &[u8], table: &'t [u8], fib_off: usize) -> Option<&'t [u8]> {
-    let fc = get_u32(word_doc, fib_off).unwrap_or(0) as usize;
-    let lcb = get_u32(word_doc, fib_off + 4).unwrap_or(0) as usize;
-    if lcb == 0 {
-        return Some(&[]);
-    }
-    table.get(fc..fc.saturating_add(lcb))
-}
-
 /// Count the header and footer stories and the comments, which this reader
 /// does not render, and the body text-box stories, which it never reads,
 /// from the story lengths `ccpHdd`, `ccpAtn` and `ccpTxbx`; a story whose
 /// table does not read counts once.
-fn report_unread_stories(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], ccps: [usize; 3]) {
+fn report_unread_stories(parse_ctx: &ParseCtx, fib: Fib<'_>, table: &[u8], ccps: [usize; 3]) {
     let [ccp_hdd, ccp_atn, ccp_txbx] = ccps;
-    match read_plc(word_doc, table, 0xF2, 0) {
+    match read_plc(fib, table, 0xF2, 0) {
         Some(hdd) => {
             let stories = hdd.n.saturating_sub(1);
             let sections = stories.saturating_sub(6) / 6;
@@ -231,7 +260,7 @@ fn report_unread_stories(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], cc
         None if ccp_hdd > 0 => parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header),
         None => {}
     }
-    match read_plc(word_doc, table, 0xBA, 30) {
+    match read_plc(fib, table, 0xBA, 30) {
         Some(comments) => {
             parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments.n as u64)
         }
@@ -239,7 +268,7 @@ fn report_unread_stories(parse_ctx: &ParseCtx, word_doc: &[u8], table: &[u8], cc
         None => {}
     }
     if ccp_txbx > 0 {
-        let boxes = read_plc(word_doc, table, 0x25A, 22).map_or(0, |txbx| {
+        let boxes = read_plc(fib, table, 0x25A, 22).map_or(0, |txbx| {
             (0..txbx.n.saturating_sub(1)).filter(|&i| get_u16(txbx.data(i), 8) == Some(0)).count()
         });
         parse_ctx.emit_count(DiagnosticCode::TextBoxUnread, Region::Body, boxes.max(1) as u64);
@@ -258,13 +287,14 @@ enum ShapeKind {
 /// and the main drawing of the `OfficeArtContent`.
 fn floating_shapes(
     parse_ctx: &ParseCtx,
-    word_doc: &[u8],
+    fib: Fib<'_>,
     table: &[u8],
 ) -> Result<HashMap<usize, ShapeKind>, ConvertError> {
-    let Some(spa) = read_plc(word_doc, table, 0x1DA, 26).filter(|spa| spa.n > 0) else {
+    let Some(spa) = read_plc(fib, table, 0x1DA, 26).filter(|spa| spa.n > 0) else {
         return Ok(HashMap::new());
     };
-    let kinds = table_range(word_doc, table, 0x22A)
+    let kinds = fib
+        .table_range(table, 0x22A)
         .and_then(main_drawing)
         .map_or(Ok(HashMap::new()), |drawing| shape_kinds(parse_ctx, drawing))?;
     Ok((0..spa.n)
@@ -445,9 +475,9 @@ fn prm0_grpprl(prm: u16) -> Option<Vec<u8>> {
     Some(vec![(sprm & 0xFF) as u8, (sprm >> 8) as u8, val])
 }
 
-fn legacy_single_piece(word_doc: &[u8]) -> Vec<Piece> {
-    let fc_min = get_u32(word_doc, 0x18).unwrap_or(0) as usize;
-    let fc_mac = get_u32(word_doc, 0x1C).unwrap_or(0) as usize;
+fn legacy_single_piece(fib: Fib<'_>) -> Vec<Piece> {
+    let fc_min = fib.size(0x18);
+    let fc_mac = fib.size(0x1C);
     if fc_mac <= fc_min {
         return Vec::new();
     }
@@ -634,6 +664,7 @@ impl Runs {
 /// once: a page's runs carry absolute FCs, so a page named again repeats them.
 fn parse_fkps(
     parse_ctx: &ParseCtx,
+    fib: Fib<'_>,
     word_doc: &[u8],
     table: &[u8],
     fib_off: usize,
@@ -641,7 +672,7 @@ fn parse_fkps(
     data: &[u8],
 ) -> Result<Vec<Run>, ConvertError> {
     let mut runs = Vec::new();
-    let Some(bin_table) = read_plc(word_doc, table, fib_off, 4) else {
+    let Some(bin_table) = read_plc(fib, table, fib_off, 4) else {
         parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
         return Ok(runs);
     };
@@ -730,9 +761,9 @@ fn parse_fkp_page(
 
 #[derive(Default)]
 struct Counters {
-    /// Numbering state keyed by list identity (`lsid`): every LFO
-    /// referencing the same list continues its sequence.
-    state: HashMap<u32, ([u64; LEVELS], [bool; LEVELS])>,
+    /// Numbering state keyed by list identity: every LFO referencing the
+    /// same list continues its sequence.
+    state: HashMap<ListId, ([u64; LEVELS], [bool; LEVELS])>,
     /// (ilfo, level) pairs whose first-use start-at override has fired.
     overridden: std::collections::HashSet<(u16, usize)>,
 }
@@ -745,7 +776,7 @@ impl Counters {
         let level = level.min(LEVELS - 1);
         let def = &list.levels[level];
         let first_use = self.overridden.insert((ilfo, level));
-        let (values, started) = self.state.entry(list.lsid).or_default();
+        let (values, started) = self.state.entry(list.id).or_default();
         let value = match list.start_override[level] {
             // An LFO start-at override restarts the shared sequence at its
             // value the first time that LFO numbers this level.
@@ -1223,7 +1254,7 @@ impl Assembler<'_> {
                 styled.flush(blocks);
                 list_run.push(ListEntry {
                     level: ilvl,
-                    key: ListKey { instance: list.lsid as u64, marker },
+                    key: ListKey { instance: list.id.instance(), marker },
                     number,
                     label,
                     blocks: vec![Block::Paragraph(inlines)],
@@ -1435,7 +1466,7 @@ mod tests {
         let mut levels: [LevelDef; LEVELS] = std::array::from_fn(|_| LevelDef::default());
         levels[0].marker = Some(MarkerKind::Decimal);
         levels[1].marker = Some(MarkerKind::LowerAlpha);
-        ListDef { lsid, levels, start_override: [None; LEVELS] }
+        ListDef { id: ListId::Lsid(lsid), levels, start_override: [None; LEVELS] }
     }
 
     #[test]
@@ -1509,6 +1540,17 @@ mod tests {
         let mut l = list(7);
         l.levels[0].pattern.text = vec![NumberText::Level(0), NumberText::Literal(".".into())];
         assert_eq!(c.next(1, &l, 0), (1, None));
+    }
+
+    #[test]
+    fn an_unknown_lfo_numbers_apart_from_the_lsid_its_stand_in_once_took() {
+        let mut c = Counters::default();
+        let known = list(u32::MAX ^ 2);
+        let unknown = ListDef::unknown(2);
+        for expected in [1, 2] {
+            assert_eq!(c.next(1, &known, 0).0, expected);
+            assert_eq!(c.next(2, &unknown, 0).0, expected);
+        }
     }
 
     #[test]
@@ -1656,14 +1698,20 @@ mod tests {
 
         /// One PAPX FKP page, in place of a CHPX page, giving each run of
         /// `(bytes, grpprl)` the next `bytes` of the main text and its sprms.
-        fn papx(mut self, runs: &[(u32, &[u8])]) -> Self {
+        fn papx(self, runs: &[(u32, &[u8])]) -> Self {
+            let styled: Vec<_> = runs.iter().map(|&(bytes, grpprl)| (bytes, 0, grpprl)).collect();
+            self.styled_papx(&styled)
+        }
+
+        /// [`Self::papx`] with each run's paragraph style `istd`.
+        fn styled_papx(mut self, runs: &[(u32, u16, &[u8])]) -> Self {
             let page = 2 * 512;
             let end = u32::try_from(self.word_doc.len()).unwrap();
             let fkp = &mut self.word_doc[page..page + 512];
             let mut fc = TEXT_FC as u32;
             let mut at = 0x100;
-            for (k, &(bytes, grpprl)) in runs.iter().enumerate() {
-                let papx = [&[0u8, 0][..], grpprl].concat();
+            for (k, &(bytes, istd, grpprl)) in runs.iter().enumerate() {
+                let papx = [&istd.to_le_bytes()[..], grpprl].concat();
                 fkp[k * 4..k * 4 + 4].copy_from_slice(&fc.to_le_bytes());
                 fkp[(runs.len() + 1) * 4 + k * 13] = u8::try_from(at / 2).unwrap();
                 let cb = u8::try_from(papx.len() / 2 + 1).unwrap();
@@ -1711,6 +1759,22 @@ mod tests {
             }
             ole.into_inner().into_inner()
         }
+    }
+
+    /// An STSH of paragraph styles `(sti, istd_base, chpx)` from istd 0.
+    fn stsh(styles: &[(u16, u16, &[u8])]) -> Vec<u8> {
+        let cstd = u16::try_from(styles.len()).unwrap();
+        let mut stsh = [4u16, cstd, 10].map(u16::to_le_bytes).concat();
+        for &(sti, istd_base, chpx) in styles {
+            let mut std =
+                [sti, 1 | istd_base << 4, 2, 0, 0, 0, 0, 2, 0].map(u16::to_le_bytes).concat();
+            std.extend(u16::try_from(chpx.len()).unwrap().to_le_bytes());
+            std.extend_from_slice(chpx);
+            std.resize(std.len().next_multiple_of(2), 0);
+            stsh.extend(u16::try_from(std.len()).unwrap().to_le_bytes());
+            stsh.extend(std);
+        }
+        stsh
     }
 
     fn words(values: &[u32]) -> Vec<u8> {
@@ -2317,6 +2381,7 @@ mod tests {
     /// of three runs each.
     fn fkp_runs(pns: &[u32]) -> (usize, u64) {
         let mut word_doc = vec![0u8; 1536];
+        word_doc[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
         for (page, start) in [(1, 0u32), (2, 30)] {
             for k in 0..4u32 {
                 let at = page * 512 + k as usize * 4;
@@ -2328,7 +2393,9 @@ mod tests {
         let table: Vec<u8> = cps.chain(pns.iter().copied()).flat_map(u32::to_le_bytes).collect();
         word_doc[0xFE..0x102].copy_from_slice(&(table.len() as u32).to_le_bytes());
         let parse_ctx = ParseCtx::default();
-        let runs = parse_fkps(&parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &[]).unwrap();
+        let fib = Fib::read(&word_doc).unwrap();
+        let runs =
+            parse_fkps(&parse_ctx, fib, &word_doc, &table, 0xFA, FkpKind::Chpx, &[]).unwrap();
         assert_eq!(parse_ctx.diagnostics().iter().count(), 0);
         (runs.len(), parse_ctx.fuel())
     }
@@ -2369,9 +2436,10 @@ mod tests {
         let word_doc = ole_stream(&mut ole, "WordDocument");
         let flags = get_u16(&word_doc, 0x0A).unwrap();
         let table = ole_stream(&mut ole, if flags & 0x0200 != 0 { "1Table" } else { "0Table" });
+        let fib = Fib::read(&word_doc).unwrap();
         let fuel = |fib_off, kind| {
             let parse_ctx = ParseCtx::default();
-            parse_fkps(&parse_ctx, &word_doc, &table, fib_off, kind, &[]).unwrap();
+            parse_fkps(&parse_ctx, fib, &word_doc, &table, fib_off, kind, &[]).unwrap();
             parse_ctx.fuel()
         };
         let chpx = fuel(0xFA, FkpKind::Chpx);
@@ -2383,5 +2451,66 @@ mod tests {
                 if max == chpx),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn a_style_cycle_converts_one_way_on_every_call_and_thread_count() {
+        let styles = stsh(&[(0, 0x0FFF, &[]), (0x0FFE, 2, &[]), (1, 1, &[])]);
+        let doc = DocBuilder::new(b"a\rb\r")
+            .table(0xA2, &styles)
+            .styled_papx(&[(2, 1, &[]), (2, 2, &[])])
+            .bytes();
+        for threads in [1, 4, 1, 4] {
+            let config = crate::Config { threads, ..Default::default() };
+            let converted = crate::Converter::new(config)
+                .unwrap()
+                .convert(crate::Input::new(&doc, crate::Format::Doc))
+                .unwrap();
+            assert_eq!(converted.markdown(), "a\n\n# b\n", "{threads} threads");
+        }
+        assert_eq!(reported(&doc), [(DiagnosticCode::StyleCycle, Region::Container, 1)]);
+    }
+
+    #[test]
+    fn a_word_document_stream_shorter_than_its_fib_is_malformed() {
+        let doc = |word_doc: &[u8]| {
+            use std::io::Write;
+            let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+            ole.create_stream("WordDocument").unwrap().write_all(word_doc).unwrap();
+            parse(&ParseCtx::default(), &ole.into_inner().into_inner())
+        };
+        let fib = |len: usize| [&[0xEC, 0xA5][..], &vec![0; len - 2]].concat();
+        for word_doc in [vec![0xEC, 0xA5, 0, 0], fib(0x381)] {
+            let refused = doc(&word_doc);
+            assert!(
+                matches!(refused, Err(ConvertError::Malformed { .. })),
+                "{}: {refused:?}",
+                word_doc.len()
+            );
+        }
+        assert!(doc(&fib(0x382)).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_lfo_keeps_its_own_list_beside_the_lsid_its_stand_in_once_took() {
+        let lsid = u32::MAX ^ 2;
+        let mut plf = [0u8; 30];
+        plf[0] = 1;
+        plf[2..6].copy_from_slice(&lsid.to_le_bytes());
+        plf[28] = 0x01;
+        let mut bullet = [0u8; 30];
+        bullet[4] = 23;
+        let bulleted = |ilfo: u8| vec![0x0B, 0x46, ilfo, 0, 0x0A, 0x26, 0];
+        let doc = DocBuilder::new(b"a\rb\r")
+            .table(0x2E2, &[&plf[..], &bullet].concat())
+            .fib(0x2E6, 30)
+            .table(0x2EA, &words(&[1, lsid, 0, 0, 0, u32::MAX]))
+            .papx(&[(2, &bulleted(1)), (2, &bulleted(2))])
+            .bytes();
+        let parsed = parse(&ParseCtx::default(), &doc).unwrap();
+        let [Block::List(known), Block::List(unknown)] = parsed.blocks.as_slice() else {
+            panic!("{:?}", parsed.blocks)
+        };
+        assert_eq!((known.items.len(), unknown.items.len()), (1, 1));
     }
 }
