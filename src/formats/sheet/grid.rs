@@ -488,7 +488,6 @@ impl CivilDate {
 pub(super) fn build_table(
     parse_ctx: &ParseCtx,
     mut sheet: SheetContent,
-    slots: &mut u64,
 ) -> Result<Option<Table>, ConvertError> {
     let hidden = Hidden::of(&mut sheet);
     let mut cells = cell_contents(&mut sheet);
@@ -504,18 +503,15 @@ pub(super) fn build_table(
     if row_map.is_empty() || col_map.is_empty() {
         return Ok(None);
     }
-    // Charged before materializing, and across the workbook rather than per
-    // sheet: the extent comes from cell coordinates, so a handful of cells
-    // describes a whole sheet and a handful of sheets multiplies it.
+    // Refused before materializing: the extent comes from cell coordinates,
+    // so a handful of cells describes a whole sheet.
     let limits = parse_ctx.limits();
     let positions = row_map.len() as u64 * col_map.len() as u64;
-    *slots = slots.saturating_add(positions);
-    if *slots > limits.max_grid_slots {
+    if positions > parse_ctx.grid_slots_left() {
         return Err(ConvertError::limit(Limit::GridSlots, limits.max_grid_slots));
     }
-    parse_ctx.charge(positions)?;
     let layout = MergeLayout::on(limits, &sheet.merges, &row_map, &col_map)?;
-    assemble(limits, &row_map, &col_map, &layout, cells)
+    assemble(parse_ctx, &row_map, &col_map, &layout, cells)
 }
 
 /// The rows a sheet hides as a sorted list and the columns as sorted
@@ -783,19 +779,18 @@ impl MergeLayout {
 /// Place every shown position into the table, merge origins with their
 /// spans.
 fn assemble(
-    limits: &Limits,
+    parse_ctx: &ParseCtx,
     row_map: &[u32],
     col_map: &[u32],
     layout: &MergeLayout,
     mut cells: HashMap<CellRef, Vec<Inline>>,
 ) -> Result<Option<Table>, ConvertError> {
-    let mut builder = GridBuilder::new(limits.max_expansion);
-    builder.keep_covered_tail();
+    let mut builder = GridBuilder::new(parse_ctx);
     for (ri, &row) in row_map.iter().enumerate() {
         builder.next_row();
         for (ci, &col) in col_map.iter().enumerate() {
             if layout.covered.contains(&(ri, ci)) {
-                builder.covered();
+                builder.covered()?;
                 continue;
             }
             let cell = match cells.remove(&CellRef::new(row, col)) {
@@ -813,7 +808,7 @@ fn assemble(
         }
     }
     // A spreadsheet marks no header row, so the shape of the data decides.
-    let mut table = builder.finish(TableKind::Data);
+    let mut table = builder.finish(TableKind::Data)?;
     if table.grid.is_empty() {
         return Ok(None);
     }
@@ -946,8 +941,25 @@ mod tests {
             ..SheetContent::on(OOXML_GRID)
         };
         let parse_ctx = ParseCtx::default();
-        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
+        assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         assert_eq!(parse_ctx.fuel(), 6);
+    }
+
+    #[test]
+    fn a_sheet_past_the_slots_its_parse_has_left_is_refused_before_it_materializes() {
+        let sheet = || SheetContent {
+            cells: HashMap::from([
+                (CellRef::new(0, 0), "a".to_string()),
+                (CellRef::new(1, 2), "b".to_string()),
+            ]),
+            ..SheetContent::on(OOXML_GRID)
+        };
+        let limits = Limits { max_grid_slots: 11, ..Default::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        assert!(build_table(&parse_ctx, sheet()).unwrap().is_some());
+        let err = build_table(&parse_ctx, sheet()).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 11 }));
+        assert_eq!((parse_ctx.grid_slots_left(), parse_ctx.fuel()), (5, 6));
     }
 
     fn cell(col: u32) -> CellRange {
@@ -965,9 +977,9 @@ mod tests {
             ..SheetContent::on(OOXML_GRID)
         };
         let limits = Limits { max_work: 2_000_000, ..Default::default() };
-        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
+        assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
         let limits = Limits { max_work: 500_000, ..Default::default() };
-        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
+        let err = build_table(&ParseCtx::new(&limits), sheet()).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
     }
 
@@ -984,9 +996,9 @@ mod tests {
             ..SheetContent::on(OOXML_GRID)
         };
         let limits = Limits { max_work: 20_000, ..Default::default() };
-        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
+        assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
         let limits = Limits { max_work: 5_000, ..Default::default() };
-        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
+        let err = build_table(&ParseCtx::new(&limits), sheet()).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
     }
 
@@ -1039,7 +1051,7 @@ mod tests {
             }
             sheet.merge(&parse_ctx, merge);
             hidden_row.into_iter().for_each(|row| sheet.hide_row(row));
-            let table = build_table(&parse_ctx, sheet, &mut 0).unwrap().unwrap();
+            let table = build_table(&parse_ctx, sheet).unwrap().unwrap();
             assert!(parse_ctx.diagnostics().is_empty());
             (table.grid.len(), table.grid[0].len())
         };
@@ -1070,7 +1082,7 @@ mod tests {
         sheet.hide_row(1);
         sheet.hide_row(2);
         let parse_ctx = ParseCtx::default();
-        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
+        assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         let unreadable = parse_ctx
             .diagnostics()
             .iter()
@@ -1098,7 +1110,7 @@ mod tests {
         sheet.put(CellRef::new(5, 0), "b".to_string());
         sheet.merge(&parse_ctx, range(0, 0, 1, 1));
         sheet.lose(CellRef::new(5, 0), DiagnosticCode::CellValueUnreadable);
-        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
+        assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [DiagnosticCode::CellValueUnreadable]);
     }
@@ -1111,7 +1123,7 @@ mod tests {
         sheet.put(CellRef::new(0, 5), "b".to_string());
         sheet.merge(&parse_ctx, range(0, 0, 1, 1));
         sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable);
-        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
+        assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [DiagnosticCode::CellValueUnreadable]);
     }

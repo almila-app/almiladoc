@@ -6,8 +6,10 @@
 //! Empty filler runs *inside* the used range materialize fully so every
 //! later cell keeps its source coordinates; only trailing filler (empty rows
 //! at the end, empty cells at a row's end) is elided. All materialization is
-//! charged against the expansion budget.
+//! charged against the expansion budget, and every position the grid holds
+//! against its slots.
 
+use crate::ctx::ParseCtx;
 use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
 use crate::formats::odf::text::{Ctx, parse_children, report_unplaced};
@@ -22,26 +24,30 @@ pub fn parse_table(elem: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError
     let limits = ctx.parse_ctx.limits();
     let mut state = TableState {
         limits,
-        builder: GridBuilder::new(limits.max_expansion),
+        builder: GridBuilder::new(ctx.parse_ctx),
         expansion: 0,
         expansion_bytes: 0,
         pending_rows: 0,
         header_rows: 0,
         rows_emitted: 0,
         checkboxes: read_checkboxes(elem),
+        held: Held::default(),
     };
     walk_rows(elem, ctx, &mut state, true)?;
-    let mut table = state.builder.finish(TableKind::Data);
+    let mut table = state.builder.finish(TableKind::Data)?;
     if table.grid.is_empty() {
         return Ok(Vec::new());
     }
+    let positions =
+        u64::try_from(table.grid.iter().map(Vec::len).sum::<usize>()).unwrap_or(u64::MAX);
+    ctx.hold(state.held.add(Held { positions, bytes: 0 }));
     table.header_rows = resolve_header_rows(&table, state.header_rows);
     Ok(vec![Block::Table(table)])
 }
 
-struct TableState<'l> {
+struct TableState<'l, 'c> {
     limits: &'l Limits,
-    builder: GridBuilder,
+    builder: GridBuilder<&'l ParseCtx<'c>>,
     /// Grid slots produced by expansion, checked against its budget.
     expansion: u64,
     /// Text bytes duplicated by expansion, checked against their own budget.
@@ -52,6 +58,32 @@ struct TableState<'l> {
     /// The sheet's form checkboxes by control id, as the inlines a
     /// `draw:control` in a cell expands to.
     checkboxes: HashMap<String, Vec<Inline>>,
+    /// What the cells placed so far hold, every copy counted.
+    held: Held,
+}
+
+/// The grid positions and text bytes parsed tables hold, their nested
+/// tables' included.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Held {
+    positions: u64,
+    bytes: u64,
+}
+
+impl Held {
+    pub(super) fn add(self, other: Held) -> Held {
+        Held {
+            positions: self.positions.saturating_add(other.positions),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+
+    fn times(self, copies: u64) -> Held {
+        Held {
+            positions: self.positions.saturating_mul(copies),
+            bytes: self.bytes.saturating_mul(copies),
+        }
+    }
 }
 
 /// Checkbox controls declared in the table's `office:forms`. The mixed
@@ -104,7 +136,7 @@ fn append_cell_controls(
     }
 }
 
-impl TableState<'_> {
+impl TableState<'_, '_> {
     fn charge(&mut self, cells: u64) -> Result<(), ConvertError> {
         self.expansion = self.expansion.saturating_add(cells);
         let max = self.limits.max_expansion;
@@ -129,10 +161,11 @@ impl TableState<'_> {
 /// One parsed cell of a row template, reused across row repeats.
 enum RowCell {
     Covered { repeat: u64 },
-    Cell { repeat: u64, col_span: u32, row_span: u32, blocks: Vec<Block>, bytes: u64 },
+    Cell { repeat: u64, col_span: u32, row_span: u32, blocks: Vec<Block>, held: Held },
 }
 
-/// Approximate retained text bytes of parsed cell content.
+/// Approximate retained text bytes of parsed cell content outside its
+/// tables.
 fn block_bytes(blocks: &[Block]) -> u64 {
     fn inline_bytes(inlines: &[crate::model::Inline]) -> u64 {
         use crate::model::Inline;
@@ -164,18 +197,9 @@ fn block_bytes(blocks: &[Block]) -> u64 {
             Block::List(list) => {
                 list.items.iter().map(|item| block_bytes(&item.blocks)).sum::<u64>()
             }
-            Block::Table(t) => t
-                .grid
-                .iter()
-                .flatten()
-                .map(|slot| match slot {
-                    crate::model::CellSlot::Origin(c) => block_bytes(&c.blocks),
-                    crate::model::CellSlot::Covered { .. } => 0,
-                })
-                .sum(),
             Block::BlockQuote(blocks) => block_bytes(blocks),
             Block::CodeBlock { text, .. } => text.len() as u64,
-            Block::Rule => 0,
+            Block::Table(_) | Block::Rule => 0,
         })
         .sum()
 }
@@ -241,19 +265,23 @@ fn emit_row(
     }
     // Parse the row template exactly once: repeated rows clone the parsed
     // cells instead of reparsing, so per-parse side effects (notes, assets)
-    // happen once and the duplicated text bytes are charged up front.
-    let cells = parse_row_cells(row, ctx, &state.checkboxes)?;
+    // happen once, and the text bytes and nested grid positions each copy
+    // duplicates are charged up front.
+    let mut cells = parse_row_cells(row, ctx, &state.checkboxes)?;
     state.charge(repeat.saturating_sub(1))?;
     for cell in &cells {
-        if let RowCell::Cell { repeat: cell_repeat, bytes, .. } = cell {
-            let copies = repeat.saturating_mul(*cell_repeat).saturating_sub(1);
-            state.charge_bytes(bytes.saturating_mul(copies))?;
+        if let RowCell::Cell { repeat: cell_repeat, held, .. } = cell {
+            let placed = repeat.saturating_mul(*cell_repeat);
+            let copies = placed.saturating_sub(1);
+            state.charge_bytes(held.bytes.saturating_mul(copies))?;
+            ctx.parse_ctx.admit_grid_positions(held.positions.saturating_mul(copies))?;
+            state.held = state.held.add(held.times(placed));
         }
     }
-    for _ in 0..repeat {
+    for row in 1..=repeat {
         state.builder.next_row();
         state.rows_emitted += 1;
-        emit_parsed_cells(&cells, ctx, state)?;
+        emit_parsed_cells(&mut cells, row == repeat, ctx, state)?;
     }
     Ok(())
 }
@@ -288,16 +316,20 @@ fn parse_row_cells(
             .and_then(|v| v.parse().ok())
             .unwrap_or(1)
             .max(1);
-        let mut blocks = cell_blocks(cell, ctx)?;
+        let (blocks, nested) = ctx.holding(|| cell_blocks(cell, ctx));
+        let mut blocks = blocks?;
         append_cell_controls(cell, ctx, checkboxes, &mut blocks);
-        let bytes = block_bytes(&blocks);
-        out.push(RowCell::Cell { repeat, col_span, row_span, blocks, bytes });
+        let held = nested.add(Held { positions: 0, bytes: block_bytes(&blocks) });
+        out.push(RowCell::Cell { repeat, col_span, row_span, blocks, held });
     }
     Ok(out)
 }
 
+/// Place a row's cells, moving each cell's content into its last copy on
+/// the `last_row`.
 fn emit_parsed_cells(
-    cells: &[RowCell],
+    cells: &mut [RowCell],
+    last_row: bool,
     ctx: &Ctx,
     state: &mut TableState,
 ) -> Result<(), ConvertError> {
@@ -312,7 +344,7 @@ fn emit_parsed_cells(
                 // covered().
                 state.charge(*repeat)?;
                 for _ in 0..*repeat {
-                    if !state.builder.covered() {
+                    if !state.builder.covered()? {
                         stray = stray.saturating_add(1);
                     }
                 }
@@ -324,8 +356,13 @@ fn emit_parsed_cells(
                 }
                 flush_gap(state, &mut pending_cells)?;
                 state.charge(repeat.saturating_mul(*col_span as u64))?;
-                for _ in 0..*repeat {
-                    state.builder.place(Cell::spanning(blocks.clone(), *col_span, *row_span))?;
+                for copy in 1..=*repeat {
+                    let content = if last_row && copy == *repeat {
+                        std::mem::take(blocks)
+                    } else {
+                        blocks.clone()
+                    };
+                    state.builder.place(Cell::spanning(content, *col_span, *row_span))?;
                 }
             }
         }
@@ -480,9 +517,11 @@ pub fn parse_spreadsheet(sheet: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conve
     let mut blocks = Vec::new();
     for (position, table) in tables.into_iter().enumerate() {
         let _unit = ctx.parse_ctx.enter_unit(position);
-        let master = table
-            .attr(ns::TABLE, "style-name")
-            .and_then(|style| ctx.styles.style_master_page("table", style))
+        let named = match table.attr(ns::TABLE, "style-name") {
+            Some(style) => ctx.styles.style_master_page(ctx.parse_ctx, "table", style)?,
+            None => None,
+        };
+        let master = named
             .map_or_else(|| ctx.styles.first_master_page(), |name| ctx.styles.master_page(name));
         if let Some(master) = master {
             super::report_running(master, ctx.parse_ctx);

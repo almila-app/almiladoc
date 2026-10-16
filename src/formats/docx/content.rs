@@ -5,6 +5,7 @@ use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::formats::docx::numbering::{Counters, Numbering};
 use crate::formats::docx::styles::{Styles, on_off, rpr_delta};
+use crate::limits::Limit;
 use crate::model::{
     Block, Cell, GridBuilder, ImageSource, Inline, LinkTarget, Style, TableKind, inlines_are_empty,
 };
@@ -23,7 +24,7 @@ use crate::shared::list::{ListEntry, ListKey, flush_list};
 use crate::shared::math::{omath_para_to_tex, omath_to_tex};
 use crate::shared::text::clean_text;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Namespaces whose markup this frontend understands; `mc:Choice` branches
 /// requiring anything else fall back to `mc:Fallback`.
@@ -306,12 +307,12 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
         .and_then(|v| v.parse::<u8>().ok())
         .map(|l| if l < 9 { Some(l + 1) } else { None });
     let style_heading = match pstyle_id {
-        Some(id) => ctx.styles.heading_level(id)?,
+        Some(id) => ctx.styles.heading_level(ctx.parse_ctx, id)?,
         None => None,
     };
     let heading = direct_outline.or(style_heading).flatten();
     let style_block = match pstyle_id {
-        Some(id) => ctx.styles.block_style(id)?,
+        Some(id) => ctx.styles.block_style(ctx.parse_ctx, id)?,
         None => None,
     };
 
@@ -322,7 +323,7 @@ fn parse_paragraph(p: &Element, ctx: &Ctx) -> Result<(ParaKind, Vec<Piece>), Con
     // Toggle properties: the paragraph style chain's true-parity flips the
     // docDefaults base. Headings use the same resolution as body text.
     let parity = match pstyle_id {
-        Some(id) => ctx.styles.run_toggles(id)?,
+        Some(id) => ctx.styles.run_toggles(ctx.parse_ctx, id)?,
         None => Default::default(),
     };
     let paragraph_level = parity.apply_over(ctx.styles.doc_defaults);
@@ -375,7 +376,7 @@ fn resolve_numbering(
     let num_id = match direct_num_id {
         Some(id) => Some(id),
         None => match pstyle_id {
-            Some(id) => ctx.styles.style_num_pr(id)?,
+            Some(id) => ctx.styles.style_num_pr(ctx.parse_ctx, id)?,
             None => None,
         },
     };
@@ -396,7 +397,9 @@ fn resolve_numbering(
         (Some(l), _) => l,
         // Style-referenced numbering carries no usable ilvl (§17.3.1.19);
         // the level comes from the abstract levels' pStyle bindings.
-        (None, Some(id)) => ctx.styles.style_numbering_level(id, instance)?.unwrap_or(0),
+        (None, Some(id)) => {
+            ctx.styles.style_numbering_level(ctx.parse_ctx, id, instance)?.unwrap_or(0)
+        }
         (None, None) => 0,
     };
     let def = &instance.levels[ilvl.min(crate::formats::docx::numbering::LEVELS - 1)];
@@ -418,11 +421,37 @@ struct InlineWalker<'a, 'b, 'e> {
     pieces: Vec<Piece>,
     current: Vec<Inline>,
     fields: Vec<FieldFrame>,
+    /// Hyperlinks, simple fields and complex fields enclosing this walker's
+    /// output, which nest against `max_nesting_depth` with its own fields.
+    enclosing: u64,
 }
 
 impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     fn new(ctx: &'e Ctx<'a, 'b>, base: Style) -> Self {
-        InlineWalker { ctx, base, pieces: Vec::new(), current: Vec::new(), fields: Vec::new() }
+        InlineWalker {
+            ctx,
+            base,
+            pieces: Vec::new(),
+            current: Vec::new(),
+            fields: Vec::new(),
+            enclosing: 0,
+        }
+    }
+
+    /// The nesting level one more wrapper here would open, refused past
+    /// `max_nesting_depth`.
+    fn deeper(&self) -> Result<u64, ConvertError> {
+        let max = self.ctx.parse_ctx.limits().max_nesting_depth;
+        let open = u64::try_from(self.fields.len()).unwrap_or(u64::MAX);
+        let level = self.enclosing.saturating_add(open).saturating_add(1);
+        if level > max {
+            return Err(ConvertError::limit(Limit::NestingDepth, max));
+        }
+        Ok(level)
+    }
+
+    fn inner(&self) -> Result<Self, ConvertError> {
+        Ok(InlineWalker { enclosing: self.deeper()?, ..InlineWalker::new(self.ctx, self.base) })
     }
 
     fn push(&mut self, inline: Inline) {
@@ -472,7 +501,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 "r" => self.walk_run(child)?,
                 "hyperlink" => {
                     let target = self.hyperlink_link_target(child);
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = self.inner()?;
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     let unknown = target.is_none()
@@ -497,7 +526,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "fldSimple" => {
                     let instr = child.attr(ns::W, "instr").unwrap_or("").to_string();
-                    let mut inner = InlineWalker::new(self.ctx, self.base);
+                    let mut inner = self.inner()?;
                     inner.walk(child)?;
                     let (content, attachments) = split_pieces(inner.finish());
                     self.push_field_result(&instr, content);
@@ -545,7 +574,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 // paragraph-level value. Direct formatting is absolute.
                 let char_parity = match rpr.find(ns::W, "rStyle").and_then(|e| e.attr(ns::W, "val"))
                 {
-                    Some(id) => self.ctx.styles.run_toggles(id)?,
+                    Some(id) => self.ctx.styles.run_toggles(self.ctx.parse_ctx, id)?,
                     None => Default::default(),
                 };
                 let with_char = char_parity.apply_over(self.base);
@@ -613,6 +642,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         }) {
                             self.ctx.emit(DiagnosticCode::FormControlUnread);
                         }
+                        self.deeper()?;
                         self.fields.push(FieldFrame::default());
                     }
                     Some("separate") => {
@@ -967,11 +997,12 @@ struct TcInfo<'e> {
     covered: bool,
 }
 
-impl TcInfo<'_> {
-    /// Empty single-column filler for `gridBefore`/`gridAfter` positions.
-    fn filler() -> Self {
-        TcInfo { elem: None, merged: Vec::new(), col_span: 1, row_span: 1, covered: false }
-    }
+/// A table row: its cells between the empty positions `gridBefore` and
+/// `gridAfter` declare.
+struct RowInfo<'e> {
+    before: usize,
+    cells: Vec<TcInfo<'e>>,
+    after: usize,
 }
 
 /// A `w:trPr` grid filler count (`gridBefore`/`gridAfter`).
@@ -980,48 +1011,96 @@ fn grid_filler(trpr: Option<&Element>, name: &str) -> usize {
         .and_then(|e| e.attr(ns::W, "val"))
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
-        .min(1000)
+}
+
+/// Clamp a row's fillers and spans to the `w:tblGrid` width, so no
+/// position a row declares lies past the grid, and return how many values
+/// it clamped. A cell keeps at least its own position.
+fn clamp_to_grid(row: &mut RowInfo, width: usize) -> u64 {
+    let mut clamped = 0u64;
+    let mut clamp = |value: &mut usize, room: usize| {
+        if *value > room {
+            *value = room;
+            clamped += 1;
+        }
+    };
+    clamp(&mut row.before, width);
+    let mut col = row.before;
+    for tc in &mut row.cells {
+        clamp(&mut tc.col_span, width.saturating_sub(col).max(1));
+        col = col.saturating_add(tc.col_span);
+    }
+    clamp(&mut row.after, width.saturating_sub(col));
+    clamped
+}
+
+fn tc_at<'m, 'e>(
+    matrix: &'m mut [RowInfo<'e>],
+    row: usize,
+    i: usize,
+) -> Option<&'m mut TcInfo<'e>> {
+    matrix.get_mut(row).and_then(|row| row.cells.get_mut(i))
 }
 
 pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
-    // Collect the raw cell matrix first so vertical merges can be resolved
-    // into row spans before the grid is built. gridBefore/gridAfter filler
-    // materializes as empty cells so every cell keeps its grid column.
     let rows = collect_rows(tbl, ctx);
-    let mut matrix: Vec<Vec<TcInfo>> = Vec::new();
+    let width = tbl
+        .find(ns::W, "tblGrid")
+        .map(|grid| grid.find_all(ns::W, "gridCol").count())
+        .filter(|&width| width > 0);
+    let mut matrix: Vec<RowInfo> = Vec::new();
+    let mut clamped = 0u64;
     for &tr in &rows {
         let trpr = tr.find(ns::W, "trPr");
-        let mut row = Vec::new();
-        row.extend((0..grid_filler(trpr, "gridBefore")).map(|_| TcInfo::filler()));
-        collect_row_cells(tr, ctx, &mut row);
-        row.extend((0..grid_filler(trpr, "gridAfter")).map(|_| TcInfo::filler()));
+        let mut row = RowInfo {
+            before: grid_filler(trpr, "gridBefore"),
+            cells: Vec::new(),
+            after: grid_filler(trpr, "gridAfter"),
+        };
+        collect_row_cells(tr, ctx, &mut row.cells);
+        if let Some(width) = width {
+            clamped = clamped.saturating_add(clamp_to_grid(&mut row, width));
+        }
         matrix.push(row);
     }
-    // Active vertical-merge chains by grid column.
-    let mut active: HashMap<usize, (usize, usize)> = HashMap::new();
-    let rows_len = matrix.len();
-    for r in 0..rows_len {
-        let mut col = 0usize;
-        let mut next_active: Vec<(usize, (usize, usize))> = Vec::new();
-        for i in 0..matrix[r].len() {
-            let (covered, span) = (matrix[r][i].covered, matrix[r][i].col_span);
-            if covered {
-                if let Some(&(orow, oidx)) = active.get(&col) {
-                    matrix[orow][oidx].row_span += 1;
-                    for c in col..col + span {
-                        next_active.push((c, (orow, oidx)));
+    if clamped > 0 {
+        ctx.parse_ctx.emit_count(DiagnosticCode::TableSpanRepaired, ctx.region, clamped);
+    }
+    // Active vertical-merge chains: the column range each covers, by its
+    // first column, and the origin it extends.
+    let mut active: BTreeMap<usize, (usize, (usize, usize))> = BTreeMap::new();
+    for r in 0..matrix.len() {
+        let Some(row) = matrix.get(r) else { break };
+        let mut col = row.before;
+        let mut next_active = BTreeMap::new();
+        let mut extended = Vec::new();
+        let mut stray = Vec::new();
+        for (i, tc) in row.cells.iter().enumerate() {
+            let end = col.saturating_add(tc.col_span);
+            if tc.covered {
+                match active.range(..=col).next_back().filter(|(_, (last, _))| col < *last) {
+                    Some((_, &(_, origin))) => {
+                        extended.push(origin);
+                        next_active.insert(col, (end, origin));
                     }
-                } else {
-                    matrix[r][i].covered = false; // stray continuation
+                    None => stray.push(i),
                 }
             } else {
-                for c in col..col + span {
-                    next_active.push((c, (r, i)));
-                }
+                next_active.insert(col, (end, (r, i)));
             }
-            col += span;
+            col = end;
         }
-        active = next_active.into_iter().collect();
+        for (orow, oidx) in extended {
+            if let Some(origin) = tc_at(&mut matrix, orow, oidx) {
+                origin.row_span += 1;
+            }
+        }
+        for i in stray {
+            if let Some(continuation) = tc_at(&mut matrix, r, i) {
+                continuation.covered = false;
+            }
+        }
+        active = next_active;
     }
 
     // tblHeader is ST_OnOff: an explicit false value is not a header row.
@@ -1030,13 +1109,16 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
         .take_while(|tr| tr.find(ns::W, "trPr").and_then(|p| on_off(p, "tblHeader")) == Some(true))
         .count();
 
-    let mut builder = GridBuilder::new(ctx.parse_ctx.limits().max_expansion);
+    let mut builder = GridBuilder::new(ctx.parse_ctx);
     for row in &matrix {
         builder.next_row();
-        for tc in row {
+        for _ in 0..row.before {
+            builder.place(Cell::default())?;
+        }
+        for tc in &row.cells {
             if tc.covered {
                 for _ in 0..tc.col_span {
-                    builder.covered();
+                    builder.covered()?;
                 }
             } else {
                 let mut blocks = match tc.elem {
@@ -1046,11 +1128,16 @@ pub(super) fn parse_table(tbl: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conver
                 for merged in &tc.merged {
                     blocks.extend(parse_blocks(merged, ctx)?);
                 }
-                builder.place(Cell::spanning(blocks, tc.col_span as u32, tc.row_span as u32))?;
+                let col_span = u32::try_from(tc.col_span).unwrap_or(u32::MAX);
+                let row_span = u32::try_from(tc.row_span).unwrap_or(u32::MAX);
+                builder.place(Cell::spanning(blocks, col_span, row_span))?;
             }
         }
+        for _ in 0..row.after {
+            builder.place(Cell::default())?;
+        }
     }
-    let mut table = builder.finish(TableKind::Data);
+    let mut table = builder.finish(TableKind::Data)?;
     if table.grid.is_empty() {
         return Ok(Vec::new());
     }
@@ -1102,7 +1189,7 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx, cells: &mut Vec<TcInfo<
                     .and_then(|e| e.attr(ns::W, "val"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1)
-                    .clamp(1, 1000);
+                    .max(1);
                 // Legacy hMerge: a non-restart hMerge cell folds into the
                 // preceding origin, widening its span.
                 let hmerge_cont = tcpr
@@ -1112,7 +1199,7 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx, cells: &mut Vec<TcInfo<
                     && let Some(prev) = cells.last_mut()
                     && !prev.covered
                 {
-                    prev.col_span += col_span;
+                    prev.col_span = prev.col_span.saturating_add(col_span);
                     prev.merged.push(child);
                     continue;
                 }

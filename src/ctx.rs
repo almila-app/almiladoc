@@ -9,7 +9,8 @@ use std::num::NonZeroU32;
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::ledger::{CancelToken, Ledger};
-use crate::limits::Limits;
+use crate::limits::{Limit, Limits};
+use crate::model::GridLedger;
 
 /// What one parse reads its configuration from, charges its work to and
 /// reports its losses to.
@@ -19,6 +20,7 @@ pub(crate) struct ParseCtx<'a> {
     diagnostics: Cell<Diagnostics>,
     unit: Cell<Option<NonZeroU32>>,
     archive_bytes: Cell<u64>,
+    grid_slots: Cell<u64>,
 }
 
 /// While alive, reports go to one unit or across the document; dropping it
@@ -42,6 +44,7 @@ impl<'a> ParseCtx<'a> {
             diagnostics: Cell::default(),
             unit: Cell::default(),
             archive_bytes: Cell::default(),
+            grid_slots: Cell::default(),
         }
     }
 
@@ -73,6 +76,23 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn count_archive_bytes(&self, bytes: u64) {
         self.archive_bytes.set(self.archive_bytes.get().saturating_add(bytes));
+    }
+
+    /// Grid positions this parse may still materialize, of
+    /// [`Limits::max_grid_slots`] for all its tables together.
+    pub(crate) fn grid_slots_left(&self) -> u64 {
+        self.limits.max_grid_slots.saturating_sub(self.grid_slots.get())
+    }
+
+    /// Count `positions` more grid positions against
+    /// [`Limits::max_grid_slots`], charging each one unit of work.
+    pub(crate) fn admit_grid_positions(&self, positions: u64) -> Result<(), ConvertError> {
+        let slots = self.grid_slots.get().saturating_add(positions);
+        self.grid_slots.set(slots);
+        if slots > self.limits.max_grid_slots {
+            return Err(ConvertError::limit(Limit::GridSlots, self.limits.max_grid_slots));
+        }
+        self.charge(positions)
     }
 
     /// Report one occurrence of `code` in `region`, in the current unit.
@@ -120,6 +140,18 @@ impl<'a> ParseCtx<'a> {
     }
 }
 
+impl GridLedger for &ParseCtx<'_> {
+    type Error = ConvertError;
+
+    fn max_expansion(&self) -> u64 {
+        self.limits.max_expansion
+    }
+
+    fn admit_positions(&mut self, count: u64) -> Result<(), ConvertError> {
+        self.admit_grid_positions(count)
+    }
+}
+
 impl fmt::Debug for ParseCtx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParseCtx")
@@ -139,7 +171,7 @@ impl Default for ParseCtx<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::limits::Limit;
+    use crate::model::{Cell as TableCell, GridBuilder, TableKind};
 
     #[test]
     fn charges_run_against_the_contexts_max_work() {
@@ -203,5 +235,34 @@ mod tests {
         token.cancel();
         assert!(matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled)));
         assert!(ParseCtx::default().with_cancel(None).charge(1).is_ok());
+    }
+
+    #[test]
+    fn the_tables_of_a_parse_share_its_grid_slots_and_charge_each_position() {
+        let limits = Limits { max_grid_slots: 5, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let table = |cells: usize| {
+            let mut builder = GridBuilder::new(&parse_ctx);
+            builder.next_row();
+            for _ in 0..cells {
+                builder.place(TableCell::default())?;
+            }
+            builder.finish(TableKind::Data)
+        };
+        assert!(table(1).is_ok());
+        assert!(parse_ctx.admit_grid_positions(2).is_ok());
+        assert_eq!((parse_ctx.grid_slots_left(), parse_ctx.fuel()), (2, 3));
+        let refused = table(3).unwrap_err();
+        assert!(matches!(refused, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 }));
+    }
+
+    #[test]
+    fn a_grid_position_stops_at_cancellation() {
+        let token = CancelToken::new();
+        let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
+        token.cancel();
+        let mut builder = GridBuilder::new(&parse_ctx);
+        builder.next_row();
+        assert!(matches!(builder.place(TableCell::default()), Err(ConvertError::Cancelled)));
     }
 }

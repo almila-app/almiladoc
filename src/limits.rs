@@ -26,7 +26,8 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 /// test) so a saturating part stays around the archive budget.
 pub const MAX_XML_NODES: usize = 2_000_000;
 
-/// Maximum grid positions one spreadsheet table may materialize: 4 million.
+/// Maximum grid positions the tables of one parse may materialize together:
+/// 4 million.
 pub const MAX_GRID_SLOTS: u64 = 4_000_000;
 
 /// Maximum content-bearing cells a repeat expansion may produce per table.
@@ -91,9 +92,15 @@ pub struct Limits {
     /// parsed. An xlsx worksheet holds its structure around the rows and one
     /// row at a time, so it bounds a row, not the row count.
     pub max_xml_nodes: u64,
-    /// Grid positions one spreadsheet table materializes: spans and repeats
-    /// address far more cells than the input holds. An xlsx worksheet's
-    /// cells, hidden ones too, count against it as its rows are read.
+    /// Grid positions the tables of one parse materialize together, covered
+    /// and padding ones too, and the positions a span claims in rows its
+    /// table never supplies: spans, merges and repeats address far more
+    /// cells than the input holds. Every DOCX, PPTX, ODF, EPUB, RTF, DOC, XLSX,
+    /// XLSB and XLS table counts. A CSV's table and a DrawingML chart's do
+    /// not: the chart's holds a header row and a row per category, each with
+    /// a category cell and a cell per series, blank where the series has no
+    /// value. An xlsx worksheet's cells, hidden ones too, are judged against
+    /// the positions left as its rows are read.
     pub max_grid_slots: u64,
     /// Content-bearing cells a span or repeat expansion produces per table.
     pub max_expansion: u64,
@@ -128,14 +135,17 @@ pub struct Limits {
     /// archive, RTF token or skipped line break or NUL (one pass over the
     /// input, and one more over each font, style and list table group), CSV
     /// field, PPT record or text unit a hyperlink range reads, DOC formatting
-    /// run, XLSX, XLSB or XLS grid position, and 64 bytes of Markdown
-    /// written (not a PDF's). The default, two units per
-    /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
-    /// linear at that rate: a 256 MiB RTF of one hex picture charges
-    /// 268 435 404 units and the costliest test-corpus document 6 990. Work
-    /// that grows faster than the input crosses it: a PPT of 65 hyperlinks
-    /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging
-    /// its range read and its label compared, asks 545 259 782.
+    /// run, DOCX or ODF style or DOCX numbering link a resolver first
+    /// resolves, style link a DOCX numbering level or an RTF chain follows,
+    /// CSS rule an element's tag or class names, grid position a table
+    /// counts against [`Limits::max_grid_slots`], and 64 bytes of Markdown
+    /// written (not a PDF's). The default, two units per byte of
+    /// [`Limits::max_input_bytes`], admits every input whose cost is linear
+    /// at that rate: a 256 MiB RTF of one hex picture charges 268 435 404
+    /// units and the costliest test-corpus document 7 008. Work that grows
+    /// faster than the input crosses it: a PPT of 65 hyperlinks each over
+    /// one text of 4 Mi UTF-16 units (8 MiB), each link charging its range
+    /// read and its label compared, asks 545 259 782.
     pub max_work: u64,
 }
 
@@ -212,7 +222,7 @@ pub enum Limit {
     NestingDepth,
     /// XML nodes in one part.
     XmlNodes,
-    /// Grid positions one spreadsheet materializes.
+    /// Grid positions the tables of one parse materialize.
     GridSlots,
     /// Cells a span or repeat expansion produces per table.
     Expansion,

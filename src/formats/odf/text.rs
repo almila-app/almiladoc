@@ -4,7 +4,7 @@ use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::formats::odf::styles::{LIST_LEVELS, OdfStyles, parse_start};
-use crate::formats::odf::table::parse_table;
+use crate::formats::odf::table::{Held, parse_table};
 use crate::model::{
     Block, ImageSource, Inline, LinkTarget, List, ListItem, Note, NoteKind, Style,
     inlines_are_empty,
@@ -34,6 +34,7 @@ pub struct Ctx<'a, 'b> {
     /// Heading numbering state for `text:outline-style` (values, started).
     heading_counters: RefCell<([u64; LIST_LEVELS], [bool; LIST_LEVELS])>,
     region: Cell<Region>,
+    held: Cell<Held>,
 }
 
 impl<'a, 'b> Ctx<'a, 'b> {
@@ -53,6 +54,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             list_ids: Default::default(),
             heading_counters: Default::default(),
             region: Cell::new(Region::Body),
+            held: Cell::default(),
         }
     }
 
@@ -64,6 +66,20 @@ impl<'a, 'b> Ctx<'a, 'b> {
     /// Report `count` occurrences of `code` in the region being walked.
     pub fn emit_count(&self, code: DiagnosticCode, count: u64) {
         self.parse_ctx.emit_count(code, self.region.get(), count);
+    }
+
+    /// `f`'s result and what the tables it parses hold, apart from the
+    /// tables around it.
+    pub fn holding<T>(&self, f: impl FnOnce() -> T) -> (T, Held) {
+        let outer = self.held.take();
+        let out = f();
+        (out, self.held.replace(outer))
+    }
+
+    /// Count what a parsed table holds toward the innermost
+    /// [`Ctx::holding`].
+    pub fn hold(&self, table: Held) {
+        self.held.set(self.held.get().add(table));
     }
 
     /// Walk `f` with its losses reported in `region`.
@@ -127,8 +143,10 @@ fn parse_block_elem(
             }
             "p" => {
                 let (inlines, boxes) = parse_inline_content(elem, ctx)?;
-                let style =
-                    elem.attr(ns::TEXT, "style-name").and_then(|n| ctx.styles.block_style(n));
+                let style = match elem.attr(ns::TEXT, "style-name") {
+                    Some(name) => ctx.styles.block_style(ctx.parse_ctx, name)?,
+                    None => None,
+                };
                 match style {
                     Some(style) => run.push(style, inlines, blocks),
                     None => {
@@ -452,7 +470,7 @@ fn parse_inline_content(
 /// The style a paragraph's runs cascade from. An unstyled paragraph still sits
 /// on the family's default style.
 fn paragraph_base(elem: &Element, ctx: &Ctx) -> Result<StyleDelta, ConvertError> {
-    ctx.styles.delta("paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))
+    ctx.styles.delta(ctx.parse_ctx, "paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))
 }
 
 fn walk_inlines(
@@ -477,7 +495,9 @@ fn walk_inlines(
                     match child.local.as_str() {
                         "span" => {
                             let merged = match child.attr(ns::TEXT, "style-name") {
-                                Some(name) => delta.merge(ctx.styles.delta("text", name)?),
+                                Some(name) => {
+                                    delta.merge(ctx.styles.delta(ctx.parse_ctx, "text", name)?)
+                                }
                                 None => delta,
                             };
                             walk_inlines(child, ctx, merged, out, boxes)?;
@@ -532,7 +552,10 @@ fn walk_inlines(
                             };
                             let note_blocks = match child.find(ns::TEXT, "note-body") {
                                 Some(b) => {
-                                    ctx.in_region(Region::Note, || parse_container(b, ctx))?
+                                    let (blocks, _held_by_the_note) = ctx.holding(|| {
+                                        ctx.in_region(Region::Note, || parse_container(b, ctx))
+                                    });
+                                    blocks?
                                 }
                                 None => Vec::new(),
                             };

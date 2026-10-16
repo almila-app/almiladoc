@@ -1,6 +1,7 @@
 use super::{
     Ctx, RenderLoss, Unread, check_nesting, document_to_markdown, render_block, render_losses,
 };
+use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
@@ -337,11 +338,12 @@ fn composite_marker_labels_are_escaped() {
 
 #[test]
 fn layout_table_unwrapped() {
-    let mut b = GridBuilder::new(u64::MAX);
+    let parse_ctx = ParseCtx::default();
+    let mut b = GridBuilder::new(&parse_ctx);
     b.next_row();
     b.place(Cell::new(vec![heading(1, "Boxed"), Block::Paragraph(vec![Inline::plain("body")])]))
         .unwrap();
-    let md = doc(vec![Block::Table(b.finish(TableKind::Layout))]);
+    let md = doc(vec![Block::Table(b.finish(TableKind::Layout).unwrap())]);
     assert_eq!(md, "# Boxed\n\nbody\n");
 }
 
@@ -412,7 +414,8 @@ fn table_multiparagraph_cell() {
 
 #[test]
 fn merged_cells_render_blank_covered_positions() {
-    let mut b = GridBuilder::new(u64::MAX);
+    let parse_ctx = ParseCtx::default();
+    let mut b = GridBuilder::new(&parse_ctx);
     b.next_row();
     b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("wide")])], 2, 1)).unwrap();
     b.place(Cell::from_inlines(vec![Inline::plain("end")])).unwrap();
@@ -420,7 +423,7 @@ fn merged_cells_render_blank_covered_positions() {
     for t in ["a", "b", "c"] {
         b.place(Cell::from_inlines(vec![Inline::plain(t)])).unwrap();
     }
-    let mut table = b.finish(TableKind::Data);
+    let mut table = b.finish(TableKind::Data).unwrap();
     table.header_rows = 1;
     let md = doc(vec![Block::Table(table)]);
     assert_eq!(md, "| wide |  | end |\n| --- | --- | --- |\n| a | b | c |\n");
@@ -428,10 +431,11 @@ fn merged_cells_render_blank_covered_positions() {
 
 #[test]
 fn trailing_covered_columns_are_preserved() {
-    let mut b = GridBuilder::new(u64::MAX);
+    let parse_ctx = ParseCtx::default();
+    let mut b = GridBuilder::new(&parse_ctx);
     b.next_row();
     b.place(Cell::spanning(vec![Block::Paragraph(vec![Inline::plain("wide")])], 3, 1)).unwrap();
-    let mut table = b.finish(TableKind::Data);
+    let mut table = b.finish(TableKind::Data).unwrap();
     table.header_rows = 1;
     let md = doc(vec![Block::Table(table)]);
     assert_eq!(md, "| wide |  |  |\n| --- | --- | --- |\n");

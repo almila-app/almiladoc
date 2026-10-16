@@ -381,12 +381,20 @@ fn parse_stylesheet(
         }
     }
     let mut cycles: HashSet<i32> = HashSet::new();
+    let mut acyclic: HashSet<i32> = HashSet::new();
     for &id in raw.keys() {
         let mut chain: Vec<(i32, &StyleDef)> = Vec::new();
         let mut seen: HashSet<i32> = HashSet::new();
+        let mut resolved = StyleDef::default();
+        let mut ends_acyclic = true;
         let mut cursor = Some(id);
         while let Some(cur) = cursor {
+            if acyclic.contains(&cur) {
+                resolved = styles.get(&cur).copied().unwrap_or_default();
+                break;
+            }
             if !seen.insert(cur) {
+                ends_acyclic = false;
                 let cycle = chain.iter().skip_while(|&&(link, _)| link != cur);
                 if cycle.map(|&(link, _)| link).min().is_some_and(|least| cycles.insert(least)) {
                     parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
@@ -395,13 +403,19 @@ fn parse_stylesheet(
             }
             let Some((def, base)) = raw.get(&cur) else { break };
             chain.push((cur, def));
+            if base.is_some() {
+                parse_ctx.charge(1)?;
+            }
             cursor = *base;
         }
-        let mut resolved = StyleDef::default();
-        for (_, def) in chain.iter().rev() {
+        for &(link, def) in chain.iter().rev() {
             resolved.delta = resolved.delta.merge(def.delta);
             resolved.outline = def.outline.or(resolved.outline);
             resolved.block = def.block.or(resolved.block);
+            if ends_acyclic {
+                styles.insert(link, resolved);
+                acyclic.insert(link);
+            }
         }
         styles.insert(id, resolved);
     }
@@ -630,4 +644,65 @@ pub fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
         1252 => encoding_rs::WINDOWS_1252,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::{Limit, Limits};
+
+    fn stylesheet(
+        parse_ctx: &ParseCtx,
+        group: &str,
+    ) -> Result<HashMap<i32, StyleDef>, ConvertError> {
+        let mut styles = HashMap::new();
+        parse_stylesheet(
+            parse_ctx,
+            group.as_bytes(),
+            &mut styles,
+            Codepage::declared(encoding_rs::WINDOWS_1252),
+        )?;
+        Ok(styles)
+    }
+
+    fn tokens(group: &str) -> u64 {
+        let lexing = ParseCtx::default();
+        let mut lexer = Lexer::new(&lexing, group.as_bytes());
+        while lexer.next_token().unwrap().is_some() {}
+        lexing.fuel()
+    }
+
+    fn chain(depth: i32) -> String {
+        let styles: String = (1001..=1000 + depth)
+            .map(|i| format!(r"{{\s{i}\sbasedon{} \b S{i};}}", i - 1))
+            .collect();
+        format!(r"{{\s1000\i Normal;}}{styles}")
+    }
+
+    #[test]
+    fn a_chain_resolves_each_style_once_against_max_work() {
+        let group = chain(4000);
+        let parse_ctx = ParseCtx::default();
+        let styles = stylesheet(&parse_ctx, &group).unwrap();
+        assert_eq!(styles.len(), 4001);
+        assert!(styles.values().all(|s| s.delta.italic == Some(true)));
+        assert_eq!(parse_ctx.fuel(), tokens(&group) + 4000);
+        let max_work = parse_ctx.fuel() - 1;
+        let limits = Limits { max_work, ..Limits::default() };
+        let err = stylesheet(&ParseCtx::new(&limits), &group).unwrap_err();
+        assert!(
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max } if max == max_work)
+        );
+    }
+
+    #[test]
+    fn a_style_below_a_cycle_keeps_the_prefix_up_to_it() {
+        let group = r"{\s1\sbasedon2\b A;}{\s2\sbasedon1 B;}{\s3\sbasedon1\i C;}";
+        let parse_ctx = ParseCtx::default();
+        let styles = stylesheet(&parse_ctx, group).unwrap();
+        let c = styles[&3].delta;
+        assert_eq!((c.bold, c.italic), (Some(true), Some(true)));
+        assert_eq!(styles[&2].delta.bold, Some(true));
+        assert_eq!(parse_ctx.fuel(), tokens(group) + 7);
+    }
 }

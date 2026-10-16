@@ -18,35 +18,37 @@ use crate::error::ConvertError;
 ///
 /// Measured as the smallest stack converting each recursion's input at two
 /// depths, in bytes per level of the limit and in the test profile (the
-/// release profile in brackets); the fixed base is at most 37 KiB:
+/// release profile in brackets); the fixed base is at most 49 KiB:
 ///
 /// | Input | Recursions | Per level |
 /// |---|---|---|
-/// | EPUB nested `a`, in a paragraph or a heading | HTML inlines, rendered links, heading text | 7238 (1443) |
-/// | EPUB nested `a` and `b` | HTML inlines, rendered links | 6449 (1068) |
-/// | EPUB nested `blockquote` | HTML blocks, rendered quotes | 4593 (938) |
-/// | EPUB nested `div` | HTML blocks | 4016 (705) |
-/// | EPUB nested `ul` | HTML lists, rendered lists | 3936 (472) |
-/// | DOCX nested `w:hyperlink`, with or without a target | DOCX inlines, rendered links | 2835 (450) |
-/// | DOCX nested `w:smartTag` | DOCX inlines | 2835 (450) |
-/// | ODT nested tables | ODF tables, rendered tables | 2562 (562) |
-/// | ODT nested `text:span` | ODF inlines | 2498 (305) |
-/// | ODT nested `text:a`, in a paragraph or a table cell | ODF inlines, cell text bytes, rendered links | 2498 (451) |
-/// | ODP nested `draw:g` | ODF shapes | 2446 (306) |
+/// | EPUB nested `a`, in a paragraph, a heading or a list item | HTML inlines, rendered links, heading text | 7390 (1357) |
+/// | EPUB nested `a` and `b` | HTML inlines, rendered links | 6610 (988) |
+/// | EPUB nested `blockquote` | HTML blocks, rendered quotes | 4753 (869) |
+/// | ODT nested `text:a`, in a paragraph or a table cell | ODF inlines, cell text bytes, rendered links | 4611 (531) |
+/// | DOCX nested `w:hyperlink`, with or without a target | DOCX inlines, rendered links | 4610 (530) |
+/// | DOCX nested complex HYPERLINK fields, alone or alternating with `w:hyperlink` | DOCX inlines, rendered links | 4608 (528) |
+/// | DOC nested HYPERLINK fields | rendered links | 4608 (528) |
+/// | EPUB nested `div` | HTML blocks | 4176 (625) |
+/// | EPUB nested `ul` | HTML lists, rendered lists | 4104 (648) |
+/// | ODT nested lists | ODF lists, rendered lists | 3132 (297) |
+/// | DOCX nested `w:smartTag` | DOCX inlines | 2835 (466) |
+/// | ODT nested tables | ODF tables, rendered tables | 2707 (570) |
+/// | ODT nested `text:span` | ODF inlines | 2490 (337) |
+/// | ODP nested `draw:g` | ODF shapes | 2454 (306) |
 /// | EPUB MathML nested `mrow` | MathML | 2321 (353) |
-/// | ODT nested lists | ODF lists, rendered lists | 1928 (345) |
-/// | DOC nested HYPERLINK fields | rendered links | 1664 (448) |
-/// | DOCX nested tables | DOCX blocks, rendered tables | 1614 (434) |
+/// | RTF nested HYPERLINK fields | rendered links | 2304 (264) |
+/// | DOCX complex HYPERLINK fields alternating with `w:hyperlink` of an unread relationship | DOCX inlines, plain text, rendered links | 2304 (264) |
+/// | DOCX nested tables | DOCX blocks, rendered tables | 2128 (442) |
 /// | PPTX nested `p:grpSp` | PPTX shapes | 992 (718) |
-/// | DOCX nested `mc:AlternateContent` in a run | DOCX run content | 859 (96) |
-/// | ODT nested `table:table-row-group` | ODF table rows | 845 (129) |
-/// | RTF nested HYPERLINK fields | rendered links | 832 (224) |
-/// | DOCX OMML nested `m:f` | OMML | 747 (169) |
-/// | RTF nested `\mf` | OMML | 739 (169) |
-/// | DOCX nested `v:group` | DOCX drawing contents | 386 (185) |
-/// | DOCX nested `w:customXml` around cells | DOCX row cells | 306 (113) |
+/// | DOCX nested `mc:AlternateContent` in a run | DOCX run content | 867 (96) |
+/// | ODT nested `table:table-row-group` | ODF table rows | 845 (121) |
+/// | DOCX OMML nested `m:f` | OMML | 739 (185) |
+/// | RTF nested `\mf` | OMML | 739 (185) |
+/// | DOCX nested `v:group` | DOCX drawing contents | 377 (185) |
+/// | DOCX nested `w:customXml` around cells | DOCX row cells | 323 (113) |
 /// | RTF nested groups | none | 0 (0) |
-const STACK: usize = 11_206_656;
+const STACK: usize = 11_468_800;
 
 /// Run `work` on a pool built for `config`, mapping a pool that cannot start
 /// and a panic in `work` to [`ConvertError::Internal`].

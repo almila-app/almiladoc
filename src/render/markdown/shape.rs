@@ -503,11 +503,12 @@ mod tests {
                 TableKind::Data,
             ),
         ];
-        let mut covered = crate::model::GridBuilder::new(2);
+        let parse_ctx = crate::ctx::ParseCtx::default();
+        let mut covered = crate::model::GridBuilder::new(&parse_ctx);
         covered.next_row();
         let unshown = Block::Paragraph(vec![Inline::NoteRef("missing".into())]);
         covered.place(Cell { col_span: 2, ..Cell::new(vec![unshown]) }).unwrap();
-        let covered = Block::Table(covered.finish(TableKind::Data));
+        let covered = Block::Table(covered.finish(TableKind::Data).unwrap());
         assert!(matches!(&covered, Block::Table(table) if !table.grid.is_empty()));
         containers.push(list(vec![item(vec![list(vec![item(vec![covered.clone(), text("x")])])])]));
         containers.push(covered);

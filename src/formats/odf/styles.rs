@@ -5,6 +5,7 @@
 //! Chains are keyed by owned `family\0name` strings because definitions come
 //! from two separately parsed trees (`styles.xml` and `content.xml`).
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::package::xml::{Element, ns};
 use crate::shared::blockstyle::{self, BlockStyle};
@@ -70,6 +71,8 @@ impl ListLevel {
 pub struct OdfStyles<'a> {
     raw: HashMap<String, (&'a Element, Option<String>)>,
     memo: RefCell<HashMap<String, StyleDelta>>,
+    blocks: RefCell<HashMap<String, Option<BlockStyle>>>,
+    master_names: RefCell<HashMap<String, Option<&'a str>>>,
     list_styles: HashMap<String, [ListLevel; LIST_LEVELS]>,
     /// `text:outline-style`: heading numbering per outline level.
     outline: Option<[ListLevel; LIST_LEVELS]>,
@@ -133,50 +136,87 @@ impl<'a> OdfStyles<'a> {
     }
 
     /// Cumulative delta of a style through its `parent-style-name` chain,
-    /// over the family's `style:default-style` base.
-    pub fn delta(&self, family: &str, name: &str) -> Result<StyleDelta, ConvertError> {
-        let id = key(family, name);
-        if let Some(hit) = self.memo.borrow().get(&id) {
-            return Ok(*hit);
-        }
-        let mut chain: Vec<&str> = Vec::new();
+    /// over the family's `style:default-style` base; each style is resolved
+    /// once and charged one unit when it is.
+    pub fn delta(
+        &self,
+        parse_ctx: &ParseCtx,
+        family: &str,
+        name: &str,
+    ) -> Result<StyleDelta, ConvertError> {
+        let mut delta = self.defaults.get(family).copied().unwrap_or_default();
+        let mut chain: Vec<(&str, &Element)> = Vec::new();
         let mut visited: HashSet<&str> = HashSet::new();
-        let mut cursor = self.raw.get_key_value(&id).map(|(k, _)| k.as_str());
-        while let Some(current) = cursor {
+        let mut cursor = self.link(&key(family, name));
+        while let Some((current, def, parent)) = cursor {
+            if let Some(hit) = self.memo.borrow().get(current) {
+                delta = *hit;
+                break;
+            }
             if !visited.insert(current) {
                 return Err(ConvertError::malformed("style inheritance cycle"));
             }
-            chain.push(current);
-            cursor = match self.raw.get(current) {
-                Some((_, Some(parent))) => {
-                    self.raw.get_key_value(parent.as_str()).map(|(k, _)| k.as_str())
-                }
-                _ => None,
-            };
+            parse_ctx.charge(1)?;
+            chain.push((current, def));
+            cursor = parent.and_then(|parent| self.link(parent));
         }
-        let mut delta = self.defaults.get(family).copied().unwrap_or_default();
-        for current in chain.into_iter().rev() {
-            let (def, _) = self.raw[current];
+        for (current, def) in chain.into_iter().rev() {
             delta = delta.merge(text_properties_delta(def));
             self.memo.borrow_mut().insert(current.to_string(), delta);
         }
         Ok(delta)
     }
 
+    fn link(&self, id: &str) -> Option<(&str, &'a Element, Option<&str>)> {
+        self.raw.get_key_value(id).map(|(id, (def, parent))| (id.as_str(), *def, parent.as_deref()))
+    }
+
+    /// The nearest value `own` finds along the `parent-style-name` chain
+    /// from the style keyed `id`, child first; each style is resolved once
+    /// into `memo` and charged one unit when it is, and a cycle ends the
+    /// walk.
+    fn nearest<T: Copy>(
+        &self,
+        parse_ctx: &ParseCtx,
+        memo: &RefCell<HashMap<String, Option<T>>>,
+        id: &str,
+        own: impl Fn(&'a Element) -> Option<T>,
+    ) -> Result<Option<T>, ConvertError> {
+        let mut chain: Vec<&str> = Vec::new();
+        let mut visited: HashSet<&str> = HashSet::new();
+        let mut found = None;
+        let mut cursor = self.link(id);
+        while let Some((current, def, parent)) = cursor {
+            if let Some(&hit) = memo.borrow().get(current) {
+                found = hit;
+                break;
+            }
+            if !visited.insert(current) {
+                break;
+            }
+            parse_ctx.charge(1)?;
+            chain.push(current);
+            found = own(def);
+            if found.is_some() {
+                break;
+            }
+            cursor = parent.and_then(|parent| self.link(parent));
+        }
+        memo.borrow_mut().extend(chain.into_iter().map(|current| (current.to_string(), found)));
+        Ok(found)
+    }
+
     /// The block container a paragraph style names, walking
     /// `parent-style-name`: an automatic style carries the name on the
     /// named style it derives from.
-    pub fn block_style(&self, name: &str) -> Option<BlockStyle> {
-        let mut id = key("paragraph", name);
-        let mut visited: HashSet<String> = HashSet::new();
-        while visited.insert(id.clone()) {
-            let (def, parent) = self.raw.get(&id)?;
-            if let Some(hit) = def.attr(ns::STYLE, "name").and_then(blockstyle::from_style_name) {
-                return Some(hit);
-            }
-            id = parent.clone()?;
-        }
-        None
+    pub fn block_style(
+        &self,
+        parse_ctx: &ParseCtx,
+        name: &str,
+    ) -> Result<Option<BlockStyle>, ConvertError> {
+        self.nearest(parse_ctx, &self.blocks, &key("paragraph", name), |def| {
+            def.attr(ns::STYLE, "name").and_then(blockstyle::from_style_name)
+        })
     }
 
     pub fn list_level(&self, style_name: &str, depth: usize) -> ListLevel {
@@ -203,17 +243,16 @@ impl<'a> OdfStyles<'a> {
 
     /// The master page a style starts, by name, through its
     /// `parent-style-name` chain; an empty name starts none.
-    pub fn style_master_page(&self, family: &str, name: &str) -> Option<&'a str> {
-        let mut id = key(family, name);
-        let mut visited: HashSet<String> = HashSet::new();
-        while visited.insert(id.clone()) {
-            let (def, parent) = self.raw.get(&id)?;
-            if let Some(master) = def.attr(ns::STYLE, "master-page-name") {
-                return Some(master).filter(|n| !n.is_empty());
-            }
-            id = parent.clone()?;
-        }
-        None
+    pub fn style_master_page(
+        &self,
+        parse_ctx: &ParseCtx,
+        family: &str,
+        name: &str,
+    ) -> Result<Option<&'a str>, ConvertError> {
+        let master = self.nearest(parse_ctx, &self.master_names, &key(family, name), |def| {
+            def.attr(ns::STYLE, "master-page-name")
+        })?;
+        Ok(master.filter(|name| !name.is_empty()))
     }
 
     /// A master page by its `style:name`.
@@ -275,5 +314,115 @@ pub fn text_properties_delta(elem: &Element) -> StyleDelta {
         italic: props.attr(ns::FO, "font-style").map(|s| s == "italic" || s == "oblique"),
         strike: props.attr(ns::STYLE, "text-line-through-style").map(|lt| lt != "none"),
         code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::CancelToken;
+    use crate::limits::{Limit, Limits};
+    use crate::package::archive::Role;
+    use crate::package::xml::parse_xml;
+
+    fn tree(styles: &str) -> Element {
+        let xml = format!(
+            r#"<office:document-styles xmlns:office="{}" xmlns:style="{}"><office:styles>{styles}</office:styles></office:document-styles>"#,
+            ns::OFFICE,
+            ns::STYLE
+        );
+        parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap()
+    }
+
+    fn chain(depth: usize) -> String {
+        (0..depth)
+            .map(|i| match i.checked_sub(1) {
+                Some(parent) => format!(
+                    r#"<style:style style:name="s{i}" style:family="paragraph" style:parent-style-name="s{parent}"/>"#
+                ),
+                None => r#"<style:style style:name="s0" style:family="paragraph"/>"#.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_resolved_ancestor_ends_the_walk() {
+        let tree = tree(&chain(4));
+        let mut styles = OdfStyles::default();
+        styles.collect(&tree);
+        let bold = StyleDelta { bold: Some(true), ..StyleDelta::default() };
+        styles.memo.borrow_mut().insert(key("paragraph", "s1"), bold);
+        styles.blocks.borrow_mut().insert(key("paragraph", "s1"), Some(BlockStyle::Quote));
+        let parse_ctx = ParseCtx::default();
+        assert_eq!(styles.delta(&parse_ctx, "paragraph", "s3").unwrap(), bold);
+        assert_eq!(styles.block_style(&parse_ctx, "s3").unwrap(), Some(BlockStyle::Quote));
+        assert_eq!(parse_ctx.fuel(), 4);
+        assert_eq!(styles.delta(&parse_ctx, "paragraph", "s0").unwrap(), StyleDelta::default());
+        assert_eq!(styles.block_style(&parse_ctx, "s0").unwrap(), None);
+    }
+
+    #[test]
+    fn every_style_of_a_chain_is_resolved_once() {
+        let tree = tree(&chain(4000));
+        let mut styles = OdfStyles::default();
+        styles.collect(&tree);
+        let parse_ctx = ParseCtx::default();
+        for i in (0..4000).rev() {
+            let name = format!("s{i}");
+            assert_eq!(
+                styles.delta(&parse_ctx, "paragraph", &name).unwrap(),
+                StyleDelta::default()
+            );
+            assert_eq!(styles.block_style(&parse_ctx, &name).unwrap(), None);
+            assert_eq!(styles.style_master_page(&parse_ctx, "paragraph", &name).unwrap(), None);
+        }
+        let memos = [&styles.memo.borrow().len(), &styles.blocks.borrow().len()];
+        assert_eq!(memos, [&4000, &4000]);
+        assert_eq!(styles.master_names.borrow().len(), 4000);
+        assert_eq!(parse_ctx.fuel(), 12000);
+    }
+
+    #[test]
+    fn resolving_a_chain_stops_at_max_work_and_at_cancellation() {
+        let tree = tree(&chain(4000));
+        let mut styles = OdfStyles::default();
+        styles.collect(&tree);
+        let limits = Limits { max_work: 3999, ..Limits::default() };
+        let lowered = ParseCtx::new(&limits);
+        let token = CancelToken::new();
+        token.cancel();
+        let cancelled = ParseCtx::default().with_cancel(Some(&token));
+        let resolve = |parse_ctx: &ParseCtx, name: &str| {
+            [
+                styles.delta(parse_ctx, "paragraph", name).map(drop),
+                styles.block_style(parse_ctx, name).map(drop),
+                styles.style_master_page(parse_ctx, "paragraph", name).map(drop),
+            ]
+        };
+        for refused in resolve(&lowered, "s3999") {
+            assert!(matches!(
+                refused,
+                Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3999 })
+            ));
+        }
+        for refused in resolve(&cancelled, "s0") {
+            assert!(matches!(refused, Err(ConvertError::Cancelled)));
+        }
+    }
+
+    #[test]
+    fn only_a_referenced_cycle_is_malformed() {
+        let tree = tree(
+            r#"<style:style style:name="a" style:family="paragraph" style:parent-style-name="b"/>
+            <style:style style:name="b" style:family="paragraph" style:parent-style-name="a"/>
+            <style:style style:name="c" style:family="paragraph"/>"#,
+        );
+        let mut styles = OdfStyles::default();
+        styles.collect(&tree);
+        let parse_ctx = ParseCtx::default();
+        assert!(styles.delta(&parse_ctx, "paragraph", "c").is_ok());
+        let cyclic = styles.delta(&parse_ctx, "paragraph", "a");
+        assert!(matches!(cyclic, Err(ConvertError::Malformed { .. })));
+        assert_eq!(styles.block_style(&parse_ctx, "a").unwrap(), None);
     }
 }

@@ -74,8 +74,6 @@ pub(super) fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, Conv
     let shown = globals.sheets.iter().filter(|s| matches!(s, Listed::Shown(_))).count();
     let mut doc = Document::default();
     let mut failed = 0usize;
-    // One budget for the workbook, so sheets cannot multiply the cap.
-    let mut slots = 0u64;
     for (position, listed) in globals.sheets.iter().enumerate() {
         let _unit = parse_ctx.enter_unit(position);
         let sheet = match listed {
@@ -94,7 +92,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, Conv
             failed += 1;
             continue;
         };
-        let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
+        let Some(table) = build_table(parse_ctx, content)? else {
             continue;
         };
         if shown > 1 {

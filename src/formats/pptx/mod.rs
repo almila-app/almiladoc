@@ -963,14 +963,14 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
         tbl.find(ns::A, "tblPr")
             .is_some_and(|p| matches!(p.attr(ns::A, "firstRow"), Some("1") | Some("true"))),
     );
-    let mut builder = GridBuilder::new(ctx.parse_ctx.limits().max_expansion);
+    let mut builder = GridBuilder::new(ctx.parse_ctx);
     for tr in tbl.find_all(ns::A, "tr") {
         builder.next_row();
         for tc in tr.find_all(ns::A, "tc") {
             let merged = matches!(tc.attr(ns::A, "hMerge"), Some("1") | Some("true"))
                 || matches!(tc.attr(ns::A, "vMerge"), Some("1") | Some("true"));
             if merged {
-                builder.covered();
+                builder.covered()?;
                 continue;
             }
             let col_span: u32 =
@@ -984,7 +984,7 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
             builder.place(Cell::spanning(cell_blocks, col_span, row_span))?;
         }
     }
-    let mut table = builder.finish(TableKind::Data);
+    let mut table = builder.finish(TableKind::Data)?;
     if table.grid.is_empty() {
         return Ok(());
     }

@@ -101,8 +101,6 @@ pub(super) fn parse(
     let multi_sheet = sheets.len() > 1;
     let mut doc = Document::default();
     let mut failed = 0usize;
-    // One budget for the workbook, so sheets cannot multiply the cap.
-    let mut slots = 0u64;
     for (position, bundle, part) in &sheets {
         let _unit = parse_ctx.enter_unit(*position);
         let content = pkg
@@ -118,7 +116,7 @@ pub(super) fn parse(
             }
         };
         read_sheet_parts(parse_ctx, pkg, part, drawing.as_deref(), &mut content)?;
-        let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
+        let Some(table) = build_table(parse_ctx, content)? else {
             continue;
         };
         if multi_sheet {

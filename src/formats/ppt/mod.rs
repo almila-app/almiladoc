@@ -95,15 +95,17 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
     };
     let mut sink = crate::shared::assets::AssetSink::new(parse_ctx);
     let mut undecodable = HashSet::new();
-    let cap = parse_ctx.limits().max_entry_bytes;
+    let limits = parse_ctx.limits();
+    let cap = limits.max_entry_bytes;
     let mut pos = 0usize;
-    let mut index = 0u32;
+    let mut index = 0u64;
     while let Some((ver_inst, rec_type, body)) = officeart::record_at(&pictures, pos) {
         let offset = pos;
         pos += 8 + body.len();
         index += 1;
-        if index > 100_000 {
-            break;
+        parse_ctx.charge(1)?;
+        if index > limits.max_records {
+            return Err(ConvertError::limit(Limit::Records, limits.max_records));
         }
         let blip = match rec_type {
             0xF007 => officeart::fbse_blip(body, cap),
@@ -1265,6 +1267,24 @@ mod tests {
         let limits = Limits { max_entry_bytes: 4095, ..Limits::default() };
         let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 }));
+    }
+
+    #[test]
+    fn every_picture_record_counts_against_max_records_and_work() {
+        let records = [0xF01Au16, 0xF01D, 0xF01E].map(|rec_type| record(0x0000, rec_type, b"x"));
+        let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        ole.create_stream("Pictures").unwrap().write_all(&records.concat()).unwrap();
+        let mut ole = cfb::CompoundFile::open(Cursor::new(ole.into_inner().into_inner())).unwrap();
+        let limits = Limits { max_records: 3, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        assert_eq!(collect_pictures(&parse_ctx, &mut ole).unwrap().undecodable.len(), 3);
+        assert_eq!(parse_ctx.fuel(), 3);
+        let limits = Limits { max_records: 2, ..Limits::default() };
+        let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 }));
+        let limits = Limits { max_work: 2, ..Limits::default() };
+        let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 2 }));
     }
 
     #[test]

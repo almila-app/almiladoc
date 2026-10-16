@@ -2,11 +2,12 @@
 //! abstractNum` (with `numStyleLink` indirection) `-> level`, plus the
 //! document-order counters that produce each paragraph's effective number.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::package::xml::{Element, ns};
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, composite_label, parse_percent_pattern};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const LEVELS: usize = 9;
 
@@ -77,6 +78,7 @@ impl Numbering {
 /// `style_num_id` maps a numbering style id to the `numId` its own `numPr`
 /// references (the `numStyleLink`/`styleLink` indirection contract).
 pub fn parse(
+    parse_ctx: &ParseCtx,
     root: &Element,
     style_num_id: &impl Fn(&str) -> Option<u64>,
 ) -> Result<Numbering, ConvertError> {
@@ -101,7 +103,7 @@ pub fn parse(
     }
 
     // First pass: direct abstract references per numId.
-    let mut direct: HashMap<u64, (&str, &Element)> = HashMap::new();
+    let mut direct: BTreeMap<u64, (&str, &Element)> = BTreeMap::new();
     for num in root.find_all(ns::W, "num") {
         let (Some(num_id), Some(abs_id)) = (
             num.attr(ns::W, "numId").and_then(|v| v.parse::<u64>().ok()),
@@ -113,8 +115,10 @@ pub fn parse(
     }
 
     let mut numbering = Numbering::default();
+    let mut resolved = HashMap::new();
+    let links = Links { abstracts: &abstracts, direct: &direct, style_num_id };
     for (&num_id, &(abs_id, num_elem)) in &direct {
-        let Some(abs) = resolve_abstract(abs_id, &abstracts, &direct, style_num_id)? else {
+        let Some(abs) = links.resolve(parse_ctx, abs_id, &mut resolved)? else {
             continue;
         };
         let mut levels = abs.levels.clone();
@@ -149,34 +153,50 @@ pub fn parse(
     Ok(numbering)
 }
 
-/// Resolve an abstract definition, following `numStyleLink` indirection:
-/// abstract -> numbering style -> that style's `numId` -> its abstract.
-fn resolve_abstract<'n>(
-    abs_id: &str,
-    abstracts: &'n HashMap<&str, AbstractNum>,
-    direct: &HashMap<u64, (&str, &Element)>,
-    style_num_id: &impl Fn(&str) -> Option<u64>,
-) -> Result<Option<&'n AbstractNum>, ConvertError> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut current = abs_id.to_string();
-    loop {
-        if seen.contains(&current) {
-            return Err(ConvertError::malformed("numbering indirection cycle"));
-        }
-        seen.push(current.clone());
-        let Some(abs) = abstracts.get(current.as_str()) else {
-            return Ok(None);
+/// The `numStyleLink` indirection: abstract -> numbering style -> that
+/// style's `numId` -> its abstract.
+struct Links<'n, 'e, F> {
+    abstracts: &'n HashMap<&'e str, AbstractNum>,
+    direct: &'n BTreeMap<u64, (&'e str, &'e Element)>,
+    style_num_id: &'n F,
+}
+
+impl<'n, 'e, F: Fn(&str) -> Option<u64>> Links<'n, 'e, F> {
+    /// The abstract definition `abs_id` resolves to, each id on the way
+    /// resolved once into `resolved` and charged one unit when it is.
+    fn resolve(
+        &self,
+        parse_ctx: &ParseCtx,
+        abs_id: &'e str,
+        resolved: &mut HashMap<&'e str, Option<&'n AbstractNum>>,
+    ) -> Result<Option<&'n AbstractNum>, ConvertError> {
+        let mut path: Vec<&'e str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut current = abs_id;
+        let found = loop {
+            if let Some(&hit) = resolved.get(current) {
+                break hit;
+            }
+            if !seen.insert(current) {
+                return Err(ConvertError::malformed("numbering indirection cycle"));
+            }
+            parse_ctx.charge(1)?;
+            path.push(current);
+            let Some(abs) = self.abstracts.get(current) else {
+                break None;
+            };
+            let linked = abs
+                .num_style_link
+                .as_deref()
+                .and_then(self.style_num_id)
+                .and_then(|num_id| self.direct.get(&num_id));
+            match linked {
+                Some(&(next, _)) => current = next,
+                None => break Some(abs),
+            }
         };
-        let Some(style_id) = &abs.num_style_link else {
-            return Ok(Some(abs));
-        };
-        let linked = style_num_id(style_id)
-            .and_then(|num_id| direct.get(&num_id))
-            .map(|(abs_id, _)| abs_id.to_string());
-        match linked {
-            Some(next) => current = next,
-            None => return Ok(Some(abs)),
-        }
+        resolved.extend(path.into_iter().map(|id| (id, found)));
+        Ok(found)
     }
 }
 
@@ -298,6 +318,8 @@ impl Counters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::CancelToken;
+    use crate::limits::{Limit, Limits};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
 
@@ -311,14 +333,23 @@ mod tests {
         style_num_id: &impl Fn(&str) -> Option<u64>,
         paragraphs: &[(u64, usize)],
     ) -> Result<Vec<u64>, ConvertError> {
+        numbers_in(&ParseCtx::default(), nums, style_num_id, paragraphs)
+    }
+
+    fn numbers_in(
+        parse_ctx: &ParseCtx,
+        nums: &str,
+        style_num_id: &impl Fn(&str) -> Option<u64>,
+        paragraphs: &[(u64, usize)],
+    ) -> Result<Vec<u64>, ConvertError> {
         let xml = format!(
             r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{ABSTRACT}{nums}</w:numbering>"#
         );
-        let tree = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe)?;
+        let tree = parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe)?;
         let root = tree
             .find(ns::W, "numbering")
             .ok_or_else(|| ConvertError::malformed("no w:numbering root"))?;
-        let numbering = parse(root, style_num_id)?;
+        let numbering = parse(parse_ctx, root, style_num_id)?;
         let mut counters = Counters::default();
         paragraphs
             .iter()
@@ -436,5 +467,81 @@ mod tests {
         let got = numbers(nums, &outline, &[(4, 0), (5, 0), (1, 0), (4, 0)])?;
         assert_eq!(got, [1, 2, 1, 3]);
         Ok(())
+    }
+
+    #[test]
+    fn a_chain_of_linked_abstracts_resolves_each_link_once() -> Result<(), ConvertError> {
+        let depth: u64 = 4000;
+        let nums: String = (0..depth)
+            .map(|i| {
+                let link = format!(r#"<w:numStyleLink w:val="L{i}"/>"#);
+                let link = if i + 1 < depth { link.as_str() } else { "" };
+                format!(
+                    r#"<w:abstractNum w:abstractNumId="a{i}">{link}</w:abstractNum><w:num w:numId="{i}"><w:abstractNumId w:val="a{i}"/></w:num>"#
+                )
+            })
+            .collect();
+        let lookups = std::cell::Cell::new(0u64);
+        let link = |style: &str| {
+            lookups.set(lookups.get() + 1);
+            style.strip_prefix('L')?.parse::<u64>().ok().map(|i| i + 1)
+        };
+        let parse_ctx = ParseCtx::default();
+        let got = numbers_in(&parse_ctx, &nums, &link, &[(0, 0), (depth - 1, 0)])?;
+        assert_eq!(got, [1, 2]);
+        assert_eq!((lookups.get(), parse_ctx.fuel()), (depth - 1, depth));
+        let limits = Limits { max_work: depth - 1, ..Limits::default() };
+        let refused = numbers_in(&ParseCtx::new(&limits), &nums, &link, &[]);
+        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })));
+        let token = CancelToken::new();
+        token.cancel();
+        let cancelled =
+            numbers_in(&ParseCtx::default().with_cancel(Some(&token)), &nums, &link, &[]);
+        assert!(matches!(cancelled, Err(ConvertError::Cancelled)));
+        Ok(())
+    }
+
+    #[test]
+    fn instances_resolve_in_num_id_order_whatever_the_work_left() {
+        let terminals: u64 = 30;
+        let cyclic = terminals + 1;
+        let nums: String = (1..=terminals)
+            .map(|i| {
+                format!(
+                    r#"<w:abstractNum w:abstractNumId="t{i}"/><w:num w:numId="{i}"><w:abstractNumId w:val="t{i}"/></w:num>"#
+                )
+            })
+            .chain([format!(
+                r#"<w:abstractNum w:abstractNumId="c"><w:numStyleLink w:val="C"/></w:abstractNum><w:num w:numId="{cyclic}"><w:abstractNumId w:val="c"/></w:num>"#
+            )])
+            .collect();
+        let link = |style: &str| (style == "C").then_some(cyclic);
+        let verdict = |max_work| {
+            let limits = Limits { max_work, ..Limits::default() };
+            let parse_ctx = ParseCtx::new(&limits);
+            let refused = numbers_in(&parse_ctx, &nums, &link, &[]).unwrap_err();
+            (refused, parse_ctx.fuel())
+        };
+        let (short, fuel) = verdict(terminals);
+        assert!(matches!(short, ConvertError::ResourceLimit { limit: Limit::Work, .. }));
+        assert_eq!(fuel, cyclic);
+        let (enough, fuel) = verdict(cyclic);
+        assert!(matches!(enough, ConvertError::Malformed { .. }));
+        assert_eq!(fuel, cyclic);
+    }
+
+    #[test]
+    fn a_cycle_of_numbering_links_is_malformed() {
+        let nums = r#"
+            <w:abstractNum w:abstractNumId="a"><w:numStyleLink w:val="B"/></w:abstractNum>
+            <w:abstractNum w:abstractNumId="b"><w:numStyleLink w:val="A"/></w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="a"/></w:num>
+            <w:num w:numId="2"><w:abstractNumId w:val="b"/></w:num>"#;
+        let link = |style: &str| match style {
+            "A" => Some(1),
+            "B" => Some(2),
+            _ => None,
+        };
+        assert!(matches!(numbers(nums, &link, &[]), Err(ConvertError::Malformed { .. })));
     }
 }

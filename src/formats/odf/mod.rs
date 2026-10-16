@@ -48,7 +48,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets);
 
     let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
-        for master in text_master_pages(text, &styles) {
+        for master in text_master_pages(parse_ctx, text, &styles)? {
             report_running(master, parse_ctx);
         }
         parse_container(text, &ctx)?
@@ -83,7 +83,11 @@ fn is_encrypted(pkg: &Package) -> Result<bool, ConvertError> {
 /// The master pages a text document's pages use: the first, which starts
 /// a document naming none, those a paragraph or table style applied in the
 /// text starts, and each one's next.
-fn text_master_pages<'a>(text: &Element, styles: &styles::OdfStyles<'a>) -> Vec<&'a Element> {
+fn text_master_pages<'a>(
+    parse_ctx: &ParseCtx,
+    text: &Element,
+    styles: &styles::OdfStyles<'a>,
+) -> Result<Vec<&'a Element>, ConvertError> {
     let applied: BTreeSet<(&str, &str)> = text
         .descendant_elems()
         .filter_map(|e| {
@@ -96,10 +100,10 @@ fn text_master_pages<'a>(text: &Element, styles: &styles::OdfStyles<'a>) -> Vec<
             }
         })
         .collect();
-    let mut pending: Vec<&str> = applied
-        .into_iter()
-        .filter_map(|(family, name)| styles.style_master_page(family, name))
-        .collect();
+    let mut pending = Vec::new();
+    for (family, name) in applied {
+        pending.extend(styles.style_master_page(parse_ctx, family, name)?);
+    }
     pending.extend(styles.first_master_page().and_then(|m| m.attr(ns::STYLE, "name")));
     let mut used = BTreeSet::new();
     while let Some(name) = pending.pop() {
@@ -108,7 +112,7 @@ fn text_master_pages<'a>(text: &Element, styles: &styles::OdfStyles<'a>) -> Vec<
             pending.extend(master.attr(ns::STYLE, "next-style-name"));
         }
     }
-    used.into_iter().filter_map(|name| styles.master_page(name)).collect()
+    Ok(used.into_iter().filter_map(|name| styles.master_page(name)).collect())
 }
 
 /// Report the header and footer a master page shows on every page it

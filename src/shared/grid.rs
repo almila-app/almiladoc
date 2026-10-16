@@ -132,21 +132,21 @@ pub fn build_edge_table(
         active = next_active;
     }
 
-    let mut builder = GridBuilder::new(parse_ctx.limits().max_expansion);
+    let mut builder = GridBuilder::new(parse_ctx);
     for row in rows {
         builder.next_row();
         for origin in row {
             let span = (origin.col_r - origin.col_l) as u32;
             if origin.covered {
                 for _ in 0..span {
-                    builder.covered();
+                    builder.covered()?;
                 }
             } else {
                 builder.place(Cell::spanning(origin.blocks, span, origin.row_span))?;
             }
         }
     }
-    let mut table = builder.finish(TableKind::Data);
+    let mut table = builder.finish(TableKind::Data)?;
     if table.grid.is_empty() {
         return Ok(None);
     }

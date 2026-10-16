@@ -22,7 +22,7 @@ pub use style::Style;
 pub use table::{Cell, CellSlot, Table, TableKind};
 
 /// Frontends build grids; consumers read them off [`Table::grid`].
-pub(crate) use table::GridBuilder;
+pub(crate) use table::{GridBuilder, GridLedger};
 
 /// A parsed document: its body, its notes, and the bytes of everything it
 /// embedded.

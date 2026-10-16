@@ -78,7 +78,6 @@ const IMPORTANT_PRIORITY: u32 = 1_000_000;
 #[derive(Debug)]
 struct Rule {
     tag: Option<String>,
-    class: Option<String>,
     /// Cascade priority: the tier base plus selector specificity within the
     /// supported subset (a class outweighs any number of tags: `.c` = 10,
     /// `t.c` = 11, `t` = 1). Source order breaks ties (rules are stored in
@@ -87,9 +86,13 @@ struct Rule {
     props: StyleProps,
 }
 
+/// Each rule sits in exactly one index: `by_class` when it names a class
+/// (`t.c` too), else `by_tag`.
 #[derive(Debug, Default)]
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
 }
 
 impl Stylesheet {
@@ -121,9 +124,14 @@ impl Stylesheet {
                 let specificity = u32::from(class.is_some()) * 10 + u32::from(tag.is_some());
                 for (props, base) in [(decls.normal, 0), (decls.important, IMPORTANT_PRIORITY)] {
                     if !props.is_default() {
+                        let index = match (&class, &tag) {
+                            (Some(class), _) => self.by_class.entry(class.clone()).or_default(),
+                            (None, Some(tag)) => self.by_tag.entry(tag.clone()).or_default(),
+                            (None, None) => continue,
+                        };
+                        index.push(self.rules.len());
                         self.rules.push(Rule {
                             tag: tag.clone(),
-                            class: class.clone(),
                             priority: base + specificity,
                             props,
                         });
@@ -133,16 +141,30 @@ impl Stylesheet {
         }
     }
 
-    /// Matching rules for one element as (priority, props) pairs.
-    fn matching_rules(&self, tag: &str, classes: &[&str]) -> Vec<(u32, StyleProps)> {
-        self.rules
-            .iter()
-            .filter(|rule| {
-                rule.tag.as_deref().is_none_or(|t| t == tag)
-                    && rule.class.as_deref().is_none_or(|c| classes.contains(&c))
-            })
+    /// Matching rules for one element as (priority, props) pairs, in source
+    /// order, each candidate rule its tag or classes name charged.
+    fn matching_rules(
+        &self,
+        parse_ctx: &ParseCtx,
+        tag: &str,
+        classes: &[&str],
+    ) -> Result<Vec<(u32, StyleProps)>, ConvertError> {
+        let mut names = classes.to_vec();
+        names.sort_unstable();
+        names.dedup();
+        let by_class = names.iter().filter_map(|class| self.by_class.get(*class));
+        let mut candidates: Vec<usize> = Vec::new();
+        for rules in self.by_tag.get(tag).into_iter().chain(by_class) {
+            parse_ctx.charge(rules.len() as u64)?;
+            candidates.extend_from_slice(rules);
+        }
+        candidates.sort_unstable();
+        Ok(candidates
+            .into_iter()
+            .filter_map(|index| self.rules.get(index))
+            .filter(|rule| rule.tag.as_deref().is_none_or(|t| t == tag))
             .map(|rule| (rule.priority, rule.props))
-            .collect()
+            .collect())
     }
 }
 
@@ -311,10 +333,10 @@ impl Builder<'_> {
     /// Element-level props: matching stylesheet rules and the inline `style`
     /// attribute merged in one cascade order — normal rules, inline style,
     /// `!important` rules, `!important` inline style.
-    fn element_props(&self, elem: &Element) -> StyleProps {
+    fn element_props(&self, elem: &Element) -> Result<StyleProps, ConvertError> {
         let classes: Vec<&str> =
             elem.attr_any("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
-        let mut entries = self.css.matching_rules(&elem.local, &classes);
+        let mut entries = self.css.matching_rules(self.parse_ctx, &elem.local, &classes)?;
         if let Some(style) = elem.attr_any("style") {
             let decls = parse_declarations(style);
             entries.push((INLINE_PRIORITY, decls.normal));
@@ -325,7 +347,7 @@ impl Builder<'_> {
         for (_, entry) in entries {
             props = props.merge(entry);
         }
-        props
+        Ok(props)
     }
 
     fn push_anchor(&mut self, elem: &Element) {
@@ -369,7 +391,7 @@ impl Builder<'_> {
     }
 
     fn walk_elem(&mut self, elem: &Element, delta: StyleDelta) -> Result<(), ConvertError> {
-        let props = self.element_props(elem);
+        let props = self.element_props(elem)?;
         if props.hidden == Some(true) {
             if holds_content(elem) {
                 self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
@@ -562,7 +584,7 @@ impl Builder<'_> {
         delta: StyleDelta,
     ) -> Result<Vec<Block>, ConvertError> {
         let ordered = elem.local == "ol";
-        self.report_unread(elem, &["li"], false);
+        self.report_unread(elem, &["li"], false)?;
         let items: Vec<&Element> = elem.child_elems().filter(|e| e.local == "li").collect();
         if items.is_empty() {
             return Ok(Vec::new());
@@ -636,14 +658,19 @@ impl Builder<'_> {
     /// Reports each child of a list, table, row group or row that holds
     /// content outside the children it reads (`read`): reading systems
     /// render it unless it, or `elem` when `hidden`, is under `display: none`.
-    fn report_unread(&self, elem: &Element, read: &[&str], hidden: bool) {
+    fn report_unread(
+        &self,
+        elem: &Element,
+        read: &[&str],
+        hidden: bool,
+    ) -> Result<(), ConvertError> {
         for node in &elem.children {
             let shown = match node {
                 Node::Text(text) if !text.trim().is_empty() => !hidden,
                 Node::Elem(child)
                     if !read.contains(&child.local.as_str()) && holds_content(child) =>
                 {
-                    !hidden && self.shows_content(child)
+                    !hidden && self.shows_content(child)?
                 }
                 _ => continue,
             };
@@ -651,26 +678,27 @@ impl Builder<'_> {
                 if shown { DiagnosticCode::BlockUnread } else { DiagnosticCode::HiddenOmitted };
             self.parse_ctx.emit(code, Region::Body);
         }
+        Ok(())
     }
 
-    fn shows_content(&self, elem: &Element) -> bool {
+    fn shows_content(&self, elem: &Element) -> Result<bool, ConvertError> {
         let mut stack = vec![elem];
         while let Some(elem) = stack.pop() {
-            if renders_nothing(&elem.local) || self.element_props(elem).hidden == Some(true) {
+            if renders_nothing(&elem.local) || self.element_props(elem)?.hidden == Some(true) {
                 continue;
             }
             if matches!(elem.local.as_str(), "img" | "image") {
-                return true;
+                return Ok(true);
             }
             for node in &elem.children {
                 match node {
-                    Node::Text(text) if !text.trim().is_empty() => return true,
+                    Node::Text(text) if !text.trim().is_empty() => return Ok(true),
                     Node::Text(_) => {}
                     Node::Elem(child) => stack.push(child),
                 }
             }
         }
-        false
+        Ok(false)
     }
 
     fn parse_table(
@@ -688,7 +716,7 @@ impl Builder<'_> {
             elem,
             &["thead", "tbody", "tfoot", "tr", "caption", "colgroup", "col"],
             false,
-        );
+        )?;
         for child in elem.child_elems() {
             match child.local.as_str() {
                 "thead" | "tbody" | "tfoot" => {
@@ -697,19 +725,19 @@ impl Builder<'_> {
                         group += 1;
                     }
                     let in_head = child.local == "thead";
-                    let hidden = self.element_props(child).hidden == Some(true);
-                    self.report_unread(child, &["tr"], hidden);
+                    let hidden = self.element_props(child)?.hidden == Some(true);
+                    self.report_unread(child, &["tr"], hidden)?;
                     for tr in child.child_elems().filter(|e| e.local == "tr") {
-                        let row_hidden = hidden || self.element_props(tr).hidden == Some(true);
-                        self.report_unread(tr, &["td", "th"], row_hidden);
+                        let row_hidden = hidden || self.element_props(tr)?.hidden == Some(true);
+                        self.report_unread(tr, &["td", "th"], row_hidden)?;
                         row_elems.push((tr, in_head, group));
                     }
                     group += 1;
                 }
                 "tr" => {
                     in_implicit_group = true;
-                    let hidden = self.element_props(child).hidden == Some(true);
-                    self.report_unread(child, &["td", "th"], hidden);
+                    let hidden = self.element_props(child)?.hidden == Some(true);
+                    self.report_unread(child, &["td", "th"], hidden)?;
                     row_elems.push((child, false, group));
                 }
                 _ => {}
@@ -723,7 +751,7 @@ impl Builder<'_> {
         for (i, &(_, _, g)) in row_elems.iter().enumerate() {
             group_end.insert(g, i);
         }
-        let mut builder = GridBuilder::new(self.parse_ctx.limits().max_expansion);
+        let mut builder = GridBuilder::new(self.parse_ctx);
         let mut header_rows = 0usize;
         for (i, (tr, in_head, grp)) in row_elems.iter().enumerate() {
             builder.next_row();
@@ -756,7 +784,7 @@ impl Builder<'_> {
                 header_rows += 1;
             }
         }
-        let mut table = builder.finish(TableKind::Data);
+        let mut table = builder.finish(TableKind::Data)?;
         if table.grid.is_empty() {
             return Ok(None);
         }
@@ -911,6 +939,32 @@ mod tests {
 
     fn blocks(html: &str) -> Vec<Block> {
         blocks_with_css(html, "")
+    }
+
+    #[test]
+    fn an_element_charges_the_rules_its_tag_and_classes_name() {
+        let mut sheet = Stylesheet::default();
+        let rules: String = (0..1000).map(|i| format!(".c{i} {{ font-weight: bold }} ")).collect();
+        sheet.add(&format!("{rules} p {{ font-style: italic }} span.c7 {{ display: none }}"));
+        let parse_ctx = ParseCtx::default();
+        let found = sheet.matching_rules(&parse_ctx, "p", &["c7", "c9", "c7", "nowhere"]).unwrap();
+        assert_eq!(parse_ctx.fuel(), 4);
+        let props: Vec<_> =
+            found.iter().map(|(priority, props)| (*priority, props.delta)).collect();
+        let bold = StyleDelta { bold: Some(true), ..StyleDelta::default() };
+        let italic = StyleDelta { italic: Some(true), ..StyleDelta::default() };
+        assert_eq!(props, [(10, bold), (10, bold), (1, italic)]);
+        let limits = crate::limits::Limits { max_work: 3, ..crate::limits::Limits::default() };
+        let refused = sheet.matching_rules(&ParseCtx::new(&limits), "p", &["c7", "c9"]);
+        assert!(matches!(
+            refused,
+            Err(ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max: 3 })
+        ));
+        let token = crate::ledger::CancelToken::new();
+        token.cancel();
+        let cancelled = ParseCtx::default().with_cancel(Some(&token));
+        let refused = sheet.matching_rules(&cancelled, "p", &["c7", "c9"]);
+        assert!(matches!(refused, Err(ConvertError::Cancelled)));
     }
 
     #[test]

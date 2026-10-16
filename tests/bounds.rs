@@ -8,7 +8,7 @@ use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit, Limits, O
 
 const CEILING: u64 = Limits::MAX_NESTING_CEILING;
 
-const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml""#;
+const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml""#;
 const ODF: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink""#;
 const PML: &str = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
 
@@ -37,6 +37,21 @@ const CASES: &[Case] = &[
     Case { name: "docx row wrappers", format: Format::Docx, wrap: 8, per: 1, build: docx_rows },
     Case { name: "docx drawing", format: Format::Docx, wrap: 5, per: 1, build: docx_drawing },
     Case { name: "docx math", format: Format::Docx, wrap: 6, per: 2, build: docx_math },
+    Case { name: "docx fields", format: Format::Docx, wrap: 0, per: 1, build: docx_link_fields },
+    Case {
+        name: "docx links and fields",
+        format: Format::Docx,
+        wrap: 0,
+        per: 1,
+        build: docx_links_and_fields,
+    },
+    Case {
+        name: "docx unread links and fields",
+        format: Format::Docx,
+        wrap: 0,
+        per: 1,
+        build: docx_unread_links_and_fields,
+    },
     Case { name: "odt lists", format: Format::Odt, wrap: 4, per: 2, build: odt_lists },
     Case { name: "odt spans", format: Format::Odt, wrap: 4, per: 1, build: odt_spans },
     Case { name: "odt tables", format: Format::Odt, wrap: 4, per: 3, build: odt_tables },
@@ -112,6 +127,30 @@ fn doc_fields_read_the_configured_limit() {
 }
 
 #[test]
+fn docx_fields_read_the_configured_limit() {
+    let docx = docx_fields("PAGE", 9);
+    assert!(converter(9).convert(Input::new(&docx, Format::Docx)).is_ok());
+    assert!(refused(converter(8).convert(Input::new(&docx, Format::Docx)), 8));
+}
+
+#[test]
+fn docx_simple_fields_nest_with_the_complex_fields_around_and_inside_them() {
+    let (begin, end) = (field_begin("PAGE"), field_char("end"));
+    let simple = r#"<w:fldSimple w:instr="PAGE">"#;
+    let docx = docx(&format!(
+        "<w:p>{}{}{}{DOCX_TEXT}{}{}{}</w:p>",
+        begin.repeat(4),
+        simple.repeat(2),
+        begin.repeat(5),
+        end.repeat(5),
+        "</w:fldSimple>".repeat(2),
+        end.repeat(4)
+    ));
+    assert!(converter(11).convert(Input::new(&docx, Format::Docx)).is_ok());
+    assert!(refused(converter(10).convert(Input::new(&docx, Format::Docx)), 10));
+}
+
+#[test]
 fn rtf_fields_open_in_one_group_read_the_configured_limit() {
     let rtf = rtf_flat_fields("PAGE", 9);
     assert!(converter(9).convert(Input::new(&rtf, Format::Rtf)).is_ok());
@@ -135,6 +174,9 @@ fn fields_nested_far_past_the_limit_are_refused_while_parsing() {
     assert!(refused_at_default(&rtf_fields(fields), Format::Rtf));
     assert!(refused_at_default(&rtf_flat_fields("HYPERLINK x", fields), Format::Rtf));
     assert!(refused_at_default(&doc_links(fields), Format::Doc));
+    assert!(refused_at_default(&docx_fields("PAGE", 150_000), Format::Docx));
+    let links = docx_links_around_fields(UNREAD_LINK, 250, 250);
+    assert!(refused_at_default(&docx(&format!("<w:p>{links}</w:p>")), Format::Docx));
 }
 
 #[test]
@@ -396,6 +438,58 @@ fn docx_math(units: usize) -> Vec<u8> {
     docx(&format!("<w:p><m:oMath>{math}</m:oMath></w:p>"))
 }
 
+fn field_char(kind: &str) -> String {
+    format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#)
+}
+
+/// The runs that open a complex field of `instruction` up to its result.
+fn field_begin(instruction: &str) -> String {
+    let instr = format!("<w:r><w:instrText>{instruction}</w:instrText></w:r>");
+    [field_char("begin"), instr, field_char("separate")].concat()
+}
+
+/// A paragraph of `fields` nested complex fields of `instruction` around `x`.
+fn docx_fields(instruction: &str, fields: usize) -> Vec<u8> {
+    let (begin, end) = (field_begin(instruction), field_char("end"));
+    docx(&format!("<w:p>{}{DOCX_TEXT}{}</w:p>", begin.repeat(fields), end.repeat(fields)))
+}
+
+fn docx_link_fields(units: usize) -> Vec<u8> {
+    docx_fields("HYPERLINK x", units)
+}
+
+const UNREAD_LINK: &str = r#"r:id="rId9""#;
+
+/// A paragraph of `levels` nested levels alternating, outermost first,
+/// between a `w:hyperlink` with attribute `link` and a complex HYPERLINK
+/// field, around `x`.
+fn docx_alternating_links(link: &str, levels: usize) -> Vec<u8> {
+    let (begin, end) = (field_begin("HYPERLINK x"), field_char("end"));
+    let level = |l: usize| match l % 2 {
+        0 => (format!("<w:hyperlink {link}>"), "</w:hyperlink>".to_string()),
+        _ => (begin.clone(), end.clone()),
+    };
+    let opens: String = (0..levels).map(|l| level(l).0).collect();
+    let closes: String = (0..levels).rev().map(|l| level(l).1).collect();
+    docx(&format!("<w:p>{opens}{DOCX_TEXT}{closes}</w:p>"))
+}
+
+fn docx_links_and_fields(levels: usize) -> Vec<u8> {
+    docx_alternating_links(r#"w:anchor="a""#, levels)
+}
+
+fn docx_unread_links_and_fields(levels: usize) -> Vec<u8> {
+    docx_alternating_links(UNREAD_LINK, levels)
+}
+
+/// `links` nested `w:hyperlink` elements with attribute `link`, each
+/// holding `fields` nested complex HYPERLINK fields around the next.
+fn docx_links_around_fields(link: &str, links: usize, fields: usize) -> String {
+    let open = format!("<w:hyperlink {link}>{}", field_begin("HYPERLINK x").repeat(fields));
+    let close = format!("{}</w:hyperlink>", field_char("end").repeat(fields));
+    nest(&open, &close, links, DOCX_TEXT)
+}
+
 fn odf(body: &str) -> Vec<u8> {
     let content = format!(
         "<office:document-content {ODF}><office:body>{body}</office:body></office:document-content>"
@@ -456,7 +550,10 @@ fn odp_groups(units: usize) -> Vec<u8> {
 
 fn pptx_groups(units: usize) -> Vec<u8> {
     let shape = "<p:sp><p:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>";
-    let tree = nest("<p:grpSp>", "</p:grpSp>", units, shape);
+    pptx(&nest("<p:grpSp>", "</p:grpSp>", units, shape))
+}
+
+fn pptx(tree: &str) -> Vec<u8> {
     let presentation = format!(
         r#"<p:presentation {PML}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#
     );
@@ -587,4 +684,225 @@ fn rtf_list(levels: usize) -> Vec<u8> {
     let paragraphs: String =
         (0..=levels).map(|level| format!(r"\pard\ls1\ilvl{level} item {level}\par ")).collect();
     format!("{{\\rtf1\\ansi {table}{paragraphs}}}").into_bytes()
+}
+
+fn docx_table(rows: &str) -> Vec<u8> {
+    docx(&format!("<w:tbl>{rows}</w:tbl>"))
+}
+
+#[test]
+fn every_table_counts_its_positions_against_max_grid_slots() {
+    let tcs =
+        |cells: &[&str]| cells.iter().map(|c| format!("<w:tc>{c}</w:tc>")).collect::<String>();
+    let wide = r#"<w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p/>"#;
+    let p = "<w:p><w:r><w:t>x</w:t></w:r></w:p>";
+    let docx = docx_table(&format!("<w:tr>{}</w:tr><w:tr>{}</w:tr>", tcs(&[wide]), tcs(&[p, p])));
+    let a_tc = |attrs: &str| {
+        format!(r#"<a:tc {attrs}><a:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></a:txBody></a:tc>"#)
+    };
+    let pptx = pptx(&format!(
+        r#"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr>{}</a:tr><a:tr>{}{}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+        a_tc(r#"gridSpan="2""#),
+        a_tc(""),
+        a_tc("")
+    ));
+    let cell = "<table:table-cell><text:p>x</text:p></table:table-cell>";
+    let odt = odf(&format!(
+        r#"<office:text><table:table><table:table-row><table:table-cell table:number-columns-spanned="2"><text:p>x</text:p></table:table-cell><table:covered-table-cell/></table:table-row><table:table-row>{cell}{cell}</table:table-row></table:table></office:text>"#
+    ));
+    let epub =
+        epub(r#"<table><tr><td colspan="2">x</td></tr><tr><td>x</td><td>x</td></tr></table>"#);
+    let row = r"\trowd\cellx1000\cellx2000\intbl x\cell x\cell\row ";
+    let rtf = rtf(&row.repeat(2));
+    let cases =
+        [("docx", docx, Format::Docx), ("pptx", pptx, Format::Pptx), ("odt", odt, Format::Odt)]
+            .into_iter()
+            .chain([("epub", epub, Format::Epub), ("rtf", rtf, Format::Rtf)]);
+    for (name, bytes, format) in cases {
+        let at =
+            |max| limited(|limits| limits.max_grid_slots = max).convert(Input::new(&bytes, format));
+        assert!(at(4).is_ok(), "{name}: {:?}", at(4).err());
+        assert!(refused_with(at(3), Limit::GridSlots, 3), "{name}: {:?}", at(3).err());
+    }
+}
+
+/// A DOCX of one table of `rows`, and the bytes of its document part.
+fn docx_declared_positions(rows: &str) -> (Vec<u8>, u64) {
+    let part = docx_document(&format!("<w:tbl>{rows}</w:tbl>"));
+    (zip(&[("word/document.xml", &part)]), part.len() as u64)
+}
+
+#[test]
+fn docx_spans_and_row_fillers_fail_on_the_grid_slots_within_linear_work() {
+    let wide = r#"<w:tc><w:tcPr><w:gridSpan w:val="1000"/></w:tcPr><w:p/></w:tc>"#;
+    let spans = docx_declared_positions(&format!("<w:tr>{}</w:tr>", wide.repeat(60_000)));
+    let fillers = r#"<w:tr><w:trPr><w:gridBefore w:val="1000"/><w:gridAfter w:val="1000"/></w:trPr><w:tc><w:p/></w:tc></w:tr>"#;
+    let fillers = docx_declared_positions(&fillers.repeat(10_000));
+    let max = Limits::default().max_grid_slots;
+    for (name, (docx, part_bytes)) in [("spans", spans), ("fillers", fillers)] {
+        let work = part_bytes + max;
+        let refusal =
+            limited(|limits| limits.max_work = work).convert(Input::new(&docx, Format::Docx));
+        assert!(refused_with(refusal, Limit::GridSlots, max), "{name}");
+    }
+}
+
+#[test]
+fn docx_positions_past_the_declared_grid_are_clamped_and_reported() {
+    let docx = docx_table(
+        r#"<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:trPr><w:gridBefore w:val="5"/><w:gridAfter w:val="3"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="4"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:gridSpan w:val="7"/></w:tcPr><w:p><w:r><w:t>y</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>z</w:t></w:r></w:p></w:tc></w:tr>"#,
+    );
+    let conversion = limited(|_| {}).convert(Input::new(&docx, Format::Docx)).unwrap();
+    let repaired: Vec<_> =
+        conversion.diagnostics().iter().map(|d| (d.code.as_str(), d.count)).collect();
+    assert_eq!(repaired, [("table_span_repaired", 4)]);
+    assert_eq!(
+        conversion.markdown(),
+        "|  |  |  |\n| --- | --- | --- |\n|  |  | x |\n| y |  | z |\n"
+    );
+}
+
+#[test]
+fn a_docx_merge_continuation_past_the_merge_above_stays_its_own_cell() {
+    let p = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let restart = format!(r#"<w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>{}</w:tc>"#, p("a"));
+    let continued = r#"<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>"#;
+    let docx = docx_table(&format!(
+        "<w:tr>{restart}</w:tr><w:tr><w:tc>{}</w:tc>{continued}</w:tr>",
+        p("b")
+    ));
+    let conversion = limited(|_| {}).convert(Input::new(&docx, Format::Docx)).unwrap();
+    assert_eq!(conversion.markdown(), "|  |\n| --- |\n| a |\n| b |\n");
+}
+
+#[test]
+fn a_span_past_the_supplied_rows_counts_each_position_it_reserves() {
+    let odt = |rows: u32| {
+        odf(&format!(
+            r#"<office:text><table:table><table:table-row><table:table-cell table:number-rows-spanned="{rows}"><text:p>x</text:p></table:table-cell></table:table-row></table:table></office:text>"#
+        ))
+    };
+    let work = |rows| least_work_of(&odt(rows), Format::Odt);
+    assert_eq!(work(1000) - work(1), 999);
+    let spanned = odt(1000);
+    let at = |max| {
+        limited(|limits| limits.max_grid_slots = max).convert(Input::new(&spanned, Format::Odt))
+    };
+    assert!(at(1000).is_ok());
+    assert!(refused_with(at(999), Limit::GridSlots, 999));
+}
+
+#[test]
+fn odf_repeated_nested_tables_count_every_copy_against_max_grid_slots() {
+    let cell = "<table:table-cell><text:p>x</text:p></table:table-cell>";
+    let row = format!("<table:table-row>{cell}{cell}</table:table-row>");
+    let odt = odf(&format!(
+        r#"<office:text><table:table><table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="3"><table:table>{row}{row}</table:table></table:table-cell></table:table-row></table:table></office:text>"#
+    ));
+    let at =
+        |max| limited(|limits| limits.max_grid_slots = max).convert(Input::new(&odt, Format::Odt));
+    assert!(at(30).is_ok(), "{:?}", at(30).err());
+    assert!(refused_with(at(29), Limit::GridSlots, 29), "{:?}", at(29).err());
+}
+
+#[test]
+fn odf_repeated_cells_copy_the_tables_their_lists_hold_and_not_their_notes() {
+    let pair = "<table:table><table:table-row><table:table-cell><text:p>x</text:p></table:table-cell><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row></table:table>";
+    let odt = odf(&format!(
+        r#"<office:text><table:table><table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="3"><text:list><text:list-item>{pair}</text:list-item></text:list><text:p>y<text:note text:id="n1"><text:note-body>{pair}</text:note-body></text:note></text:p></table:table-cell></table:table-row></table:table></office:text>"#
+    ));
+    let at = |set: fn(&mut Limits, u64), max| {
+        limited(|limits| set(limits, max)).convert(Input::new(&odt, Format::Odt))
+    };
+    let slots: fn(&mut Limits, u64) = |limits, max| limits.max_grid_slots = max;
+    let bytes: fn(&mut Limits, u64) = |limits, max| limits.max_expansion_text_bytes = max;
+    assert!(at(slots, 20).is_ok(), "{:?}", at(slots, 20).err());
+    assert!(refused_with(at(slots, 19), Limit::GridSlots, 19), "{:?}", at(slots, 19).err());
+    assert!(at(bytes, 25).is_ok(), "{:?}", at(bytes, 25).err());
+    assert!(
+        refused_with(at(bytes, 24), Limit::ExpansionTextBytes, 24),
+        "{:?}",
+        at(bytes, 24).err()
+    );
+}
+
+#[test]
+fn odf_covered_markers_and_inner_gaps_charge_the_expansion_budget() {
+    let row = |inner: &str| {
+        let cell = "<table:table-cell><text:p>x</text:p></table:table-cell>";
+        odf(&format!(
+            "<office:text><table:table><table:table-row>{cell}{inner}{cell}</table:table-row></table:table></office:text>"
+        ))
+    };
+    let gap = row(r#"<table:table-cell table:number-columns-repeated="20"/>"#);
+    let covered = row(r#"<table:covered-table-cell table:number-columns-repeated="20"/>"#);
+    for (name, odt) in [("gap", gap), ("covered", covered)] {
+        let at = |max| {
+            limited(|limits| limits.max_expansion = max).convert(Input::new(&odt, Format::Odt))
+        };
+        assert!(at(22).is_ok(), "{name}: {:?}", at(22).err());
+        assert!(refused_with(at(10), Limit::Expansion, 10), "{name}: {:?}", at(10).err());
+    }
+}
+
+fn least_work_of(bytes: &[u8], format: Format) -> u64 {
+    least_work(|converter| converter.convert(Input::new(bytes, format)).is_ok())
+}
+
+#[test]
+fn docx_numbering_charges_the_conversion_once_per_abstract_it_resolves() {
+    let nums = 1000;
+    let docx = |abstract_of: fn(u64) -> u64| {
+        let nums: String = (0..nums)
+            .map(|i| {
+                let abs = abstract_of(i);
+                format!(r#"<w:num w:numId="{i}"><w:abstractNumId w:val="a{abs:04}"/></w:num>"#)
+            })
+            .collect();
+        let numbering = format!("<w:numbering {W}>{nums}</w:numbering>");
+        let document = docx_document("<w:p/>");
+        zip(&[("word/document.xml", &document), ("word/numbering.xml", &numbering)])
+    };
+    let work = |abstract_of| least_work_of(&docx(abstract_of), Format::Docx);
+    assert_eq!(work(|i| i) - work(|_| 0), nums - 1);
+}
+
+#[test]
+fn odf_style_resolution_charges_the_conversion_once_per_style() {
+    let depth = 1000;
+    let chain = |family: &str, prefix: char| -> String {
+        (0..depth)
+            .map(|i: u64| {
+                let parent = i.checked_sub(1).map_or(String::new(), |parent| {
+                    format!(r#" style:parent-style-name="{prefix}{parent:04}""#)
+                });
+                format!(
+                    r#"<style:style style:name="{prefix}{i:04}" style:family="{family}"{parent}/>"#
+                )
+            })
+            .collect()
+    };
+    let styles = [chain("paragraph", 'p'), chain("text", 't'), chain("table", 'b')].concat();
+    let document = |body: String| {
+        let content = format!(
+            r#"<office:document-content {ODF} xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"><office:automatic-styles>{styles}</office:automatic-styles><office:body>{body}</office:body></office:document-content>"#
+        );
+        zip(&[("content.xml", &content)])
+    };
+    let text = |paragraph: &str, span: &str| {
+        let odt = document(format!(
+            r#"<office:text><text:p text:style-name="{paragraph}"><text:span text:style-name="{span}">x</text:span></text:p></office:text>"#
+        ));
+        least_work_of(&odt, Format::Odt)
+    };
+    let sheet = |table: &str| {
+        let ods = document(format!(
+            r#"<office:spreadsheet><table:table table:name="s" table:style-name="{table}"><table:table-row><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet>"#
+        ));
+        least_work_of(&ods, Format::Ods)
+    };
+    let least = text("p0000", "t0000");
+    assert_eq!(text("p0999", "t0000") - least, 3 * (depth - 1));
+    assert_eq!(text("p0000", "t0999") - least, depth - 1);
+    assert_eq!(sheet("b0999") - sheet("b0000"), depth - 1);
 }

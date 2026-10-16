@@ -94,11 +94,9 @@ pub(super) fn parse(
     let multi_sheet = sheets.len() > 1;
     let mut doc = Document::default();
     let mut failed = 0usize;
-    // One budget for the workbook, so sheets cannot multiply the cap.
-    let mut slots = 0u64;
     for (position, name, part) in &sheets {
         let _unit = parse_ctx.enter_unit(*position);
-        let mut rows = SheetRows::new(parse_ctx, &shared, &styles, dates, slots);
+        let mut rows = SheetRows::new(parse_ctx, &shared, &styles, dates);
         let worksheet =
             pkg.related_xml_part_streamed(part, Role::Reported(Region::Body), &mut rows)?;
         let Some(worksheet) = worksheet.as_ref().and_then(|r| r.find(ns::SML, "worksheet")) else {
@@ -110,7 +108,7 @@ pub(super) fn parse(
         let drawing =
             worksheet.find(ns::SML, "drawing").and_then(|d| d.attr_qualified(ns::R, "id"));
         read_sheet_parts(parse_ctx, pkg, part, drawing, &mut content)?;
-        let Some(table) = build_table(parse_ctx, content, &mut slots)? else {
+        let Some(table) = build_table(parse_ctx, content)? else {
             continue;
         };
         if multi_sheet {
@@ -356,8 +354,8 @@ impl Styles {
 
 /// A worksheet's rows read as the parse closes each one, so the part holds
 /// one row's nodes at a time beside the structure around the rows, and its
-/// cells, hidden or shown, are judged against the grid slots the workbook
-/// has left.
+/// cells, hidden or shown, are judged against the grid slots the parse has
+/// left.
 struct SheetRows<'s> {
     shared: &'s [String],
     styles: &'s Styles,
@@ -375,17 +373,15 @@ impl<'s> SheetRows<'s> {
         shared: &'s [String],
         styles: &'s Styles,
         dates: DateSystem,
-        slots: u64,
     ) -> Self {
-        let max_slots = parse_ctx.limits().max_grid_slots;
         SheetRows {
             shared,
             styles,
             dates,
             content: SheetContent::on(OOXML_GRID),
             next_row: 0,
-            max_slots,
-            slots_left: max_slots.saturating_sub(slots),
+            max_slots: parse_ctx.limits().max_grid_slots,
+            slots_left: parse_ctx.grid_slots_left(),
             placed: 0,
         }
     }

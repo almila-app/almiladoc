@@ -6,11 +6,12 @@
 //! a true-count *parity* XORed over the `docDefaults` base. Direct run
 //! formatting is absolute on/off.
 
+use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::Style;
 use crate::package::xml::{Element, ns};
 use crate::shared::blockstyle::{self, BlockStyle};
-use crate::shared::chain::StyleChains;
+use crate::shared::chain::{Memo, StyleChains};
 use crate::shared::delta::StyleDelta;
 
 /// Per-property parity of `true` toggle specifications in a style chain.
@@ -44,13 +45,17 @@ pub struct Styles<'a> {
     chains: StyleChains<'a, Element>,
     /// docDefaults as absolute values (the base the toggles flip over).
     pub doc_defaults: Style,
+    toggles: Memo<'a, Toggles>,
+    headings: Memo<'a, Option<Option<u8>>>,
+    blocks: Memo<'a, Option<BlockStyle>>,
+    num_ids: Memo<'a, Option<u64>>,
 }
 
 impl<'a> Styles<'a> {
     pub fn parse_opt(root: Option<&'a Element>) -> Styles<'a> {
         match root {
             Some(root) => Styles::parse(root),
-            None => Styles { chains: StyleChains::default(), doc_defaults: Style::PLAIN },
+            None => Styles::new(StyleChains::default(), Style::PLAIN),
         }
     }
 
@@ -68,33 +73,70 @@ impl<'a> Styles<'a> {
             .and_then(|d| d.find(ns::W, "rPr"))
             .map(|rpr| rpr_delta(rpr).resolve())
             .unwrap_or(Style::PLAIN);
-        Styles { chains, doc_defaults }
+        Styles::new(chains, doc_defaults)
+    }
+
+    fn new(chains: StyleChains<'a, Element>, doc_defaults: Style) -> Styles<'a> {
+        Styles {
+            chains,
+            doc_defaults,
+            toggles: Memo::default(),
+            headings: Memo::default(),
+            blocks: Memo::default(),
+            num_ids: Memo::default(),
+        }
+    }
+
+    /// The nearest specification `own` finds along a style's `basedOn`
+    /// chain, child first.
+    fn nearest<T: Clone>(
+        &self,
+        parse_ctx: &ParseCtx,
+        memo: &Memo<'a, Option<T>>,
+        id: &str,
+        own: impl Fn(&'a Element) -> Option<T>,
+    ) -> Result<Option<T>, ConvertError> {
+        self.chains.resolve(
+            parse_ctx,
+            memo,
+            id,
+            None,
+            |style| own(style).is_some(),
+            |style, inherited| own(style).or(inherited),
+        )
     }
 
     /// The parity of `true` toggle specifications along a style's `basedOn`
     /// chain. A `false` in a style leaves the inherited value unchanged.
-    pub fn run_toggles(&self, id: &str) -> Result<Toggles, ConvertError> {
-        let mut parity = Toggles::default();
-        self.chains.walk::<()>(id, |style| {
-            if let Some(rpr) = style.find(ns::W, "rPr") {
-                parity = parity.xor(Toggles {
+    pub fn run_toggles(&self, parse_ctx: &ParseCtx, id: &str) -> Result<Toggles, ConvertError> {
+        self.chains.resolve(
+            parse_ctx,
+            &self.toggles,
+            id,
+            Toggles::default(),
+            |_| false,
+            |style, inherited| match style.find(ns::W, "rPr") {
+                Some(rpr) => inherited.xor(Toggles {
                     bold: on_off(rpr, "b") == Some(true),
                     italic: on_off(rpr, "i") == Some(true),
                     strike: on_off(rpr, "strike") == Some(true)
                         || on_off(rpr, "dstrike") == Some(true),
-                });
-            }
-            None
-        })?;
-        Ok(parity)
+                }),
+                None => inherited,
+            },
+        )
     }
 
     /// Heading level a paragraph style resolves to, from its name
     /// (`heading N`, `Title`) or an `outlineLvl`, inherited through
     /// `basedOn`. Tri-state: `Some(None)` when the nearest specification is
     /// the explicit off value (`outlineLvl` 9), which stops inheritance.
-    pub fn heading_level(&self, id: &str) -> Result<Option<Option<u8>>, ConvertError> {
-        self.chains.walk(id, |style| {
+    pub fn heading_level(
+        &self,
+        parse_ctx: &ParseCtx,
+        id: &str,
+    ) -> Result<Option<Option<u8>>, ConvertError> {
+        self.nearest(parse_ctx, &self.headings, id, |style| {
             let name = style
                 .find(ns::W, "name")
                 .and_then(|e| e.attr(ns::W, "val"))
@@ -120,8 +162,12 @@ impl<'a> Styles<'a> {
 
     /// The block container a paragraph style names, inherited through
     /// `basedOn` (Word's `Quote`, Pandoc's `Source Code`, ...).
-    pub fn block_style(&self, id: &str) -> Result<Option<BlockStyle>, ConvertError> {
-        self.chains.walk(id, |style| {
+    pub fn block_style(
+        &self,
+        parse_ctx: &ParseCtx,
+        id: &str,
+    ) -> Result<Option<BlockStyle>, ConvertError> {
+        self.nearest(parse_ctx, &self.blocks, id, |style| {
             let name = style.find(ns::W, "name")?.attr(ns::W, "val")?;
             blockstyle::from_style_name(name)
         })
@@ -131,8 +177,12 @@ impl<'a> Styles<'a> {
     /// `basedOn`. An `ilvl` inside a style's `numPr` is ignored per ECMA-376
     /// §17.3.1.19 - the effective level comes from the abstract levels'
     /// `w:pStyle` bindings ([`Styles::style_numbering_level`]).
-    pub fn style_num_pr(&self, id: &str) -> Result<Option<u64>, ConvertError> {
-        self.chains.walk(id, |style| {
+    pub fn style_num_pr(
+        &self,
+        parse_ctx: &ParseCtx,
+        id: &str,
+    ) -> Result<Option<u64>, ConvertError> {
+        self.nearest(parse_ctx, &self.num_ids, id, |style| {
             style
                 .find(ns::W, "pPr")?
                 .find(ns::W, "numPr")?
@@ -144,17 +194,16 @@ impl<'a> Styles<'a> {
     }
 
     /// The numbering level a paragraph style binds to: the first style along
-    /// the `basedOn` chain (child first) that one of the instance's abstract
-    /// levels references via `w:pStyle`.
+    /// the `basedOn` chain (child first) that one of the abstract levels of
+    /// `instance` references via `w:pStyle`. Walked on every call: a memo
+    /// per instance would grow with instances times styles.
     pub fn style_numbering_level(
         &self,
+        parse_ctx: &ParseCtx,
         id: &str,
         instance: &crate::formats::docx::numbering::Instance,
     ) -> Result<Option<usize>, ConvertError> {
-        self.chains.walk(id, |style| {
-            let style_id = style.attr(ns::W, "styleId")?;
-            instance.style_level(style_id)
-        })
+        self.chains.find(parse_ctx, id, |style| instance.style_level(style))
     }
 
     /// The `numId` referenced by a numbering style's own `numPr`
@@ -197,6 +246,7 @@ pub fn on_off(parent: &Element, name: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::{Limit, Limits};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
 
@@ -241,7 +291,121 @@ mod tests {
         </w:styles>"#;
         let root = parse(styles_xml);
         let styles = Styles::parse(root.find(ns::W, "styles").unwrap());
-        assert_eq!(styles.run_toggles("NotBold").unwrap(), Toggles::default());
-        assert!(styles.run_toggles("Flip").unwrap().bold);
+        let parse_ctx = crate::ctx::ParseCtx::default();
+        assert_eq!(styles.run_toggles(&parse_ctx, "NotBold").unwrap(), Toggles::default());
+        assert!(styles.run_toggles(&parse_ctx, "Flip").unwrap().bold);
+    }
+
+    #[test]
+    fn only_a_referenced_cycle_is_malformed() {
+        let styles_xml = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:styleId="A"><w:basedOn w:val="B"/></w:style>
+            <w:style w:styleId="B"><w:basedOn w:val="A"/></w:style>
+            <w:style w:styleId="C"><w:name w:val="heading 2"/><w:basedOn w:val="A"/></w:style>
+            <w:style w:styleId="D"/>
+        </w:styles>"#;
+        let root = parse(styles_xml);
+        let styles = Styles::parse(root.find(ns::W, "styles").unwrap());
+        let parse_ctx = crate::ctx::ParseCtx::default();
+        assert_eq!(styles.heading_level(&parse_ctx, "C").unwrap(), Some(Some(2)));
+        assert_eq!(styles.run_toggles(&parse_ctx, "D").unwrap(), Toggles::default());
+        assert!(matches!(
+            styles.heading_level(&parse_ctx, "A"),
+            Err(ConvertError::Malformed { .. })
+        ));
+        assert!(matches!(styles.run_toggles(&parse_ctx, "C"), Err(ConvertError::Malformed { .. })));
+    }
+
+    #[test]
+    fn every_resolver_charges_each_style_of_a_chain_once() {
+        let chain: String = (0..4000)
+            .map(|i| match i {
+                0 => r#"<w:style w:styleId="s0"><w:name w:val="Quote"/><w:pPr><w:outlineLvl w:val="0"/><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr></w:style>"#.to_string(),
+                2000 => r#"<w:style w:styleId="s2000"><w:basedOn w:val="s1999"/><w:rPr><w:b/></w:rPr></w:style>"#.to_string(),
+                _ => format!(
+                    r#"<w:style w:styleId="s{i}"><w:basedOn w:val="s{}"/></w:style>"#,
+                    i - 1
+                ),
+            })
+            .collect();
+        let root = parse(&format!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{chain}</w:styles>"#
+        ));
+        let ids: Vec<String> = (0..4000).map(|i| format!("s{i}")).collect();
+        let lowered = Limits { max_work: 3999, ..Limits::default() };
+        let refused = |result: Result<String, ConvertError>| {
+            matches!(result, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3999 }))
+        };
+        type Resolver = fn(&Styles, &ParseCtx, &str) -> Result<String, ConvertError>;
+        let resolvers: [(Resolver, &str); 4] = [
+            (|s, c, id| s.run_toggles(c, id).map(|t| format!("{}", t.bold)), "true"),
+            (|s, c, id| s.heading_level(c, id).map(|l| format!("{l:?}")), "Some(Some(1))"),
+            (|s, c, id| s.block_style(c, id).map(|b| format!("{b:?}")), "Some(Quote)"),
+            (|s, c, id| s.style_num_pr(c, id).map(|n| format!("{n:?}")), "Some(7)"),
+        ];
+        for (resolve, expected) in resolvers {
+            let styles = Styles::parse(root.find(ns::W, "styles").unwrap());
+            let parse_ctx = ParseCtx::default();
+            for id in &ids {
+                resolve(&styles, &parse_ctx, id).unwrap();
+            }
+            assert_eq!(resolve(&styles, &parse_ctx, "s3999").unwrap(), expected);
+            assert_eq!(parse_ctx.fuel(), 4000, "{expected}");
+            let styles = Styles::parse(root.find(ns::W, "styles").unwrap());
+            assert!(refused(resolve(&styles, &ParseCtx::new(&lowered), "s3999")), "{expected}");
+        }
+    }
+
+    fn memo_entries(styles: &Styles) -> usize {
+        styles.toggles.borrow().len()
+            + styles.headings.borrow().len()
+            + styles.blocks.borrow().len()
+            + styles.num_ids.borrow().len()
+    }
+
+    #[test]
+    fn a_numbering_level_by_style_walks_the_chain_and_keeps_nothing_per_instance() {
+        let depth: u64 = 200;
+        let chain: String = (0..depth)
+            .map(|i| match i.checked_sub(1) {
+                Some(parent) => {
+                    format!(r#"<w:style w:styleId="s{i}"><w:basedOn w:val="s{parent}"/></w:style>"#)
+                }
+                None => r#"<w:style w:styleId="s0"/>"#.to_string(),
+            })
+            .collect();
+        let root = parse(&format!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{chain}</w:styles>"#
+        ));
+        let nums: String = (1..=depth)
+            .map(|n| format!(r#"<w:num w:numId="{n}"><w:abstractNumId w:val="0"/></w:num>"#))
+            .collect();
+        let numbering = parse(&format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"/></w:abstractNum><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="3"><w:pStyle w:val="s150"/></w:lvl></w:abstractNum><w:num w:numId="999"><w:abstractNumId w:val="1"/></w:num>{nums}</w:numbering>"#
+        ));
+        let numbering = crate::formats::docx::numbering::parse(
+            &ParseCtx::default(),
+            numbering.find(ns::W, "numbering").unwrap(),
+            &|_| None,
+        )
+        .unwrap();
+        let styles = || Styles::parse(root.find(ns::W, "styles").unwrap());
+        let level = |styles: &Styles, parse_ctx: &ParseCtx, num_id| {
+            let instance = numbering.instance(num_id).unwrap();
+            styles.style_numbering_level(parse_ctx, "s199", instance)
+        };
+        let resolved = styles();
+        let parse_ctx = ParseCtx::default();
+        assert_eq!(level(&resolved, &parse_ctx, 999).unwrap(), Some(3));
+        assert_eq!(parse_ctx.fuel(), 50);
+        for num_id in 1..=depth {
+            assert_eq!(level(&resolved, &parse_ctx, num_id).unwrap(), None);
+        }
+        assert_eq!(parse_ctx.fuel(), 50 + depth * depth);
+        assert_eq!(memo_entries(&resolved), 0);
+        let lowered = Limits { max_work: depth - 1, ..Limits::default() };
+        let refused = level(&styles(), &ParseCtx::new(&lowered), 1);
+        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, max })
+            if max == depth - 1));
     }
 }
