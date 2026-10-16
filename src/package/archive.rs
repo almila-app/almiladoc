@@ -5,7 +5,7 @@ use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::package::directory::{self, ContainerFacts};
-use crate::package::xml::{Dialect, Element, Marks, Parsed, parse};
+use crate::package::xml::{Dialect, Element, Marks, NodeSink, Parsed, WholeTree, parse};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Cursor, ErrorKind, Read};
@@ -236,7 +236,7 @@ impl<'a> Package<'a> {
         name: &str,
         role: Role,
     ) -> Result<Option<Element>, ConvertError> {
-        self.read_xml_part(name, role, Absent::Valid)
+        self.read_xml_part(name, role, Absent::Valid, &mut WholeTree)
     }
 
     /// [`Package::related_part`], parsed as XML: a part that does not parse
@@ -246,7 +246,20 @@ impl<'a> Package<'a> {
         name: &str,
         role: Role,
     ) -> Result<Option<Element>, ConvertError> {
-        self.read_xml_part(name, role, Absent::Lost)
+        self.read_xml_part(name, role, Absent::Lost, &mut WholeTree)
+    }
+
+    /// [`Package::related_xml_part`], with every node `sink` takes handed to
+    /// it as it completes instead of joining the tree. A part that does not
+    /// parse reads as absent after the sink has seen part of it, so the
+    /// caller discards what the sink holds.
+    pub fn related_xml_part_streamed(
+        &self,
+        name: &str,
+        role: Role,
+        sink: &mut dyn NodeSink,
+    ) -> Result<Option<Element>, ConvertError> {
+        self.read_xml_part(name, role, Absent::Lost, sink)
     }
 
     /// [`Package::related_xml_part`], shared while the shared trees stay
@@ -273,7 +286,7 @@ impl<'a> Package<'a> {
                 return Ok(None);
             }
             None => {
-                let Some(parsed) = self.read_xml(name, role, Absent::Lost)? else {
+                let Some(parsed) = self.read_xml(name, role, Absent::Lost, &mut WholeTree)? else {
                     self.trees.borrow_mut().insert(index, None);
                     return Ok(None);
                 };
@@ -299,7 +312,7 @@ impl<'a> Package<'a> {
     /// its decoding and references report by `role`.
     pub fn required_xml_part(&self, name: &str, role: Role) -> Result<Element, ConvertError> {
         let bytes = self.required_part(name)?;
-        let parsed = self.parse_part(name, &bytes)?;
+        let parsed = self.parse_part(name, &bytes, &mut WholeTree)?;
         if parsed.marks.recovered {
             return Err(ConvertError::malformed_part(name, "ill-formed xml"));
         }
@@ -307,8 +320,13 @@ impl<'a> Package<'a> {
         Ok(parsed.root)
     }
 
-    fn parse_part(&self, name: &str, bytes: &[u8]) -> Result<Parsed, ConvertError> {
-        parse(self.parse_ctx, bytes, self.dialect()).map_err(|e| e.within(name))
+    fn parse_part(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        sink: &mut dyn NodeSink,
+    ) -> Result<Parsed, ConvertError> {
+        parse(self.parse_ctx, bytes, self.dialect(), sink).map_err(|e| e.within(name))
     }
 
     fn read_part(
@@ -329,8 +347,9 @@ impl<'a> Package<'a> {
         name: &str,
         role: Role,
         absent: Absent,
+        sink: &mut dyn NodeSink,
     ) -> Result<Option<Element>, ConvertError> {
-        Ok(self.read_xml(name, role, absent)?.map(|parsed| {
+        Ok(self.read_xml(name, role, absent, sink)?.map(|parsed| {
             parsed.marks.report(self.parse_ctx, role);
             parsed.root
         }))
@@ -343,11 +362,12 @@ impl<'a> Package<'a> {
         name: &str,
         role: Role,
         absent: Absent,
+        sink: &mut dyn NodeSink,
     ) -> Result<Option<Parsed>, ConvertError> {
         let Some(bytes) = self.read_part(name, role, absent)? else {
             return Ok(None);
         };
-        skip_unreadable(self.parse_ctx, role, self.parse_part(name, &bytes).map(Some))
+        skip_unreadable(self.parse_ctx, role, self.parse_part(name, &bytes, sink).map(Some))
     }
 }
 

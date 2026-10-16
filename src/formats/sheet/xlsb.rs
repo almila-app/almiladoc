@@ -7,9 +7,8 @@
 //! identically.
 
 use super::grid::{
-    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MAX_COLS, MAX_ROWS,
-    OOXML_GRID, SheetContent, SheetLink, build_table, format_as_text, render_number,
-    resolve_format,
+    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, OOXML_GRID, SheetContent,
+    SheetLink, build_table, format_as_text, render_number, resolve_format,
 };
 use super::xlsx::{SHARED_STRINGS_REL, Sibling, read_sheet_parts};
 use super::{error_literal, rk_number};
@@ -267,7 +266,7 @@ fn read_sheet(
     xfs: &CellXfs,
     dates: DateSystem,
 ) -> Result<(SheetContent, Option<String>), ConvertError> {
-    let mut out = SheetContent::default();
+    let mut out = SheetContent::on(OOXML_GRID);
     let mut drawing = None;
     let mut row: Option<u32> = None;
     let mut records = Records::new(parse_ctx, data);
@@ -277,9 +276,6 @@ fn read_sheet(
             BRT_ROW_HDR => {
                 let rw = f.u32()?;
                 row = Some(rw);
-                if rw >= MAX_ROWS {
-                    continue;
-                }
                 f.skip(7)?; // ixfe, miyRw, fExtraAsc/fExtraDsc byte
                 if f.u8()? & 0x10 != 0 {
                     // fDyZero: the row is hidden.
@@ -296,22 +292,21 @@ fn read_sheet(
                 }
             }
             BRT_MERGE_CELL => {
-                out.merge(parse_ctx, range(&mut f)?, OOXML_GRID);
+                out.merge(parse_ctx, range(&mut f)?);
             }
             BRT_CELL_RK | BRT_CELL_ERROR | BRT_CELL_BOOL | BRT_CELL_REAL | BRT_CELL_ST
             | BRT_CELL_ISST | BRT_CELL_RSTRING | BRT_FMLA_STRING | BRT_FMLA_NUM | BRT_FMLA_BOOL
             | BRT_FMLA_ERROR => {
                 let col = f.u32()?;
-                let style = f.u32()? & 0x00FF_FFFF;
+                let style = (f.u32()? & 0x00FF_FFFF) as usize;
+                let (text, loss, replaced) = cell_text(id, &mut f, &xfs.get(style), shared, dates)?;
                 let Some(r) = row else {
-                    parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
+                    if loss.is_some() || !text.trim().is_empty() {
+                        parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
+                    }
                     continue;
                 };
-                if r >= MAX_ROWS || col >= MAX_COLS {
-                    continue;
-                }
-                let (at, style) = (CellRef::new(r, col), style as usize);
-                let (text, loss, replaced) = cell_text(id, &mut f, &xfs.get(style), shared, dates)?;
+                let at = CellRef::new(r, col);
                 if let Some(code) = loss {
                     out.lose(at, code);
                 }
@@ -549,6 +544,7 @@ impl<'a> Fields<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::grid::{MAX_COLS, MAX_ROWS};
     use super::*;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
     use std::io::Write;
@@ -948,9 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_extends_past_the_populated_range() {
-        // Issue #8, matching the xlsx reader: the only populated cell
-        // anchors F1:O3, so the grid widens to the full 3x10 extent.
+    fn a_merge_past_the_content_is_clamped_to_it() {
         let mut body = row_hdr(0, false);
         body.extend({
             let mut p = cell(5, 0);
@@ -958,13 +952,9 @@ mod tests {
             rec(BRT_CELL_ST, &p)
         });
         body.extend(merge(0, 2, 5, 14));
-        let doc = parse(&one_sheet(body).build()).unwrap();
-        let table = first_table(&doc);
-        assert_eq!((table.grid.len(), table.grid[1].len()), (3, 10));
-        let CellSlot::Origin(cell) = &table.grid[0][0] else {
-            panic!("expected the merge origin at (0,0)");
-        };
-        assert_eq!((cell.col_span, cell.row_span), (10, 3));
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["wide"]]);
+        assert_eq!(diagnose(&wb), []);
     }
 
     #[test]
@@ -980,7 +970,7 @@ mod tests {
         let CellSlot::Origin(cell) = &table.grid[0][0] else {
             panic!("expected the merge origin at (0,0)");
         };
-        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (2, 2, 2));
+        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (1, 1, 1));
         assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TableSpanRepaired, 1, 3)]);
     }
 
@@ -1194,17 +1184,128 @@ mod tests {
     }
 
     #[test]
-    fn a_cell_past_the_grid_reports_nothing() {
+    fn a_hidden_row_past_the_grid_reports_its_content_as_hidden_only() {
+        let body = [one_value(), row_hdr(MAX_ROWS, true), real_cell(0, 0, 2.0)].concat();
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+    }
+
+    #[test]
+    fn a_hidden_column_past_the_grid_reports_its_content_as_hidden_only() {
+        let body =
+            [col_info(MAX_COLS, MAX_COLS + 5, true), one_value(), real_cell(MAX_COLS, 0, 2.0)]
+                .concat();
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+    }
+
+    #[test]
+    fn a_merge_moved_off_a_hidden_origin_replaces_the_covered_text_it_lands_on() {
+        let text = |col: u32, s: &str| string_cell(col, &s.encode_utf16().collect::<Vec<_>>());
+        let run = |body: Vec<u8>| texts(first_table(&parse(&one_sheet(body).build()).unwrap()));
+        let below = [
+            row_hdr(0, true),
+            row_hdr(1, false),
+            text(0, "covered"),
+            text(1, "y"),
+            merge(0, 2, 0, 0),
+        ];
+        assert_eq!(run(below.concat()), vec![vec!["y"]]);
+        let beside = [
+            col_info(0, 0, true),
+            row_hdr(0, false),
+            text(1, "covered"),
+            text(2, "y"),
+            merge(0, 0, 0, 1),
+        ];
+        assert_eq!(run(beside.concat()), vec![vec!["y"]]);
+        let kept = [
+            row_hdr(0, true),
+            text(0, "kept"),
+            row_hdr(1, false),
+            text(0, "covered"),
+            text(1, "y"),
+            merge(0, 2, 0, 0),
+        ];
+        assert_eq!(run(kept.concat()), vec![vec!["kept", "y"]]);
+    }
+
+    #[test]
+    fn a_cell_a_merge_clamped_to_the_content_covers_shows_nothing() {
+        let text = |col: u32, s: &str| string_cell(col, &s.encode_utf16().collect::<Vec<_>>());
+        let body =
+            [row_hdr(1, false), text(0, "a"), text(1, "hidden"), text(2, "c"), merge(0, 1, 1, 1)]
+                .concat();
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["a", "", "c"]]);
+        assert_eq!(diagnose(&wb), []);
+        let body =
+            [row_hdr(2, false), text(0, "a"), text(1, "hidden"), text(3, "d"), merge(1, 2, 1, 2)]
+                .concat();
+        let doc = parse(&one_sheet(body).build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a", "", "<covered>", "d"]]);
+    }
+
+    #[test]
+    fn a_cell_before_any_row_header_is_unreadable_only_where_its_text_shows() {
+        let body = [
+            string_cell(0, &[0x20]),
+            string_cell(1, &[]),
+            real_cell(2, 0, 1.0),
+            rec(BRT_CELL_ERROR, &[cell(3, 0), vec![0x99]].concat()),
+            one_value(),
+        ]
+        .concat();
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::CellValueUnreadable, 1, 2)]);
+    }
+
+    #[test]
+    fn a_cell_past_the_grid_is_unreadable_only_where_its_text_shows() {
         let body = [
             row_hdr(MAX_ROWS, false),
             real_cell(0, 0, 1.0),
             rec(BRT_CELL_ERROR, &[cell(1, 0), vec![0x99]].concat()),
+            string_cell(2, &[0x20]),
             row_hdr(0, false),
             real_cell(0, 0, 2.0),
             real_cell(MAX_COLS, 0, 3.0),
+            string_cell(MAX_COLS + 1, &[]),
+            row_hdr(1, true),
+            real_cell(MAX_COLS, 0, 4.0),
         ]
         .concat();
-        assert_eq!(diagnose(&one_sheet(body)), []);
+        let wb = one_sheet(body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::CellValueUnreadable, 1, 3),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_truncated_cell_record_or_row_header_fails_its_sheet_wherever_it_lies() {
+        let short_real = |col: u32| rec(BRT_CELL_REAL, &[cell(col, 0), vec![0; 4]].concat());
+        let short_row = rec(BRT_ROW_HDR, &[MAX_ROWS.to_le_bytes().to_vec(), vec![0; 4]].concat());
+        for body in [
+            short_real(0),
+            [row_hdr(MAX_ROWS, false), short_real(0)].concat(),
+            [row_hdr(0, false), short_real(MAX_COLS)].concat(),
+            [row_hdr(0, false), short_real(0)].concat(),
+            [one_value(), short_row].concat(),
+        ] {
+            let alone = parse(&one_sheet(body.clone()).build());
+            assert!(matches!(alone, Err(ConvertError::Malformed { .. })), "{alone:?}");
+            let beside =
+                Wb { sheets: vec![("A", 0, one_value()), ("B", 0, body)], ..Wb::default() };
+            assert_eq!(diagnose(&beside), [in_unit(DiagnosticCode::UnitUnreadable, 2, 1)]);
+        }
     }
 
     #[test]

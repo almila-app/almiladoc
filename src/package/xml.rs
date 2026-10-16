@@ -293,6 +293,32 @@ pub(crate) struct Parsed {
     pub nodes: u64,
 }
 
+/// Where nodes go as they complete instead of joining the tree: a reader
+/// streams a part's repeated records through it, so the parse holds one
+/// record's nodes at a time.
+pub(crate) trait NodeSink {
+    /// Whether a node completing under `ancestors`, outermost first, leaves
+    /// the tree for the sink.
+    fn takes(&self, ancestors: &[Element]) -> bool;
+
+    /// Receive a closed element the sink takes under `ancestors`; text it
+    /// takes is dropped, and an error ends the parse.
+    fn take(&mut self, ancestors: &[Element], elem: Element) -> Result<(), ConvertError>;
+}
+
+/// The sink that takes nothing: the whole part stays in the tree.
+pub(crate) struct WholeTree;
+
+impl NodeSink for WholeTree {
+    fn takes(&self, _: &[Element]) -> bool {
+        false
+    }
+
+    fn take(&mut self, _: &[Element], _: Element) -> Result<(), ConvertError> {
+        Ok(())
+    }
+}
+
 /// [`parse`] in the XML dialect, with its marks reported by `role`.
 #[cfg(test)]
 pub(crate) fn parse_xml(
@@ -300,7 +326,7 @@ pub(crate) fn parse_xml(
     bytes: &[u8],
     role: Role,
 ) -> Result<Element, ConvertError> {
-    let parsed = parse(parse_ctx, bytes, Dialect::Xml)?;
+    let parsed = parse(parse_ctx, bytes, Dialect::Xml, &mut WholeTree)?;
     parsed.marks.report(parse_ctx, role);
     Ok(parsed.root)
 }
@@ -312,11 +338,14 @@ pub(crate) fn parse_xml(
 /// resolution sees one consistent encoding. Markup a repair would misread is
 /// `Malformed`: a `<` that opens no well-formed tag, a declaration or
 /// document type inside the content, and in [`Dialect::Xml`] a document
-/// type with an internal subset.
+/// type with an internal subset. Every node `sink` takes goes to it as it
+/// completes and is released, so `max_xml_nodes` bounds the nodes held at
+/// once.
 pub(crate) fn parse(
     parse_ctx: &ParseCtx,
     bytes: &[u8],
     dialect: Dialect,
+    sink: &mut dyn NodeSink,
 ) -> Result<Parsed, ConvertError> {
     let limits = parse_ctx.limits();
     let (utf8, undecodable) = to_utf8(bytes);
@@ -329,6 +358,7 @@ pub(crate) fn parse(
         Element { ns: None, local: String::new(), attrs: Vec::new(), children: Vec::new() };
     let mut stack: Vec<Element> = Vec::new();
     let mut open_names: Vec<Box<str>> = Vec::new();
+    let mut held_before: Vec<u64> = Vec::new();
     let mut nodes: u64 = 0;
     let mut marks = Marks { undecodable, ..Marks::default() };
 
@@ -341,15 +371,17 @@ pub(crate) fn parse(
                 if stack.len() as u64 >= limits.max_nesting_depth {
                     return Err(ConvertError::limit(Limit::NestingDepth, limits.max_nesting_depth));
                 }
+                held_before.push(nodes);
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 stack.push(start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?);
                 open_names.push(e.name().as_ref().into());
             }
             Event::Empty(e) => {
                 check_start_tag(&e)?;
+                let before = nodes;
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 let elem = start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?;
-                attach(&mut stack, &mut root, Node::Elem(elem));
+                close(&mut stack, &mut root, elem, sink, &mut nodes, before)?;
             }
             Event::End(end) => {
                 if end.trim().is_empty() || end.contains('<') {
@@ -360,7 +392,8 @@ pub(crate) fn parse(
                         if open_names.pop().as_deref() != Some(end.name().as_ref()) {
                             marks.recovered = true;
                         }
-                        attach(&mut stack, &mut root, Node::Elem(elem));
+                        let before = held_before.pop().unwrap_or_default();
+                        close(&mut stack, &mut root, elem, sink, &mut nodes, before)?;
                     }
                     None => marks.recovered = true,
                 }
@@ -368,8 +401,7 @@ pub(crate) fn parse(
             Event::Text(e) => {
                 let text = e.into_inner().into_owned();
                 if !text.is_empty() {
-                    bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                    push_text(&mut stack, &mut root, text);
+                    push_text(&mut stack, &mut root, text, sink, &mut nodes, limits.max_xml_nodes)?;
                 }
             }
             Event::GeneralRef(e) => {
@@ -382,13 +414,11 @@ pub(crate) fn parse(
                     }
                     Reference::Literal => format!("&{};", &*e),
                 };
-                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                push_text(&mut stack, &mut root, text);
+                push_text(&mut stack, &mut root, text, sink, &mut nodes, limits.max_xml_nodes)?;
             }
             Event::CData(e) => {
                 let text = e.into_inner().into_owned();
-                bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                push_text(&mut stack, &mut root, text);
+                push_text(&mut stack, &mut root, text, sink, &mut nodes, limits.max_xml_nodes)?;
             }
             Event::PI(e) if !is_name(e.target()) => {
                 return Err(ConvertError::malformed("processing instruction without a target"));
@@ -406,7 +436,8 @@ pub(crate) fn parse(
     if !stack.is_empty() {
         marks.recovered = true;
         while let Some(elem) = stack.pop() {
-            attach(&mut stack, &mut root, Node::Elem(elem));
+            let before = held_before.pop().unwrap_or_default();
+            close(&mut stack, &mut root, elem, sink, &mut nodes, before)?;
         }
     }
     Ok(Parsed { root, marks, nodes })
@@ -513,11 +544,25 @@ fn bump_nodes(nodes: &mut u64, max: u64) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn attach(stack: &mut [Element], root: &mut Element, node: Node) {
-    match stack.last_mut() {
-        Some(parent) => parent.children.push(node),
-        None => root.children.push(node),
+/// Attach a closed element to its parent, or hand it to `sink` and release
+/// its nodes, setting `nodes` back to the count `before` it opened.
+fn close(
+    stack: &mut [Element],
+    root: &mut Element,
+    elem: Element,
+    sink: &mut dyn NodeSink,
+    nodes: &mut u64,
+    before: u64,
+) -> Result<(), ConvertError> {
+    if sink.takes(stack) {
+        *nodes = before;
+        return sink.take(stack, elem);
     }
+    match stack.last_mut() {
+        Some(parent) => parent.children.push(Node::Elem(elem)),
+        None => root.children.push(Node::Elem(elem)),
+    }
+    Ok(())
 }
 
 /// ISO/IEC 29500 *Strict* namespace and relationship-type URIs are the
@@ -649,7 +694,18 @@ fn escape_unread_references<'v>(
     Cow::Owned(out)
 }
 
-fn push_text(stack: &mut [Element], root: &mut Element, text: String) {
+fn push_text(
+    stack: &mut [Element],
+    root: &mut Element,
+    text: String,
+    sink: &dyn NodeSink,
+    nodes: &mut u64,
+    max: u64,
+) -> Result<(), ConvertError> {
+    if sink.takes(stack) {
+        return Ok(());
+    }
+    bump_nodes(nodes, max)?;
     let target = match stack.last_mut() {
         Some(parent) => &mut parent.children,
         None => &mut root.children,
@@ -659,6 +715,7 @@ fn push_text(stack: &mut [Element], root: &mut Element, text: String) {
     } else {
         target.push(Node::Text(text));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -666,6 +723,51 @@ mod tests {
     use super::*;
     use crate::diagnostics::{DiagnosticCode, LossClass, Region};
     use crate::limits::Limits;
+
+    /// Takes every node directly under a top-level `list`, keeping the text
+    /// of each element it takes.
+    #[derive(Default)]
+    struct Items(Vec<String>);
+
+    impl NodeSink for Items {
+        fn takes(&self, ancestors: &[Element]) -> bool {
+            matches!(ancestors, [list] if list.local == "list")
+        }
+
+        fn take(&mut self, _: &[Element], elem: Element) -> Result<(), ConvertError> {
+            self.0.push(elem.text());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_sink_holds_one_record_at_a_time_against_the_node_limit() {
+        let limits = Limits { max_xml_nodes: 4, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let xml = b"<list>\n<i>a</i>\n<i>b&amp;</i>\n<i/><i>c<![CDATA[d]]></i>\n</list><tail/>";
+        let mut items = Items::default();
+        let parsed = parse(&parse_ctx, xml, Dialect::Xml, &mut items).unwrap();
+        assert_eq!(items.0, ["a", "b&", "", "cd"]);
+        assert_eq!(parsed.nodes, 2);
+        assert_eq!(parsed.root.child_elems().map(|e| e.children.len()).collect::<Vec<_>>(), [0, 0]);
+        let exceeds = |xml: &[u8], sink: &mut dyn NodeSink| {
+            let held = parse(&parse_ctx, xml, Dialect::Xml, sink).map(|parsed| parsed.nodes);
+            matches!(held, Err(ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 4 }))
+        };
+        assert!(exceeds(xml, &mut WholeTree));
+        assert!(exceeds(b"<list><i>a<b/><b/></i></list>", &mut Items::default()));
+        assert!(exceeds(b"<list><i/></list><o><p/><p/><p/></o>", &mut Items::default()));
+    }
+
+    #[test]
+    fn a_record_left_open_at_the_end_still_reaches_the_sink() {
+        let mut items = Items::default();
+        let parsed =
+            parse(&ParseCtx::default(), b"<list><i>a</i><i>b", Dialect::Xml, &mut items).unwrap();
+        assert_eq!(items.0, ["a", "b"]);
+        assert!(parsed.marks.recovered);
+        assert_eq!(parsed.nodes, 1);
+    }
 
     fn default_depth() -> usize {
         usize::try_from(Limits::default().max_nesting_depth).unwrap()
@@ -922,7 +1024,10 @@ mod tests {
     fn an_end_tag_that_does_not_repeat_its_start_tags_qualified_name_is_repaired() {
         let recovered = |inner: &str| {
             let xml = format!("<r xmlns:w=\"urn:w\" xmlns:x=\"urn:w\">{inner}</r>");
-            parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xml).unwrap().marks.recovered
+            parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xml, &mut WholeTree)
+                .unwrap()
+                .marks
+                .recovered
         };
         for inner in ["<w:t>a</x:t>", "<t>a</w:t>", "<w:t>a</t>"] {
             assert!(recovered(inner), "{inner}");
@@ -972,7 +1077,7 @@ mod tests {
         dialect: Dialect,
     ) -> Result<(String, Vec<(DiagnosticCode, Region)>), ConvertError> {
         let parse_ctx = ParseCtx::default();
-        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect)?;
+        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect, &mut WholeTree)?;
         assert!(!parsed.marks.recovered, "{xml}");
         parsed.marks.report(&parse_ctx, Role::Content(Region::Note));
         let reported = parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region)).collect();
@@ -981,7 +1086,7 @@ mod tests {
 
     fn attribute(xml: &str, dialect: Dialect) -> (String, Vec<(DiagnosticCode, Region)>) {
         let parse_ctx = ParseCtx::default();
-        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect).unwrap();
+        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect, &mut WholeTree).unwrap();
         parsed.marks.report(&parse_ctx, Role::Content(Region::Note));
         let value = parsed.root.child_elems().next().unwrap().attr_any("a").unwrap().to_owned();
         (value, parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region)).collect())
@@ -1186,7 +1291,7 @@ mod tests {
     fn marks_are_returned_not_reported() {
         let marks = |xml: &[u8]| {
             let parse_ctx = ParseCtx::default();
-            let parsed = parse(&parse_ctx, xml, Dialect::Xml).unwrap();
+            let parsed = parse(&parse_ctx, xml, Dialect::Xml, &mut WholeTree).unwrap();
             assert!(parse_ctx.diagnostics().is_empty());
             let Marks { recovered, unresolved, undecodable } = parsed.marks;
             (recovered, unresolved, undecodable)

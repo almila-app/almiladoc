@@ -20,9 +20,10 @@ pub const MAX_ENTRY_COUNT: usize = 100_000;
 /// Maximum nesting depth of input structure.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
-/// Maximum number of XML nodes (elements + text runs) in one part. Sized
-/// from the measured worst-case DOM cost (~400 bytes/node, see the node-cap
-/// memory test) so a saturating part stays around the archive budget.
+/// Maximum number of XML nodes (elements + text runs) one part holds at
+/// once; an xlsx worksheet releases each row as it closes. Sized from the
+/// measured worst-case DOM cost (~400 bytes/node, see the node-cap memory
+/// test) so a saturating part stays around the archive budget.
 pub const MAX_XML_NODES: usize = 2_000_000;
 
 /// Maximum grid positions one spreadsheet table may materialize: 4 million.
@@ -86,10 +87,13 @@ pub struct Limits {
     /// and links: recursion over it needs stack in proportion. At most
     /// [`Limits::MAX_NESTING_CEILING`].
     pub max_nesting_depth: u64,
-    /// XML nodes in one part: each costs about 400 bytes once parsed.
+    /// XML nodes one part holds at once: each costs about 400 bytes once
+    /// parsed. An xlsx worksheet holds its structure around the rows and one
+    /// row at a time, so it bounds a row, not the row count.
     pub max_xml_nodes: u64,
     /// Grid positions one spreadsheet table materializes: spans and repeats
-    /// address far more cells than the input holds.
+    /// address far more cells than the input holds. An xlsx worksheet's
+    /// cells, hidden ones too, count against it as its rows are read.
     pub max_grid_slots: u64,
     /// Content-bearing cells a span or repeat expansion produces per table.
     pub max_expansion: u64,

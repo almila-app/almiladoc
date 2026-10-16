@@ -14,10 +14,11 @@ use super::grid::{
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
+use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
 use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
-use crate::package::xml::{Element, ns};
+use crate::package::xml::{Element, NodeSink, ns};
 use crate::package::{Package, path};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
@@ -97,13 +98,15 @@ pub(super) fn parse(
     let mut slots = 0u64;
     for (position, name, part) in &sheets {
         let _unit = parse_ctx.enter_unit(*position);
-        let worksheet = pkg.related_xml_part(part, Role::Reported(Region::Body))?;
+        let mut rows = SheetRows::new(parse_ctx, &shared, &styles, dates, slots);
+        let worksheet =
+            pkg.related_xml_part_streamed(part, Role::Reported(Region::Body), &mut rows)?;
         let Some(worksheet) = worksheet.as_ref().and_then(|r| r.find(ns::SML, "worksheet")) else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             failed += 1;
             continue;
         };
-        let mut content = read_sheet(parse_ctx, worksheet, &shared, &styles, dates);
+        let mut content = read_sheet(parse_ctx, worksheet, rows.content);
         let drawing =
             worksheet.find(ns::SML, "drawing").and_then(|d| d.attr_qualified(ns::R, "id"));
         read_sheet_parts(parse_ctx, pkg, part, drawing, &mut content)?;
@@ -351,14 +354,97 @@ impl Styles {
     }
 }
 
-fn read_sheet(
-    parse_ctx: &ParseCtx,
-    worksheet: &Element,
-    shared: &[String],
-    styles: &Styles,
+/// A worksheet's rows read as the parse closes each one, so the part holds
+/// one row's nodes at a time beside the structure around the rows, and its
+/// cells, hidden or shown, are judged against the grid slots the workbook
+/// has left.
+struct SheetRows<'s> {
+    shared: &'s [String],
+    styles: &'s Styles,
     dates: DateSystem,
-) -> SheetContent {
-    let mut out = SheetContent::default();
+    content: SheetContent,
+    next_row: u32,
+    max_slots: u64,
+    slots_left: u64,
+    placed: u64,
+}
+
+impl<'s> SheetRows<'s> {
+    fn new(
+        parse_ctx: &ParseCtx,
+        shared: &'s [String],
+        styles: &'s Styles,
+        dates: DateSystem,
+        slots: u64,
+    ) -> Self {
+        let max_slots = parse_ctx.limits().max_grid_slots;
+        SheetRows {
+            shared,
+            styles,
+            dates,
+            content: SheetContent::on(OOXML_GRID),
+            next_row: 0,
+            max_slots,
+            slots_left: max_slots.saturating_sub(slots),
+            placed: 0,
+        }
+    }
+
+    fn count_placed(&mut self) -> Result<(), ConvertError> {
+        self.placed = self.placed.saturating_add(1);
+        if self.placed > self.slots_left {
+            return Err(ConvertError::limit(Limit::GridSlots, self.max_slots));
+        }
+        Ok(())
+    }
+
+    fn read_row(&mut self, row: &Element) -> Result<(), ConvertError> {
+        let r = row
+            .attr_unqualified("r")
+            .and_then(|v| v.parse::<u32>().ok())
+            .and_then(|v| v.checked_sub(1))
+            .unwrap_or(self.next_row);
+        self.next_row = r.saturating_add(1);
+        if row.attr_unqualified("hidden").is_some_and(bool_attr) {
+            self.content.hide_row(r);
+        }
+        let mut next_col: u32 = 0;
+        for c in row.find_all(ns::SML, "c") {
+            let (text, loss) = cell_text(c, self.shared, self.styles, self.dates);
+            // Position comes from the cell's own reference: a row may skip
+            // cells entirely, so iteration order says nothing.
+            let at = match c.attr_unqualified("r").map(parse_coords) {
+                Some(Some(at)) => at,
+                Some(None) => {
+                    self.content.put_unplaced(CellRef::new(r, next_col), &text, loss.is_some());
+                    continue;
+                }
+                None => CellRef::new(r, next_col),
+            };
+            next_col = at.col.saturating_add(1);
+            if let Some(code) = loss {
+                self.content.lose(at, code);
+            }
+            if self.content.put(at, text) {
+                self.count_placed()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl NodeSink for SheetRows<'_> {
+    fn takes(&self, ancestors: &[Element]) -> bool {
+        matches!(ancestors, [worksheet, sheet_data]
+            if worksheet.is(ns::SML, "worksheet") && sheet_data.is(ns::SML, "sheetData"))
+    }
+
+    fn take(&mut self, _ancestors: &[Element], elem: Element) -> Result<(), ConvertError> {
+        if elem.is(ns::SML, "row") { self.read_row(&elem) } else { Ok(()) }
+    }
+}
+
+fn read_sheet(parse_ctx: &ParseCtx, worksheet: &Element, mut out: SheetContent) -> SheetContent {
     for cols in worksheet.find_all(ns::SML, "cols") {
         for col in cols.find_all(ns::SML, "col") {
             if !col.attr_unqualified("hidden").is_some_and(bool_attr) {
@@ -374,48 +460,11 @@ fn read_sheet(
             }
         }
     }
-    let mut next_row: u32 = 0;
-    for row in worksheet.find_all(ns::SML, "sheetData").flat_map(|sd| sd.find_all(ns::SML, "row")) {
-        let r = row
-            .attr_unqualified("r")
-            .and_then(|v| v.parse::<u32>().ok())
-            .and_then(|v| v.checked_sub(1))
-            .unwrap_or(next_row);
-        if r >= MAX_ROWS {
-            continue;
-        }
-        next_row = r + 1;
-        if row.attr_unqualified("hidden").is_some_and(bool_attr) {
-            out.hide_row(r);
-        }
-        let mut next_col: u32 = 0;
-        for c in row.find_all(ns::SML, "c") {
-            // Position comes from the cell's own reference: a row may skip
-            // cells entirely, so iteration order says nothing.
-            let at = match c.attr_unqualified("r").map(parse_ref) {
-                Some(Some(at)) => at,
-                Some(None) => {
-                    out.lose(CellRef::new(r, next_col), DiagnosticCode::CellValueUnreadable);
-                    continue;
-                }
-                None => CellRef::new(r, next_col),
-            };
-            next_col = at.col + 1;
-            if at.row >= MAX_ROWS || at.col >= MAX_COLS {
-                continue;
-            }
-            let (text, loss) = cell_text(c, shared, styles, dates);
-            if let Some(code) = loss {
-                out.lose(at, code);
-            }
-            out.put(at, text);
-        }
-    }
     for merge in
         worksheet.find_all(ns::SML, "mergeCells").flat_map(|mc| mc.find_all(ns::SML, "mergeCell"))
     {
         match merge.attr_unqualified("ref").and_then(|r| parse_region(r, parse_coords)) {
-            Some(range) => out.merge(parse_ctx, range, OOXML_GRID),
+            Some(range) => out.merge(parse_ctx, range),
             None => parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body),
         }
     }
@@ -529,7 +578,6 @@ fn bool_attr(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::limits::Limit;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
     use std::io::Write;
 
@@ -754,22 +802,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_extends_past_the_populated_range() {
-        // Issue #8: the only populated cell anchors F1:O3, so the grid must
-        // widen to the merge's full 3x10 extent instead of clipping to the
-        // 1x1 populated range.
+    fn a_merge_past_the_content_is_clamped_to_it() {
         let wb = one_sheet(
             r#"<sheetData><row r="1"><c r="F1" t="inlineStr"><is><t>wide</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="F1:O3"/></mergeCells>"#,
         );
         let doc = parse(&wb.build()).unwrap();
-        let table = first_table(&doc);
-        assert_eq!(table.grid.len(), 3);
-        assert_eq!(table.grid[1].len(), 10);
-        let CellSlot::Origin(cell) = &table.grid[0][0] else {
-            panic!("expected the merge origin at (0,0)");
-        };
-        assert_eq!((cell.col_span, cell.row_span), (10, 3));
-        assert_eq!(covered_count(table), 29);
+        assert_eq!(texts(first_table(&doc)), vec![vec!["wide"]]);
+        assert_eq!(diagnose(&wb), []);
     }
 
     /// Minimal sheet with a used range at D11:E12 and the given merge.
@@ -806,8 +845,155 @@ mod tests {
         let CellSlot::Origin(cell) = &table.grid[0][0] else {
             panic!("expected the merge origin at (0,0)");
         };
-        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (2, 2, 2));
+        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (1, 1, 1));
         assert_eq!(diagnose(&wb), [(DiagnosticCode::TableSpanRepaired, Region::Body, Some(1), 3)]);
+    }
+
+    #[test]
+    fn only_the_rows_of_the_worksheets_own_sheet_data_are_read() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><other r="3"><c r="A3"><v>3</v></c></other></sheetData><extLst><ext><sheetData><row r="2"><c r="A2"><v>2</v></c></row></sheetData></ext></extLst>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+    }
+
+    #[test]
+    fn rows_read_before_a_worksheet_fails_to_parse_render_nothing() {
+        let wb = Wb {
+            sheets: vec![
+                ("Broken", "", r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><x<y/>"#),
+                ("Kept", "", r#"<sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>"#),
+            ],
+            ..Wb::default()
+        };
+        let doc = parse(&wb.build()).unwrap();
+        let tables: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table(t) => Some(texts(t)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables, [vec![vec!["2"]]]);
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::UnitUnreadable, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn a_cell_past_the_grid_or_off_it_is_unreadable_only_where_its_text_shows() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1048577"><c><v>1</v></c><c s="0"/></row><row r="1"><c r="1B"><v>4</v></c><c r="2C" s="0"/><c r="A1"><v>2</v></c><c r="XFE1"><v>3</v></c><c r="XFF1" t="inlineStr"><is><t> </t></is></c><c><v>5</v></c><c r="1D"><f>A1</f></c><c r="1E" t="s"><v>99</v></c><c r="XFG1" t="s"><v>99</v></c></row><row r="2" hidden="1"><c r="XFE2"><v>6</v></c><c r="XFG2" t="s"><v>99</v></c></row></sheetData>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [(CELL, BODY, Some(1), 7), (DiagnosticCode::HiddenOmitted, BODY, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn a_row_past_the_grid_places_its_cells_by_their_own_reference() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="1048577"><c r="B1"><v>2</v></c><c><v>3</v></c></row></sheetData>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1", "2"]]);
+        assert_eq!(diagnose(&wb), [(CELL, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn cells_hidden_or_shown_are_judged_against_the_grid_slots_left_as_the_rows_stream() {
+        let limits = crate::limits::Limits { max_grid_slots: 2, ..Default::default() };
+        let run = |sheets: Vec<(&str, &str, &str)>| {
+            let wb = Wb { sheets, ..Wb::default() };
+            super::super::parse(&ParseCtx::new(&limits), &wb.build()).map(|doc| doc.blocks.len())
+        };
+        let fits = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1" t="inlineStr"><is><t> </t></is></c></row></sheetData>"#;
+        let broken =
+            |row: &str, cells: &str| format!(r#"<sheetData><row r="1"{row}>{cells}</row><x<y/>"#);
+        let past = |err: Result<usize, ConvertError>| {
+            matches!(err, Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 2 }))
+        };
+        assert_eq!(run(vec![("A", "", fits)]).unwrap(), 1);
+        let three = r#"<c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c>"#;
+        assert!(past(run(vec![("A", "", &broken("", three))])));
+        let hidden_cols = r#"<cols><col min="1" max="16384" hidden="1"/></cols>"#;
+        assert!(past(run(vec![("A", "", &format!("{hidden_cols}{}", broken("", three)))])));
+        assert!(past(run(vec![("A", "", &broken(r#" hidden="1""#, three))])));
+        let one = broken("", r#"<c r="A1"><v>1</v></c>"#);
+        assert!(past(run(vec![("A", "", fits), ("B", "", &one)])));
+    }
+
+    #[test]
+    fn a_hidden_row_past_the_grid_reports_its_content_as_hidden_only() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="1048577" hidden="1"><c><v>2</v></c></row></sheetData>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::HiddenOmitted, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn a_hidden_column_past_the_grid_reports_its_content_as_hidden_only() {
+        let wb = one_sheet(
+            r#"<cols><col min="16385" max="16390" hidden="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="XFE1"><v>2</v></c></row></sheetData>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["1"]]);
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::HiddenOmitted, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn a_merge_moved_off_a_hidden_origin_replaces_the_covered_text_it_lands_on() {
+        let cell =
+            |r: &str, t: &str| format!(r#"<c r="{r}" t="inlineStr"><is><t>{t}</t></is></c>"#);
+        let run = |cols: &str, rows: &str, merge: &str| {
+            let body = format!(
+                r#"{cols}<sheetData>{rows}</sheetData><mergeCells count="1"><mergeCell ref="{merge}"/></mergeCells>"#
+            );
+            texts(first_table(&parse(&one_sheet(&body).build()).unwrap()))
+        };
+        let below = format!(
+            r#"<row r="1" hidden="1"/><row r="2">{}{}</row>"#,
+            cell("A2", "covered"),
+            cell("B2", "y")
+        );
+        assert_eq!(run("", &below, "A1:A3"), vec![vec!["y"]]);
+        let hidden_col = r#"<cols><col min="1" max="1" hidden="1"/></cols>"#;
+        let beside = format!(r#"<row r="1">{}{}</row>"#, cell("B1", "covered"), cell("C1", "y"));
+        assert_eq!(run(hidden_col, &beside, "A1:B1"), vec![vec!["y"]]);
+        let kept = format!(
+            r#"<row r="1" hidden="1">{}</row><row r="2">{}{}</row>"#,
+            cell("A1", "kept"),
+            cell("A2", "covered"),
+            cell("B2", "y")
+        );
+        assert_eq!(run("", &kept, "A1:A3"), vec![vec!["kept", "y"]]);
+    }
+
+    #[test]
+    fn hidden_column_ranges_that_touch_or_nest_hide_as_one() {
+        let wb = one_sheet(
+            r#"<cols><col min="2" max="2" hidden="1"/><col min="1" max="1" hidden="1"/><col min="5" max="7" hidden="1"/><col min="6" max="6" hidden="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>origin</t></is></c><c r="C1" t="inlineStr"><is><t>covered</t></is></c><c r="D1" t="inlineStr"><is><t>d</t></is></c><c r="G1" t="inlineStr"><is><t>hidden</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A1:C1"/></mergeCells>"#,
+        );
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["origin", "d"]]);
+    }
+
+    #[test]
+    fn a_cell_a_merge_clamped_to_the_content_covers_shows_nothing() {
+        let cell =
+            |r: &str, t: &str| format!(r#"<c r="{r}" t="inlineStr"><is><t>{t}</t></is></c>"#);
+        let sheet = |row: u32, cells: &[(&str, &str)], merge: &str| {
+            let cells: String = cells.iter().map(|&(r, t)| cell(r, t)).collect();
+            format!(
+                r#"<sheetData><row r="{row}">{cells}</row></sheetData><mergeCells count="1"><mergeCell ref="{merge}"/></mergeCells>"#
+            )
+        };
+        let body = sheet(2, &[("A2", "a"), ("B2", "hidden"), ("C2", "c")], "B1:B2");
+        let wb = one_sheet(&body);
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["a", "", "c"]]);
+        assert_eq!(diagnose(&wb), []);
+        let body = sheet(3, &[("A3", "a"), ("B3", "hidden"), ("D3", "d")], "B2:C3");
+        let doc = parse(&one_sheet(&body).build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a", "", "<covered>", "d"]]);
     }
 
     #[test]
@@ -830,7 +1016,7 @@ mod tests {
         let CellSlot::Origin(cell) = &table.grid[0][0] else {
             panic!("expected the merge origin at (0,0)");
         };
-        assert_eq!((table.grid.len(), cell.row_span), (1_048_576, 1_048_576));
+        assert_eq!((table.grid.len(), cell.row_span), (1, 1));
         assert_eq!(diagnose(&wb), [(DiagnosticCode::TableSpanRepaired, Region::Body, Some(1), 1)]);
     }
 
@@ -954,7 +1140,7 @@ mod tests {
     #[test]
     fn merges_are_charged_against_the_contexts_expansion_before_placement() {
         let bytes = one_sheet(
-            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row><row r="3"><c r="C3" t="inlineStr"><is><t>c</t></is></c></row></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="B2:C3"/></mergeCells>"#,
+            r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="3"><c r="C3"><v>3</v></c></row><row r="5"><c r="E5"><v>5</v></c></row></sheetData><mergeCells count="2"><mergeCell ref="A1:B2"/><mergeCell ref="C3:D4"/></mergeCells>"#,
         )
         .build();
         let limits = crate::limits::Limits { max_expansion: 6, ..Default::default() };

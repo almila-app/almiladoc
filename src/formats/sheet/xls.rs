@@ -539,13 +539,11 @@ fn read_sst(segs: &[&[u8]]) -> Vec<(String, bool)> {
     out
 }
 
-/// A cell record's leading cell and ixfe; `None` when the column is outside
-/// the grid the format defines.
+/// A cell record's leading cell, which may lie past the grid, and ixfe.
 fn cell_ref(body: &[u8]) -> Option<(CellRef, u16)> {
     let row = u32::from(get_u16(body, 0)?);
     let col = u32::from(get_u16(body, 2)?);
-    let ixfe = get_u16(body, 4)?;
-    (col < BIFF8_COLS).then_some((CellRef::new(row, col), ixfe))
+    Some((CellRef::new(row, col), get_u16(body, 4)?))
 }
 
 fn get_f64(body: &[u8], off: usize) -> Option<f64> {
@@ -567,7 +565,7 @@ fn read_sheet(
     if rec_type != BOF || get_u16(body, 2) != Some(WORKSHEET_SUBSTREAM) {
         return Ok(None);
     }
-    let mut out = SheetContent::default();
+    let mut out = SheetContent::on(BIFF8_GRID);
     let mut depth = 1usize;
     // A FORMULA whose cached value is a string: its cell and ixfe waiting
     // for the STRING record that carries the text.
@@ -601,7 +599,7 @@ fn read_sheet(
                     && flags & 0x01 != 0
                     && first <= last
                 {
-                    out.hide_cols(u32::from(first), u32::from(last).min(BIFF8_COLS - 1));
+                    out.hide_cols(u32::from(first), u32::from(last));
                 }
             }
             MERGEDCELLS => {
@@ -621,7 +619,7 @@ fn read_sheet(
                         CellRef::new(u32::from(r1), u32::from(c1)),
                         CellRef::new(u32::from(r2), u32::from(c2)),
                     );
-                    out.merge(parse_ctx, range, BIFF8_GRID);
+                    out.merge(parse_ctx, range);
                 }
             }
             LABELSST => {
@@ -668,9 +666,6 @@ fn read_sheet(
                             break;
                         };
                         let col = u32::from(col_first) + i as u32;
-                        if col >= BIFF8_COLS {
-                            break;
-                        }
                         let at = CellRef::new(u32::from(row), col);
                         put_number(&mut out, at, globals, ixfe, rk_number(rk));
                     }
@@ -687,7 +682,9 @@ fn read_sheet(
                         _ => None,
                     };
                     match text {
-                        Some(text) => out.put(at, text.to_string()),
+                        Some(text) => {
+                            out.put(at, text.to_string());
+                        }
                         None => out.lose(at, DiagnosticCode::CellValueUnreadable),
                     }
                 }
@@ -704,7 +701,9 @@ fn read_sheet(
                                 out.put(at, text.to_string());
                             }
                             0x02 => match error_literal(value[2]) {
-                                Some(text) => out.put(at, text.to_string()),
+                                Some(text) => {
+                                    out.put(at, text.to_string());
+                                }
                                 None => out.lose(at, DiagnosticCode::CellValueUnreadable),
                             },
                             // 0x03 is a blank string result.
@@ -1443,23 +1442,129 @@ mod tests {
     }
 
     #[test]
-    fn merge_extends_past_the_populated_range() {
-        // Issue #8: the only populated cell anchors F1:O3, so the grid must
-        // widen to the merge's full 3x10 extent.
+    fn a_merge_past_the_content_is_clamped_to_it() {
         let mut records = label(0, 5, 0, "wide");
         let mut merged = 1u16.to_le_bytes().to_vec();
         for v in [0u16, 2, 5, 14] {
             merged.extend(v.to_le_bytes());
         }
         records.extend(rec(MERGEDCELLS, &merged));
-        let doc = parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap();
-        let table = first_table(&doc);
-        assert_eq!(table.grid.len(), 3);
-        assert_eq!(table.grid[1].len(), 10);
-        let CellSlot::Origin(cell) = &table.grid[0][0] else {
-            panic!("expected the merge origin at (0,0)");
+        let wb = one_sheet(records);
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["wide"]]);
+        assert_eq!(diagnose(&wb), []);
+    }
+
+    #[test]
+    fn a_cell_a_merge_clamped_to_the_content_covers_shows_nothing() {
+        let merged = |v: [u16; 4]| {
+            let body: Vec<u8> = [1u16].iter().chain(&v).flat_map(|v| v.to_le_bytes()).collect();
+            rec(MERGEDCELLS, &body)
         };
-        assert_eq!((cell.col_span, cell.row_span), (10, 3));
+        let records = [
+            label(1, 0, 0, "a"),
+            label(1, 1, 0, "hidden"),
+            label(1, 2, 0, "c"),
+            merged([0, 1, 1, 1]),
+        ]
+        .concat();
+        let wb = one_sheet(records);
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a", "", "c"]]);
+        assert_eq!(diagnose(&wb), []);
+        let records = [
+            label(2, 0, 0, "a"),
+            label(2, 1, 0, "hidden"),
+            label(2, 3, 0, "d"),
+            merged([1, 2, 1, 2]),
+        ]
+        .concat();
+        let doc = parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a", "", "<covered>", "d"]]);
+    }
+
+    #[test]
+    fn a_cell_past_the_biff8_columns_is_unreadable_only_where_its_text_shows() {
+        let mut records = label(0, 0, 0, "a");
+        records.extend(label(0, 256, 0, "past"));
+        records.extend(label(0, 257, 0, " "));
+        records.extend(number(1, 300, 0, 1.0));
+        let mut mulrk = cell6(2, 256, 0)[..4].to_vec();
+        for _ in 0..2 {
+            mulrk.extend(0u16.to_le_bytes());
+            mulrk.extend(rk_from_int(7).to_le_bytes());
+        }
+        mulrk.extend(257u16.to_le_bytes());
+        records.extend(rec(MULRK, &mulrk));
+        records.extend(rec(BOOLERR, &[cell6(0, 258, 0), vec![0x99, 1]].concat()));
+        records.extend(formula(0, 259, 0, [2, 0, 0x99, 0, 0, 0, 0xFF, 0xFF]));
+        records.extend(rec(LABEL, &[cell6(0, 260, 0), vec![9, 0, 0, b'a']].concat()));
+        records.extend(label(3, 256, 0, "past in a hidden row"));
+        records.extend(rec(BOOLERR, &[cell6(3, 258, 0), vec![0x99, 1]].concat()));
+        records.extend(hidden_row(3));
+        let wb = one_sheet(records);
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::CellValueUnreadable, 1, 7),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 1)
+            ]
+        );
+    }
+
+    fn hidden_cols(first: u16, last: u16) -> Vec<u8> {
+        let mut colinfo = vec![0u8; 12];
+        colinfo[..2].copy_from_slice(&first.to_le_bytes());
+        colinfo[2..4].copy_from_slice(&last.to_le_bytes());
+        colinfo[8] = 0x01;
+        rec(COLINFO, &colinfo)
+    }
+
+    fn hidden_row(row: u16) -> Vec<u8> {
+        let mut body = vec![0u8; 16];
+        body[..2].copy_from_slice(&row.to_le_bytes());
+        body[12] = 0x20;
+        rec(ROW, &body)
+    }
+
+    #[test]
+    fn a_hidden_column_past_the_biff8_columns_reports_its_content_as_hidden_only() {
+        let records = [hidden_cols(256, 300), label(0, 0, 0, "a"), label(0, 256, 0, "past")];
+        let wb = one_sheet(records.concat());
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a"]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+    }
+
+    #[test]
+    fn a_merge_moved_off_a_hidden_origin_replaces_the_covered_text_it_lands_on() {
+        let merged = |v: [u16; 4]| {
+            let body: Vec<u8> = [1u16].iter().chain(&v).flat_map(|v| v.to_le_bytes()).collect();
+            rec(MERGEDCELLS, &body)
+        };
+        let run = |records: Vec<u8>| {
+            texts(first_table(&parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap()))
+        };
+        let below =
+            [hidden_row(0), label(1, 0, 0, "covered"), label(1, 1, 0, "y"), merged([0, 2, 0, 0])];
+        assert_eq!(run(below.concat()), vec![vec!["y"]]);
+        let beside = [
+            hidden_cols(0, 0),
+            label(0, 1, 0, "covered"),
+            label(0, 2, 0, "y"),
+            merged([0, 0, 0, 1]),
+        ];
+        assert_eq!(run(beside.concat()), vec![vec!["y"]]);
+        let kept = [
+            hidden_row(0),
+            label(0, 0, 0, "kept"),
+            label(1, 0, 0, "covered"),
+            label(1, 1, 0, "y"),
+            merged([0, 2, 0, 0]),
+        ];
+        assert_eq!(run(kept.concat()), vec![vec!["kept", "y"]]);
     }
 
     #[test]
@@ -1476,7 +1581,7 @@ mod tests {
         let CellSlot::Origin(cell) = &table.grid[0][0] else {
             panic!("expected the merge origin at (0,0)");
         };
-        assert_eq!((table.grid[0].len(), cell.col_span), (6, 6));
+        assert_eq!((table.grid[0].len(), cell.col_span), (1, 1));
         assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TableSpanRepaired, 1, 2)]);
     }
 
@@ -1732,18 +1837,9 @@ mod tests {
 
     #[test]
     fn a_hidden_cell_reports_only_that_it_is_hidden() {
-        let hidden_row = |row: u16| {
-            let mut body = vec![0u8; 16];
-            body[..2].copy_from_slice(&row.to_le_bytes());
-            body[12] = 0x20;
-            rec(ROW, &body)
-        };
-        let mut colinfo = vec![0u8; 12];
-        colinfo[..4].copy_from_slice(&[2, 0, 2, 0]);
-        colinfo[8] = 0x01;
         let mut records = label(0, 0, 0, "shown");
         records.extend(hidden_row(1));
-        records.extend(rec(COLINFO, &colinfo));
+        records.extend(hidden_cols(2, 2));
         records.extend(labelsst(1, 0, 0, 9));
         records.extend(number(1, 1, 7, 1.0));
         records.extend(rec(LABEL, &[cell6(0, 2, 0), vec![1, 0, 1, 0x00, 0xDC]].concat()));

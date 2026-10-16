@@ -227,6 +227,7 @@ path = [
     "tests/snapshots/snapshots__pdf__handmade-ligatures.pdf.snap",
     "tests/snapshots/snapshots__pdf__text.pdf.snap",
     "tests/snapshots/snapshots__rtf__text.rtf.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-sheet.xlsb.snap",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = [
