@@ -1,3 +1,7 @@
+import base64
+import random
+import struct
+
 from fixturegen.common import (
     CONTENT_TYPES_BASE,
     DOT_PNG,
@@ -629,13 +633,53 @@ def malformed(out):
     (m / "empty--errors.docx").write_bytes(b"")
 
 
+def noise(size, seed):
+    """Seeded incompressible bytes, which hold a part under the compression
+    ratio limit while another limit is the one it trips."""
+    return random.Random(seed).randbytes(size)
+
+
+def noise_comment(size, seed):
+    return "<!--" + base64.b64encode(noise(size, seed)).decode() + "-->"
+
+
+def zip64_end(data, entries):
+    """Declares `entries` entries in ZIP64 end records, with no matching
+    central headers."""
+    end = data.rindex(b"PK\x05\x06")
+    size, start = struct.unpack_from("<II", data, end + 12)
+    record = struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+                         entries, entries, size, start)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1)
+    classic = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF,
+                          0xFFFFFFFF, 0xFFFFFFFF, 0)
+    return data[:end] + record + locator + classic
+
+
 def abuse(out):
     a = out / "abuse"
     a.mkdir(parents=True, exist_ok=True)
     ct = CONTENT_TYPES_BASE.format(extra="")
+    small_doc = (f'<?xml version="1.0"?><w:document {W}><w:body><w:p><w:r>'
+                 '<w:t>text</w:t></w:r></w:p></w:body></w:document>')
+    eocd = a / "max_entry_count--eocd--errors.docx"
+    write_zip(eocd, [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", small_doc),
+    ])
+    eocd.write_bytes(zip64_end(eocd.read_bytes(), 100_001))
+    ratio_doc = ('<?xml version="1.0"?><!--' + "A" * (16 * 1024 * 1024)
+                 + f'--><w:document {W}><w:body/></w:document>')
+    write_zip(a / "max_compression_ratio--bomb--errors.docx", [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", ratio_doc),
+    ])
     # The bomb must live in a part the parser actually reads: a document.xml
     # that decompresses to ~192 MiB crosses the 128 MiB per-entry cap.
-    bomb_doc = (f'<?xml version="1.0"?><w:document {W}><w:body><w:p><w:r><w:t>'
+    bomb_doc = (f'<?xml version="1.0"?>{noise_comment(32 * 1024, 1)}'
+                f'<w:document {W}><w:body><w:p><w:r><w:t>'
                 + "A" * (192 * 1024 * 1024)
                 + "</w:t></w:r></w:p></w:body></w:document>")
     write_zip(a / "max_entry_bytes--zipbomb--errors.docx", [
@@ -662,7 +706,7 @@ def abuse(out):
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", image_doc),
         ("word/_rels/document.xml.rels", image_rels),
-        ("word/media/image1.png", b"\x00" * (192 * 1024 * 1024)),
+        ("word/media/image1.png", b"\x00" * (192 * 1024 * 1024) + noise(32 * 1024, 2)),
     ])
     depth = 40_000
     deep_doc = (f'<?xml version="1.0"?><w:document {W}><w:body><w:p><w:r><w:t>'
@@ -674,7 +718,8 @@ def abuse(out):
         ("word/document.xml", deep_doc),
     ])
     # Past the default node limit, each node an empty element.
-    flat_doc = (f'<?xml version="1.0"?><w:document {W}><w:body>'
+    flat_doc = (f'<?xml version="1.0"?>{noise_comment(2 * 1024, 3)}'
+                f'<w:document {W}><w:body>'
                 + "<x/>" * 2_000_001
                 + "</w:body></w:document>")
     write_zip(a / "max_xml_nodes--flatflood--errors.docx", [
@@ -684,7 +729,8 @@ def abuse(out):
     ])
     # Five parts the parser reads, each padded by a 110 MiB comment that no
     # node counts: under the per-entry cap, past the whole-archive total.
-    pad = "<!--" + "A" * (110 * 1024 * 1024) + "-->"
+    pad = ("<!--" + "A" * (110 * 1024 * 1024) + "-->"
+           + noise_comment(16 * 1024, 4))
     write_zip(a / "max_total_bytes--paddedparts--errors.docx", [
         ("[Content_Types].xml", ct),
         ("_rels/.rels", ROOT_RELS),
@@ -713,8 +759,8 @@ def abuse(out):
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", two_images_doc),
         ("word/_rels/document.xml.rels", two_images_rels),
-        ("word/media/image1.png", b"\x00" * (100 * 1024 * 1024)),
-        ("word/media/image2.png", b"\x00" * (100 * 1024 * 1024)),
+        ("word/media/image1.png", b"\x00" * (100 * 1024 * 1024) + noise(16 * 1024, 5)),
+        ("word/media/image2.png", b"\x00" * (100 * 1024 * 1024) + noise(16 * 1024, 6)),
     ])
 
 

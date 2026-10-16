@@ -11,6 +11,7 @@ fn default_max(name: &str) -> u64 {
     match name {
         "max_entry_bytes" => limits.max_entry_bytes,
         "max_total_bytes" => limits.max_total_bytes,
+        "max_entry_count" => limits.max_entry_count,
         "max_nesting_depth" => limits.max_nesting_depth,
         "max_xml_nodes" => limits.max_xml_nodes,
         "max_expansion" => limits.max_expansion,
@@ -18,6 +19,7 @@ fn default_max(name: &str) -> u64 {
         "max_asset_total_bytes" => limits.max_asset_total_bytes,
         "max_record_depth" => limits.max_record_depth,
         "max_grid_slots" => limits.max_grid_slots,
+        "max_compression_ratio" => limits.max_compression_ratio,
         other => panic!("no abuse fixture is expected to trip {other}"),
     }
 }
@@ -26,7 +28,7 @@ fn default_max(name: &str) -> u64 {
 fn every_abuse_fixture_trips_the_limit_its_name_gives() {
     let mut files = Vec::new();
     walk(&fixture_root().join("abuse"), &mut files);
-    assert_eq!(files.len(), 13, "abuse fixture set");
+    assert_eq!(files.len(), 15, "abuse fixture set");
     let converter = converter(1);
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();

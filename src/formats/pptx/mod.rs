@@ -144,7 +144,8 @@ impl ThemeFills {
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let pkg = match Package::open(parse_ctx, bytes, PackageKind::Opc) {
         Ok(p) => p,
-        Err(e) => return Err(probe_ole(bytes).unwrap_or(e)),
+        Err(e @ ConvertError::Malformed { .. }) => return Err(probe_ole(bytes).unwrap_or(e)),
+        Err(e) => return Err(e),
     };
     let pkg = RefCell::new(pkg);
 

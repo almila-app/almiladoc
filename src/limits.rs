@@ -107,7 +107,6 @@ pub struct Limits {
     pub max_input_bytes: u64,
     /// Ratio of an archive entry's decompressed to compressed size, checked on
     /// entries declaring at least 1 MiB: ordinary content compresses far less.
-    /// Not yet enforced.
     pub max_compression_ratio: u64,
     /// Units (pages, slides, sheets or spine items) in one document: each
     /// costs work and output even when empty. Not yet enforced.

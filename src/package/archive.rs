@@ -4,6 +4,7 @@ use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
+use crate::package::directory::{self, ContainerFacts};
 use crate::package::xml::{Element, parse_xml};
 use std::collections::HashMap;
 use std::io::{Cursor, ErrorKind, Read};
@@ -82,16 +83,19 @@ enum Absent {
 /// A ZIP-based document package (OOXML, ODF, EPUB).
 pub struct Package<'a> {
     parse_ctx: &'a ParseCtx<'a>,
-    #[expect(dead_code, reason = "no reader chooses an XML dialect by package kind yet")]
     kind: PackageKind,
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+    facts: ContainerFacts,
+    /// Entry indices by ASCII-lowercased name, for OPC alone: its part names
+    /// compare case-insensitively in ASCII (ECMA-376 Part 2).
+    folded: HashMap<Vec<u8>, usize>,
     total_read: u64,
-    /// Decompressed parts by normalized name: repeated references are served
-    /// from the cache instead of re-decompressing and re-charging the
-    /// total-bytes budget (which would falsely trip on valid documents that
-    /// reference one part many times). Bounded by `max_total_bytes`. Buffers
-    /// are shared (`Rc`), so a cache hit never copies the bytes.
-    cache: HashMap<String, Rc<[u8]>>,
+    /// Decompressed parts by entry: repeated references are served from the
+    /// cache instead of re-decompressing and re-charging the total-bytes
+    /// budget (which would falsely trip on valid documents that reference one
+    /// part many times). Bounded by `max_total_bytes`. Buffers are shared
+    /// (`Rc`), so a cache hit never copies the bytes.
+    cache: HashMap<usize, Rc<[u8]>>,
 }
 
 impl<'a> Package<'a> {
@@ -100,13 +104,28 @@ impl<'a> Package<'a> {
         bytes: &'a [u8],
         kind: PackageKind,
     ) -> Result<Self, ConvertError> {
+        directory::admit(bytes, parse_ctx.limits())?;
         let zip = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|_| ConvertError::malformed("not a readable zip archive"))?;
-        let max = parse_ctx.limits().max_entry_count;
-        if zip.len() as u64 > max {
-            return Err(ConvertError::limit(Limit::EntryCount, max));
+        let facts = directory::inspect(&zip, bytes, parse_ctx.limits())?;
+        let folded = match kind {
+            PackageKind::Opc => folded_names(&zip)?,
+            PackageKind::Odf | PackageKind::Epub => HashMap::new(),
+        };
+        Ok(Package { parse_ctx, kind, zip, facts, folded, total_read: 0, cache: HashMap::new() })
+    }
+
+    /// The entry count and sizes the central directory declares.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no caller inspects a package yet"))]
+    pub fn facts(&self) -> ContainerFacts {
+        self.facts
+    }
+
+    fn index_of(&self, name: &str) -> Option<usize> {
+        match self.kind {
+            PackageKind::Opc => self.folded.get(&name.as_bytes().to_ascii_lowercase()).copied(),
+            PackageKind::Odf | PackageKind::Epub => self.zip.index_for_name(name),
         }
-        Ok(Package { parse_ctx, kind, zip, total_read: 0, cache: HashMap::new() })
     }
 
     /// Read a part's bytes. `Ok(None)` means the part is absent (a valid
@@ -116,14 +135,16 @@ impl<'a> Package<'a> {
     pub fn part(&mut self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
         // OPC part URIs may carry a leading slash; entries never do.
         let name = name.trim_start_matches('/');
-        if let Some(bytes) = self.cache.get(name) {
+        let Some(index) = self.index_of(name) else {
+            return Ok(None);
+        };
+        if let Some(bytes) = self.cache.get(&index) {
             return Ok(Some(Rc::clone(bytes)));
         }
-        let mut file = match self.zip.by_name(name) {
-            Ok(f) => f,
-            Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-            Err(_) => return Err(ConvertError::malformed_part(name, "unreadable archive entry")),
-        };
+        let mut file = self
+            .zip
+            .by_index(index)
+            .map_err(|_| ConvertError::malformed_part(name, "unreadable archive entry"))?;
         let limits = self.parse_ctx.limits();
         if file.size() > limits.max_entry_bytes {
             return Err(ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes));
@@ -139,13 +160,13 @@ impl<'a> Package<'a> {
         }
         self.total_read += read;
         let bytes: Rc<[u8]> = Rc::from(bytes);
-        self.cache.insert(name.to_string(), Rc::clone(&bytes));
+        self.cache.insert(index, Rc::clone(&bytes));
         Ok(Some(bytes))
     }
 
     /// True when a part exists, without reading (or budget-charging) it.
     pub fn has_part(&self, name: &str) -> bool {
-        self.zip.index_for_name(name.trim_start_matches('/')).is_some()
+        self.index_of(name.trim_start_matches('/')).is_some()
     }
 
     /// Read a part that must exist for any meaningful output.
@@ -225,6 +246,21 @@ impl<'a> Package<'a> {
         };
         skip_unreadable(self.parse_ctx, role, parse_xml(self.parse_ctx, &bytes, role).map(Some))
     }
+}
+
+fn folded_names(
+    zip: &zip::ZipArchive<Cursor<&[u8]>>,
+) -> Result<HashMap<Vec<u8>, usize>, ConvertError> {
+    let mut folded = HashMap::with_capacity(zip.len());
+    for index in 0..zip.len() {
+        let entry = zip
+            .by_index_data(index)
+            .map_err(|_| ConvertError::malformed("unreadable entry name"))?;
+        if folded.insert(entry.name_raw().to_ascii_lowercase(), index).is_some() {
+            return Err(ConvertError::malformed("entry names equal after case folding"));
+        }
+    }
+    Ok(folded)
 }
 
 fn read_entry<R: Read>(
@@ -665,5 +701,133 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
+    }
+
+    const KINDS: [PackageKind; 3] = [PackageKind::Opc, PackageKind::Odf, PackageKind::Epub];
+
+    #[test]
+    fn exact_duplicate_names_are_malformed_in_every_kind() {
+        let mut data = package_of(&[("a.xml", b"<first/>"), ("b.xml", b"<second/>")]);
+        for at in data
+            .windows(5)
+            .enumerate()
+            .filter(|(_, w)| w == b"b.xml")
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+        {
+            data[at] = b'a';
+        }
+        for kind in KINDS {
+            let err = Package::open(&ParseCtx::default(), &data, kind).err().unwrap();
+            assert!(
+                matches!(err, ConvertError::Malformed { reason: "duplicate entry names", .. }),
+                "{kind:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_equal_after_ascii_case_folding_are_duplicates_in_opc_only() {
+        let data = package_of(&[("word/a.xml", b"<lower/>"), ("word/A.xml", b"<upper/>")]);
+        let err = Package::open(&ParseCtx::default(), &data, PackageKind::Opc).err().unwrap();
+        assert!(
+            matches!(
+                err,
+                ConvertError::Malformed { reason: "entry names equal after case folding", .. }
+            ),
+            "{err:?}"
+        );
+        for kind in [PackageKind::Odf, PackageKind::Epub] {
+            let parse_ctx = ParseCtx::default();
+            let mut pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            assert_eq!(&*pkg.part("word/a.xml").unwrap().unwrap(), b"<lower/>");
+            assert_eq!(&*pkg.part("word/A.xml").unwrap().unwrap(), b"<upper/>");
+        }
+    }
+
+    #[test]
+    fn opc_names_resolve_after_ascii_case_folding_and_are_cached_once() {
+        let data = one_part_zip("word/document.xml", &[7u8; 2048]);
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        assert!(pkg.has_part("/Word/Document.XML"));
+        for name in ["word/Document.xml", "WORD/DOCUMENT.XML", "word/document.xml"] {
+            assert_eq!(pkg.part(name).unwrap().unwrap().len(), 2048, "{name}");
+        }
+        assert_eq!((pkg.total_read, pkg.cache.len(), parse_ctx.fuel()), (2048, 1, 2));
+        assert!(pkg.part("word/document.xm").unwrap().is_none());
+        for kind in [PackageKind::Odf, PackageKind::Epub] {
+            let mut pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            assert!(!pkg.has_part("word/Document.xml"), "{kind:?}");
+            assert!(pkg.part("word/Document.xml").unwrap().is_none(), "{kind:?}");
+            assert!(pkg.part("word/document.xml").unwrap().is_some(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn facts_are_the_central_directorys() {
+        let data = package_of(&[("a.xml", &[b'a'; 3000]), ("b.xml", b"<b/>")]);
+        let parse_ctx = ParseCtx::default();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Odf).unwrap();
+        let zip = zip::ZipArchive::new(Cursor::new(data.as_slice())).unwrap();
+        let compressed = (0..2).map(|i| zip.by_index_data(i).unwrap().compressed_size()).sum();
+        assert_eq!(
+            pkg.facts(),
+            ContainerFacts { entries: 2, compressed_bytes: compressed, uncompressed_bytes: 3004 }
+        );
+    }
+
+    #[test]
+    fn duplicates_behind_a_refused_end_record_are_malformed() {
+        let mut data = package_of(&[("a.xml", b"<first/>"), ("b.xml", b"<second/>")]);
+        let at: Vec<usize> =
+            data.windows(5).enumerate().filter(|(_, w)| w == b"b.xml").map(|(i, _)| i).collect();
+        for i in at {
+            data[i] = b'a';
+        }
+        let end = data.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let mut appended = data[end..end + 22].to_vec();
+        appended[4] = 1;
+        appended[8] = 1;
+        appended[10] = 1;
+        data.extend(appended);
+        let zip = zip::ZipArchive::new(Cursor::new(data.as_slice())).unwrap();
+        assert_eq!(zip.len(), 1);
+        let err = Package::open(&ParseCtx::default(), &data, PackageKind::Odf).err().unwrap();
+        assert!(
+            matches!(err, ConvertError::Malformed { reason: "duplicate entry names", .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn compressed_sizes_past_the_directory_are_malformed() {
+        let mut data = one_part_zip("word/document.xml", &[0; 4 << 20]);
+        let limits = Limits { max_compression_ratio: 2, ..Limits::default() };
+        let err = Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).err().unwrap();
+        assert!(
+            matches!(err, ConvertError::ResourceLimit { limit: Limit::CompressionRatio, max: 2 }),
+            "{err:?}"
+        );
+        let central = data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        data[central + 20..central + 24].copy_from_slice(&(4u32 << 20).to_le_bytes());
+        assert!(zip::ZipArchive::new(Cursor::new(data.as_slice())).is_ok());
+        let err = Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).err().unwrap();
+        assert!(
+            matches!(
+                err,
+                ConvertError::Malformed { reason: "compressed sizes exceed the archive", .. }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_package_after_prepended_bytes_opens_where_zip_finds_it() {
+        let data = [b"prefix!!".as_slice(), &one_part_zip("word/document.xml", b"<d/>")].concat();
+        let parse_ctx = ParseCtx::default();
+        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        assert_eq!(&*pkg.part("word/document.xml").unwrap().unwrap(), b"<d/>");
+        assert_eq!(pkg.facts().entries, 1);
     }
 }
