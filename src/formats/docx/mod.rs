@@ -476,6 +476,18 @@ mod tests {
             parts
         };
         let alone = |body: &str| vec![("word/document.xml", document(body))];
+        let declined_in_note = |choice: &str| {
+            vec![
+                ("word/document.xml", document("<w:p/>")),
+                (
+                    "word/footnotes.xml",
+                    format!(
+                        r#"<w:footnotes {NS}><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
+                        run(&alternate(choice, ""))
+                    ),
+                ),
+            ]
+        };
         let styled = |styles: &str, numbering: Option<&str>| {
             let mut parts = alone("<w:p/>");
             parts.push(("word/styles.xml", styles.into()));
@@ -829,6 +841,13 @@ mod tests {
                 alone(&run(&alternate(r#"<w:contentPart r:id="rId1"/>"#, ""))),
                 vec![(GraphicUnread, Body, 1)],
             ),
+            ("declined ink in a note", declined_in_note(r#"<w:contentPart r:id="rId1"/>"#), vec![(GraphicUnread, Note, 1)]),
+            (
+                "a declined picture in a note",
+                declined_in_note(&format!("<w:drawing>{PICTURE}</w:drawing>")),
+                vec![(ImageUnplaced, Note, 1)],
+            ),
+            ("declined text in a note", declined_in_note("<w:t>words</w:t>"), vec![(BlockUnread, Note, 1)]),
             (
                 "a declined DrawingML chart",
                 declined(&format!("<w:drawing>{CHART}</w:drawing>")),

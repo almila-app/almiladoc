@@ -363,7 +363,12 @@ const CASES: &[Case] = &[
         ],
         &[(RECOVERED, Note, None, 1)],
     ),
-    case(Fixture("pptx/pres.pptx"), Format::Pptx, &[("_rels/.rels", Corrupt)], &[]),
+    case(
+        Fixture("pptx/pres.pptx"),
+        Format::Pptx,
+        &[("_rels/.rels", Corrupt)],
+        &[(CONVENTIONAL, Container, None, 1)],
+    ),
     case(
         Fixture("pptx/pres.pptx"),
         Format::Pptx,
@@ -400,7 +405,12 @@ const CASES: &[Case] = &[
         &[("ppt/slides/slide1.xml", Recover)],
         &[(RECOVERED, Body, Some(1), 1)],
     ),
-    case(Fixture("pptx/pres.pptx"), Format::Pptx, &[("ppt/slides/slide1.xml", Corrupt)], &[]),
+    case(
+        Fixture("pptx/pres.pptx"),
+        Format::Pptx,
+        &[("ppt/slides/slide1.xml", Corrupt)],
+        &[(UNIT, Body, Some(1), 1)],
+    ),
     case(
         Fixture("pptx/pres.pptx"),
         Format::Pptx,

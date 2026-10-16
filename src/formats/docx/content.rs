@@ -39,8 +39,6 @@ const SUPPORTED_NS: &[&str] = &[
     ns::WPG,
 ];
 
-const CHARTEX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
-
 use crate::shared::assets::AssetSink;
 
 pub(super) struct Ctx<'a, 'b> {
@@ -103,45 +101,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    /// Pick the branch of an `mc:AlternateContent` to process, reporting
-    /// what the declined choices hold when no choice is taken: a chart,
-    /// diagram or ink always, and a picture or text only when the fallback
-    /// shows none.
     fn alternate_branch<'e>(&self, alt: &'e Element) -> Option<&'e Element> {
-        let branch = crate::shared::mc::alternate_branch(alt, SUPPORTED_NS);
-        if branch.is_none_or(|b| b.is(ns::MC, "Fallback")) {
-            let declined: Vec<&Element> = alt.find_all(ns::MC, "Choice").collect();
-            let fallback_lacks = |holds: fn(&Element) -> bool| !branch.is_some_and(holds);
-            if declined.iter().any(|c| holds_graphic(c)) {
-                self.emit(DiagnosticCode::GraphicUnread);
-            }
-            if declined.iter().any(|c| holds_picture(c)) && fallback_lacks(holds_picture) {
-                self.emit(DiagnosticCode::ImageUnplaced);
-            }
-            if declined.iter().any(|c| shows_text(c)) && fallback_lacks(shows_text) {
-                self.emit(DiagnosticCode::BlockUnread);
-            }
-        }
-        branch
+        crate::shared::mc::alternate_branch(self.parse_ctx, self.region, alt, SUPPORTED_NS, |_| {
+            true
+        })
     }
-}
-
-fn holds_graphic(elem: &Element) -> bool {
-    elem.descendant_elems().any(|e| {
-        e.is(ns::CHART, "chart")
-            || e.is(CHARTEX, "chart")
-            || e.is(ns::DGM, "relIds")
-            || e.local == "contentPart"
-    })
-}
-
-fn holds_picture(elem: &Element) -> bool {
-    elem.descendant_elems().any(|e| e.is(ns::A, "blip") || e.is(ns::VML, "imagedata"))
-}
-
-fn shows_text(elem: &Element) -> bool {
-    elem.descendant_elems()
-        .any(|e| (e.is(ns::W, "t") || e.is(ns::A, "t")) && !e.text().trim().is_empty())
 }
 
 pub(super) enum ParaKind {
