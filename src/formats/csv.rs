@@ -14,7 +14,7 @@ use crate::error::ConvertError;
 use crate::model::{Block, Cell, Document, Inline, Table, TableKind};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::text::clean_text;
-use csv::ReaderBuilder;
+use csv::{ReaderBuilder, StringRecord};
 use std::borrow::Cow;
 
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
@@ -31,16 +31,18 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .from_reader(text.as_bytes());
 
     let mut rows: Vec<Vec<Cell>> = Vec::new();
-    for record in reader.records() {
-        let record = match record {
-            Ok(r) => r,
+    let mut record = StringRecord::new();
+    loop {
+        match reader.read_record(&mut record) {
+            Ok(true) => {}
+            Ok(false) => break,
             // Unreachable while the input is a `str` read flexibly: no
             // I/O, UTF-8 or record-length error can arise.
             Err(_) => {
                 parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
                 continue;
             }
-        };
+        }
         parse_ctx.charge(record.len() as u64)?;
         let cells: Vec<Cell> =
             record.iter().map(|f| Cell::from_inlines(vec![Inline::plain(clean_text(f))])).collect();

@@ -487,6 +487,119 @@ fn a_cell_drops_blank_parts_lines_and_rows() {
     assert_eq!(md, "|  |\n| --- |\n| a<br>a<br>b<br>x / y |\n");
 }
 
+#[test]
+fn a_ragged_table_renders_as_its_padded_twin() {
+    let cell = |t: &str| Cell::from_inlines(vec![Inline::plain(t)]);
+    let ragged = vec![
+        vec![cell("h")],
+        (0..37).map(|i| cell(&i.to_string())).collect(),
+        Vec::new(),
+        vec![cell("a"), cell(" "), cell("b")],
+    ];
+    let padded = ragged
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            row.resize_with(37, Cell::default);
+            row
+        })
+        .collect();
+    let md = doc(vec![table_from(ragged, 1)]);
+    assert_eq!(md, doc(vec![table_from(padded, 1)]));
+    let blank = |cells: usize| "  |".repeat(cells);
+    let numbers: String = (0..37).map(|i| format!(" {i} |")).collect();
+    assert_eq!(
+        md,
+        format!(
+            "| h |{}\n|{}\n|{numbers}\n|{}\n| a |  | b |{}\n",
+            blank(36),
+            " --- |".repeat(37),
+            blank(37),
+            blank(34),
+        )
+    );
+}
+
+#[test]
+fn a_nested_cell_holds_its_text_once_whatever_its_depth() {
+    let text = "x".repeat(10_000);
+    let mut cell = Cell::from_inlines(vec![Inline::plain(&text)]);
+    for _ in 0..100 {
+        let table = Table::from_rows(vec![vec![cell]], 0, TableKind::Data);
+        cell = Cell::new(vec![Block::Table(table)]);
+    }
+    let document = Document::default();
+    let ledger = crate::ledger::Ledger::new(u64::MAX, None);
+    let meter = super::Meter::new(&ledger, u64::MAX);
+    let mut out = super::sink::Text::new(&meter);
+    super::table::render_cell(&cell, &Ctx::of(&document), &mut out).unwrap();
+    assert_eq!(out.as_str(), text);
+    assert!(meter.admitted() <= text.len() as u64 + 100 * 8, "{}", meter.admitted());
+}
+
+#[test]
+fn a_cell_part_taken_back_keeps_the_space_held_before_it() {
+    let paragraph = |inlines| Block::Paragraph(inlines);
+    let item = ListItem {
+        blocks: vec![
+            paragraph(vec![Inline::LineBreak]),
+            paragraph(vec![Inline::plain(" y ")]),
+            Block::heading(2, vec![Inline::plain(" \n ")]),
+            Block::heading(2, vec![Inline::plain(" h \n\n i ")]),
+        ],
+        marker_label: None,
+    };
+    let list = Block::List(List { marker: MarkerKind::Bullet, start: 1, items: vec![item] });
+    let nested = Table::from_rows(
+        vec![vec![Cell::new(vec![paragraph(vec![Inline::plain(" \n ")])]), Cell::new(vec![list])]],
+        0,
+        TableKind::Data,
+    );
+    let cell = Cell::new(vec![paragraph(vec![Inline::plain("a  ")]), Block::Table(nested)]);
+    let md = doc(vec![table_from(vec![vec![cell]], 0)]);
+    assert_eq!(md, "|  |\n| --- |\n| a  <br> / •  y  **h<br>i** |\n");
+}
+
+#[test]
+fn a_line_break_after_a_nested_table_in_a_list_item_breaks_the_cell_line() {
+    let inner = Table::from_rows(
+        vec![vec![Cell::from_inlines(vec![Inline::plain("x")])]],
+        0,
+        TableKind::Data,
+    );
+    let item = ListItem {
+        blocks: vec![
+            Block::Table(inner),
+            Block::Paragraph(vec![Inline::LineBreak, Inline::plain("y")]),
+        ],
+        marker_label: None,
+    };
+    let list = Block::List(List { marker: MarkerKind::Bullet, start: 1, items: vec![item] });
+    assert_eq!(
+        doc(vec![table_from(vec![vec![Cell::new(vec![list])]], 0)]),
+        "|  |\n| --- |\n| • x<br>y |\n"
+    );
+}
+
+#[test]
+fn whitespace_a_cell_shows_counts_once_against_the_maximum() {
+    let text = format!("a{}|b", " ".repeat(100));
+    let document = Document {
+        blocks: vec![table_from(vec![vec![Cell::from_inlines(vec![Inline::plain(&text)])]], 0)],
+        notes: Vec::new(),
+        assets: Vec::new(),
+    };
+    let md = super::document_to_markdown(&document);
+    assert_eq!(md, format!("|  |\n| --- |\n| a{}\\|b |\n", " ".repeat(100)));
+    let ledger = crate::ledger::Ledger::new(u64::MAX, None);
+    let len = md.len() as u64;
+    assert_eq!(super::render(&document, &super::Meter::new(&ledger, len)).unwrap(), md);
+    assert!(matches!(
+        super::render(&document, &super::Meter::new(&ledger, len - 1)),
+        Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. })
+    ));
+}
+
 fn refused_on_what_it_holds(blocks: Vec<Block>, notes: Vec<Note>) {
     let document = Document { blocks, notes, assets: Vec::new() };
     let len = super::document_to_markdown(&document).len() as u64;

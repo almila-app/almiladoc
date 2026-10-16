@@ -224,7 +224,7 @@ fn render_link(
             None => return render_inlines_mode(content, ctx, false, rc, out),
         },
     };
-    let mark = out.len();
+    let mark = out.mark();
     out.push('[')?;
     let label = out.len();
     render_inlines_mode(content, ctx, true, rc, out)?;

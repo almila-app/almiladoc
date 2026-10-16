@@ -24,10 +24,9 @@ pub(crate) fn write_table(
     // Interior empty rows render as blank rows — they carry the source's
     // row coordinates; trailing blank rows are popped below.
     let meter = sink.meter();
-    let width = table.grid.iter().map(|r| r.len()).max().unwrap_or(0);
     let mut rendered: Vec<Vec<RenderedCell<'_>>> = Vec::with_capacity(table.grid.len());
     for row in &table.grid {
-        let mut cells: Vec<RenderedCell<'_>> = Vec::with_capacity(width);
+        let mut cells: Vec<RenderedCell<'_>> = Vec::with_capacity(row.len());
         for slot in row {
             let mut text = Text::new(meter);
             if let CellSlot::Origin(cell) = slot {
@@ -38,7 +37,6 @@ pub(crate) fn write_table(
                 covered_span: matches!(slot, CellSlot::Covered { .. }),
             });
         }
-        cells.resize_with(width, || RenderedCell { text: Text::new(meter), covered_span: false });
         rendered.push(cells);
     }
     while rendered.len() > 1
@@ -69,12 +67,10 @@ pub(crate) fn write_table(
     let mut rows = rendered.into_iter();
     let header = if table.header_rows >= 1 { rows.next() } else { None };
     if let Some(header) = header {
-        write_row(header, sink)?;
+        write_row(header, width, sink)?;
     } else {
         sink.write("|")?;
-        for _ in 0..width {
-            sink.write("  |")?;
-        }
+        write_blank_cells(width, sink)?;
     }
     sink.write("\n|")?;
     for _ in 0..width {
@@ -82,44 +78,48 @@ pub(crate) fn write_table(
     }
     for row in rows {
         sink.write("\n")?;
-        write_row(row, sink)?;
+        write_row(row, width, sink)?;
     }
     Ok(())
 }
 
-fn write_row<'m>(
-    cells: impl IntoIterator<Item = RenderedCell<'m>>,
+fn write_row(
+    cells: Vec<RenderedCell<'_>>,
+    width: usize,
     sink: &mut Sink<'_>,
 ) -> Result<(), ConvertError> {
+    let blanks = width.saturating_sub(cells.len());
     sink.write("|")?;
     for cell in cells {
         sink.write(" ")?;
         sink.write_text(cell.text)?;
         sink.write(" |")?;
     }
-    Ok(())
+    write_blank_cells(blanks, sink)
+}
+
+fn write_blank_cells(count: usize, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    const BLANK: &str = "  |";
+    const CHUNK: &str = "  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |";
+    const PER_CHUNK: usize = CHUNK.len() / BLANK.len();
+    for _ in 0..count / PER_CHUNK {
+        sink.write(CHUNK)?;
+    }
+    sink.write(CHUNK.get(..count % PER_CHUNK * BLANK.len()).unwrap_or_default())
 }
 
 /// Flatten arbitrary block content into a single table-cell line in `out`:
-/// its parts joined by `<br>`, then in one pass each line trimmed, blank
-/// lines dropped and the rest joined by `<br>`.
+/// its parts joined by `<br>`, each line trimmed, blank lines dropped and
+/// the rest joined by `<br>` as `out` takes them. A cell's edge whitespace
+/// is padding the table's own padding would swallow anyway, and
+/// spreadsheets carry it by the thousand.
 pub(crate) fn render_cell(cell: &Cell, rc: &Ctx, out: &mut Text<'_>) -> Result<(), ConvertError> {
-    let mut parts = Text::new(out.meter());
-    let mut joined = Join::new("<br>");
+    out.open_cell();
+    let mut parts = Join::new("<br>");
     for block in &cell.blocks {
-        cell_block_text(block, rc, &mut parts, &mut joined)?;
+        cell_block_text(block, rc, out, &mut parts)?;
     }
-    // A cell's edge whitespace is padding the table's own padding would
-    // swallow anyway, and spreadsheets carry it by the thousand.
-    let parts = parts.into_string();
-    let mut first = true;
-    for line in parts.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if !first {
-            out.push_str("<br>")?;
-        }
-        out.push_str(line)?;
-        first = false;
-    }
+    out.close_cell();
     Ok(())
 }
 
@@ -142,7 +142,7 @@ impl Join {
         out: &mut Text<'_>,
         render: impl FnOnce(&mut Text<'_>, usize) -> Result<bool, ConvertError>,
     ) -> Result<(), ConvertError> {
-        let mark = out.len();
+        let mark = out.mark();
         if self.any {
             out.push_str(self.sep)?;
         }
@@ -166,8 +166,9 @@ fn cell_block_text(
         Block::Heading { content, .. } => parts.part(out, |out, _| {
             out.push_str("**")?;
             let text = out.len();
+            out.open_cell();
             render_inlines(content, InlineContext::TableCell, rc, out)?;
-            out.trim_since(text);
+            out.close_cell();
             if out.len() == text {
                 return Ok(false);
             }
@@ -175,9 +176,6 @@ fn cell_block_text(
             Ok(true)
         }),
         Block::Paragraph(inlines) => parts.part(out, |out, start| {
-            // Edge whitespace is preserved here and protected in
-            // `render_cell`; sources that retain cell padding (spreadsheets,
-            // CSV) keep it in the final output.
             render_inlines(inlines, InlineContext::TableCell, rc, out)?;
             Ok(!out.since(start).trim().is_empty())
         }),

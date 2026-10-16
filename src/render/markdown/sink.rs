@@ -20,11 +20,26 @@ pub(crate) struct Meter<'l> {
     max: u64,
     written: Cell<u64>,
     held: Cell<u64>,
+    #[cfg(test)]
+    admitted: Cell<u64>,
 }
 
 impl<'l> Meter<'l> {
     pub(crate) fn new(ledger: &'l Ledger<'l>, max: u64) -> Self {
-        Meter { ledger, max, written: Cell::new(0), held: Cell::new(0) }
+        Meter {
+            ledger,
+            max,
+            written: Cell::new(0),
+            held: Cell::new(0),
+            #[cfg(test)]
+            admitted: Cell::new(0),
+        }
+    }
+
+    /// Every byte admitted so far, held or written, released or not.
+    #[cfg(test)]
+    pub(crate) fn admitted(&self) -> u64 {
+        self.admitted.get()
     }
 
     fn admit(&self, bytes: usize) -> Result<u64, ConvertError> {
@@ -33,6 +48,8 @@ impl<'l> Meter<'l> {
         if total > self.max {
             return Err(ConvertError::limit(Limit::OutputBytes, self.max));
         }
+        #[cfg(test)]
+        self.admitted.set(self.admitted.get().saturating_add(bytes));
         Ok(bytes)
     }
 
@@ -57,24 +74,69 @@ impl<'l> Meter<'l> {
 }
 
 /// Rendered text held before it is written: a paragraph to trim, a table
-/// cell, a list marker.
+/// cell, a list marker. Inside the table cells opened on it, it is a cell
+/// line: each line pushed is trimmed, blank lines are dropped and the rest
+/// joined by `<br>` as the bytes arrive, and a nested cell trims its own
+/// lines inside its parent's.
 pub(crate) struct Text<'m> {
     buf: String,
     meter: &'m Meter<'m>,
+    line: Line,
+    /// Whitespace a cell line held after what it showed and has not shown:
+    /// the owed tail, moved into `buf` if the line goes on, and the tails it
+    /// dropped, kept for a take-back until the outermost cell closes.
+    space: String,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Line {
+    /// How many cells are open.
+    depth: usize,
+    /// How many of the outermost open cells show something on their current
+    /// line.
+    shown: usize,
+    owed: Option<Owed>,
+}
+
+/// What the cell at depth `by` owes before the next character shown.
+#[derive(Clone, Copy)]
+struct Owed {
+    by: usize,
+    debt: Debt,
+}
+
+#[derive(Clone, Copy)]
+enum Debt {
+    /// A `<br>`: a line that showed something ended.
+    Break,
+    /// The held whitespace from this offset on.
+    Space(usize),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Mark {
+    len: usize,
+    space: usize,
+    line: Line,
 }
 
 impl<'m> Text<'m> {
     pub(crate) fn new(meter: &'m Meter<'m>) -> Self {
-        Text { buf: String::new(), meter }
-    }
-
-    pub(crate) fn meter(&self) -> &'m Meter<'m> {
-        self.meter
+        Text { buf: String::new(), meter, line: Line::default(), space: String::new() }
     }
 
     pub(crate) fn push_str(&mut self, s: &str) -> Result<(), ConvertError> {
-        self.meter.hold(s.len())?;
-        self.buf.push_str(s);
+        if self.line.depth == 0 {
+            return self.append(s);
+        }
+        let mut lines = s.split('\n');
+        if let Some(first) = lines.next() {
+            self.push_line(first)?;
+        }
+        for line in lines {
+            self.end_line();
+            self.push_line(line)?;
+        }
         Ok(())
     }
 
@@ -95,21 +157,45 @@ impl<'m> Text<'m> {
         self.buf.get(mark..).unwrap_or_default()
     }
 
-    /// Drop what was pushed since `mark`, a length this text had.
-    pub(crate) fn truncate(&mut self, mark: usize) {
-        let before = self.buf.len();
-        self.buf.truncate(mark);
-        self.meter.release(before.saturating_sub(self.buf.len()));
+    pub(crate) fn mark(&self) -> Mark {
+        Mark { len: self.buf.len(), space: self.space.len(), line: self.line }
     }
 
-    /// Trim the whitespace at both edges of what was pushed since `mark`.
-    pub(crate) fn trim_since(&mut self, mark: usize) {
-        let tail = self.since(mark);
-        let lead = tail.len().saturating_sub(tail.trim_start().len());
-        let kept = tail.trim().len();
-        self.buf.drain(mark..mark.saturating_add(lead));
-        self.meter.release(lead);
-        self.truncate(mark.saturating_add(kept));
+    /// Take back everything pushed since `mark`. Whitespace owed at `mark`
+    /// and shown since is the first thing pushed after it, so it moves back
+    /// from there; owed whitespace dropped since stays where it was held.
+    pub(crate) fn truncate(&mut self, mark: Mark) {
+        let held = self.buf.len().saturating_add(self.space.len());
+        if let Some(Owed { debt: Debt::Space(from), .. }) = mark.line.owed
+            && self.since(mark.len).starts_with(char::is_whitespace)
+        {
+            let shown = mark.len.saturating_add(mark.space.saturating_sub(from));
+            self.space.truncate(from);
+            self.space.push_str(self.buf.get(mark.len..shown).unwrap_or_default());
+        }
+        self.buf.truncate(mark.len);
+        self.space.truncate(mark.space);
+        self.meter.release(held.saturating_sub(self.buf.len().saturating_add(self.space.len())));
+        self.line = mark.line;
+    }
+
+    /// Open a table cell: what is pushed until it closes forms one line.
+    pub(crate) fn open_cell(&mut self) {
+        self.line.depth = self.line.depth.saturating_add(1);
+    }
+
+    /// Close the innermost cell, dropping its trailing whitespace and breaks.
+    pub(crate) fn close_cell(&mut self) {
+        let line = &mut self.line;
+        if line.owed.is_some_and(|owed| owed.by == line.depth) {
+            line.owed = None;
+        }
+        line.depth = line.depth.saturating_sub(1);
+        line.shown = line.shown.min(line.depth);
+        if line.depth == 0 {
+            self.meter.release(self.space.len());
+            self.space.clear();
+        }
     }
 
     pub(crate) fn into_string(mut self) -> String {
@@ -117,11 +203,69 @@ impl<'m> Text<'m> {
         self.meter.release(buf.len());
         buf
     }
+
+    fn append(&mut self, s: &str) -> Result<(), ConvertError> {
+        self.meter.hold(s.len())?;
+        self.buf.push_str(s);
+        Ok(())
+    }
+
+    /// One line's worth of a push into the innermost cell: its edge
+    /// whitespace held or dropped, what lies between shown.
+    fn push_line(&mut self, line: &str) -> Result<(), ConvertError> {
+        let rest = line.trim_start();
+        self.push_space(line.strip_suffix(rest).unwrap_or_default())?;
+        let core = rest.trim_end();
+        if !core.is_empty() {
+            self.show(core)?;
+        }
+        self.push_space(rest.strip_prefix(core).unwrap_or_default())
+    }
+
+    /// Whitespace after what the innermost cell's line shows is held, and
+    /// dropped before it.
+    fn push_space(&mut self, ws: &str) -> Result<(), ConvertError> {
+        let line = &mut self.line;
+        if ws.is_empty() || line.shown < line.depth {
+            return Ok(());
+        }
+        if line.owed.is_none() {
+            line.owed = Some(Owed { by: line.depth, debt: Debt::Space(self.space.len()) });
+        }
+        self.meter.hold(ws.len())?;
+        self.space.push_str(ws);
+        Ok(())
+    }
+
+    fn show(&mut self, core: &str) -> Result<(), ConvertError> {
+        match self.line.owed.map(|owed| owed.debt) {
+            Some(Debt::Break) => self.append("<br>")?,
+            Some(Debt::Space(from)) => {
+                self.buf.push_str(self.space.get(from..).unwrap_or_default());
+                self.space.truncate(from);
+            }
+            None => {}
+        }
+        self.line.owed = None;
+        self.append(core)?;
+        self.line.shown = self.line.depth;
+        Ok(())
+    }
+
+    /// A line break in the innermost cell: a line that showed something
+    /// owes a `<br>` in place of the whitespace it held.
+    fn end_line(&mut self) {
+        let line = &mut self.line;
+        if line.shown == line.depth {
+            line.owed = Some(Owed { by: line.depth, debt: Debt::Break });
+            line.shown = line.depth.saturating_sub(1);
+        }
+    }
 }
 
 impl Drop for Text<'_> {
     fn drop(&mut self) {
-        self.meter.release(self.buf.len());
+        self.meter.release(self.buf.len().saturating_add(self.space.len()));
     }
 }
 
@@ -442,7 +586,9 @@ mod tests {
         let meter = Meter::new(&ledger, 10);
         let mut sink = Sink::new(&meter);
         let mut held = Text::new(&meter);
-        held.push_str("12345").unwrap();
+        held.push_str("123").unwrap();
+        let mark = held.mark();
+        held.push_str("45").unwrap();
         sink.write("1234").unwrap();
         let refused = held.push_str("12");
         assert!(matches!(
@@ -450,7 +596,7 @@ mod tests {
             Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
         ));
         assert_eq!(held.as_str(), "12345");
-        held.truncate(3);
+        held.truncate(mark);
         held.push_str("12").unwrap();
         assert!(sink.write("12").is_err());
         assert_eq!(sink.len(), 4);
@@ -512,15 +658,33 @@ mod tests {
     }
 
     #[test]
-    fn trimming_held_text_releases_what_it_drops() {
+    fn a_cell_line_releases_the_whitespace_it_drops() {
         let ledger = Ledger::new(u64::MAX, None);
         let meter = Meter::new(&ledger, 12);
         let mut text = Text::new(&meter);
-        text.push_str("ab").unwrap();
-        text.push_str("  c d \n").unwrap();
-        text.trim_since(2);
-        assert_eq!(text.as_str(), "abc d");
-        text.push_str("1234567").unwrap();
+        text.open_cell();
+        text.push_str("  ab  \n\n c d ").unwrap();
+        text.close_cell();
+        assert_eq!(text.as_str(), "ab<br>c d");
+        text.push_str("123").unwrap();
         assert!(text.push_str("x").is_err());
+    }
+
+    #[test]
+    fn a_take_back_restores_the_whitespace_a_cell_line_held() {
+        let ledger = Ledger::new(u64::MAX, None);
+        let meter = Meter::new(&ledger, u64::MAX);
+        let mut text = Text::new(&meter);
+        text.open_cell();
+        text.push_str("a ").unwrap();
+        let mark = text.mark();
+        text.push_str("\nb").unwrap();
+        text.truncate(mark);
+        text.open_cell();
+        text.push_str(" \n ").unwrap();
+        text.close_cell();
+        text.push_str("c").unwrap();
+        text.close_cell();
+        assert_eq!(text.as_str(), "a c");
     }
 }

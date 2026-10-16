@@ -311,6 +311,17 @@ fn rendering_charges_a_unit_of_work_per_64_bytes_on_top_of_the_parse() {
     assert!(parsed.render().is_ok());
 }
 
+#[test]
+fn a_ragged_csv_writes_the_blank_cells_of_its_short_rows_against_max_output_bytes() {
+    let fields = 100_000;
+    let mut csv = "a,".repeat(fields - 1);
+    csv.push_str("a\n");
+    csv.push_str(&"a\n".repeat(fields));
+    let refusal = limited(|_| {}).convert(Input::new(csv.as_bytes(), Format::Csv));
+    let max = Limits::default().max_output_bytes;
+    assert!(refused_with(refusal, Limit::OutputBytes, max));
+}
+
 fn zip(parts: &[(&str, &str)]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, text) in parts {
