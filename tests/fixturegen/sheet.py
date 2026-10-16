@@ -1,6 +1,6 @@
 import struct
 
-from fixturegen.common import write_zip
+from fixturegen.common import write_cfb, write_zip
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +161,95 @@ def sheet_xlsb(out):
     ])
 
 
+# ---------------------------------------------------------------------------
+# A 10-row table with one whitespace cell at the grid's last row: blank
+# cells must not widen the grid past its content.
+
+TABLE_10X5 = [[f"{chr(65 + c)}{r + 1}" for c in range(5)] for r in range(10)]
+
+
+def trailing_space_xlsx(out):
+    rows = "".join(
+        f'<row r="{r + 1}">' + "".join(
+            f'<c r="{v}" t="inlineStr"><is><t>{v}</t></is></c>' for v in row
+        ) + "</row>"
+        for r, row in enumerate(TABLE_10X5)
+    )
+    sheet = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>{rows}<row r="1048576"><c r="E1048576" t="inlineStr"><is><t xml:space="preserve"> </t></is></c></row></sheetData>
+</worksheet>"""
+    write_one_sheet_xlsx(out / "xlsx" / "handmade-trailing-space.xlsx", "Filled", sheet)
+
+
+def trailing_space_xlsb(out):
+    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.bin"/>
+</Relationships>"""
+    wb_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.bin"/>
+</Relationships>"""
+    workbook = (
+        xlsb_rec(153, struct.pack("<II", 0, 0) + xlsb_str(""))
+        + xlsb_rec(156, struct.pack("<II", 0, 1) + xlsb_str("rId1") + xlsb_str("Filled"))
+    )
+    st = lambda col, s: xlsb_rec(6, xlsb_cell(col) + xlsb_str(s))
+    data = b"".join(
+        xlsb_row(r) + b"".join(st(c, v) for c, v in enumerate(row))
+        for r, row in enumerate(TABLE_10X5)
+    ) + xlsb_row(1048575) + st(4, " ")
+    write_zip(out / "xlsb" / "handmade-trailing-space.xlsb", [
+        ("_rels/.rels", root_rels),
+        ("xl/workbook.bin", workbook),
+        ("xl/_rels/workbook.bin.rels", wb_rels),
+        ("xl/worksheets/sheet1.bin", data),
+    ])
+
+
+def biff_rec(rec_type, body=b""):
+    return struct.pack("<HH", rec_type, len(body)) + body
+
+
+def biff_bof(substream):
+    return biff_rec(0x0809, struct.pack("<HH", 0x0600, substream) + bytes(12))
+
+
+def biff_label(row, col, text):
+    data = text.encode("ascii")
+    return biff_rec(0x0204, struct.pack("<HHHHB", row, col, 0, len(data), 0) + data)
+
+
+def write_xls(path, sheet_records, globals_eof=True, sheets=True):
+    """One BIFF8 worksheet named "Filled" (or none), padded to the CFB
+    mini-stream cutoff with a skipped record so no stray bytes follow."""
+    globals_head = biff_bof(0x0005) + biff_rec(0x00E0, bytes(20))
+    boundsheet = lambda offset: biff_rec(0x0085, struct.pack("<IBBBB", offset, 0, 0, 6, 0) + b"Filled")
+    directory_len = len(boundsheet(0)) if sheets else 0
+    eof = biff_rec(0x000A)
+    sheet = biff_bof(0x0010) + sheet_records + eof if sheets else b""
+    body_len = len(globals_head) + directory_len + (len(eof) if globals_eof else 0) + len(sheet)
+    filler = biff_rec(0x0160, bytes(max(0, 4096 - body_len - 4)))
+    offset = len(globals_head) + len(filler) + directory_len + (len(eof) if globals_eof else 0)
+    stream = (globals_head + filler + (boundsheet(offset) if sheets else b"")
+              + (eof if globals_eof else b"") + sheet)
+    write_cfb(path, [("Workbook", stream)])
+
+
+def trailing_space_xls(out):
+    cells = b"".join(
+        biff_label(r, c, v) for r, row in enumerate(TABLE_10X5) for c, v in enumerate(row)
+    )
+    write_xls(out / "xls" / "handmade-trailing-space.xls", cells + biff_label(65535, 255, " "))
+
+
+def malformed(out):
+    write_xls(out / "malformed" / "nosheet--errors.xls", b"", sheets=False)
+    write_xls(out / "malformed" / "unended-globals--recovers.xls", biff_label(0, 0, "kept"),
+              globals_eof=False)
+
+
 def abuse(out):
     sheet = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -175,4 +264,8 @@ def abuse(out):
 def generate(out):
     merged_xlsx(out)
     sheet_xlsb(out)
+    trailing_space_xlsx(out)
+    trailing_space_xlsb(out)
+    trailing_space_xls(out)
+    malformed(out)
     abuse(out)

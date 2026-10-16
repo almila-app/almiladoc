@@ -62,7 +62,10 @@ path = [
     "tests/fixtures/docx/handmade-run-marks.docx",
     "tests/fixtures/pdf/handmade-arabic.pdf",
     "tests/fixtures/pdf/handmade-ligatures.pdf",
+    "tests/fixtures/xlsb/handmade-trailing-space.xlsb",
+    "tests/fixtures/xlsx/handmade-trailing-space.xlsx",
     "tests/limits.rs",
+    "tests/sheet_bounds.rs",
     "tests/snapshots/snapshots__doc__text.doc.diagnostics.snap",
     "tests/snapshots/snapshots__docx__handmade-ole.docx.diagnostics.snap",
     "tests/snapshots/snapshots__docx__handmade-rich.docx.diagnostics.snap",
@@ -74,13 +77,18 @@ path = [
     "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__mismatched--recovers.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__nosheet--errors.xls.snap",
     "tests/snapshots/snapshots__malformed__unbalanced--recovers.rtf.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__unclosed--recovers.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.diagnostics.snap",
     "tests/snapshots/snapshots__ods__sheet.ods.diagnostics.snap",
     "tests/snapshots/snapshots__pdf__handmade-arabic.pdf.snap",
     "tests/snapshots/snapshots__pptx__handmade-order.pptx.diagnostics.snap",
+    "tests/snapshots/snapshots__xls__handmade-trailing-space.xls.snap",
     "tests/snapshots/snapshots__xls__sheet.xls.diagnostics.snap",
     "tests/snapshots/snapshots__xlsb__handmade-sheet.xlsb.diagnostics.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-trailing-space.xlsb.snap",
+    "tests/snapshots/snapshots__xlsx__handmade-trailing-space.xlsx.snap",
     "tests/snapshots/snapshots__xlsx__sheet.xlsx.diagnostics.snap",
     "uv.lock",
 ]
@@ -193,8 +201,11 @@ path = [
     "tests/fixtures/abuse/max_entry_bytes--imagebomb--errors.docx",
     "tests/fixtures/abuse/max_entry_bytes--zipbomb--errors.docx",
     "tests/fixtures/docx/handmade-numbering.docx",
+    "tests/fixtures/malformed/nosheet--errors.xls",
+    "tests/fixtures/malformed/unended-globals--recovers.xls",
     "tests/fixtures/pdf/handmade-inline-image-no-colorspace.pdf",
     "tests/fixtures/rtf/text.rtf",
+    "tests/fixtures/xls/handmade-trailing-space.xls",
     "tests/gen_fixtures.py",
     "tests/robustness.rs",
     "tests/snapshots.rs",
@@ -203,6 +214,7 @@ path = [
     "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.snap",
     "tests/snapshots/snapshots__malformed__empty--errors.docx.snap",
     "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.snap",
     "tests/snapshots/snapshots__malformed__truncated--errors.doc.snap",
     "tests/snapshots/snapshots__malformed__truncated--errors.docx.snap",
     "tests/snapshots/snapshots__pdf__handmade-inline-image-no-colorspace.pdf.snap",
@@ -214,6 +226,16 @@ precedence = "override"
 SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/sheet/numfmt.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Thai Son Dinh <87920408+sondt99@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
 

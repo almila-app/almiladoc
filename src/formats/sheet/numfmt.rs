@@ -176,11 +176,16 @@ pub(super) struct NumberFormat {
     sections: Vec<Section>,
 }
 
+/// The longest format code, in UTF-16 code units: [MS-XLS] Format and
+/// [MS-XLSB] BrtFmt cap the code at 255, and xlsx takes the same cap so the
+/// three containers agree.
+const MAX_CODE_UNITS: usize = 255;
+
 impl NumberFormat {
     pub(super) fn parse(code: &str) -> Option<NumberFormat> {
         // An empty code is not the `;;;` idiom for hiding a value, it is a
         // format that says nothing, so the caller falls back to General.
-        if code.is_empty() {
+        if code.is_empty() || code.encode_utf16().nth(MAX_CODE_UNITS).is_some() {
             return None;
         }
         let parts = split_sections(code)?;
@@ -260,6 +265,66 @@ impl NumberFormat {
             _ => Some(String::new()),
         }
     }
+}
+
+/// A code that does not parse, split at its text section: the numeric
+/// sections before it, which a number renders through, and whether the text
+/// section adds to a text cell what its fallback to General drops.
+pub(super) struct TextSection<'a> {
+    pub(super) numeric: &'a str,
+    pub(super) decorates: bool,
+}
+
+/// Split a code at its text section, at any length. The text section is the
+/// fourth section, else a last one holding an unquoted `@`, and it decorates
+/// with a quoted or escaped literal, a skip, a `[$…]` currency symbol, or any
+/// character but `@`, a fill, a digit placeholder or `General`. A code with
+/// no text section, or whose sections do not split, is numeric whole and
+/// decorates nothing. One pass over the bytes decides it with nothing
+/// copied, so a code past [`MAX_CODE_UNITS`] costs no parse.
+pub(super) fn text_section(code: &str) -> TextSection<'_> {
+    let whole = TextSection { numeric: code, decorates: false };
+    let split_at = |start: usize, decorates: bool| TextSection {
+        numeric: code.get(..start).unwrap_or(code),
+        decorates,
+    };
+    let (mut index, mut at, mut adds, mut start) = (0, false, false, 0);
+    let mut rest = code.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        rest = tail;
+        match b {
+            b';' if index == 3 => return split_at(start, adds),
+            b';' => (index, at, adds, start) = (index + 1, false, false, code.len() - tail.len()),
+            b'"' | b'[' => {
+                let close = if b == b'"' { b'"' } else { b']' };
+                let mut run = tail.splitn(2, |&c| c == close);
+                let (Some(inner), Some(after)) = (run.next(), run.next()) else {
+                    return whole;
+                };
+                adds |= match b {
+                    b'"' => !inner.is_empty(),
+                    _ => inner.first() == Some(&b'$') && inner.get(1).is_some_and(|&c| c != b'-'),
+                };
+                rest = after;
+            }
+            b'\\' | b'_' | b'*' => {
+                let Some((_, after)) = tail.split_first() else {
+                    return whole;
+                };
+                adds |= b != b'*';
+                rest = after;
+            }
+            b'@' => at = true,
+            b'g' | b'G' => match tail.split_at_checked(6) {
+                Some((word, after)) if word.eq_ignore_ascii_case(b"eneral") => rest = after,
+                _ => adds = true,
+            },
+            // A UTF-8 continuation byte belongs to a character already read.
+            b'0' | b'#' | b'?' | 0x80..=0xBF => {}
+            _ => adds = true,
+        }
+    }
+    if index == 3 || at { split_at(start, adds) } else { whole }
 }
 
 fn is_empty_body(body: &Body) -> bool {
@@ -1093,6 +1158,101 @@ mod tests {
             Rendered::Text(s) => s,
             other => panic!("expected text for {code:?} on {v}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_code_past_the_binary_cap_does_not_parse() {
+        assert!(NumberFormat::parse(&"0".repeat(MAX_CODE_UNITS)).is_some());
+        assert!(NumberFormat::parse(&"0".repeat(MAX_CODE_UNITS + 1)).is_none());
+        let quoted = |n| format!("0\"{}\"", "\u{1F600}".repeat(n));
+        assert!(NumberFormat::parse(&quoted((MAX_CODE_UNITS - 3) / 2)).is_some());
+        assert!(NumberFormat::parse(&quoted((MAX_CODE_UNITS - 3) / 2 + 1)).is_none());
+    }
+
+    const DECORATING: [&str; 20] = [
+        "0;0;0;\"a\"@",
+        "0;0;0;[Red]\"a\"@",
+        "0;0;0;@_)",
+        "0;0;0;[$USD-409]@",
+        "0;0;0;[$€-407]@",
+        "\\>@",
+        "0;\"n: \"@",
+        "0;0;0;x;@",
+        "0;0;0;\"a\"0",
+        "0;0;0;\\a",
+        "0;0;0;\"a\"General",
+        "0;0;0;Gen@",
+        "€@",
+        "0;€@",
+        "x@",
+        "0;x@",
+        "0;1@",
+        "0;.@",
+        "0;!@",
+        "0;yy@",
+    ];
+
+    const PLAIN: [&str; 18] = [
+        "0;0;0;@",
+        "0;0;0;",
+        "0;0;0;[Red]@",
+        "0;0;0;*-@",
+        "0;0;0;*€@",
+        "0;0;0;0",
+        "\"@\"0",
+        "\"a\"0",
+        "0;\"a\"",
+        "0;\"open",
+        "0;0;0;0@",
+        "0;0;0;#@",
+        "0;0;0;[h]@",
+        "0;0;0;General",
+        "0;0;0;general@",
+        "0;0;0;[$-409]@",
+        "0;0;0;\"\"@",
+        "0;0;0;@_",
+    ];
+
+    fn classified() -> impl Iterator<Item = (&'static str, bool)> {
+        DECORATING.map(|code| (code, true)).into_iter().chain(PLAIN.map(|code| (code, false)))
+    }
+
+    fn text_section_decorates(code: &str) -> bool {
+        text_section(code).decorates
+    }
+
+    #[test]
+    fn a_text_section_decorates_when_it_adds_to_the_text() {
+        for (code, decorates) in classified() {
+            assert_eq!(text_section_decorates(code), decorates, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_text_section_past_the_cap_decorates_by_the_same_rule() {
+        for (code, decorates) in classified() {
+            let padded = format!("{}{code}", "\"\"".repeat(MAX_CODE_UNITS));
+            assert!(NumberFormat::parse(&padded).is_none(), "{code}");
+            assert_eq!(text_section_decorates(&padded), text_section_decorates(code), "{code}");
+            assert_eq!(text_section_decorates(&padded), decorates, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_text_section_far_past_the_cap_costs_a_pass_over_its_bytes() {
+        let section = "@".repeat(64 << 20);
+        let codes = [(format!("0;0;0;{section}"), false), (format!("0;0;0;{section}\"a\""), true)];
+        let started = std::time::Instant::now();
+        for (code, _) in &codes {
+            std::hint::black_box(code.bytes().filter(|&b| b == b'@').count());
+        }
+        let pass = started.elapsed();
+        let started = std::time::Instant::now();
+        for (code, decorates) in &codes {
+            assert_eq!(text_section_decorates(code), *decorates);
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < pass * 2, "{elapsed:?} against {pass:?} for one pass");
     }
 
     #[test]

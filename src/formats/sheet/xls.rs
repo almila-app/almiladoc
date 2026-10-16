@@ -7,7 +7,7 @@
 
 use super::controls::Checkbox;
 use super::grid::{
-    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MergePolicy, SheetContent,
+    CellFormat, CellRange, CellRef, CellXfs, DateSystem, GridBounds, LinkTarget, SheetContent,
     SheetLink, build_table, format_as_text, render_number, resolve_format,
 };
 use super::{error_literal, rk_number};
@@ -60,6 +60,9 @@ const WORKSHEET_SUBSTREAM: u16 = 0x0010;
 
 /// The BIFF8 grid is 256 columns; a larger column index is not a real cell.
 const BIFF8_COLS: u32 = 256;
+
+/// [MS-XLS] Rw: a BIFF8 row index is two bytes, so a sheet has 65,536 rows.
+pub(super) const BIFF8_GRID: GridBounds = GridBounds { rows: 65_536, cols: BIFF8_COLS };
 
 pub(super) fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let mut ole = cfb::CompoundFile::open(Cursor::new(bytes))
@@ -400,7 +403,8 @@ impl Globals {
 }
 
 /// The workbook globals substream: SST, FORMAT/XF tables, sheet directory,
-/// date system, encryption marker.
+/// date system, encryption marker. A workbook listing no sheet is
+/// `Malformed`; globals that end without their EOF were cut short.
 fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, ConvertError> {
     let Some((rec_type, body, mut pos)) = record_at(data, 0) else {
         return Err(ConvertError::malformed("empty workbook stream"));
@@ -419,12 +423,14 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
     let mut formats: HashMap<u32, (String, bool)> = HashMap::new();
     let mut xf_ifmts: Vec<u16> = Vec::new();
     let mut depth = 1usize;
+    let mut ended = false;
     while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
         pos = next;
         match rec_type {
             BOF => depth += 1,
             EOF_REC => {
                 if depth == 1 {
+                    ended = true;
                     break;
                 }
                 depth -= 1;
@@ -467,6 +473,12 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
             }
             _ => {}
         }
+    }
+    if globals.sheets.is_empty() {
+        return Err(ConvertError::malformed("the workbook lists no sheet"));
+    }
+    if !ended && records.cut_at.is_none() {
+        records.parse_ctx.emit(DiagnosticCode::TruncatedRecords, Region::Body);
     }
     // Resolved after the pass: FORMAT records are not ordered relative to
     // the XFs that reference them.
@@ -609,7 +621,7 @@ fn read_sheet(
                         CellRef::new(u32::from(r1), u32::from(c1)),
                         CellRef::new(u32::from(r2), u32::from(c2)),
                     );
-                    out.merge(parse_ctx, range, MergePolicy::ClampCols(BIFF8_COLS));
+                    out.merge(parse_ctx, range, BIFF8_GRID);
                 }
             }
             LABELSST => {
@@ -1057,7 +1069,7 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
 
 fn put_number(out: &mut SheetContent, at: CellRef, globals: &Globals, ixfe: u16, n: f64) {
     let rendered = render_number(&globals.format(ixfe), n, globals.dates);
-    put_rendered(out, at, globals, ixfe, rendered);
+    put_rendered(out, at, globals, ixfe, rendered, false);
 }
 
 fn put_string(
@@ -1067,29 +1079,28 @@ fn put_string(
     ixfe: u16,
     text: Option<(String, bool)>,
 ) {
-    let rendered = match text {
-        Some((text, replaced)) => (
-            format_as_text(&globals.format(ixfe), &clean_text(&text)),
-            replaced.then_some(DiagnosticCode::InvalidEncoding),
-        ),
-        None => (String::new(), Some(DiagnosticCode::CellValueUnreadable)),
-    };
-    put_rendered(out, at, globals, ixfe, rendered);
+    match text {
+        Some((text, replaced)) => {
+            let rendered = format_as_text(&globals.format(ixfe), &clean_text(&text));
+            put_rendered(out, at, globals, ixfe, rendered, replaced);
+        }
+        None => out.lose(at, DiagnosticCode::CellValueUnreadable),
+    }
 }
 
 /// Record a cell's text, what rendering it lost, and a replacement
-/// character its format code put in it.
+/// character its string decoded with or its format code put in it.
 fn put_rendered(
     out: &mut SheetContent,
     at: CellRef,
     globals: &Globals,
     ixfe: u16,
     (text, loss): (String, Option<DiagnosticCode>),
+    replaced: bool,
 ) {
-    let format_replaced = loss != Some(DiagnosticCode::InvalidEncoding)
-        && globals.xfs.replaced_in(usize::from(ixfe), &text);
+    let replaced = replaced || globals.xfs.replaced_in(usize::from(ixfe), &text);
     out.put(at, text);
-    for code in loss.into_iter().chain(format_replaced.then_some(DiagnosticCode::InvalidEncoding)) {
+    for code in loss.into_iter().chain(replaced.then_some(DiagnosticCode::InvalidEncoding)) {
         out.lose(at, code);
     }
 }
@@ -1208,6 +1219,14 @@ mod tests {
         globals: Vec<u8>,
         /// Bytes cut from the end of the stream.
         cut: usize,
+        /// The globals substream has no EOF of its own.
+        globals_unended: bool,
+    }
+
+    fn format_record(ifmt: u16, code: &str) -> Vec<u8> {
+        let mut body = ifmt.to_le_bytes().to_vec();
+        body.extend(ustr(code));
+        rec(FORMAT, &body)
     }
 
     impl Wb {
@@ -1219,10 +1238,8 @@ mod tests {
             if self.date1904 {
                 stream.extend(rec(DATEMODE, &1u16.to_le_bytes()));
             }
-            for (ifmt, code) in &self.formats {
-                let mut body = ifmt.to_le_bytes().to_vec();
-                body.extend(ustr(code));
-                stream.extend(rec(FORMAT, &body));
+            for &(ifmt, code) in &self.formats {
+                stream.extend(format_record(ifmt, code));
             }
             for ifmt in &self.xfs {
                 let mut body = vec![0u8; 20];
@@ -1247,7 +1264,9 @@ mod tests {
                 stream.extend(rec(BOUNDSHEET, &body));
             }
             stream.extend_from_slice(&self.globals);
-            stream.extend(rec(EOF_REC, &[]));
+            if !self.globals_unended {
+                stream.extend(rec(EOF_REC, &[]));
+            }
             for (i, (_, _, records)) in self.sheets.iter().enumerate() {
                 let offset = (stream.len() as u32).to_le_bytes();
                 stream[patch_at[i]..patch_at[i] + 4].copy_from_slice(&offset);
@@ -1444,19 +1463,21 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_past_the_biff8_columns_is_clamped_to_them() {
+    fn a_merge_past_the_biff8_columns_is_clamped_and_one_outside_them_dropped() {
         let mut records = label(0, 250, 0, "wide");
-        let mut merged = 1u16.to_le_bytes().to_vec();
-        for v in [0u16, 0, 250, 300] {
+        let mut merged = 2u16.to_le_bytes().to_vec();
+        for v in [0u16, 0, 250, 300, 0, 0, 256, 300] {
             merged.extend(v.to_le_bytes());
         }
         records.extend(rec(MERGEDCELLS, &merged));
-        let doc = parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap();
+        let wb = one_sheet(records);
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
         let table = first_table(&doc);
         let CellSlot::Origin(cell) = &table.grid[0][0] else {
             panic!("expected the merge origin at (0,0)");
         };
         assert_eq!((table.grid[0].len(), cell.col_span), (6, 6));
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TableSpanRepaired, 1, 2)]);
     }
 
     #[test]
@@ -1960,6 +1981,127 @@ mod tests {
                 in_unit(DiagnosticCode::HiddenOmitted, 1, 1),
             ]
         );
+    }
+
+    #[test]
+    fn a_format_code_past_the_binary_cap_falls_back_by_what_it_shows() {
+        let mut records = number(0, 0, 1, 2.0);
+        records.extend(number(0, 1, 2, 2.0));
+        let text = format!("0\"{}\"", "x".repeat(253));
+        let wb = Wb {
+            globals: [format_record(164, &"0".repeat(256)), format_record(165, &text)].concat(),
+            xfs: vec![0, 164, 165],
+            sheets: vec![("S", 0, records)],
+            ..Wb::default()
+        };
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["2", "2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 1),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_under_a_code_past_the_binary_cap_is_judged_by_its_numeric_sections() {
+        let x = "x".repeat(260);
+        let codes = [
+            format!("0\"{x}\";0;0;@"),
+            format!("0;0;0;\"{x}\"@"),
+            format!("{};\"a\"@", "0".repeat(300)),
+        ];
+        let mut records = number(0, 0, 1, 2.0);
+        records.extend(number(0, 1, 2, 2.0));
+        records.extend(number(0, 2, 3, 2.0));
+        let wb = Wb {
+            globals: [
+                format_record(164, &codes[0]),
+                format_record(165, &codes[1]),
+                format_record(166, &codes[2]),
+            ]
+            .concat(),
+            xfs: vec![0, 164, 165, 166],
+            sheets: vec![("S", 0, records)],
+            ..Wb::default()
+        };
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["2", "2", "2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 1),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_text_section_past_the_binary_cap_reports_only_what_it_decorates() {
+        let decorated = format!("0;0;0;\"{}\"@", "x".repeat(247));
+        let plain = format!("{};@", "0".repeat(254));
+        let mut records = label(0, 0, 1, "t");
+        records.extend(label(0, 1, 2, "t"));
+        let wb = Wb {
+            globals: [format_record(164, &decorated), format_record(165, &plain)].concat(),
+            xfs: vec![0, 164, 165],
+            sheets: vec![("S", 0, records)],
+            ..Wb::default()
+        };
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["t", "t"]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::NumberFormatUnread, 1, 1)]);
+    }
+
+    #[test]
+    fn a_replaced_string_under_an_unread_text_section_reports_both() {
+        let decorated = format!("0;0;0;\"{}\"@", "x".repeat(247));
+        let mut records =
+            rec(LABEL, &[cell6(0, 0, 1), vec![2, 0, 1, 0x74, 0x00, 0x00, 0xD8]].concat());
+        records.extend(labelsst(0, 1, 1, 0));
+        let mut sst = 1u32.to_le_bytes().to_vec();
+        sst.extend(1u32.to_le_bytes());
+        sst.extend([2, 0, 1, 0x74, 0x00, 0x00, 0xD8]);
+        let wb = Wb {
+            globals: format_record(164, &decorated),
+            xfs: vec![0, 164],
+            sst: vec![rec(SST, &sst)],
+            sheets: vec![("S", 0, records)],
+            ..Wb::default()
+        };
+        let doc = parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["t\u{FFFD}"; 2]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 2),
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_workbook_listing_no_sheet_is_malformed() {
+        let wb = Wb { xfs: vec![0], ..Wb::default() };
+        let error = parse(&ParseCtx::default(), &wb.build()).unwrap_err();
+        assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn globals_without_their_eof_report_the_stream_truncated() {
+        let wb = Wb { globals_unended: true, ..one_sheet(label(0, 0, 0, "a")) };
+        let parse_ctx = ParseCtx::default();
+        let doc = parse(&parse_ctx, &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a"]]);
+        assert_eq!(
+            reported(parse_ctx),
+            [(DiagnosticCode::TruncatedRecords, Region::Body, None, 1)]
+        );
+        let cut = Wb { cut: 1, ..wb };
+        assert_eq!(diagnose(&cut), [(DiagnosticCode::TruncatedRecords, Region::Body, None, 1)]);
+        assert_eq!(diagnose(&one_sheet(label(0, 0, 0, "a"))), []);
     }
 
     #[test]

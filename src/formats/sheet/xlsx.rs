@@ -8,7 +8,7 @@
 use super::controls::read_vml_checkboxes;
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MAX_COLS, MAX_ROWS,
-    MergePolicy, SheetContent, SheetLink, build_table, format_as_text, render_number,
+    OOXML_GRID, SheetContent, SheetLink, build_table, format_as_text, render_number,
     resolve_format,
 };
 use crate::ctx::ParseCtx;
@@ -414,8 +414,8 @@ fn read_sheet(
     for merge in
         worksheet.find_all(ns::SML, "mergeCells").flat_map(|mc| mc.find_all(ns::SML, "mergeCell"))
     {
-        match merge.attr_unqualified("ref").and_then(parse_region) {
-            Some(range) => out.merge(parse_ctx, range, MergePolicy::Drop),
+        match merge.attr_unqualified("ref").and_then(|r| parse_region(r, parse_coords)) {
+            Some(range) => out.merge(parse_ctx, range, OOXML_GRID),
             None => parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body),
         }
     }
@@ -423,7 +423,7 @@ fn read_sheet(
         .find_all(ns::SML, "hyperlinks")
         .flat_map(|links| links.find_all(ns::SML, "hyperlink"))
     {
-        let range = link.attr_unqualified("ref").and_then(parse_region);
+        let range = link.attr_unqualified("ref").and_then(|r| parse_region(r, parse_ref));
         if let (Some(range), Some(id)) = (range, link.attr_qualified(ns::R, "id")) {
             out.links.push(SheetLink { range, target: LinkTarget::Related(id.to_string()) });
         }
@@ -465,14 +465,14 @@ fn cell_text(
     let unread = || (String::new(), Some(DiagnosticCode::CellValueUnreadable));
     let text = match c.attr_unqualified("t").unwrap_or("n") {
         "s" => match value.parse::<usize>().ok().and_then(|i| shared.get(i)) {
-            Some(text) => format_as_text(&fmt, text),
+            Some(text) => return format_as_text(&fmt, text),
             None => return unread(),
         },
         "str" if formula && v.is_none() => return unread(),
-        "str" => format_as_text(&fmt, &clean_text(v.as_deref().unwrap_or_default())),
+        "str" => return format_as_text(&fmt, &clean_text(v.as_deref().unwrap_or_default())),
         "inlineStr" => {
             let text = c.find(ns::SML, "is").map(|is| clean_text(&rich_text(is)));
-            format_as_text(&fmt, &text.unwrap_or_default())
+            return format_as_text(&fmt, &text.unwrap_or_default());
         }
         "b" => match value {
             "1" | "true" => "TRUE".to_string(),
@@ -491,35 +491,34 @@ fn cell_text(
     (text, None)
 }
 
-/// A cell reference (`C3`) as a zero-based cell; the column letters are
-/// bijective base-26.
+/// A cell reference (`C3`) as a zero-based cell inside the grid.
 fn parse_ref(r: &str) -> Option<CellRef> {
-    let digits_at = r.find(|c: char| c.is_ascii_digit())?;
-    let (letters, digits) = r.split_at(digits_at);
-    if letters.is_empty() {
-        return None;
-    }
-    let mut col: u32 = 0;
-    for ch in letters.chars() {
-        if !ch.is_ascii_alphabetic() {
-            return None;
-        }
-        col = col.checked_mul(26)?.checked_add(ch.to_ascii_uppercase() as u32 - 'A' as u32 + 1)?;
-        if col > MAX_COLS {
-            return None;
-        }
-    }
-    let row: u32 = digits.parse().ok()?;
-    if !(1..=MAX_ROWS).contains(&row) {
-        return None;
-    }
-    Some(CellRef::new(row - 1, col - 1))
+    parse_coords(r).filter(|at| at.row < MAX_ROWS && at.col < MAX_COLS)
 }
 
-/// A merge reference (`F1:O3`, or a single cell) as a cell range.
-fn parse_region(r: &str) -> Option<CellRange> {
+/// A cell reference as zero-based coordinates, which may lie past the grid
+/// and saturate past `u32`; the column letters are bijective base-26.
+fn parse_coords(r: &str) -> Option<CellRef> {
+    let digits_at = r.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = r.split_at(digits_at);
+    if letters.is_empty()
+        || !letters.bytes().all(|b| b.is_ascii_alphabetic())
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let col = letters.bytes().fold(0u32, |col, b| {
+        col.saturating_mul(26).saturating_add(u32::from(b.to_ascii_uppercase() - b'A') + 1)
+    });
+    let row = digits.parse::<u32>().unwrap_or(u32::MAX);
+    Some(CellRef::new(row.checked_sub(1)?, col - 1))
+}
+
+/// A reference (`F1:O3`, or a single cell) as a cell range, each corner read
+/// by `cell`.
+fn parse_region(r: &str, cell: fn(&str) -> Option<CellRef>) -> Option<CellRange> {
     let (a, b) = r.split_once(':').unwrap_or((r, r));
-    Some(CellRange::spanning(parse_ref(a.trim())?, parse_ref(b.trim())?))
+    Some(CellRange::spanning(cell(a.trim())?, cell(b.trim())?))
 }
 
 /// XML schema boolean attribute.
@@ -798,6 +797,44 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_past_the_grid_is_clamped_and_one_outside_it_dropped() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1"><c r="XFC1" t="inlineStr"><is><t>edge</t></is></c></row></sheetData><mergeCells><mergeCell ref="XFC1:XFZ2"/><mergeCell ref="XFE3:XFF4"/><mergeCell ref="A1048577:B99999999999"/></mergeCells>"#,
+        );
+        let doc = parse(&wb.build()).unwrap();
+        let table = first_table(&doc);
+        let CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected the merge origin at (0,0)");
+        };
+        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (2, 2, 2));
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::TableSpanRepaired, Region::Body, Some(1), 3)]);
+    }
+
+    #[test]
+    fn a_reference_rejects_row_zero_and_stray_digits_and_saturates_past_u32() {
+        assert_eq!(parse_coords("A0"), None);
+        assert_eq!(parse_coords("B2x"), None);
+        assert_eq!(parse_coords("XFE1"), Some(CellRef::new(0, MAX_COLS)));
+        assert_eq!(parse_ref("XFE1"), None);
+        assert_eq!(parse_coords("A99999999999"), Some(CellRef::new(u32::MAX - 1, 0)));
+        assert_eq!(parse_coords("ZZZZZZZZ1"), Some(CellRef::new(0, u32::MAX - 1)));
+    }
+
+    #[test]
+    fn a_merge_down_past_u32_rows_is_clamped_to_the_grid() {
+        let wb = one_sheet(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData><mergeCells><mergeCell ref="A1:A99999999999"/></mergeCells>"#,
+        );
+        let doc = parse(&wb.build()).unwrap();
+        let table = first_table(&doc);
+        let CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected the merge origin at (0,0)");
+        };
+        assert_eq!((table.grid.len(), cell.row_span), (1_048_576, 1_048_576));
+        assert_eq!(diagnose(&wb), [(DiagnosticCode::TableSpanRepaired, Region::Body, Some(1), 1)]);
+    }
+
+    #[test]
     fn hidden_rows_columns_and_sheets_are_omitted() {
         // Hidden content is invisible to someone opening the workbook, so
         // passing it on would make it look authoritative. One visible sheet
@@ -995,6 +1032,68 @@ mod tests {
         let unstyled =
             Wb { styles: Some(r#"<cellXfs><xf numFmtId="0"/></cellXfs>"#), ..one_sheet(&body) };
         assert_eq!(diagnose(&unstyled), [(FALLBACK, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn a_format_code_past_the_binary_cap_falls_back_by_what_it_shows() {
+        let styles = format!(
+            r#"<numFmts><numFmt numFmtId="164" formatCode="{}"/><numFmt numFmtId="165" formatCode="0&quot;{}&quot;"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs>"#,
+            "0".repeat(256),
+            "x".repeat(253),
+        );
+        let body = number_cells(&[1, 2]);
+        let wb = Wb { styles: Some(&styles), ..one_sheet(&body) };
+        let doc = super::super::parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc))[0][..2], ["2", "2"]);
+        assert_eq!(diagnose(&wb), [(UNREAD, BODY, Some(1), 1), (FALLBACK, BODY, Some(1), 1)]);
+    }
+
+    #[test]
+    fn a_number_under_a_code_past_the_binary_cap_is_judged_by_its_numeric_sections() {
+        let styles = format!(
+            r#"<numFmts><numFmt numFmtId="164" formatCode="0&quot;{x}&quot;;0;0;@"/><numFmt numFmtId="165" formatCode="0;0;0;&quot;{x}&quot;@"/><numFmt numFmtId="166" formatCode="{};&quot;a&quot;@"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="165"/><xf numFmtId="166"/></cellXfs>"#,
+            "0".repeat(300),
+            x = "x".repeat(260),
+        );
+        let body = number_cells(&[1, 2, 3]);
+        let wb = Wb { styles: Some(&styles), ..one_sheet(&body) };
+        let doc = super::super::parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc))[0][..3], ["2", "2", "2"]);
+        assert_eq!(diagnose(&wb), [(UNREAD, BODY, Some(1), 1), (FALLBACK, BODY, Some(1), 2)]);
+    }
+
+    #[test]
+    fn a_text_section_past_the_binary_cap_reports_only_what_it_decorates() {
+        let styles = format!(
+            r#"<numFmts><numFmt numFmtId="164" formatCode="0;0;0;&quot;{}&quot;@"/><numFmt numFmtId="165" formatCode="{};@"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="165"/></cellXfs>"#,
+            "x".repeat(247),
+            "0".repeat(254),
+        );
+        let cell =
+            |r: &str, s: u8| format!(r#"<c r="{r}" s="{s}" t="inlineStr"><is><t>t</t></is></c>"#);
+        let body = format!(
+            r#"<sheetData><row r="1">{}{}<c r="C1" s="1" t="s"><v>0</v></c><c r="D1" s="1" t="str"><f>A2</f><v>t</v></c></row></sheetData>"#,
+            cell("A1", 1),
+            cell("B1", 2)
+        );
+        let wb =
+            Wb { styles: Some(&styles), shared: Some("<si><t>t</t></si>"), ..one_sheet(&body) };
+        let doc = super::super::parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), [["t", "t", "t", "t"]]);
+        assert_eq!(diagnose(&wb), [(UNREAD, BODY, Some(1), 3)]);
+    }
+
+    #[test]
+    fn a_mebibyte_format_code_renders_its_value_as_general() {
+        let styles = format!(
+            r#"<numFmts><numFmt numFmtId="164" formatCode="{}"/></numFmts><cellXfs><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs>"#,
+            "0".repeat(1 << 20),
+        );
+        let body = r#"<sheetData><row r="1"><c r="A1" s="1"><v>2.5</v></c></row></sheetData>"#;
+        let wb = Wb { styles: Some(&styles), ..one_sheet(body) };
+        let doc = super::super::parse(&ParseCtx::default(), &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), [["2.5"]]);
+        assert_eq!(diagnose(&wb), [(FALLBACK, BODY, Some(1), 1)]);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! their records into a [`SheetContent`] and share everything after that.
 
 use super::controls::{Checkboxes, cell_inlines};
-use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
+use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code, text_section};
 use super::{format_duration_days, format_float, format_time_of_day};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -101,15 +101,20 @@ impl DateSystem {
     }
 }
 
-/// What a reader does with a merge range that leaves the grid it reads.
+/// The rows and columns a container's grid holds; a cell at or past either
+/// count is not a real cell.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum MergePolicy {
-    /// A range past the grid is dropped and reported.
-    Drop,
-    /// A range starting past this many columns is dropped silently; one
-    /// running past them is clamped to them.
-    ClampCols(u32),
+pub(super) struct GridBounds {
+    pub(super) rows: u32,
+    pub(super) cols: u32,
 }
+
+/// The grid of xlsx and xlsb: [MS-XLSB] Rw and Col bound a zero-based row
+/// index at 1,048,575 and a column index at 16,383. ECMA-376 Part 1
+/// §18.17.5.1 sets the same grid for SpreadsheetML, A1 to XFD1048576, and
+/// lets an implementation extend it; xlsx keeps it unextended, so the two
+/// readers agree.
+pub(super) const OOXML_GRID: GridBounds = GridBounds { rows: MAX_ROWS, cols: MAX_COLS };
 
 /// One worksheet, parsed but not yet filtered or gridded.
 #[derive(Default)]
@@ -131,9 +136,10 @@ pub(super) struct SheetContent {
 }
 
 impl SheetContent {
-    /// Record a cell's text; an empty text leaves no cell.
+    /// Record a cell's text; a text that is empty or only whitespace shows
+    /// nothing and leaves no cell, so it never widens the grid.
     pub(super) fn put(&mut self, at: CellRef, text: String) {
-        if !text.is_empty() {
+        if !text.trim().is_empty() {
             self.cells.insert(at, text);
         }
     }
@@ -156,20 +162,24 @@ impl SheetContent {
         }
     }
 
-    /// Record a merge range under the reader's policy for one that leaves
-    /// its grid; a single cell merges nothing.
-    pub(super) fn merge(&mut self, parse_ctx: &ParseCtx, range: CellRange, policy: MergePolicy) {
-        match policy {
-            MergePolicy::Drop if range.last.row >= MAX_ROWS || range.last.col >= MAX_COLS => {
-                parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
-            }
-            MergePolicy::Drop if range.is_single() => {}
-            MergePolicy::Drop => self.merges.push(range),
-            MergePolicy::ClampCols(cols) if range.first.col >= cols || range.is_single() => {}
-            MergePolicy::ClampCols(cols) => {
-                let last = CellRef::new(range.last.row, range.last.col.min(cols - 1));
-                self.merges.push(CellRange { last, ..range });
-            }
+    /// Record a merge range within `grid`: one running past it is clamped to
+    /// the part the grid shows and one wholly outside it is dropped, each
+    /// reported; a single cell merges nothing.
+    pub(super) fn merge(&mut self, parse_ctx: &ParseCtx, range: CellRange, grid: GridBounds) {
+        if range.first.row >= grid.rows || range.first.col >= grid.cols {
+            parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
+            return;
+        }
+        let last = CellRef::new(
+            range.last.row.min(grid.rows.saturating_sub(1)),
+            range.last.col.min(grid.cols.saturating_sub(1)),
+        );
+        if last != range.last {
+            parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
+        }
+        let range = CellRange { last, ..range };
+        if !range.is_single() {
+            self.merges.push(range);
         }
     }
 }
@@ -193,12 +203,13 @@ pub(super) enum LinkTarget {
 
 /// A cell's resolved number format: General, a parsed format code, or
 /// General standing in for a format that could not be applied, which a
-/// numeric cell reports as the code it carries.
+/// numeric cell reports as `number` and a text cell as `number_format_unread`
+/// when the format's text section shows more than the text.
 #[derive(Clone)]
 pub(super) enum CellFormat {
     General,
     Fmt(Rc<NumberFormat>),
-    Fallback(DiagnosticCode),
+    Fallback { number: DiagnosticCode, text_unread: bool },
 }
 
 /// The ordered cell formats of a workbook, which a cell names by index,
@@ -227,7 +238,10 @@ impl CellXfs {
         match self.xfs.get(index) {
             Some((format, _)) => format.clone(),
             None if self.reported || (index == 0 && self.xfs.is_empty()) => CellFormat::General,
-            None => CellFormat::Fallback(DiagnosticCode::NumberFormatFallback),
+            None => CellFormat::Fallback {
+                number: DiagnosticCode::NumberFormatFallback,
+                text_unread: false,
+            },
         }
     }
 
@@ -241,22 +255,27 @@ impl CellXfs {
 
 /// A numFmtId's format: the file's own `numFmt` entries first, then the
 /// built-in table. Unknown ids and unsupported codes fall back to General -
-/// never to a guess - and carry what that fallback costs.
+/// never to a guess - and carry what that fallback costs: a number what its
+/// numeric sections show, a text what its text section adds.
 pub(super) fn resolve_format(id: u32, custom: &HashMap<u32, &str>) -> CellFormat {
     let code = custom.get(&id).copied().or_else(|| builtin_code(id));
-    let unread = match code {
+    let (unread, text_unread) = match code {
         Some(code) => match NumberFormat::parse(code) {
             Some(f) => return CellFormat::Fmt(Rc::new(f)),
-            None => shows_more_than_its_number(code),
+            None => {
+                let text = text_section(code);
+                (shows_more_than_its_number(text.numeric), text.decorates)
+            }
         },
         None if id == 0 => return CellFormat::General,
-        None => matches!(id, 5..=8 | 27..=36 | 42 | 44 | 50..=58 | 71..=81),
+        None => (matches!(id, 5..=8 | 27..=36 | 42 | 44 | 50..=58 | 71..=81), false),
     };
-    CellFormat::Fallback(if unread {
+    let number = if unread {
         DiagnosticCode::NumberFormatUnread
     } else {
         DiagnosticCode::NumberFormatFallback
-    })
+    };
+    CellFormat::Fallback { number, text_unread }
 }
 
 /// Whether a format code shows more than the number General shows: a date
@@ -308,7 +327,7 @@ pub(super) fn render_number(
 ) -> (String, Option<DiagnosticCode>) {
     let (text, loss) = match fmt {
         CellFormat::General => (format_float(n), None),
-        CellFormat::Fallback(code) => (format_float(n), Some(*code)),
+        CellFormat::Fallback { number, .. } => (format_float(n), Some(*number)),
         CellFormat::Fmt(f) => match f.format_number(n) {
             Rendered::General { value, prefix, suffix } => {
                 (format!("{prefix}{}{suffix}", format_float(value)), None)
@@ -320,13 +339,18 @@ pub(super) fn render_number(
     (clean_text(&text), loss)
 }
 
-pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> String {
+/// Render a text cell through its resolved format's text section, with the
+/// code a fallback to General costs when that section would have shown more.
+pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> (String, Option<DiagnosticCode>) {
     match fmt {
         CellFormat::Fmt(f) => match f.format_text(text) {
-            Some(s) => clean_text(&s),
-            None => text.to_string(),
+            Some(s) => (clean_text(&s), None),
+            None => (text.to_string(), None),
         },
-        CellFormat::General | CellFormat::Fallback(_) => text.to_string(),
+        CellFormat::Fallback { text_unread: true, .. } => {
+            (text.to_string(), Some(DiagnosticCode::NumberFormatUnread))
+        }
+        CellFormat::General | CellFormat::Fallback { .. } => (text.to_string(), None),
     }
 }
 
@@ -903,28 +927,51 @@ mod tests {
         CellRange::spanning(CellRef::new(r1, c1), CellRef::new(r2, c2))
     }
 
-    fn merged(ranges: &[CellRange], policy: MergePolicy) -> (Vec<CellRange>, usize) {
+    fn merged(ranges: &[CellRange], grid: GridBounds) -> (Vec<CellRange>, u64) {
         let parse_ctx = ParseCtx::default();
         let mut sheet = SheetContent::default();
         for &r in ranges {
-            sheet.merge(&parse_ctx, r, policy);
+            sheet.merge(&parse_ctx, r, grid);
         }
-        (sheet.merges, parse_ctx.diagnostics().iter().count())
+        let diagnostics = parse_ctx.diagnostics();
+        assert!(diagnostics.iter().all(|d| d.code == DiagnosticCode::TableSpanRepaired));
+        (sheet.merges, diagnostics.iter().map(|d| d.count).sum())
     }
 
     #[test]
-    fn a_merge_past_the_grid_is_dropped_and_reported() {
-        let past = [range(0, 0, 0, MAX_COLS), range(0, 0, MAX_ROWS, 0)];
-        let parse_ctx = ParseCtx::default();
-        let mut sheet = SheetContent::default();
-        for r in past {
-            sheet.merge(&parse_ctx, r, MergePolicy::Drop);
-        }
-        assert_eq!(sheet.merges, []);
-        let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| (d.code, d.count)).collect();
-        assert_eq!(reported, [(DiagnosticCode::TableSpanRepaired, 2)]);
+    fn a_merge_past_the_grid_is_clamped_to_it_and_reported() {
+        let past = [range(0, 0, 0, MAX_COLS), range(0, 0, MAX_ROWS, 0), range(2, 2, u32::MAX, 3)];
+        let clamped = vec![
+            range(0, 0, 0, MAX_COLS - 1),
+            range(0, 0, MAX_ROWS - 1, 0),
+            range(2, 2, MAX_ROWS - 1, 3),
+        ];
+        assert_eq!(merged(&past, OOXML_GRID), (clamped, 3));
+        let biff8 = super::super::xls::BIFF8_GRID;
+        assert_eq!(merged(&[range(0, 0, 0, 300)], biff8), (vec![range(0, 0, 0, 255)], 1));
         let inside = [range(0, 0, 1, MAX_COLS - 1), range(3, 3, 3, 3)];
-        assert_eq!(merged(&inside, MergePolicy::Drop), (vec![inside[0]], 0));
+        assert_eq!(merged(&inside, OOXML_GRID), (vec![inside[0]], 0));
+    }
+
+    #[test]
+    fn a_merge_outside_the_grid_is_dropped_and_reported() {
+        let outside = [range(0, MAX_COLS, 2, MAX_COLS + 3), range(MAX_ROWS, 0, MAX_ROWS + 1, 2)];
+        assert_eq!(merged(&outside, OOXML_GRID), (vec![], 2));
+        let biff8 = super::super::xls::BIFF8_GRID;
+        assert_eq!(merged(&[range(0, 256, 2, 300)], biff8), (vec![], 1));
+        assert_eq!(merged(&[range(0, MAX_COLS - 1, 0, MAX_COLS)], OOXML_GRID), (vec![], 1));
+    }
+
+    #[test]
+    fn a_whitespace_cell_leaves_no_cell() {
+        let mut sheet = SheetContent::default();
+        sheet.put(CellRef::new(0, 0), "a".to_string());
+        sheet.put(CellRef::new(0, 1), " \t\u{a0}".to_string());
+        sheet.put(CellRef::new(0, 2), String::new());
+        sheet.put(CellRef::new(0, 3), " b ".to_string());
+        let kept: HashMap<CellRef, String> =
+            HashMap::from([(CellRef::new(0, 0), "a".into()), (CellRef::new(0, 3), " b ".into())]);
+        assert_eq!(sheet.cells, kept);
     }
 
     #[test]
@@ -933,7 +980,7 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         sheet.put(CellRef::new(0, 0), "a".to_string());
         sheet.put(CellRef::new(5, 0), "b".to_string());
-        sheet.merge(&parse_ctx, range(0, 0, 1, 1), MergePolicy::Drop);
+        sheet.merge(&parse_ctx, range(0, 0, 1, 1), OOXML_GRID);
         sheet.lose(CellRef::new(5, 0), DiagnosticCode::CellValueUnreadable);
         assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
@@ -946,18 +993,10 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         sheet.put(CellRef::new(0, 0), "a".to_string());
         sheet.put(CellRef::new(0, 5), "b".to_string());
-        sheet.merge(&parse_ctx, range(0, 0, 1, 1), MergePolicy::Drop);
+        sheet.merge(&parse_ctx, range(0, 0, 1, 1), OOXML_GRID);
         sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable);
         assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [DiagnosticCode::CellValueUnreadable]);
-    }
-
-    #[test]
-    fn a_biff8_merge_is_clamped_to_its_columns() {
-        let policy = MergePolicy::ClampCols(256);
-        let (merges, reported) = merged(&[range(0, 0, 0, 300)], policy);
-        assert_eq!((merges, reported), (vec![range(0, 0, 0, 255)], 0));
-        assert_eq!(merged(&[range(0, 256, 2, 300), range(1, 1, 1, 1)], policy), (vec![], 0));
     }
 }

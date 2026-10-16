@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+truncated_records lost body count=1
+under fail: incomplete

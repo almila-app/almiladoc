@@ -8,7 +8,7 @@
 
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MAX_COLS, MAX_ROWS,
-    MergePolicy, SheetContent, SheetLink, build_table, format_as_text, render_number,
+    OOXML_GRID, SheetContent, SheetLink, build_table, format_as_text, render_number,
     resolve_format,
 };
 use super::xlsx::{SHARED_STRINGS_REL, Sibling, read_sheet_parts};
@@ -296,7 +296,7 @@ fn read_sheet(
                 }
             }
             BRT_MERGE_CELL => {
-                out.merge(parse_ctx, range(&mut f)?, MergePolicy::Drop);
+                out.merge(parse_ctx, range(&mut f)?, OOXML_GRID);
             }
             BRT_CELL_RK | BRT_CELL_ERROR | BRT_CELL_BOOL | BRT_CELL_REAL | BRT_CELL_ST
             | BRT_CELL_ISST | BRT_CELL_RSTRING | BRT_FMLA_STRING | BRT_FMLA_NUM | BRT_FMLA_BOOL
@@ -311,11 +311,11 @@ fn read_sheet(
                     continue;
                 }
                 let (at, style) = (CellRef::new(r, col), style as usize);
-                let (text, loss) = cell_text(id, &mut f, &xfs.get(style), shared, dates)?;
+                let (text, loss, replaced) = cell_text(id, &mut f, &xfs.get(style), shared, dates)?;
                 if let Some(code) = loss {
                     out.lose(at, code);
                 }
-                if loss != Some(DiagnosticCode::InvalidEncoding) && xfs.replaced_in(style, &text) {
+                if replaced || xfs.replaced_in(style, &text) {
                     out.lose(at, DiagnosticCode::InvalidEncoding);
                 }
                 out.put(at, text);
@@ -376,46 +376,48 @@ fn omit_headers_and_footers(parse_ctx: &ParseCtx, f: &mut Fields) -> Result<(), 
 }
 
 /// A cell's rendered text from the record body after the common header,
-/// and what rendering it lost. Formula records carry their cached result
-/// first; the parsed formula trails it and is never read.
+/// what rendering it lost, and whether its string decoded with a
+/// replacement. Formula records carry their cached result first; the parsed
+/// formula trails it and is never read.
 fn cell_text(
     id: u16,
     f: &mut Fields,
     fmt: &CellFormat,
     shared: &[(String, bool)],
     dates: DateSystem,
-) -> Result<(String, Option<DiagnosticCode>), ConvertError> {
-    let unread = (String::new(), Some(DiagnosticCode::CellValueUnreadable));
-    let string = |(text, replaced): (String, bool)| {
-        (
-            format_as_text(fmt, &clean_text(&text)),
-            replaced.then_some(DiagnosticCode::InvalidEncoding),
-        )
+) -> Result<(String, Option<DiagnosticCode>, bool), ConvertError> {
+    let unread = (String::new(), Some(DiagnosticCode::CellValueUnreadable), false);
+    let string = |text: &str, replaced: bool| {
+        let (text, loss) = format_as_text(fmt, text);
+        (text, loss, replaced)
     };
+    let number = |(text, loss): (String, Option<DiagnosticCode>)| (text, loss, false);
     Ok(match id {
-        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), dates),
-        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, dates),
-        BRT_CELL_ST | BRT_FMLA_STRING => string(f.wide_string()?),
+        BRT_CELL_RK => number(render_number(fmt, rk_number(f.u32()?), dates)),
+        BRT_CELL_REAL | BRT_FMLA_NUM => number(render_number(fmt, f.f64()?, dates)),
+        BRT_CELL_ST | BRT_FMLA_STRING => {
+            let (text, replaced) = f.wide_string()?;
+            string(&clean_text(&text), replaced)
+        }
         BRT_CELL_RSTRING => {
             f.u8()?; // RichStr flags; runs and phonetic data trail the string
-            string(f.wide_string()?)
+            let (text, replaced) = f.wide_string()?;
+            string(&clean_text(&text), replaced)
         }
         BRT_CELL_ISST => match usize::try_from(f.u32()?).ok().and_then(|i| shared.get(i)) {
-            Some((text, replaced)) => {
-                (format_as_text(fmt, text), replaced.then_some(DiagnosticCode::InvalidEncoding))
-            }
+            Some((text, replaced)) => string(text, *replaced),
             None => unread,
         },
         BRT_CELL_BOOL | BRT_FMLA_BOOL => match f.u8()? {
-            1 => ("TRUE".to_string(), None),
-            0 => ("FALSE".to_string(), None),
+            1 => ("TRUE".to_string(), None, false),
+            0 => ("FALSE".to_string(), None, false),
             _ => unread,
         },
         BRT_CELL_ERROR | BRT_FMLA_ERROR => match error_literal(f.u8()?) {
-            Some(text) => (text.to_string(), None),
+            Some(text) => (text.to_string(), None, false),
             None => unread,
         },
-        _ => (String::new(), None),
+        _ => (String::new(), None, false),
     })
 }
 
@@ -966,6 +968,23 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_past_the_grid_is_clamped_and_one_outside_it_dropped() {
+        let mut body = row_hdr(0, false);
+        body.extend(string_cell(MAX_COLS - 2, &[0x61]));
+        body.extend(merge(0, 1, MAX_COLS - 2, MAX_COLS + 5));
+        body.extend(merge(2, 3, MAX_COLS, MAX_COLS + 1));
+        body.extend(merge(MAX_ROWS, u32::MAX, 0, 1));
+        let wb = one_sheet(body);
+        let doc = parse(&wb.build()).unwrap();
+        let table = first_table(&doc);
+        let CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected the merge origin at (0,0)");
+        };
+        assert_eq!((table.grid.len(), cell.col_span, cell.row_span), (2, 2, 2));
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TableSpanRepaired, 1, 3)]);
+    }
+
+    #[test]
     fn date1904_serials_shift_epoch() {
         let mut body = row_hdr(0, false);
         body.extend(real_cell(0, 0, 100.0));
@@ -1135,7 +1154,7 @@ mod tests {
         rich.extend_from_slice(&2u32.to_le_bytes());
         rich.extend([0x00, 0xDC, 0x61, 0x00]);
         body.extend(rec(BRT_CELL_RSTRING, &rich));
-        body.extend(merge(0, 0, 0, MAX_COLS));
+        body.extend(merge(0, 0, MAX_COLS, MAX_COLS));
         let shared = shared_strings_units(&[&[0x61], &[0xDC00], &[0xD800]]);
         let wb = Wb { shared: Some(shared), ..one_sheet(body) };
         assert_eq!(
@@ -1214,6 +1233,92 @@ mod tests {
             [
                 in_unit(DiagnosticCode::InvalidEncoding, 1, 2),
                 in_unit(DiagnosticCode::HiddenOmitted, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_format_code_past_the_binary_cap_falls_back_by_what_it_shows() {
+        let digits = "0".repeat(256);
+        let text = format!("0\"{}\"", "x".repeat(253));
+        let styles = styles(&[(164, &digits), (165, &text)], &[0, 164, 165]);
+        let body = [row_hdr(0, false), real_cell(0, 1, 2.0), real_cell(1, 2, 2.0)].concat();
+        let wb = Wb { styles: Some(styles), ..one_sheet(body) };
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["2", "2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 1),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_under_a_code_past_the_binary_cap_is_judged_by_its_numeric_sections() {
+        let x = "x".repeat(260);
+        let unread = format!("0\"{x}\";0;0;@");
+        let text_only = format!("0;0;0;\"{x}\"@");
+        let last_at = format!("{};\"a\"@", "0".repeat(300));
+        let styles =
+            styles(&[(164, &unread), (165, &text_only), (166, &last_at)], &[0, 164, 165, 166]);
+        let body =
+            [row_hdr(0, false), real_cell(0, 1, 2.0), real_cell(1, 2, 2.0), real_cell(2, 3, 2.0)]
+                .concat();
+        let wb = Wb { styles: Some(styles), ..one_sheet(body) };
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["2", "2", "2"]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 1),
+                in_unit(DiagnosticCode::NumberFormatFallback, 1, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_text_section_past_the_binary_cap_reports_only_what_it_decorates() {
+        let decorated = format!("0;0;0;\"{}\"@", "x".repeat(247));
+        let plain = format!("{};@", "0".repeat(254));
+        let styles = styles(&[(164, &decorated), (165, &plain)], &[0, 164, 165]);
+        let text = |col: u32, style: u32| {
+            rec(
+                BRT_CELL_ST,
+                &[cell(col, style), 1u32.to_le_bytes().to_vec(), b"t\0".to_vec()].concat(),
+            )
+        };
+        let isst = rec(BRT_CELL_ISST, &[cell(2, 1), 0u32.to_le_bytes().to_vec()].concat());
+        let rich = rec(BRT_CELL_RSTRING, &[cell(3, 1), vec![0], wstr("t")].concat());
+        let body = [row_hdr(0, false), text(0, 1), text(1, 2), isst, rich].concat();
+        let wb =
+            Wb { styles: Some(styles), shared: Some(shared_strings(&["t"])), ..one_sheet(body) };
+        assert_eq!(
+            texts(first_table(&parse(&wb.build()).unwrap())),
+            vec![vec!["t", "t", "t", "t"]]
+        );
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::NumberFormatUnread, 1, 3)]);
+    }
+
+    #[test]
+    fn a_replaced_string_under_an_unread_text_section_reports_both() {
+        let decorated = format!("0;0;0;\"{}\"@", "x".repeat(247));
+        let styles = styles(&[(164, &decorated)], &[0, 164]);
+        let units = [0x74u16, 0xD800];
+        let string =
+            [2u32.to_le_bytes().to_vec(), units.iter().flat_map(|u| u.to_le_bytes()).collect()]
+                .concat();
+        let st = rec(BRT_CELL_ST, &[cell(0, 1), string.clone()].concat());
+        let isst = rec(BRT_CELL_ISST, &[cell(1, 1), 0u32.to_le_bytes().to_vec()].concat());
+        let rich = rec(BRT_CELL_RSTRING, &[cell(2, 1), vec![0], string].concat());
+        let body = [row_hdr(0, false), st, isst, rich].concat();
+        let shared = shared_strings_units(&[&units]);
+        let wb = Wb { styles: Some(styles), shared: Some(shared), ..one_sheet(body) };
+        assert_eq!(texts(first_table(&parse(&wb.build()).unwrap())), vec![vec!["t\u{FFFD}"; 3]]);
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::InvalidEncoding, 1, 3),
+                in_unit(DiagnosticCode::NumberFormatUnread, 1, 3),
             ]
         );
     }
