@@ -45,6 +45,7 @@ path = [
     "src/package/directory.rs",
     "src/pool.rs",
     "src/shared/link_label.rs",
+    "tests/bounds.rs",
     "tests/container.rs",
     "tests/converter.rs",
     "tests/diagnostics.rs",
@@ -54,6 +55,8 @@ path = [
     "tests/fixtures/abuse/max_entry_count--eocd--errors.docx",
     "tests/fixtures/abuse/max_expansion_text_bytes--longrepeat--errors.ods",
     "tests/fixtures/abuse/max_grid_slots--corners--errors.xlsx",
+    "tests/fixtures/abuse/max_nesting_depth--fieldnest--errors.doc",
+    "tests/fixtures/abuse/max_nesting_depth--fieldnest--errors.rtf",
     "tests/fixtures/abuse/max_total_bytes--paddedparts--errors.docx",
     "tests/fixtures/abuse/max_xml_nodes--flatflood--errors.docx",
     "tests/fixtures/docx/handmade-run-marks.docx",
@@ -136,7 +139,6 @@ path = [
     "src/formats/ppt/styletext.rs",
     "src/formats/pptx/mod.rs",
     "src/formats/rtf/lexer.rs",
-    "src/formats/rtf/mod.rs",
     "src/formats/rtf/table.rs",
     "src/formats/rtf/tables.rs",
     "src/formats/sheet/controls.rs",
@@ -166,6 +168,7 @@ path = [
     "src/shared/fields.rs",
     "src/shared/grid.rs",
     "src/shared/html.rs",
+    "src/shared/list.rs",
     "src/shared/math/mathml.rs",
     "src/shared/math/mod.rs",
     "src/shared/math/omml.rs",
@@ -241,6 +244,16 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 breken <312387581+breken-ai@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/rtf/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Jack <272938095+jackoconner45@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
 

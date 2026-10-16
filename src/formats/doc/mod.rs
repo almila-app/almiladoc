@@ -11,6 +11,7 @@ mod stsh;
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
+use crate::limits::Limit;
 use crate::model::{
     Block, Document, ImageSource, Inline, LinkTarget, Note, NoteKind, Style, inlines_are_empty,
     inlines_to_plain_text,
@@ -898,9 +899,13 @@ impl ParaBuilder {
         }
     }
 
-    fn field_begin(&mut self) {
+    fn field_begin(&mut self, max_depth: u64) -> Result<(), ConvertError> {
+        if self.fields.len() as u64 >= max_depth {
+            return Err(ConvertError::limit(Limit::NestingDepth, max_depth));
+        }
         self.flush_text();
         self.fields.push(OpenField::default());
+        Ok(())
     }
 
     fn field_separate(&mut self) {
@@ -1047,7 +1052,7 @@ impl Assembler<'_> {
                     }
                 }
                 '\u{b}' => para.push_inline(Inline::LineBreak),
-                '\u{13}' => para.field_begin(),
+                '\u{13}' => para.field_begin(self.parse_ctx.limits().max_nesting_depth)?,
                 '\u{14}' => para.field_separate(),
                 '\u{15}' => {
                     if para.fields.last().is_some_and(|f| is_choice_form_field(&f.frame.instr)) {

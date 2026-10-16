@@ -1,12 +1,14 @@
 //! Inline run normalization and rendering.
 
-use crate::model::{ImageSource, Inline, LinkTarget, Style, checkbox_text, inlines_are_empty};
+use crate::model::{ImageSource, Inline, LinkTarget, Style, checkbox_text};
 use crate::render::markdown::Ctx;
 use crate::render::markdown::escape::{
     Delims, EscapeOpts, InlineContext, backtick_fence, escape_cell_code_span, escape_text,
     escape_url_as_text, format_url,
 };
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 pub(crate) enum Norm<'a> {
@@ -64,8 +66,9 @@ pub(crate) fn normalize<'a>(inlines: &'a [Inline], rc: &Ctx) -> Vec<Norm<'a>> {
             Inline::Link { content, target } => {
                 if target.is_empty() {
                     // No usable destination: keep the content as plain inlines.
-                    if !inlines_are_empty(content) {
-                        out.extend(normalize(content, rc));
+                    let runs = normalize(content, rc);
+                    if !runs.iter().all(run_is_blank) {
+                        out.extend(runs);
                     }
                     continue;
                 }
@@ -82,6 +85,49 @@ pub(crate) fn normalize<'a>(inlines: &'a [Inline], rc: &Ctx) -> Vec<Norm<'a>> {
         }
     }
     out
+}
+
+/// Whether `run` renders nothing visible, as
+/// [`inlines_are_empty`](crate::model::inlines_are_empty) judges
+/// the inlines it came from.
+fn run_is_blank(run: &Norm) -> bool {
+    match run {
+        Norm::Text { text, .. } => text.trim().is_empty(),
+        Norm::Anchor(_) | Norm::LineBreak => true,
+        Norm::Link { .. }
+        | Norm::Image { .. }
+        | Norm::NoteRef(_)
+        | Norm::Math(_)
+        | Norm::Checkbox(_) => false,
+    }
+}
+
+/// What each link's content emits for the lookahead, computed once per link
+/// and keyed by the content's address, so nested links cost linear time.
+#[derive(Default)]
+pub(crate) struct LinkMemo {
+    plain: RefCell<HashMap<*const Inline, Delims>>,
+    backtick: RefCell<HashMap<*const Inline, bool>>,
+    #[cfg(test)]
+    pub(crate) computed: std::cell::Cell<usize>,
+}
+
+impl LinkMemo {
+    fn get_or<T: Copy>(
+        &self,
+        memo: &RefCell<HashMap<*const Inline, T>>,
+        content: &[Inline],
+        compute: impl FnOnce() -> T,
+    ) -> T {
+        if let Some(value) = memo.borrow().get(&content.as_ptr()) {
+            return *value;
+        }
+        #[cfg(test)]
+        self.computed.set(self.computed.get() + 1);
+        let value = compute();
+        memo.borrow_mut().insert(content.as_ptr(), value);
+        value
+    }
 }
 
 pub(crate) fn render_inlines(inlines: &[Inline], ctx: InlineContext, rc: &Ctx) -> String {
@@ -154,7 +200,6 @@ fn render_link(
     rc: &Ctx,
     out: &mut String,
 ) {
-    let label = render_inlines_mode(content, ctx, true, rc);
     let url = match target {
         LinkTarget::External(url) | LinkTarget::Relative(url) => url.clone(),
         LinkTarget::Anchor(id) => match rc.anchors.fragment(id) {
@@ -166,6 +211,7 @@ fn render_link(
             }
         },
     };
+    let label = render_inlines_mode(content, ctx, true, rc);
     // Emptiness is tested on the trimmed label, but the rendered label keeps
     // its source-significant edge spaces.
     if label.trim().is_empty() {
@@ -251,15 +297,19 @@ fn delims_of(run: &Norm, rc: &Ctx) -> Delims {
             // An unresolved target degrades to its rendered content
             // (see render_link), which emits like any sibling runs.
             LinkTarget::Anchor(id) if rc.anchors.fragment(id).is_none() => {
-                for run in &normalize(content, rc) {
-                    delims.union(delims_of(run, rc));
-                }
+                delims.union(rc.links.get_or(&rc.links.plain, content, || {
+                    let mut plain = Delims::default();
+                    for run in &normalize(content, rc) {
+                        plain.union(delims_of(run, rc));
+                    }
+                    plain
+                }));
             }
             // Emphasis cannot cross a link boundary, but a code span
             // can: a backtick in the label or destination pairs with
             // one outside.
             _ => {
-                if emits_backtick(content) || target_has_backtick(target) {
+                if emits_backtick(content, rc) || target_has_backtick(target) {
                     delims.insert('`');
                 }
             }
@@ -298,14 +348,18 @@ fn target_has_backtick(target: &LinkTarget) -> bool {
 /// earlier raw one can pair with: any backtick in text counts even where the
 /// label escapes it (code spans ignore backslash escapes), and a code run
 /// emits fences unless it is whitespace-only and loses its styling.
-fn emits_backtick(inlines: &[Inline]) -> bool {
-    inlines.iter().any(|inline| match inline {
-        Inline::Text { text, style } => {
-            text.contains('`') || (style.code && !text.trim().is_empty())
-        }
-        Inline::Link { content, target } => emits_backtick(content) || target_has_backtick(target),
-        Inline::Image { alt, .. } => alt.contains('`'),
-        _ => false,
+fn emits_backtick(inlines: &[Inline], rc: &Ctx) -> bool {
+    rc.links.get_or(&rc.links.backtick, inlines, || {
+        inlines.iter().any(|inline| match inline {
+            Inline::Text { text, style } => {
+                text.contains('`') || (style.code && !text.trim().is_empty())
+            }
+            Inline::Link { content, target } => {
+                emits_backtick(content, rc) || target_has_backtick(target)
+            }
+            Inline::Image { alt, .. } => alt.contains('`'),
+            _ => false,
+        })
     })
 }
 

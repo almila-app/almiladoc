@@ -115,7 +115,18 @@ def malformed(out):
         (m / "truncated--errors.doc").write_bytes(doc.read_bytes()[:4096])
 
 
+def abuse(out):
+    """HYPERLINK fields nested 1024 deep, the most a raised nesting limit
+    admits: past the default limit of 256."""
+    depth = 1024
+    field = '\x13 HYPERLINK "https://example.com" \x14'
+    text = (field * depth + "x" + "\x15" * depth + "\r").encode("cp1252")
+    write_cfb(out / "abuse" / "max_nesting_depth--fieldnest--errors.doc",
+              [("WordDocument", word_doc_stream(0x0409, text))])
+
+
 def generate(out):
     encoded_docs(out)
     blockstyle_doc(out)
     malformed(out)
+    abuse(out)

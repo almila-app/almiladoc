@@ -1,5 +1,9 @@
-use super::{RenderLoss, Unread, document_to_markdown, render_losses};
+use super::{
+    Ctx, RenderLoss, Unread, check_nesting, document_to_markdown, render_block, render_losses,
+};
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
+use crate::error::ConvertError;
+use crate::limits::Limit;
 use crate::model::{
     AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
     MarkerKind, Note, NoteKind, Style, Table, TableKind,
@@ -936,4 +940,119 @@ fn the_causes_that_silence_render_losses_are_read_from_the_parse() {
         let unread = Unread::of(&diagnostics);
         assert_eq!((unread.notes, unread.units), expected, "{name}");
     }
+}
+
+#[test]
+fn every_container_nests_to_the_limit_and_no_further() {
+    let paragraph = |inlines| Block::Paragraph(inlines);
+    let wraps: [fn(Block) -> Block; 4] = [
+        |inner| {
+            Block::List(List {
+                marker: MarkerKind::Bullet,
+                start: 1,
+                items: vec![ListItem { blocks: vec![inner], marker_label: None }],
+            })
+        },
+        |inner| table_from(vec![vec![Cell::new(vec![inner])]], 0),
+        |inner| Block::BlockQuote(vec![inner]),
+        |inner| {
+            let Block::Paragraph(content) = inner else { unreachable!() };
+            let target = LinkTarget::External("https://example.com".into());
+            Block::Paragraph(vec![Inline::Link { content, target }])
+        },
+    ];
+    let refused = |doc: &Document| {
+        matches!(
+            check_nesting(doc, 4),
+            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 4 })
+        )
+    };
+    for (case, wrap) in wraps.iter().enumerate() {
+        let nested = |depth| {
+            let mut block = paragraph(vec![Inline::plain("x")]);
+            for _ in 0..depth {
+                block = wrap(block);
+            }
+            block
+        };
+        let body = |depth| Document { blocks: vec![nested(depth)], ..Document::default() };
+        let notes =
+            |depth| Document { notes: vec![note("1", vec![nested(depth)])], ..Document::default() };
+        assert!(check_nesting(&body(4), 4).is_ok(), "{case}");
+        assert!(check_nesting(&notes(4), 4).is_ok(), "{case}");
+        assert!(refused(&body(5)), "{case}");
+        assert!(refused(&notes(5)), "{case}");
+    }
+}
+
+#[test]
+fn notes_number_in_the_order_their_first_references_are_read() {
+    let reference = |id: &str| Inline::NoteRef(id.into());
+    let text = |t: &str| Block::Paragraph(vec![Inline::plain(t)]);
+    let target = LinkTarget::External("https://example.com".into());
+    let md = document_to_markdown(&Document {
+        blocks: vec![
+            Block::Paragraph(vec![
+                Inline::Link { content: vec![reference("a")], target },
+                reference("d"),
+            ]),
+            Block::BlockQuote(vec![Block::Paragraph(vec![reference("c")])]),
+        ],
+        notes: vec![
+            note("d", vec![text("D")]),
+            note("c", vec![text("C")]),
+            note("b", vec![text("B")]),
+            note("a", vec![Block::Paragraph(vec![Inline::plain("A"), reference("b")])]),
+        ],
+        assets: Vec::new(),
+    });
+    assert_eq!(
+        md,
+        "[[^1]](https://example.com)[^3]\n\n> [^4]\n\n[^1]: A[^2]\n\n[^2]: B\n\n[^3]: D\n\n[^4]: C\n"
+    );
+}
+
+#[test]
+fn each_nested_link_is_looked_ahead_at_once() {
+    let depth = 300;
+    let bold = Style { bold: true, ..Style::PLAIN };
+    let unresolved = LinkTarget::Anchor("nowhere".into());
+    let external = LinkTarget::External("https://example.com".into());
+    let shapes = [
+        ("docx unresolved", Inline::plain("x"), unresolved.clone()),
+        ("epub unresolved bold", Inline::Text { text: "x".into(), style: bold }, unresolved),
+        ("external", Inline::plain("x"), external),
+    ];
+    for (name, leaf, target) in shapes {
+        let mut content = vec![leaf];
+        for _ in 0..depth {
+            content = vec![Inline::Link { content, target: target.clone() }];
+        }
+        let doc = Document { blocks: vec![Block::Paragraph(content)], ..Document::default() };
+        let rc = Ctx::of(&doc);
+        assert!(render_block(&doc.blocks[0], &rc).is_some(), "{name}");
+        assert_eq!(rc.links.computed.get(), depth, "{name}");
+    }
+}
+
+#[test]
+fn a_link_without_a_target_drops_content_that_shows_nothing() {
+    let untargeted = |content| Inline::Link { content, target: LinkTarget::Anchor(String::new()) };
+    let between = |inline| {
+        Block::Paragraph(vec![Inline::plain("a"), untargeted(vec![inline]), Inline::plain("b")])
+    };
+    let md = document_to_markdown(&Document {
+        blocks: vec![
+            between(Inline::plain(" ")),
+            between(Inline::LineBreak),
+            between(Inline::Anchor("t".into())),
+            between(Inline::plain(" c ")),
+            Block::Paragraph(vec![Inline::Link {
+                content: vec![Inline::plain("to t")],
+                target: LinkTarget::Anchor("t".into()),
+            }]),
+        ],
+        ..Document::default()
+    });
+    assert_eq!(md, "ab\n\nab\n\nab\n\na c b\n\n[to t](#t)\n");
 }

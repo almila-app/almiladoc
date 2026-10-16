@@ -118,8 +118,19 @@ def bin_rtf(out):
     (out / "malformed" / "unbalanced--recovers.rtf").write_bytes(data[: data.rfind(b"}")])
 
 
+def abuse(out):
+    """HYPERLINK fields nested 300 deep, each two groups: past the default
+    nesting limit of 256."""
+    depth = 300
+    field = '{\\field{\\*\\fldinst HYPERLINK "https://example.com"}{\\fldrslt '
+    data = "{\\rtf1\\ansi " + field * depth + "x" + "}}" * depth + "\\par}"
+    (out / "abuse").mkdir(parents=True, exist_ok=True)
+    (out / "abuse" / "max_nesting_depth--fieldnest--errors.rtf").write_bytes(data.encode("ascii"))
+
+
 def generate(out):
     merge_rtf(out)
     blockstyle_rtf(out)
     bin_rtf(out)
     math_rtf(out)
+    abuse(out)

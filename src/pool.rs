@@ -11,12 +11,42 @@ use rayon::{ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use crate::config::Config;
 use crate::error::ConvertError;
 
-/// Stack of each pool thread: the measured stack cost of one level of the
-/// deepest recursion over input nesting, times
-/// [`Limits::MAX_NESTING_CEILING`](crate::Limits::MAX_NESTING_CEILING). A
-/// stack overflow aborts the process, so this is never sized below that
-/// product.
-const STACK: usize = 8 * 1024 * 1024;
+/// Stack of each pool thread: the costliest recursion over input nesting at
+/// [`Limits::MAX_NESTING_CEILING`](crate::Limits::MAX_NESTING_CEILING), parse
+/// and render, times 1.5, rounded up to 64 KiB. A stack overflow aborts the
+/// process, so this is never sized below it.
+///
+/// Measured as the smallest stack converting each recursion's input at two
+/// depths, in bytes per level of the limit and in the test profile (the
+/// release profile in brackets); the fixed base is at most 37 KiB:
+///
+/// | Input | Recursions | Per level |
+/// |---|---|---|
+/// | EPUB nested `a`, in a paragraph or a heading | HTML inlines, rendered links, heading text | 7238 (1443) |
+/// | EPUB nested `a` and `b` | HTML inlines, rendered links | 6449 (1068) |
+/// | EPUB nested `blockquote` | HTML blocks, rendered quotes | 4593 (938) |
+/// | EPUB nested `div` | HTML blocks | 4016 (705) |
+/// | EPUB nested `ul` | HTML lists, rendered lists | 3936 (472) |
+/// | DOCX nested `w:hyperlink`, with or without a target | DOCX inlines, rendered links | 2835 (450) |
+/// | DOCX nested `w:smartTag` | DOCX inlines | 2835 (450) |
+/// | ODT nested tables | ODF tables, rendered tables | 2562 (562) |
+/// | ODT nested `text:span` | ODF inlines | 2498 (305) |
+/// | ODT nested `text:a`, in a paragraph or a table cell | ODF inlines, cell text bytes, rendered links | 2498 (451) |
+/// | ODP nested `draw:g` | ODF shapes | 2446 (306) |
+/// | EPUB MathML nested `mrow` | MathML | 2321 (353) |
+/// | ODT nested lists | ODF lists, rendered lists | 1928 (345) |
+/// | DOC nested HYPERLINK fields | rendered links | 1664 (448) |
+/// | DOCX nested tables | DOCX blocks, rendered tables | 1614 (434) |
+/// | PPTX nested `p:grpSp` | PPTX shapes | 992 (718) |
+/// | DOCX nested `mc:AlternateContent` in a run | DOCX run content | 859 (96) |
+/// | ODT nested `table:table-row-group` | ODF table rows | 845 (129) |
+/// | RTF nested HYPERLINK fields | rendered links | 832 (224) |
+/// | DOCX OMML nested `m:f` | OMML | 747 (169) |
+/// | RTF nested `\mf` | OMML | 739 (169) |
+/// | DOCX nested `v:group` | DOCX drawing contents | 386 (185) |
+/// | DOCX nested `w:customXml` around cells | DOCX row cells | 306 (113) |
+/// | RTF nested groups | none | 0 (0) |
+const STACK: usize = 11_206_656;
 
 /// Run `work` on a pool built for `config`, mapping a pool that cannot start
 /// and a panic in `work` to [`ConvertError::Internal`].
@@ -61,12 +91,12 @@ mod tests {
     #[test]
     fn work_runs_on_the_sized_stack() {
         let used = run_on_pool(&threads(1), || Ok(fill_stack()));
-        assert_eq!(used.ok(), Some(6 * 1024 * 1024));
+        assert_eq!(used.ok(), Some(STACK - 1024 * 1024));
     }
 
     #[inline(never)]
     fn fill_stack() -> usize {
-        let mut frame = [0u8; 6 * 1024 * 1024];
+        let mut frame = [0u8; STACK - 1024 * 1024];
         std::hint::black_box(&mut frame);
         frame.len()
     }

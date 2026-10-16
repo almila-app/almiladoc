@@ -28,7 +28,7 @@ fn default_max(name: &str) -> u64 {
 fn every_abuse_fixture_trips_the_limit_its_name_gives() {
     let mut files = Vec::new();
     walk(&fixture_root().join("abuse"), &mut files);
-    assert_eq!(files.len(), 15, "abuse fixture set");
+    assert_eq!(files.len(), 17, "abuse fixture set");
     let converter = converter(1);
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().to_string();

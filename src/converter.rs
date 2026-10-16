@@ -15,7 +15,7 @@ use crate::ledger::CancelToken;
 use crate::limits::Limit;
 use crate::model::Document;
 use crate::pool::run_on_pool;
-use crate::render::markdown::{Unread, document_to_markdown, render_losses};
+use crate::render::markdown::{Unread, check_nesting, document_to_markdown, render_losses};
 
 /// Converts documents under one validated [`Config`]; share it across threads
 /// and calls.
@@ -181,10 +181,13 @@ impl Parsed {
     /// # Errors
     ///
     /// [`ConvertError::Incomplete`] when content was lost under
-    /// [`OnLoss::Fail`]; [`ConvertError::Internal`] when the pool cannot
-    /// start or rendering panics.
+    /// [`OnLoss::Fail`]; [`ConvertError::ResourceLimit`] when the document
+    /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth);
+    /// [`ConvertError::Internal`] when the pool cannot start or rendering
+    /// panics.
     pub fn render(&self) -> Result<Conversion, ConvertError> {
         self.on_pool(|| {
+            check_nesting(&self.document, self.config.limits.max_nesting_depth)?;
             let markdown = document_to_markdown(&self.document);
             conclude(self.config.on_loss, markdown, self.diagnostics.clone())
         })
@@ -204,6 +207,7 @@ fn parse_document(
     format: Format,
 ) -> Result<(Document, Diagnostics), ConvertError> {
     let document = formats::parse(&parse_ctx, bytes, format)?;
+    check_nesting(&document, parse_ctx.limits().max_nesting_depth)?;
     let mut diagnostics = parse_ctx.into_diagnostics();
     for (code, region, count) in render_losses(&document, Unread::of(&diagnostics)) {
         diagnostics.add(code, region, None, count);
@@ -433,6 +437,30 @@ mod tests {
             "{error:?}"
         );
         assert!(converter(1).parse(Input::new(&bytes, Format::Docx)).is_ok());
+    }
+
+    #[test]
+    fn render_reads_the_nesting_limit_from_the_config() {
+        let mut blocks =
+            vec![crate::model::Block::Paragraph(vec![crate::model::Inline::plain("x")])];
+        for _ in 0..5 {
+            blocks = vec![crate::model::Block::BlockQuote(blocks)];
+        }
+        let parsed = |max| {
+            let mut config = Config::default();
+            config.limits.max_nesting_depth = max;
+            let document = Document { blocks: blocks.clone(), ..Document::default() };
+            Parsed { document, diagnostics: Diagnostics::default(), config: Arc::new(config) }
+        };
+        assert!(parsed(5).render().is_ok());
+        let error = parsed(4).render();
+        assert!(
+            matches!(
+                error,
+                Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 4 })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

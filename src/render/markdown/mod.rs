@@ -9,12 +9,14 @@ mod table;
 mod tests;
 
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
+use crate::error::ConvertError;
+use crate::limits::Limit;
 use crate::model::{
     Block, Document, Inline, LinkTarget, List, MarkerKind, Note, TableKind, inlines_are_empty,
 };
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
-use inline::render_inlines;
+use inline::{LinkMemo, render_inlines};
 use std::collections::{HashMap, HashSet};
 
 /// Escape a source-derived composite marker label for literal use: control
@@ -34,15 +36,16 @@ pub(crate) fn escape_marker_label(label: &str, ctx: InlineContext) -> String {
 /// Footnote id -> rendered number, shared by all render functions.
 type NoteNumbers = HashMap<String, usize>;
 
-/// Immutable render context threaded through every render function.
+/// Render context threaded through every render function.
 pub(crate) struct Ctx {
     nums: NoteNumbers,
     anchors: AnchorMap,
+    links: LinkMemo,
 }
 
 impl Ctx {
     fn of(doc: &Document) -> Self {
-        Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) }
+        Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc), links: LinkMemo::default() }
     }
 }
 
@@ -229,56 +232,102 @@ fn block_is_blank(block: &Block) -> bool {
     }
 }
 
+/// Push every note `blocks` reference in first-reference order, each note's
+/// own references right after it, with an explicit stack: a chain of notes
+/// referencing the next is as long as the document's note count.
 fn collect_note_refs(
     blocks: &[Block],
     valid: &HashMap<&str, &Note>,
     order: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) {
-    fn walk_inlines(
-        inlines: &[Inline],
-        valid: &HashMap<&str, &Note>,
-        order: &mut Vec<String>,
-        seen: &mut HashSet<String>,
-    ) {
-        for inline in inlines {
-            match inline {
-                Inline::NoteRef(id) => {
-                    if let Some(note) = valid.get(id.as_str())
-                        && seen.insert(id.clone())
-                    {
-                        order.push(id.clone());
-                        collect_note_refs(&note.blocks, valid, order, seen);
-                    }
+    let mut stack: Vec<Node<'_>> = vec![Node::Blocks(blocks)];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Inlines(inlines) => {
+                for inline in inlines.iter().rev() {
+                    stack.push(Node::Inline(inline));
                 }
-                Inline::Link { content, .. } => walk_inlines(content, valid, order, seen),
-                _ => {}
+            }
+            Node::Inline(Inline::NoteRef(id)) => {
+                if let Some(note) = valid.get(id.as_str())
+                    && seen.insert(id.clone())
+                {
+                    order.push(id.clone());
+                    stack.push(Node::Blocks(&note.blocks));
+                }
+            }
+            Node::Inline(Inline::Link { content, .. }) => stack.push(Node::Inlines(content)),
+            Node::Inline(_) => {}
+            Node::Blocks(blocks) => {
+                for block in blocks.iter().rev() {
+                    stack.extend(children(block).into_iter().rev());
+                }
             }
         }
     }
-    for block in blocks {
-        match block {
-            Block::Paragraph(i) | Block::Heading { content: i, .. } => {
-                walk_inlines(i, valid, order, seen)
-            }
-            Block::List(list) => {
-                for item in &list.items {
-                    collect_note_refs(&item.blocks, valid, order, seen);
+}
+
+/// A slice of the model one iterative walk has yet to visit.
+#[derive(Clone, Copy)]
+enum Node<'d> {
+    Blocks(&'d [Block]),
+    Inlines(&'d [Inline]),
+    Inline(&'d Inline),
+}
+
+/// What `block` holds, in document order.
+fn children(block: &Block) -> Vec<Node<'_>> {
+    match block {
+        Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } => {
+            vec![Node::Inlines(inlines)]
+        }
+        Block::List(list) => list.items.iter().map(|item| Node::Blocks(&item.blocks)).collect(),
+        Block::Table(t) => t
+            .grid
+            .iter()
+            .flatten()
+            .filter_map(|slot| match slot {
+                crate::model::CellSlot::Origin(cell) => Some(Node::Blocks(&cell.blocks)),
+                crate::model::CellSlot::Covered { .. } => None,
+            })
+            .collect(),
+        Block::BlockQuote(blocks) => vec![Node::Blocks(blocks)],
+        Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => Vec::new(),
+    }
+}
+
+/// Fail [`Limit::NestingDepth`] when lists, table cells, quotes and links
+/// nest deeper than `max` anywhere in `doc`, before a recursive walk renders
+/// it; the walk itself is iterative.
+pub(crate) fn check_nesting(doc: &Document, max: u64) -> Result<(), ConvertError> {
+    let mut stack: Vec<(Node<'_>, u64)> = vec![(Node::Blocks(&doc.blocks), 0)];
+    stack.extend(doc.notes.iter().map(|note| (Node::Blocks(&note.blocks), 0)));
+    while let Some((node, depth)) = stack.pop() {
+        if depth > max {
+            return Err(ConvertError::limit(Limit::NestingDepth, max));
+        }
+        match node {
+            Node::Blocks(blocks) => {
+                for block in blocks {
+                    let inner = match block {
+                        Block::Paragraph(_) | Block::Heading { .. } => depth,
+                        _ => depth.saturating_add(1),
+                    };
+                    stack.extend(children(block).into_iter().map(|child| (child, inner)));
                 }
             }
-            Block::Table(t) => {
-                for row in &t.grid {
-                    for slot in row {
-                        if let crate::model::CellSlot::Origin(cell) = slot {
-                            collect_note_refs(&cell.blocks, valid, order, seen);
-                        }
+            Node::Inlines(inlines) => {
+                for inline in inlines {
+                    if let Inline::Link { content, .. } = inline {
+                        stack.push((Node::Inlines(content), depth.saturating_add(1)));
                     }
                 }
             }
-            Block::BlockQuote(blocks) => collect_note_refs(blocks, valid, order, seen),
-            Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => {}
+            Node::Inline(_) => {}
         }
     }
+    Ok(())
 }
 
 fn render_blocks(blocks: &[Block], rc: &Ctx) -> String {

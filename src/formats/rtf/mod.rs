@@ -10,6 +10,7 @@ mod tables;
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
+use crate::limits::Limit;
 use crate::model::{Block, Document, Inline, LinkTarget, Note, NoteKind, Style, inlines_are_empty};
 use crate::package::xml::{Element, Node, ns};
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
@@ -764,6 +765,10 @@ impl<'a> Parser<'a> {
         while let Some(token) = self.lexer.next_token()? {
             match token {
                 Token::Open => {
+                    let max = self.parse_ctx.limits().max_nesting_depth;
+                    if self.stack.len() as u64 >= max {
+                        return Err(ConvertError::limit(Limit::NestingDepth, max));
+                    }
                     self.flush_pending();
                     self.stack.push(self.state);
                     if self.state.capture == Capture::Math
@@ -1003,7 +1008,7 @@ impl<'a> Parser<'a> {
         if self.list_control(word, param) {
             return Ok(());
         }
-        if self.object_control(word) {
+        if self.object_control(word)? {
             return Ok(());
         }
         if SUPPRESSED_DESTINATIONS.contains(&word) {
@@ -1209,12 +1214,16 @@ impl<'a> Parser<'a> {
     }
 
     /// Field, footnote, and bookmark controls.
-    fn object_control(&mut self, word: &str) -> bool {
+    fn object_control(&mut self, word: &str) -> Result<bool, ConvertError> {
         match word {
             "field" => {
                 self.flush_pending();
                 self.omit_deleted();
                 if !self.state.suppress {
+                    let max = self.parse_ctx.limits().max_nesting_depth;
+                    if self.dest.fields.len() as u64 >= max {
+                        return Err(ConvertError::limit(Limit::NestingDepth, max));
+                    }
                     self.dest.fields.push(FieldFrame {
                         depth: self.stack.len(),
                         instr: String::new(),
@@ -1282,9 +1291,9 @@ impl<'a> Parser<'a> {
             "emfblip" => self.set_pict_format(Some(("image/emf", "emf"))),
             "wmetafile" => self.set_pict_format(Some(("image/wmf", "wmf"))),
             "macpict" | "dibitmap" | "wbitmap" => self.set_pict_format(None),
-            _ => return false,
+            _ => return Ok(false),
         }
-        true
+        Ok(true)
     }
 
     /// Math zone controls: `\mmath` opens a zone, and inside one every math

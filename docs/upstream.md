@@ -12,7 +12,7 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #17 PR, unwrap single-cell tables that wrap a nested table: the fix for #14, rewritten as a model normalisation step without panicking paths.
 - #31 issue, slides concatenated without a boundary: slides become units with milestones in the model, so an untitled slide no longer merges into the one before it (ADR 0001 decisions 4 and 5).
 - #32 PR, separate slides with a thematic break: its ODP coverage and tests carry over to slide milestones (ADR 0001 decision 5); a thematic break is not used, as it cannot be told apart from a horizontal rule.
-- #47 PR, single-pass RTF prelude scan and group-depth cap: RTF group nesting is bounded by the nesting limit and the prelude is scanned once (ADR 0001 decision 12).
+- #47 PR, single-pass RTF prelude scan and group-depth cap: its group-depth cap is taken, bounding the body's group nesting, fields and equations by the nesting limit; the prelude half remains, a single scan of the font, style and list tables under the same limit (ADR 0001 decision 12).
 - #54 PR, invalid EPUB spine references: a spine whose references all dangle no longer converts to an empty success, and each dangling item is reported (ADR 0001 decision 10).
 - #62 issue, PDF through `to_document` with per-page extraction: PDF is parsed into the model with page units (ADR 0001 decisions 4 and 6).
 - #63 issue, embedded image assets in the Markdown output: images render as `![alt](asset:N)` placeholders by default (ADR 0001 decisions 8 and 11).

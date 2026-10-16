@@ -80,8 +80,10 @@ pub struct Limits {
     pub max_total_bytes: u64,
     /// Entries in one archive: each costs memory before any is read.
     pub max_entry_count: u64,
-    /// Nesting depth of input structure: recursion over it needs stack in
-    /// proportion. At most [`Limits::MAX_NESTING_CEILING`].
+    /// Nesting depth of input structure (XML elements in a part, RTF groups,
+    /// Word fields) and of the parsed document's lists, table cells, quotes
+    /// and links: recursion over it needs stack in proportion. At most
+    /// [`Limits::MAX_NESTING_CEILING`].
     pub max_nesting_depth: u64,
     /// XML nodes in one part: each costs about 400 bytes once parsed.
     pub max_xml_nodes: u64,

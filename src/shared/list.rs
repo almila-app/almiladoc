@@ -33,12 +33,20 @@ pub struct ListEntry {
     pub blocks: Vec<Block>,
 }
 
+/// The deepest list level a run nests to, the last of the nine levels
+/// (0 to 8) WordprocessingML, DrawingML, RTF and Word 97 define (PowerPoint
+/// 97 defines five); a deeper source level is read as this one.
+const MAX_LIST_LEVEL: usize = 8;
+
 /// Pop the accumulated run of list paragraphs into list blocks; one block
 /// per identity segment.
 pub fn flush_list(blocks: &mut Vec<Block>, run: &mut Vec<ListEntry>) {
-    let entries = std::mem::take(run);
+    let mut entries = std::mem::take(run);
     if entries.is_empty() {
         return;
+    }
+    for entry in &mut entries {
+        entry.level = entry.level.min(MAX_LIST_LEVEL);
     }
     blocks.extend(build_lists(entries));
 }
@@ -135,7 +143,22 @@ mod tests {
     }
 
     fn lists(entries: Vec<ListEntry>) -> Vec<Block> {
-        build_lists(entries)
+        let mut blocks = Vec::new();
+        flush_list(&mut blocks, &mut { entries });
+        blocks
+    }
+
+    fn depth(blocks: &[Block]) -> usize {
+        blocks
+            .iter()
+            .map(|block| match block {
+                Block::List(list) => {
+                    1 + list.items.iter().map(|item| depth(&item.blocks)).max().unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     #[test]
@@ -192,5 +215,17 @@ mod tests {
         let Block::List(l) = &out[0] else { panic!() };
         assert_eq!(l.items.len(), 2);
         assert!(matches!(l.items[0].blocks.last(), Some(Block::List(sub)) if sub.ordered()));
+    }
+
+    #[test]
+    fn levels_past_the_last_nest_no_deeper_than_it() {
+        let rising = (0..100_000).map(|level| entry(level, 1, MarkerKind::Bullet, 0, "x"));
+        assert_eq!(depth(&lists(rising.collect())), MAX_LIST_LEVEL + 1);
+        let out = lists(vec![
+            entry(MAX_LIST_LEVEL, 1, MarkerKind::Bullet, 0, "last"),
+            entry(usize::MAX, 1, MarkerKind::Bullet, 0, "past"),
+        ]);
+        let [Block::List(l)] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!(l.items.len(), 2);
     }
 }
