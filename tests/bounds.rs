@@ -1,7 +1,8 @@
 //! Every recursion over input nesting converts at the deepest
 //! `max_nesting_depth` a converter accepts, on the pool's stack, and refuses
 //! one level more as `ResourceLimit`; the legacy binary readers' record
-//! nesting and optional streams stay within their limits.
+//! nesting and optional streams stay within their limits; rendering stays
+//! within the output and work limits.
 
 use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit, Limits, OnLoss};
 
@@ -48,6 +49,21 @@ const CASES: &[Case] = &[
     Case { name: "epub divs", format: Format::Epub, wrap: 3, per: 1, build: epub_divs },
     Case { name: "epub quotes", format: Format::Epub, wrap: 3, per: 1, build: epub_quotes },
     Case { name: "epub links", format: Format::Epub, wrap: 3, per: 1, build: epub_links },
+    Case { name: "epub item links", format: Format::Epub, wrap: 5, per: 1, build: epub_item_links },
+    Case {
+        name: "epub item anchor links",
+        format: Format::Epub,
+        wrap: 5,
+        per: 1,
+        build: epub_item_anchor_links,
+    },
+    Case {
+        name: "epub item quotes",
+        format: Format::Epub,
+        wrap: 7,
+        per: 1,
+        build: epub_item_quotes,
+    },
     Case { name: "epub bold links", format: Format::Epub, wrap: 3, per: 2, build: epub_bold_links },
     Case {
         name: "epub heading links",
@@ -231,6 +247,70 @@ fn a_doc_data_stream_past_max_entry_bytes_is_a_limit() {
     );
 }
 
+fn csv_records() -> Vec<u8> {
+    (0..50).map(|i| format!("cell {i},value {i}\n")).collect::<String>().into_bytes()
+}
+
+fn refused_with(
+    result: Result<almiladoc::Conversion, ConvertError>,
+    limit: Limit,
+    max: u64,
+) -> bool {
+    matches!(result, Err(ConvertError::ResourceLimit { limit: l, max: m, .. }) if l == limit && m == max)
+}
+
+#[test]
+fn convert_and_render_stop_at_max_output_bytes_and_a_parse_writes_none() {
+    let csv = csv_records();
+    let input = || Input::new(&csv, Format::Csv);
+    let markdown = limited(|_| {}).convert(input()).unwrap().into_markdown();
+    let len = markdown.len() as u64;
+    let at = |max| limited(|limits| limits.max_output_bytes = max);
+    assert_eq!(at(len).convert(input()).unwrap().markdown(), markdown);
+    assert_eq!(at(len).parse(input()).unwrap().render().unwrap().markdown(), markdown);
+    assert!(refused_with(at(len - 1).convert(input()), Limit::OutputBytes, len - 1));
+    let parsed = at(1).parse(input()).unwrap();
+    assert!(refused_with(parsed.render(), Limit::OutputBytes, 1));
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn a_pdf_stops_at_max_output_bytes() {
+    let pdf =
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/text.pdf")).unwrap();
+    let input = || Input::new(&pdf, Format::Pdf);
+    let len = limited(|_| {}).convert(input()).unwrap().markdown().len() as u64;
+    let at = |max| limited(|limits| limits.max_output_bytes = max).convert(input());
+    assert!(at(len).is_ok());
+    assert!(refused_with(at(len - 1), Limit::OutputBytes, len - 1));
+}
+
+/// The least `max_work` under which `passes` holds, which holds for every
+/// larger one.
+fn least_work(passes: impl Fn(Converter) -> bool) -> u64 {
+    let (mut low, mut high) = (0, 1 << 20);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if passes(limited(|limits| limits.max_work = mid)) { high = mid } else { low = mid + 1 }
+    }
+    low
+}
+
+#[test]
+fn rendering_charges_a_unit_of_work_per_64_bytes_on_top_of_the_parse() {
+    let csv = csv_records();
+    let input = || Input::new(&csv, Format::Csv);
+    let len = limited(|_| {}).convert(input()).unwrap().markdown().len() as u64;
+    let parse = least_work(|converter| converter.parse(input()).is_ok());
+    let convert = least_work(|converter| converter.convert(input()).is_ok());
+    assert!(parse > 0 && len >= 64, "{parse} {len}");
+    assert_eq!(convert, parse + len / 64);
+    let parsed = limited(|limits| limits.max_work = convert - 1).parse(input()).unwrap();
+    assert!(refused_with(parsed.render(), Limit::Work, convert - 1));
+    let parsed = limited(|limits| limits.max_work = convert).parse(input()).unwrap();
+    assert!(parsed.render().is_ok());
+}
+
 fn zip(parts: &[(&str, &str)]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, text) in parts {
@@ -407,6 +487,20 @@ const EPUB_LINK: &str = r##"<a href="#nowhere">"##;
 
 fn epub_links(units: usize) -> Vec<u8> {
     epub(&format!("<p>{}</p>", nest(EPUB_LINK, "</a>", units, "x")))
+}
+
+fn epub_item_links(units: usize) -> Vec<u8> {
+    epub(&format!("<ul><li><p>{}</p></li></ul>", nest(EPUB_LINK, "</a>", units, "x")))
+}
+
+fn epub_item_anchor_links(units: usize) -> Vec<u8> {
+    let links = nest(r##"<a href="#t">"##, "</a>", units, "x");
+    epub(&format!(r#"<p id="t">t</p><ul><li><p>{links}</p></li></ul>"#))
+}
+
+fn epub_item_quotes(units: usize) -> Vec<u8> {
+    let quotes = nest("<blockquote>", "</blockquote>", units, "<p>x</p>");
+    epub(&format!("<ul><li><ul><li>{quotes}</li></ul></li></ul>"))
 }
 
 fn epub_bold_links(units: usize) -> Vec<u8> {

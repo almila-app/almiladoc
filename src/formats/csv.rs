@@ -172,6 +172,26 @@ mod tests {
         assert_eq!(parse_ctx.fuel(), 5);
     }
 
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_bytes_never_hold_more_cells_than_the_fields_charged(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
+        ) {
+            let parse_ctx = ParseCtx::default();
+            if let Ok(doc) = parse(&parse_ctx, &bytes) {
+                let cells: usize = doc
+                    .blocks
+                    .iter()
+                    .map(|block| match block {
+                        Block::Table(table) => table.grid.iter().map(Vec::len).sum(),
+                        _ => 0,
+                    })
+                    .sum();
+                proptest::prop_assert!(cells as u64 <= parse_ctx.fuel());
+            }
+        }
+    }
+
     #[test]
     fn a_decoding_loss_reports_once_per_file() {
         let utf16 = |bom: [u8; 2], unit: fn(u16) -> [u8; 2]| {

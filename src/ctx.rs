@@ -51,6 +51,12 @@ impl<'a> ParseCtx<'a> {
         self.limits
     }
 
+    /// The ledger this parse charges, which rendering its document charges
+    /// on.
+    pub(crate) fn ledger(&self) -> &Ledger<'a> {
+        &self.ledger
+    }
+
     /// Charge `units` of work, failing once the parse is cancelled or past
     /// [`Limits::max_work`].
     pub(crate) fn charge(&self, units: u64) -> Result<(), ConvertError> {
@@ -90,7 +96,6 @@ impl<'a> ParseCtx<'a> {
         self.diagnostics.into_inner()
     }
 
-    #[cfg(test)]
     pub(crate) fn fuel(&self) -> u64 {
         self.ledger.spent()
     }

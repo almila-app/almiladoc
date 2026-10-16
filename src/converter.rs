@@ -11,11 +11,11 @@ use crate::diagnostics::{Diagnostics, OnLoss};
 use crate::error::ConvertError;
 use crate::formats;
 use crate::identity::EngineIdentity;
-use crate::ledger::CancelToken;
+use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
 use crate::model::Document;
 use crate::pool::run_on_pool;
-use crate::render::markdown::{Unread, check_nesting, document_to_markdown, render_losses};
+use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
 
 /// Converts documents under one validated [`Config`]; share it across threads
 /// and calls.
@@ -57,9 +57,14 @@ impl Converter {
     /// in a build without the `pdf` feature.
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
         self.admit(&input)?;
-        let (document, diagnostics) =
-            self.on_pool(|| parse_document(self.parse_ctx(&input), input.bytes, input.format))?;
-        Ok(Parsed { document, diagnostics, config: Arc::clone(&self.config) })
+        let (document, diagnostics, fuel) = self.on_pool(|| {
+            let parse_ctx = self.parse_ctx(&input);
+            let document = parse_document(&parse_ctx, input.bytes, input.format)?;
+            let fuel = parse_ctx.fuel();
+            let diagnostics = diagnostics_of(parse_ctx, &document);
+            Ok((document, diagnostics, fuel))
+        })?;
+        Ok(Parsed { document, diagnostics, fuel, config: Arc::clone(&self.config) })
     }
 
     /// Convert `input` to Markdown: [`Converter::parse`] then
@@ -72,17 +77,26 @@ impl Converter {
     /// [`OnLoss::Fail`].
     pub fn convert(&self, input: Input<'_>) -> Result<Conversion, ConvertError> {
         self.admit(&input)?;
+        let limits = &self.config.limits;
         self.on_pool(|| {
             let parse_ctx = self.parse_ctx(&input);
             let (markdown, diagnostics) = match input.format {
                 #[cfg(feature = "pdf")]
-                Format::Pdf => (
-                    formats::pdf::to_markdown(&parse_ctx, input.bytes)?,
-                    parse_ctx.into_diagnostics(),
-                ),
+                Format::Pdf => {
+                    let markdown = formats::pdf::to_markdown(&parse_ctx, input.bytes)?;
+                    if markdown.len() as u64 > limits.max_output_bytes {
+                        return Err(ConvertError::limit(
+                            Limit::OutputBytes,
+                            limits.max_output_bytes,
+                        ));
+                    }
+                    (markdown, parse_ctx.into_diagnostics())
+                }
                 format => {
-                    let (document, diagnostics) = parse_document(parse_ctx, input.bytes, format)?;
-                    (document_to_markdown(&document), diagnostics)
+                    let document = parse_document(&parse_ctx, input.bytes, format)?;
+                    let meter = Meter::new(parse_ctx.ledger(), limits.max_output_bytes);
+                    let markdown = render(&document, &meter)?;
+                    (markdown, diagnostics_of(parse_ctx, &document))
                 }
             };
             conclude(self.config.on_loss, markdown, diagnostics)
@@ -147,11 +161,12 @@ impl fmt::Debug for Input<'_> {
 }
 
 /// A parsed document and its diagnostics, keeping the [`Config`] it was
-/// parsed under for [`Parsed::render`].
+/// parsed under and the work its parse charged for [`Parsed::render`].
 #[derive(Debug, Clone)]
 pub struct Parsed {
     document: Document,
     diagnostics: Diagnostics,
+    fuel: u64,
     config: Arc<Config>,
 }
 
@@ -176,19 +191,25 @@ impl Parsed {
     }
 
     /// Render the document to Markdown on a pool built from its [`Config`],
-    /// carrying the parse's diagnostics.
+    /// carrying the parse's diagnostics and charging its work on from the
+    /// parse's, as [`Converter::convert`] does.
     ///
     /// # Errors
     ///
     /// [`ConvertError::Incomplete`] when content was lost under
     /// [`OnLoss::Fail`]; [`ConvertError::ResourceLimit`] when the document
-    /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth);
+    /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth),
+    /// its Markdown passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
+    /// or the parse and the render together charge more than
+    /// [`Limits::max_work`](crate::Limits::max_work);
     /// [`ConvertError::Internal`] when the pool cannot start or rendering
     /// panics.
     pub fn render(&self) -> Result<Conversion, ConvertError> {
+        let limits = &self.config.limits;
         self.on_pool(|| {
-            check_nesting(&self.document, self.config.limits.max_nesting_depth)?;
-            let markdown = document_to_markdown(&self.document);
+            check_nesting(&self.document, limits.max_nesting_depth)?;
+            let ledger = Ledger::new(limits.max_work, None).starting_at(self.fuel);
+            let markdown = render(&self.document, &Meter::new(&ledger, limits.max_output_bytes))?;
             conclude(self.config.on_loss, markdown, self.diagnostics.clone())
         })
     }
@@ -202,17 +223,22 @@ impl Parsed {
 }
 
 fn parse_document(
-    parse_ctx: ParseCtx<'_>,
+    parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
     format: Format,
-) -> Result<(Document, Diagnostics), ConvertError> {
-    let document = formats::parse(&parse_ctx, bytes, format)?;
+) -> Result<Document, ConvertError> {
+    let document = formats::parse(parse_ctx, bytes, format)?;
     check_nesting(&document, parse_ctx.limits().max_nesting_depth)?;
+    Ok(document)
+}
+
+/// What the parse reported, and what rendering `document` loses.
+fn diagnostics_of(parse_ctx: ParseCtx<'_>, document: &Document) -> Diagnostics {
     let mut diagnostics = parse_ctx.into_diagnostics();
-    for (code, region, count) in render_losses(&document, Unread::of(&diagnostics)) {
+    for (code, region, count) in render_losses(document, Unread::of(&diagnostics)) {
         diagnostics.add(code, region, None, count);
     }
-    Ok((document, diagnostics))
+    diagnostics
 }
 
 fn conclude(
@@ -450,7 +476,12 @@ mod tests {
             let mut config = Config::default();
             config.limits.max_nesting_depth = max;
             let document = Document { blocks: blocks.clone(), ..Document::default() };
-            Parsed { document, diagnostics: Diagnostics::default(), config: Arc::new(config) }
+            Parsed {
+                document,
+                diagnostics: Diagnostics::default(),
+                fuel: 0,
+                config: Arc::new(config),
+            }
         };
         assert!(parsed(5).render().is_ok());
         let error = parsed(4).render();
@@ -556,6 +587,7 @@ mod tests {
         let parsed = Parsed {
             document,
             diagnostics: Diagnostics::default(),
+            fuel: 0,
             config: Arc::new(Config::default()),
         };
         let rendered = on_a_small_stack(|| parsed.render());

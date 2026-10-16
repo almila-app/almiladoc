@@ -44,6 +44,8 @@ path = [
     "src/ledger.rs",
     "src/package/directory.rs",
     "src/pool.rs",
+    "src/render/markdown/shape.rs",
+    "src/render/markdown/sink.rs",
     "src/shared/link_label.rs",
     "tests/bounds.rs",
     "tests/container.rs",
@@ -129,7 +131,6 @@ path = [
     "python/src/lib.rs",
     "python/tests/test_almiladoc.py",
     "src/error.rs",
-    "src/formats/csv.rs",
     "src/formats/detect.rs",
     "src/formats/doc/lists.rs",
     "src/formats/doc/mod.rs",
@@ -167,8 +168,10 @@ path = [
     "src/package/mod.rs",
     "src/package/path.rs",
     "src/package/relationships.rs",
+    "src/render/markdown/escape.rs",
     "src/render/markdown/inline.rs",
     "src/render/markdown/mod.rs",
+    "src/render/markdown/table.rs",
     "src/render/markdown/tests.rs",
     "src/shared/assets.rs",
     "src/shared/binary.rs",
@@ -308,5 +311,15 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/csv.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 APZN <129354802+jsk1004ha@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

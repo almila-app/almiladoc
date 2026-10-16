@@ -64,6 +64,24 @@ fn math_in_a_table_cell_escapes_pipes() {
 }
 
 #[test]
+fn paragraph_math_keeps_pipes_and_an_escaped_dollar() {
+    let md =
+        doc(vec![Block::Paragraph(vec![Inline::plain("a "), Inline::Math("|x| a\\$b".into())])]);
+    assert_eq!(md, "a $|x| a\\$b$\n");
+}
+
+#[test]
+fn a_styled_dollar_closes_a_dollar_before_it() {
+    let md = doc(vec![Block::Paragraph(vec![
+        Inline::plain("cost $x"),
+        Inline::LineBreak,
+        styled("y$", BOLD),
+        Inline::plain(" z"),
+    ])]);
+    assert_eq!(md, "cost \\$x\\\n**y$** z\n");
+}
+
+#[test]
 fn escapes_paired_syntax_chars() {
     let md = doc(vec![Block::Paragraph(vec![Inline::plain("a *bold* _it_ ~st~ `code`")])]);
     assert_eq!(md, "a \\*bold* \\_it_ \\~st~ \\`code`\n");
@@ -439,6 +457,74 @@ fn code_span_pipes_cannot_split_table_cells() {
     };
     let md = doc(vec![table_from(vec![vec![code("a | b"), code(r"a \| b")]], 0)]);
     assert_eq!(md, concat!("|  |  |\n", "| --- | --- |\n", r"| `a \| b` | `a \\\| b` |", "\n"));
+    let md = doc(vec![table_from(vec![vec![code("a\\\n| b")]], 0)]);
+    assert_eq!(md, concat!("|  |\n", "| --- |\n", r"| `a\ \| b` |", "\n"));
+}
+
+#[test]
+fn a_cell_drops_blank_parts_lines_and_rows() {
+    let text = |t: &str| Block::Paragraph(vec![Inline::plain(t)]);
+    let nested = Table::from_rows(
+        vec![
+            vec![Cell::new(vec![text(" ")]), Cell::new(vec![text(" ")])],
+            vec![Cell::new(vec![text("x")]), Cell::new(vec![text("y")])],
+        ],
+        0,
+        TableKind::Data,
+    );
+    let cell = Cell::new(vec![
+        text("a"),
+        text(" "),
+        Block::Paragraph(vec![
+            Inline::plain("a"),
+            Inline::LineBreak,
+            Inline::LineBreak,
+            Inline::plain("b"),
+        ]),
+        Block::Table(nested),
+    ]);
+    let md = doc(vec![table_from(vec![vec![cell]], 0)]);
+    assert_eq!(md, "|  |\n| --- |\n| a<br>a<br>b<br>x / y |\n");
+}
+
+fn refused_on_what_it_holds(blocks: Vec<Block>, notes: Vec<Note>) {
+    let document = Document { blocks, notes, assets: Vec::new() };
+    let len = super::document_to_markdown(&document).len() as u64;
+    let ledger = crate::ledger::Ledger::new(u64::MAX, None);
+    let rendered = super::render(&document, &super::Meter::new(&ledger, len));
+    assert!(
+        matches!(rendered, Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. })),
+        "{len}: {rendered:?}"
+    );
+}
+
+#[test]
+fn held_paragraphs_headings_markers_and_note_labels_count_against_the_maximum() {
+    refused_on_what_it_holds(vec![Block::Paragraph(vec![Inline::plain("abc   ")])], vec![]);
+    refused_on_what_it_holds(vec![heading(1, "abc        ")], vec![]);
+    let silent = Note {
+        id: "n".into(),
+        kind: NoteKind::Footnote,
+        blocks: vec![Block::heading(1, vec![Inline::plain(" ")])],
+    };
+    refused_on_what_it_holds(vec![Block::Paragraph(vec![Inline::plain("abc")])], vec![silent]);
+    let item =
+        ListItem { blocks: vec![Block::Paragraph(vec![Inline::plain("  ")])], marker_label: None };
+    refused_on_what_it_holds(
+        vec![Block::List(List { marker: MarkerKind::Bullet, start: 1, items: vec![item] })],
+        vec![],
+    );
+}
+
+#[test]
+fn notes_without_a_body_open_the_document() {
+    let note = Note {
+        id: "n".into(),
+        kind: NoteKind::Footnote,
+        blocks: vec![Block::Paragraph(vec![Inline::plain("N")])],
+    };
+    let md = document_to_markdown(&Document { blocks: vec![], notes: vec![note], assets: vec![] });
+    assert_eq!(md, "[^1]: N\n");
 }
 
 #[test]

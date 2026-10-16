@@ -2,181 +2,251 @@
 //! blank cells (GFM has no span syntax); the grid invariant means the
 //! renderer never synthesizes or duplicates columns.
 
-use crate::model::{Block, Cell, CellSlot, Table};
-use crate::render::markdown::Ctx;
+use crate::error::ConvertError;
+use crate::model::{Block, Cell, CellSlot, MarkerKind, Table};
 use crate::render::markdown::escape::InlineContext;
 use crate::render::markdown::inline::{push_code_span, push_math_span, render_inlines};
+use crate::render::markdown::sink::{Sink, Text};
+use crate::render::markdown::{Ctx, escape_marker_label};
 
-struct RenderedCell {
-    text: String,
+struct RenderedCell<'m> {
+    text: Text<'m>,
     covered_span: bool,
 }
 
-pub(crate) fn render_table(table: &Table, rc: &Ctx) -> Option<String> {
+/// Write `table`, rendering every cell first, held until written: trailing
+/// blank rows and columns are only known once all are rendered.
+pub(crate) fn write_table(
+    table: &Table,
+    rc: &Ctx,
+    sink: &mut Sink<'_>,
+) -> Result<(), ConvertError> {
     // Interior empty rows render as blank rows — they carry the source's
     // row coordinates; trailing blank rows are popped below.
-    if table.grid.is_empty() {
-        return None;
-    }
+    let meter = sink.meter();
     let width = table.grid.iter().map(|r| r.len()).max().unwrap_or(0);
-    let mut rendered: Vec<Vec<RenderedCell>> = table
-        .grid
-        .iter()
-        .map(|row| {
-            let mut cells: Vec<RenderedCell> = row
-                .iter()
-                .map(|slot| match slot {
-                    CellSlot::Origin(cell) => {
-                        RenderedCell { text: render_cell(cell, rc), covered_span: false }
-                    }
-                    CellSlot::Covered { .. } => {
-                        RenderedCell { text: String::new(), covered_span: true }
-                    }
-                })
-                .collect();
-            cells.resize_with(width, || RenderedCell { text: String::new(), covered_span: false });
-            cells
-        })
-        .collect();
+    let mut rendered: Vec<Vec<RenderedCell<'_>>> = Vec::with_capacity(table.grid.len());
+    for row in &table.grid {
+        let mut cells: Vec<RenderedCell<'_>> = Vec::with_capacity(width);
+        for slot in row {
+            let mut text = Text::new(meter);
+            if let CellSlot::Origin(cell) = slot {
+                render_cell(cell, rc, &mut text)?;
+            }
+            cells.push(RenderedCell {
+                text,
+                covered_span: matches!(slot, CellSlot::Covered { .. }),
+            });
+        }
+        cells.resize_with(width, || RenderedCell { text: Text::new(meter), covered_span: false });
+        rendered.push(cells);
+    }
     while rendered.len() > 1
-        && rendered.last().is_some_and(|r| r.iter().all(|c| c.text.is_empty() && !c.covered_span))
+        && rendered
+            .last()
+            .is_some_and(|r| r.iter().all(|c| c.text.as_str().is_empty() && !c.covered_span))
     {
         rendered.pop();
     }
     let width = rendered
         .iter()
-        .map(|r| r.iter().rposition(|c| !c.text.is_empty() || c.covered_span).map_or(0, |i| i + 1))
+        .map(|r| {
+            r.iter()
+                .rposition(|c| !c.text.as_str().is_empty() || c.covered_span)
+                .map_or(0, |i| i + 1)
+        })
         .max()
         .unwrap_or(0);
     if width == 0 {
-        return None;
+        return Ok(());
     }
     for row in &mut rendered {
         row.truncate(width);
     }
 
-    let mut out = String::new();
     // GFM tables always carry a delimiter row, so a table with no header row
     // of its own renders an empty one above the data.
-    let header: Vec<String> = if table.header_rows >= 1 && !rendered.is_empty() {
-        rendered.remove(0).into_iter().map(|c| c.text).collect()
+    let mut rows = rendered.into_iter();
+    let header = if table.header_rows >= 1 { rows.next() } else { None };
+    if let Some(header) = header {
+        write_row(header, sink)?;
     } else {
-        vec![String::new(); width]
-    };
-    out.push_str(&format_row(header.iter().map(String::as_str)));
-    out.push('\n');
-    out.push_str(&format_row(std::iter::repeat_n("---", width)));
-    for row in &rendered {
-        out.push('\n');
-        out.push_str(&format_row(row.iter().map(|c| c.text.as_str())));
+        sink.write("|")?;
+        for _ in 0..width {
+            sink.write("  |")?;
+        }
     }
-    Some(out)
+    sink.write("\n|")?;
+    for _ in 0..width {
+        sink.write(" --- |")?;
+    }
+    for row in rows {
+        sink.write("\n")?;
+        write_row(row, sink)?;
+    }
+    Ok(())
 }
 
-fn format_row<'a>(cells: impl IntoIterator<Item = &'a str>) -> String {
-    let mut s = String::from("|");
+fn write_row<'m>(
+    cells: impl IntoIterator<Item = RenderedCell<'m>>,
+    sink: &mut Sink<'_>,
+) -> Result<(), ConvertError> {
+    sink.write("|")?;
     for cell in cells {
-        s.push(' ');
-        s.push_str(cell);
-        s.push_str(" |");
+        sink.write(" ")?;
+        sink.write_text(cell.text)?;
+        sink.write(" |")?;
     }
-    s
+    Ok(())
 }
 
-/// Flatten arbitrary block content into a single table-cell line.
-pub(crate) fn render_cell(cell: &Cell, rc: &Ctx) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// Flatten arbitrary block content into a single table-cell line in `out`:
+/// its parts joined by `<br>`, then in one pass each line trimmed, blank
+/// lines dropped and the rest joined by `<br>`.
+pub(crate) fn render_cell(cell: &Cell, rc: &Ctx, out: &mut Text<'_>) -> Result<(), ConvertError> {
+    let mut parts = Text::new(out.meter());
+    let mut joined = Join::new("<br>");
     for block in &cell.blocks {
-        cell_block_text(block, rc, &mut parts);
+        cell_block_text(block, rc, &mut parts, &mut joined)?;
     }
     // A cell's edge whitespace is padding the table's own padding would
     // swallow anyway, and spreadsheets carry it by the thousand.
-    parts
-        .join("<br>")
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("<br>")
+    let parts = parts.into_string();
+    let mut first = true;
+    for line in parts.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !first {
+            out.push_str("<br>")?;
+        }
+        out.push_str(line)?;
+        first = false;
+    }
+    Ok(())
 }
 
-fn cell_block_text(block: &Block, rc: &Ctx, parts: &mut Vec<String>) {
-    match block {
-        Block::Heading { content, .. } => {
-            let t = render_inlines(content, InlineContext::TableCell, rc);
-            if !t.trim().is_empty() {
-                parts.push(format!("**{}**", t.trim()));
-            }
+/// Parts rendered in place into one text, `sep` between those kept.
+struct Join {
+    sep: &'static str,
+    any: bool,
+}
+
+impl Join {
+    fn new(sep: &'static str) -> Self {
+        Join { sep, any: false }
+    }
+
+    /// Render one part after the separator it needs; `render` reports
+    /// whether it keeps what it rendered since the mark it is given, and a
+    /// part not kept is taken back with its separator.
+    fn part(
+        &mut self,
+        out: &mut Text<'_>,
+        render: impl FnOnce(&mut Text<'_>, usize) -> Result<bool, ConvertError>,
+    ) -> Result<(), ConvertError> {
+        let mark = out.len();
+        if self.any {
+            out.push_str(self.sep)?;
         }
-        Block::Paragraph(inlines) => {
+        let start = out.len();
+        if render(out, start)? {
+            self.any = true;
+        } else {
+            out.truncate(mark);
+        }
+        Ok(())
+    }
+}
+
+fn cell_block_text(
+    block: &Block,
+    rc: &Ctx,
+    out: &mut Text<'_>,
+    parts: &mut Join,
+) -> Result<(), ConvertError> {
+    match block {
+        Block::Heading { content, .. } => parts.part(out, |out, _| {
+            out.push_str("**")?;
+            let text = out.len();
+            render_inlines(content, InlineContext::TableCell, rc, out)?;
+            out.trim_since(text);
+            if out.len() == text {
+                return Ok(false);
+            }
+            out.push_str("**")?;
+            Ok(true)
+        }),
+        Block::Paragraph(inlines) => parts.part(out, |out, start| {
             // Edge whitespace is preserved here and protected in
             // `render_cell`; sources that retain cell padding (spreadsheets,
             // CSV) keep it in the final output.
-            let t = render_inlines(inlines, InlineContext::TableCell, rc);
-            if !t.trim().is_empty() {
-                parts.push(t);
-            }
-        }
+            render_inlines(inlines, InlineContext::TableCell, rc, out)?;
+            Ok(!out.since(start).trim().is_empty())
+        }),
         Block::List(list) => {
             for (i, item) in list.items.iter().enumerate() {
-                let mut inner: Vec<String> = Vec::new();
-                for b in &item.blocks {
-                    cell_block_text(b, rc, &mut inner);
-                }
-                let marker = match (&item.marker_label, list.marker) {
-                    (Some(label), _) => format!(
-                        "{} ",
-                        crate::render::markdown::escape_marker_label(
-                            label,
-                            InlineContext::TableCell
-                        )
-                    ),
-                    (None, crate::model::MarkerKind::Bullet) => "• ".to_string(),
-                    (None, kind) => {
-                        format!("{} ", kind.label(list.start.saturating_add(i as u64)))
+                parts.part(out, |out, _| {
+                    match (&item.marker_label, list.marker) {
+                        (Some(label), _) => {
+                            escape_marker_label(label, InlineContext::TableCell, out)?;
+                            out.push(' ')?;
+                        }
+                        (None, MarkerKind::Bullet) => out.push_str("• ")?,
+                        (None, kind) => out.push_str(&format!(
+                            "{} ",
+                            kind.label(list.start.saturating_add(i as u64))
+                        ))?,
                     }
-                };
-                if !inner.is_empty() {
-                    parts.push(format!("{marker}{}", inner.join(" ")));
-                }
+                    let mut inner = Join::new(" ");
+                    for b in &item.blocks {
+                        cell_block_text(b, rc, out, &mut inner)?;
+                    }
+                    Ok(inner.any)
+                })?;
             }
+            Ok(())
         }
         Block::Table(table) => {
             // Keep empty cells in the join so values stay in their source
             // column positions.
             for row in &table.grid {
-                let cells: Vec<String> = row
-                    .iter()
-                    .map(|slot| match slot {
-                        CellSlot::Origin(cell) => render_cell(cell, rc),
-                        CellSlot::Covered { .. } => String::new(),
-                    })
-                    .collect();
-                if cells.iter().any(|c| !c.is_empty()) {
-                    parts.push(cells.join(" / "));
-                }
+                parts.part(out, |out, _| {
+                    let mut any = false;
+                    for (i, slot) in row.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(" / ")?;
+                        }
+                        if let CellSlot::Origin(cell) = slot {
+                            let mark = out.len();
+                            render_cell(cell, rc, out)?;
+                            any |= out.len() > mark;
+                        }
+                    }
+                    Ok(any)
+                })?;
             }
+            Ok(())
         }
         Block::BlockQuote(blocks) => {
             for b in blocks {
-                cell_block_text(b, rc, parts);
+                cell_block_text(b, rc, out, parts)?;
             }
+            Ok(())
         }
         Block::CodeBlock { text, .. } => {
             let t = text.trim();
-            if !t.is_empty() {
-                let mut s = String::new();
-                push_code_span(t, InlineContext::TableCell, &mut s);
-                parts.push(s);
+            if t.is_empty() {
+                return Ok(());
             }
+            parts
+                .part(out, |out, _| push_code_span(t, InlineContext::TableCell, out).map(|()| true))
         }
         Block::Math(tex) => {
-            if !tex.trim().is_empty() {
-                let mut s = String::new();
-                push_math_span(tex, InlineContext::TableCell, &mut s);
-                parts.push(s);
+            if tex.trim().is_empty() {
+                return Ok(());
             }
+            parts.part(out, |out, _| {
+                push_math_span(tex, InlineContext::TableCell, out).map(|()| true)
+            })
         }
-        Block::Rule => {}
+        Block::Rule => Ok(()),
     }
 }

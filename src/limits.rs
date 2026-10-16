@@ -114,18 +114,21 @@ pub struct Limits {
     /// Units (pages, slides, sheets or spine items) in one document: each
     /// costs work and output even when empty. Not yet enforced.
     pub max_pages: u64,
-    /// Markdown bytes one conversion writes: rendering amplifies repeated
-    /// references. Not yet enforced.
+    /// Markdown bytes one conversion writes, counting what rendering holds
+    /// before writing it (a paragraph to trim, a table's cells): escaping and
+    /// repeated references amplify the input. A PDF's Markdown is measured
+    /// once extracted.
     pub max_output_bytes: u64,
     /// Work units one conversion charges, bounding its time
     /// deterministically: one per XML event, KiB decompressed from an
     /// archive, RTF token or skipped line break or NUL (one pass over the
     /// input, and one more over each font, style and list table group), CSV
     /// field, PPT record or text unit a hyperlink range reads, DOC formatting
-    /// run, and XLSX, XLSB or XLS grid position. The default, two units per
+    /// run, XLSX, XLSB or XLS grid position, and 64 bytes of Markdown
+    /// written (not a PDF's). The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges
-    /// 268 435 404 units and the costliest test-corpus document 6 970. Work
+    /// 268 435 404 units and the costliest test-corpus document 6 990. Work
     /// that grows faster than the input crosses it: a PPT of 65 hyperlinks
     /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging
     /// its range read and its label compared, asks 545 259 782.

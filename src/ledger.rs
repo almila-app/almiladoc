@@ -1,4 +1,4 @@
-//! The work ledger of one parse: deterministic fuel against
+//! The work ledger of one conversion: deterministic fuel against
 //! [`Limits::max_work`](crate::Limits::max_work), and the caller's
 //! [`CancelToken`], checked at every charge.
 
@@ -34,7 +34,7 @@ impl CancelToken {
     }
 }
 
-/// Fuel spent by one parse, saturating, and the token that may cancel it.
+/// Fuel spent by one conversion, saturating, and the token that may cancel it.
 #[derive(Debug)]
 pub(crate) struct Ledger<'a> {
     spent: Cell<u64>,
@@ -45,6 +45,12 @@ pub(crate) struct Ledger<'a> {
 impl<'a> Ledger<'a> {
     pub(crate) fn new(max: u64, cancel: Option<&'a CancelToken>) -> Self {
         Ledger { spent: Cell::new(0), max, cancel }
+    }
+
+    /// This ledger with `spent` already charged, as rendering continues the
+    /// parse's work.
+    pub(crate) fn starting_at(self, spent: u64) -> Self {
+        Ledger { spent: Cell::new(spent), ..self }
     }
 
     pub(crate) fn charge(&self, units: u64) -> Result<(), ConvertError> {
@@ -59,7 +65,6 @@ impl<'a> Ledger<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn spent(&self) -> u64 {
         self.spent.get()
     }
@@ -107,6 +112,17 @@ mod tests {
         token.cancel();
         let ledger = Ledger::new(1, Some(&token));
         assert!(matches!(ledger.charge(2), Err(ConvertError::Cancelled)));
+    }
+
+    #[test]
+    fn a_ledger_started_at_spent_fuel_fails_past_the_same_maximum() {
+        let ledger = Ledger::new(10, None).starting_at(9);
+        assert!(ledger.charge(1).is_ok());
+        assert!(matches!(
+            ledger.charge(1),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 10 })
+        ));
+        assert_eq!(ledger.spent(), 11);
     }
 
     #[test]

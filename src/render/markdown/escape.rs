@@ -1,9 +1,12 @@
 //! Context-sensitive minimal escaping: document text is escaped only where a
 //! character could actually parse as Markdown syntax in its context.
 
+use crate::error::ConvertError;
+use crate::render::markdown::sink::Text;
+
 /// Where an inline run is being rendered; controls which characters can be
 /// syntax there.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum InlineContext {
     Block,
     Heading,
@@ -62,14 +65,10 @@ impl Delims {
     /// text: every backtick and `]`, plus the emphasis delimiters that
     /// can close.
     pub(crate) fn insert_closers(&mut self, text: &str) {
-        let chars: Vec<char> = text.chars().collect();
-        let mut j = 0;
-        while j < chars.len() {
-            let end = run_end(&chars, j);
-            if let Some(slot) = partner_slot(&chars, j, end) {
-                self.0[slot] = true;
+        for (start, end, c) in runs(text) {
+            if let Some(set) = partner_slot(text, start, end, c).and_then(|s| self.0.get_mut(s)) {
+                *set = true;
             }
-            j = end;
         }
     }
 
@@ -84,61 +83,84 @@ impl Delims {
     }
 }
 
-/// End of the run of identical characters starting at `j`.
-fn run_end(chars: &[char], j: usize) -> usize {
-    let mut end = j + 1;
-    while end < chars.len() && chars[end] == chars[j] {
-        end += 1;
-    }
-    end
+/// The runs of one repeated character in `text`: the byte offsets each
+/// starts and ends at, and its character.
+fn runs(text: &str) -> impl Iterator<Item = (usize, usize, char)> + '_ {
+    let mut chars = text.char_indices().peekable();
+    std::iter::from_fn(move || {
+        let (start, c) = chars.next()?;
+        let mut end = start + c.len_utf8();
+        while let Some(&(at, next)) = chars.peek()
+            && next == c
+        {
+            end = at + next.len_utf8();
+            chars.next();
+        }
+        Some((start, end, c))
+    })
 }
 
-/// Slot for the delimiter run `j..end` when it can act as a pairing partner.
-/// Backticks and `]` always can: code spans pair by backtick-string length
-/// (even a backslash-escaped backtick still closes one) and brackets pair
-/// as link structure. `*`, `_` and `~` pair by flanking, and `$` closes
-/// math only after a non-space and before a non-digit, so those count only
-/// where they can close.
-fn partner_slot(chars: &[char], j: usize, end: usize) -> Option<usize> {
-    let slot = Delims::slot(chars[j])?;
-    let closes = match chars[j] {
+/// Slot for the run of `c` at `start..end` of `text` when it can act as a
+/// pairing partner. Backticks and `]` always can: code spans pair by
+/// backtick-string length (even a backslash-escaped backtick still closes
+/// one) and brackets pair as link structure. `*`, `_` and `~` pair by
+/// flanking, and `$` closes math only after a non-space and before a
+/// non-digit, so those count only where they can close.
+fn partner_slot(text: &str, start: usize, end: usize, c: char) -> Option<usize> {
+    let slot = Delims::slot(c)?;
+    let prev = text.get(..start).and_then(|before| before.chars().next_back());
+    let next = text.get(end..).and_then(|after| after.chars().next());
+    let closes = match c {
         '`' | ']' => true,
-        '$' => can_close_math(chars, j, end),
-        _ => can_close(chars, j, end),
+        '$' => can_close_math(prev, next),
+        _ => can_close(c, prev, next),
     };
     closes.then_some(slot)
 }
 
-/// Whether the `$` run `j..end` could close a math span: not preceded by
-/// whitespace, not followed by a digit. Unknown neighbours at the edges
-/// assume the worst.
-fn can_close_math(chars: &[char], j: usize, end: usize) -> bool {
-    let prev = j.checked_sub(1).map(|p| chars[p]);
-    let next = chars.get(end).copied();
+/// Whether a `$` run between `prev` and `next` could close a math span: not
+/// preceded by whitespace, not followed by a digit. Unknown neighbours at the
+/// edges assume the worst.
+fn can_close_math(prev: Option<char>, next: Option<char>) -> bool {
     !prev.is_some_and(char::is_whitespace) && !next.is_some_and(|n| n.is_ascii_digit())
 }
 
-/// Whether the emphasis or strikethrough run `j..end` could close a pair:
-/// approximate right-flanking (not preceded by whitespace, nor preceded by
-/// punctuation with a word character after), plus the intraword exclusion
-/// for `_`. Unknown neighbours at the edges assume the worst; the
-/// punctuation test stays ASCII so an unclassified character never
-/// suppresses a genuine closer.
-fn can_close(chars: &[char], j: usize, end: usize) -> bool {
-    let prev = j.checked_sub(1).map(|p| chars[p]);
-    let next = chars.get(end).copied();
+/// Whether a run of the emphasis or strikethrough character `c` between
+/// `prev` and `next` could close a pair: approximate right-flanking (not
+/// preceded by whitespace, nor preceded by punctuation with a word character
+/// after), plus the intraword exclusion for `_`. Unknown neighbours at the
+/// edges assume the worst; the punctuation test stays ASCII so an
+/// unclassified character never suppresses a genuine closer.
+fn can_close(c: char, prev: Option<char>, next: Option<char>) -> bool {
     if prev.is_some_and(char::is_whitespace) {
         return false;
     }
     if prev.is_some_and(|p| p.is_ascii_punctuation()) && next.is_some_and(char::is_alphanumeric) {
         return false;
     }
-    chars[j] != '_'
+    c != '_'
         || !(prev.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric))
 }
 
-/// Escape Markdown syntax in document text.
-pub(crate) fn escape_text(text: &str, ctx: InlineContext, opts: EscapeOpts) -> String {
+/// Whether a `$` in `text` could close a math span once every other
+/// non-space character is masked: one not preceded by whitespace.
+pub(crate) fn masked_dollar_closes(text: &str) -> bool {
+    runs(text).any(|(start, _, c)| {
+        c == '$'
+            && !text
+                .get(..start)
+                .and_then(|b| b.chars().next_back())
+                .is_some_and(char::is_whitespace)
+    })
+}
+
+/// Escape Markdown syntax in document text into `out`.
+pub(crate) fn escape_text(
+    text: &str,
+    ctx: InlineContext,
+    opts: EscapeOpts,
+    out: &mut Text<'_>,
+) -> Result<(), ConvertError> {
     let EscapeOpts {
         at_line_start,
         styled,
@@ -147,41 +169,42 @@ pub(crate) fn escape_text(text: &str, ctx: InlineContext, opts: EscapeOpts) -> S
         trailing_delims,
         in_label,
     } = opts;
-    let chars: Vec<char> = text.chars().collect();
     // Last position of each delimiter that can pair; one with no later
     // partner is inert.
     let mut last: [Option<usize>; 6] = [None; 6]; // * _ ~ ` ] $
-    let mut j = 0;
-    while j < chars.len() {
-        let end = run_end(&chars, j);
-        if let Some(slot) = partner_slot(&chars, j, end) {
-            last[slot] = Some(end - 1);
+    for (start, end, c) in runs(text) {
+        if let Some(slot) = partner_slot(text, start, end, c).and_then(|s| last.get_mut(s)) {
+            *slot = Some(end - c.len_utf8());
         }
-        j = end;
     }
-    let mut out = String::with_capacity(text.len() + 8);
     let mut line_has_content = !(at_line_start && ctx == InlineContext::Block);
+    let mut flushed = 0;
+    let mut prev: Option<char> = None;
     let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
+    while let Some(rest) = text.get(i..)
+        && let Some(c) = rest.chars().next()
+    {
+        let after = i + c.len_utf8();
         if c == '\n' {
-            out.push('\n');
             if ctx == InlineContext::Block {
                 line_has_content = false;
             }
-            i += 1;
+            prev = Some(c);
+            i = after;
             continue;
         }
         let start_of_line = !line_has_content;
         if !c.is_whitespace() {
             line_has_content = true;
         }
-        let next = chars.get(i + 1).copied();
+        let next = rest.chars().nth(1);
         // At the run's end the next character is unknown; trailing_active assumes the worst.
         let next_nonspace =
             next.map_or(trailing_active || trailing_nonspace, |n| !n.is_whitespace());
         let paired = |slot: usize| {
-            trailing_active || trailing_delims.contains(slot) || last[slot].is_some_and(|j| j > i)
+            trailing_active
+                || trailing_delims.contains(slot)
+                || last.get(slot).copied().flatten().is_some_and(|j| j > i)
         };
         let escape = match c {
             '\\' => true,
@@ -192,7 +215,7 @@ pub(crate) fn escape_text(text: &str, ctx: InlineContext, opts: EscapeOpts) -> S
             '`' => styled || paired(3),
             '*' => styled || start_of_line || (next_nonspace && paired(0)),
             '_' => {
-                let prev_alnum = i > 0 && chars[i - 1].is_alphanumeric();
+                let prev_alnum = prev.is_some_and(char::is_alphanumeric);
                 let next_alnum = next.is_some_and(char::is_alphanumeric);
                 styled || (next_nonspace && !(prev_alnum && next_alnum) && paired(1))
             }
@@ -201,32 +224,33 @@ pub(crate) fn escape_text(text: &str, ctx: InlineContext, opts: EscapeOpts) -> S
             '<' => next.is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?')),
             '!' => next.is_none() && trailing_active,
             '|' if ctx == InlineContext::TableCell => true,
-            '&' if entity_ahead(&chars[i..]) => {
-                out.push_str("&amp;");
-                i += 1;
+            '&' if entity_ahead(rest) => {
+                out.push_str(text.get(flushed..i).unwrap_or_default())?;
+                out.push_str("&amp;")?;
+                flushed = after;
+                prev = Some(c);
+                i = after;
                 continue;
             }
             '#' if start_of_line => {
-                let j = (i..chars.len()).find(|&j| chars[j] != '#').unwrap_or(chars.len());
-                chars.get(j).is_none_or(|n| n.is_whitespace())
+                rest.trim_start_matches('#').chars().next().is_none_or(char::is_whitespace)
             }
-            '-' if start_of_line => !next_nonspace || line_is_only(&chars[i..], '-'),
+            '-' if start_of_line => !next_nonspace || line_is_only(rest, '-'),
             '+' if start_of_line => !next_nonspace,
             '>' if start_of_line => true,
-            '=' if start_of_line => line_is_only(&chars[i..], '='),
+            '=' if start_of_line => line_is_only(rest, '='),
             '0'..='9' if start_of_line => {
-                let mut j = i;
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j < chars.len()
-                    && (chars[j] == '.' || chars[j] == ')')
-                    && chars.get(j + 1).is_none_or(|n| n.is_whitespace())
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                let mut tail = rest.get(digits..).unwrap_or_default().chars();
+                if let Some(mark @ ('.' | ')')) = tail.next()
+                    && tail.next().is_none_or(char::is_whitespace)
                 {
-                    out.extend(&chars[i..j]);
-                    out.push('\\');
-                    out.push(chars[j]);
-                    i = j + 1;
+                    let at = i + digits;
+                    out.push_str(text.get(flushed..at).unwrap_or_default())?;
+                    out.push('\\')?;
+                    flushed = at;
+                    prev = Some(mark);
+                    i = at + mark.len_utf8();
                     continue;
                 }
                 false
@@ -234,96 +258,85 @@ pub(crate) fn escape_text(text: &str, ctx: InlineContext, opts: EscapeOpts) -> S
             _ => false,
         };
         if escape {
-            out.push('\\');
+            out.push_str(text.get(flushed..i).unwrap_or_default())?;
+            out.push('\\')?;
+            flushed = i;
         }
-        out.push(c);
-        i += 1;
+        prev = Some(c);
+        i = after;
     }
-    out
+    out.push_str(text.get(flushed..).unwrap_or_default())
 }
 
 /// True when the rest of the current line is just `c`, spaces, and tabs
 /// (a setext underline or thematic break).
-fn line_is_only(chars: &[char], c: char) -> bool {
-    chars.iter().take_while(|&&ch| ch != '\n').all(|&ch| ch == c || ch == ' ' || ch == '\t')
+fn line_is_only(rest: &str, c: char) -> bool {
+    rest.chars().take_while(|&ch| ch != '\n').all(|ch| ch == c || ch == ' ' || ch == '\t')
 }
 
-fn entity_ahead(chars: &[char]) -> bool {
-    let mut i = 1;
-    if i < chars.len() && chars[i] == '#' {
+/// Whether the `&` that starts `rest` opens a character reference.
+fn entity_ahead(rest: &str) -> bool {
+    let after = rest.get(1..).unwrap_or_default();
+    if after.starts_with('#') {
         return true;
     }
-    let mut seen = 0;
-    while i < chars.len() && chars[i].is_ascii_alphanumeric() {
-        i += 1;
-        seen += 1;
-    }
-    seen > 0 && i < chars.len() && chars[i] == ';'
+    let name = after.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    name > 0 && after.as_bytes().get(name) == Some(&b';')
 }
 
-/// Format a link destination, angle-bracketing when needed.
-pub(crate) fn format_url(url: &str) -> String {
+/// Write a link destination into `out`, angle-bracketing when needed.
+pub(crate) fn format_url(url: &str, out: &mut Text<'_>) -> Result<(), ConvertError> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut escaped = String::with_capacity(url.len());
-    for c in url.chars() {
-        match c {
-            '<' => escaped.push_str("%3C"),
-            '>' => escaped.push_str("%3E"),
+    // Controls are encoded below, so only the whitespace that stays raw
+    // needs the brackets.
+    let bracketed =
+        url.chars().any(|c| (c.is_whitespace() && !c.is_control()) || c == '(' || c == ')');
+    if bracketed {
+        out.push('<')?;
+    }
+    let mut flushed = 0;
+    for (i, c) in url.char_indices() {
+        let encoded = match c {
+            '<' => "%3C",
+            '>' => "%3E",
             // Raw pipes split GFM table cells.
-            '|' => escaped.push_str("%7C"),
-            // Encode controls so they cannot split the Markdown output.
-            c if c.is_control() => {
-                let mut bytes = [0; 4];
-                for byte in c.encode_utf8(&mut bytes).bytes() {
-                    escaped.push('%');
-                    escaped.push(HEX[(byte >> 4) as usize] as char);
-                    escaped.push(HEX[(byte & 0x0F) as usize] as char);
-                }
+            '|' => "%7C",
+            _ if !c.is_control() => continue,
+            _ => "",
+        };
+        out.push_str(url.get(flushed..i).unwrap_or_default())?;
+        flushed = i + c.len_utf8();
+        if !encoded.is_empty() {
+            out.push_str(encoded)?;
+            continue;
+        }
+        // Encode controls so they cannot split the Markdown output.
+        for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+            out.push('%')?;
+            for nibble in [byte >> 4, byte & 0x0F] {
+                out.push(char::from(HEX.get(usize::from(nibble)).copied().unwrap_or(b'0')))?;
             }
-            c => escaped.push(c),
         }
     }
-    if escaped.chars().any(|c| c.is_whitespace() || c == '(' || c == ')') {
-        format!("<{escaped}>")
-    } else {
-        escaped
+    out.push_str(url.get(flushed..).unwrap_or_default())?;
+    if bracketed {
+        out.push('>')?;
     }
+    Ok(())
 }
 
-pub(crate) fn escape_url_as_text(url: &str, ctx: InlineContext) -> String {
+pub(crate) fn escape_url_as_text(
+    url: &str,
+    ctx: InlineContext,
+    out: &mut Text<'_>,
+) -> Result<(), ConvertError> {
     let cleaned: String = url.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     escape_text(
         &cleaned,
         ctx,
         EscapeOpts { trailing_active: true, in_label: true, ..Default::default() },
+        out,
     )
-}
-
-/// Prepare a code span's text for a table cell, where a pipe is the only
-/// character between the fences that is still syntax.
-///
-/// A backslash run already sitting in front of a pipe would pair off with the
-/// escape and leave the pipe bare, so it is doubled to keep the escape intact.
-/// That doubling survives into the rendered code span: GFM has no encoding for
-/// a code span that contains a backslash immediately before a pipe, and an
-/// intact row is worth more than the exact backslash count.
-pub(crate) fn escape_cell_code_span(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut backslashes = 0;
-    for c in text.chars() {
-        match c {
-            '|' => {
-                for _ in 0..=backslashes {
-                    out.push('\\');
-                }
-                backslashes = 0;
-            }
-            '\\' => backslashes += 1,
-            _ => backslashes = 0,
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Shortest backtick fence longer than any backtick run in `text`.

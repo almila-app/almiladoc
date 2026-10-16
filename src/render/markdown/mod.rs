@@ -3,6 +3,8 @@
 mod anchors;
 mod escape;
 mod inline;
+mod shape;
+mod sink;
 mod table;
 
 #[cfg(test)]
@@ -12,17 +14,25 @@ use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{
-    Block, Document, Inline, LinkTarget, List, MarkerKind, Note, TableKind, inlines_are_empty,
+    Block, Cell, CellSlot, Document, Inline, LinkTarget, List, MarkerKind, Note, Table, TableKind,
+    inlines_are_empty,
 };
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
 use inline::{LinkMemo, render_inlines};
+use shape::Shapes;
+pub(crate) use sink::Meter;
+use sink::{Sink, Text};
 use std::collections::{HashMap, HashSet};
 
-/// Escape a source-derived composite marker label for literal use: control
-/// characters collapse to spaces and Markdown syntax is neutralized so a
-/// crafted label cannot alter document structure.
-pub(crate) fn escape_marker_label(label: &str, ctx: InlineContext) -> String {
+/// Escape a source-derived composite marker label for literal use into
+/// `out`: control characters collapse to spaces and Markdown syntax is
+/// neutralized so a crafted label cannot alter document structure.
+pub(crate) fn escape_marker_label(
+    label: &str,
+    ctx: InlineContext,
+    out: &mut Text<'_>,
+) -> Result<(), ConvertError> {
     let cleaned: String = label.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     let opts = EscapeOpts {
         // List-item content re-opens block syntax after the `- ` marker.
@@ -30,7 +40,7 @@ pub(crate) fn escape_marker_label(label: &str, ctx: InlineContext) -> String {
         trailing_active: true,
         ..Default::default()
     };
-    escape_text(&cleaned, ctx, opts)
+    escape_text(&cleaned, ctx, opts, out)
 }
 
 /// Footnote id -> rendered number, shared by all render functions.
@@ -41,35 +51,50 @@ pub(crate) struct Ctx {
     nums: NoteNumbers,
     anchors: AnchorMap,
     links: LinkMemo,
+    shapes: Shapes,
 }
 
 impl Ctx {
     fn of(doc: &Document) -> Self {
-        Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc), links: LinkMemo::default() }
+        Ctx {
+            nums: number_notes(doc),
+            anchors: resolve_anchors(doc),
+            links: LinkMemo::default(),
+            shapes: Shapes::default(),
+        }
     }
 }
 
-pub fn document_to_markdown(doc: &Document) -> String {
+/// Render `doc` as GitHub-Flavored Markdown, every byte charged to `meter`.
+pub(crate) fn render(doc: &Document, meter: &Meter<'_>) -> Result<String, ConvertError> {
     let rc = Ctx::of(doc);
-    let mut parts: Vec<String> = doc.blocks.iter().filter_map(|b| render_block(b, &rc)).collect();
-    for (num, _, body) in note_definitions(doc, &rc).defined {
-        let mut lines = body.lines();
-        let first = lines.next().unwrap_or("");
-        let mut s = format!("[^{num}]: {first}");
-        for line in lines {
-            s.push('\n');
-            if !line.is_empty() {
-                s.push_str("    ");
-                s.push_str(line);
-            }
+    let mut sink = Sink::new(meter);
+    write_blocks(&doc.blocks, &rc, &mut sink)?;
+    let mut defined: HashSet<usize> = HashSet::new();
+    for (note, num) in numbered_notes(doc, &rc) {
+        if defined.contains(&num) {
+            continue;
         }
-        parts.push(s);
+        if sink.len() > 0 {
+            sink.gap(2);
+        }
+        let mut label = Text::new(meter);
+        label.push_str(&format!("[^{num}]: "))?;
+        sink.push_marker(label, 4);
+        let before = sink.len();
+        write_blocks(&note.blocks, &rc, &mut sink)?;
+        sink.pop();
+        if sink.len() > before {
+            defined.insert(num);
+        }
     }
-    let mut out = parts.join("\n\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out
+    sink.finish()
+}
+
+#[cfg(test)]
+pub(crate) fn document_to_markdown(doc: &Document) -> String {
+    let ledger = crate::ledger::Ledger::new(u64::MAX, None);
+    render(doc, &Meter::new(&ledger, u64::MAX)).expect("an unlimited render succeeds")
 }
 
 /// Which causes the parse already counted, silencing the render losses they
@@ -100,22 +125,31 @@ pub(crate) type RenderLoss = (DiagnosticCode, Region, u64);
 
 /// What rendering `doc` loses, by code, region and count: note bodies under
 /// an id already defined, and links to anchors and note references whose
-/// target exists nowhere, unless `unread` names their cause.
+/// target exists nowhere, unless `unread` names their cause. Read from the
+/// model alone: nothing is rendered.
 pub(crate) fn render_losses(doc: &Document, unread: Unread) -> Vec<RenderLoss> {
     let rc = Ctx::of(doc);
-    let definitions = note_definitions(doc, &rc);
+    let mut numbers: HashSet<usize> = HashSet::new();
+    let mut duplicates: u64 = 0;
+    let mut notes = Dangling::default();
+    for (note, num) in numbered_notes(doc, &rc) {
+        if !note.blocks.iter().any(|b| shape::shows(b, &rc)) {
+            continue;
+        }
+        if numbers.insert(num) {
+            visit_inlines(&note.blocks, &mut |inline| notes.tally(inline, &rc));
+        } else {
+            duplicates = duplicates.saturating_add(1);
+        }
+    }
     let mut body = Dangling::default();
     visit_inlines(&doc.blocks, &mut |inline| body.tally(inline, &rc));
-    let mut notes = Dangling::default();
-    for (_, note, _) in &definitions.defined {
-        visit_inlines(&note.blocks, &mut |inline| notes.tally(inline, &rc));
-    }
     let dangling = |found: Dangling| {
         let links = if unread.units { 0 } else { found.links };
         links.saturating_add(if unread.notes { 0 } else { found.note_refs })
     };
     [
-        (DiagnosticCode::DuplicateNote, Region::Note, definitions.duplicates),
+        (DiagnosticCode::DuplicateNote, Region::Note, duplicates),
         (DiagnosticCode::DanglingReference, Region::Body, dangling(body)),
         (DiagnosticCode::DanglingReference, Region::Note, dangling(notes)),
     ]
@@ -180,29 +214,13 @@ fn visit_inlines(blocks: &[Block], visit: &mut impl FnMut(&Inline)) {
     }
 }
 
-struct NoteDefinitions<'d> {
-    defined: Vec<(usize, &'d Note, String)>,
-    duplicates: u64,
-}
-
-fn note_definitions<'d>(doc: &'d Document, rc: &Ctx) -> NoteDefinitions<'d> {
+/// The notes that have a number, in number order and, under one number, in
+/// document order: the first whose body shows anything is its definition.
+fn numbered_notes<'d>(doc: &'d Document, rc: &Ctx) -> Vec<(&'d Note, usize)> {
     let mut ordered: Vec<(&Note, usize)> =
         doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
     ordered.sort_by_key(|(_, num)| *num);
-    let mut definitions = NoteDefinitions { defined: Vec::new(), duplicates: 0 };
-    let mut numbers: HashSet<usize> = HashSet::new();
-    for (note, num) in ordered {
-        let body = render_blocks(&note.blocks, rc);
-        if body.is_empty() {
-            continue;
-        }
-        if numbers.insert(num) {
-            definitions.defined.push((num, note, body));
-        } else {
-            definitions.duplicates = definitions.duplicates.saturating_add(1);
-        }
-    }
-    definitions
+    ordered
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the
@@ -330,118 +348,135 @@ pub(crate) fn check_nesting(doc: &Document, max: u64) -> Result<(), ConvertError
     Ok(())
 }
 
-fn render_blocks(blocks: &[Block], rc: &Ctx) -> String {
-    let parts: Vec<String> = blocks.iter().filter_map(|b| render_block(b, rc)).collect();
-    parts.join("\n\n")
+/// Write `blocks` separated by empty lines, skipping those that write
+/// nothing.
+fn write_blocks(blocks: &[Block], rc: &Ctx, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    let start = sink.len();
+    for block in blocks {
+        if sink.len() > start {
+            sink.gap(2);
+        }
+        write_block(block, rc, sink)?;
+    }
+    if sink.len() > start {
+        sink.drop_gap();
+    }
+    Ok(())
 }
 
-fn render_block(block: &Block, rc: &Ctx) -> Option<String> {
+/// The one cell of a trivial layout table, which is scaffolding: its content
+/// renders directly.
+fn layout_cell(table: &Table) -> Option<&Cell> {
+    if table.kind != TableKind::Layout || !table.is_single_cell() {
+        return None;
+    }
+    match table.grid.first().and_then(|row| row.first()) {
+        Some(CellSlot::Origin(cell)) => Some(cell),
+        _ => None,
+    }
+}
+
+fn write_block(block: &Block, rc: &Ctx, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
     match block {
         Block::Heading { level, content, .. } => {
-            let text = render_inlines(content, InlineContext::Heading, rc);
+            let mut text = Text::new(sink.meter());
+            render_inlines(content, InlineContext::Heading, rc, &mut text)?;
+            let text = text.into_string();
             let text = text.trim();
             if text.is_empty() {
-                return None;
+                return Ok(());
             }
             let level = (*level).clamp(1, 6) as usize;
-            Some(format!("{} {}", "#".repeat(level), text))
+            sink.write(&format!("{} ", "#".repeat(level)))?;
+            sink.write(text)
         }
         Block::Paragraph(inlines) => {
-            let text = render_inlines(inlines, InlineContext::Block, rc);
-            let trimmed = trim_paragraph(&text);
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            let mut text = Text::new(sink.meter());
+            render_inlines(inlines, InlineContext::Block, rc, &mut text)?;
+            write_paragraph(&text.into_string(), sink)
         }
-        Block::List(list) => render_list(list, rc),
-        // Trivial layout tables are scaffolding; render their content directly.
-        Block::Table(t) if t.kind == TableKind::Layout && t.is_single_cell() => {
-            let crate::model::CellSlot::Origin(cell) = &t.grid[0][0] else { unreachable!() };
-            let inner = render_blocks(&cell.blocks, rc);
-            if inner.is_empty() { None } else { Some(inner) }
-        }
-        Block::Table(t) => table::render_table(t, rc),
+        Block::List(list) => write_list(list, rc, sink),
+        Block::Table(t) => match layout_cell(t) {
+            Some(cell) => write_blocks(&cell.blocks, rc, sink),
+            None => table::write_table(t, rc, sink),
+        },
         Block::BlockQuote(blocks) => {
-            let inner = render_blocks(blocks, rc);
-            if inner.is_empty() {
-                return None;
-            }
-            let quoted: Vec<String> = inner
-                .lines()
-                .map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") })
-                .collect();
-            Some(quoted.join("\n"))
+            sink.push_quote();
+            write_blocks(blocks, rc, sink)?;
+            sink.pop();
+            Ok(())
         }
         Block::CodeBlock { lang, text } => {
             let fence = backtick_fence(text, 3);
-            let lang = lang.as_deref().unwrap_or("");
-            let body = text.trim_end_matches('\n');
-            Some(format!("{fence}{lang}\n{body}\n{fence}"))
+            sink.write(&fence)?;
+            sink.write(lang.as_deref().unwrap_or(""))?;
+            sink.write("\n")?;
+            sink.write(text.trim_end_matches('\n'))?;
+            sink.write("\n")?;
+            sink.write(&fence)
         }
-        Block::Rule => Some("---".to_string()),
+        Block::Rule => sink.write("---"),
         Block::Math(tex) => {
             let tex = tex.trim();
             if tex.is_empty() {
-                return None;
+                return Ok(());
             }
             // A bare `$` is never valid inside math; escaped, it cannot
             // close the block early.
-            let mut source = String::with_capacity(tex.len());
+            sink.write("$$\n")?;
+            let mut flushed = 0;
             let mut backslashes = 0;
-            for c in tex.chars() {
+            for (i, c) in tex.char_indices() {
                 if c == '$' && backslashes % 2 == 0 {
-                    source.push('\\');
+                    sink.write(tex.get(flushed..i).unwrap_or_default())?;
+                    sink.write("\\")?;
+                    flushed = i;
                 }
-                source.push(c);
                 backslashes = if c == '\\' { backslashes + 1 } else { 0 };
             }
-            Some(format!("$$\n{source}\n$$"))
+            sink.write(tex.get(flushed..).unwrap_or_default())?;
+            sink.write("\n$$")
         }
     }
 }
 
-fn render_list(list: &List, rc: &Ctx) -> Option<String> {
-    if list.items.is_empty() {
-        return None;
-    }
-    let mut rendered_items: Vec<String> = Vec::new();
-    let mut loose = false;
+fn write_list(list: &List, rc: &Ctx, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    let loose = shape::loose(list, rc, sink.meter())?;
     for (i, item) in list.items.iter().enumerate() {
+        if i > 0 {
+            sink.gap(if loose { 2 } else { 1 });
+        }
         // GFM has decimal ordered lists only, so Roman/alphabetic levels
         // render as bullets carrying the source marker as literal text
         // (`- iv. …`) — the source marker semantics stay visible. Items with
         // an explicit label (composite number text) render it the same way.
-        let marker = match (&item.marker_label, list.marker) {
+        let mut marker = Text::new(sink.meter());
+        match (&item.marker_label, list.marker) {
             (Some(label), _) => {
-                format!("- {} ", escape_marker_label(label, InlineContext::Block))
+                marker.push_str("- ")?;
+                escape_marker_label(label, InlineContext::Block, &mut marker)?;
+                marker.push(' ')?;
             }
-            (None, MarkerKind::Bullet) => "- ".to_string(),
-            (None, MarkerKind::Decimal) => format!("{}. ", list.start.saturating_add(i as u64)),
-            (None, kind) => format!("- {} ", kind.label(list.start.saturating_add(i as u64))),
-        };
-        let body = render_blocks(&item.blocks, rc);
-        if item.blocks.len() > 1 {
-            loose = true;
-        }
-        let indent = " ".repeat(marker.chars().count());
-        let mut lines = body.lines();
-        let first = lines.next().unwrap_or("");
-        let mut s = format!("{marker}{first}");
-        for line in lines {
-            s.push('\n');
-            if line.is_empty() {
-                loose = true;
-            } else {
-                s.push_str(&indent);
-                s.push_str(line);
+            (None, MarkerKind::Bullet) => marker.push_str("- ")?,
+            (None, MarkerKind::Decimal) => {
+                marker.push_str(&format!("{}. ", list.start.saturating_add(i as u64)))?;
+            }
+            (None, kind) => {
+                marker
+                    .push_str(&format!("- {} ", kind.label(list.start.saturating_add(i as u64))))?;
             }
         }
-        rendered_items.push(s);
+        let indent = marker.as_str().chars().count();
+        sink.push_marker(marker, indent);
+        write_blocks(&item.blocks, rc, sink)?;
+        sink.pop_shown()?;
     }
-    let sep = if loose { "\n\n" } else { "\n" };
-    Some(rendered_items.join(sep))
+    Ok(())
 }
 
-/// Trim paragraph lines, keeping hard-break backslashes intact.
-fn trim_paragraph(text: &str) -> String {
+/// Write a paragraph's rendered `text` with its lines trimmed, keeping
+/// hard-break backslashes intact.
+fn write_paragraph(text: &str, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
     let lines: Vec<&str> = text
         .lines()
         .map(|l| {
@@ -452,19 +487,29 @@ fn trim_paragraph(text: &str) -> String {
         .collect();
     let start = lines.iter().position(|l| !l.is_empty());
     let end = lines.iter().rposition(|l| !l.is_empty());
-    match (start, end) {
-        (Some(s), Some(e)) => {
-            let mut out = lines[s..=e].join("\n");
-            if ends_with_hard_break(&out) {
-                out.pop();
-                out.truncate(out.trim_end().len());
-            }
-            out
-        }
-        _ => String::new(),
+    let (Some(start), Some(end)) = (start, end) else {
+        return Ok(());
+    };
+    for line in lines.iter().take(end).skip(start) {
+        sink.write(line)?;
+        sink.write("\n")?;
+    }
+    let last = lines.get(end).copied().unwrap_or_default();
+    match last.strip_suffix('\\') {
+        Some(kept) if ends_with_hard_break(last) => sink.write(kept.trim_end()),
+        _ => sink.write(last),
     }
 }
 
 fn ends_with_hard_break(line: &str) -> bool {
     line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
+}
+
+#[cfg(test)]
+fn render_block(block: &Block, rc: &Ctx) -> Option<String> {
+    let ledger = crate::ledger::Ledger::new(u64::MAX, None);
+    let meter = Meter::new(&ledger, u64::MAX);
+    let mut sink = Sink::new(&meter);
+    write_block(block, rc, &mut sink).ok()?;
+    sink.finish().ok().filter(|markdown| !markdown.is_empty())
 }

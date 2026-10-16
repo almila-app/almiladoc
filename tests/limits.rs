@@ -131,3 +131,16 @@ fn a_ppt_stream_of_max_records_empty_atoms_trips_max_records() {
         "{error:?}"
     );
 }
+
+#[test]
+fn a_csv_cell_escaped_past_max_output_bytes_trips_it() {
+    let max = Limits::default().max_output_bytes;
+    // `&#` renders as `&amp;#`, three bytes of Markdown a byte of input.
+    let csv = b"&#".repeat(usize::try_from(max / 6 + 1).unwrap());
+    assert!((csv.len() as u64) < Limits::default().max_input_bytes);
+    let error = converter(1).convert(Input::new(&csv, Format::Csv)).unwrap_err();
+    assert!(
+        matches!(error, ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: m, .. } if m == max),
+        "{error:?}"
+    );
+}
