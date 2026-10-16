@@ -76,7 +76,7 @@ fn detect_ole(bytes: &[u8]) -> Option<Format> {
 
 fn detect_zip(bytes: &[u8]) -> Option<Format> {
     let parse_ctx = ParseCtx::new(&Limits::DEFAULT);
-    let mut pkg = Package::open(&parse_ctx, bytes, PackageKind::Opc).ok()?;
+    let pkg = Package::open(&parse_ctx, bytes, PackageKind::Opc).ok()?;
 
     // ODF and EPUB designate the `mimetype` part as the package identity.
     if let Ok(Some(mime)) = pkg.optional_part("mimetype", Role::Probe) {
@@ -86,7 +86,7 @@ fn detect_zip(bytes: &[u8]) -> Option<Format> {
 
     // OPC: the package-level officeDocument relationship designates the
     // main part; its content type names the document kind.
-    if let Ok(rels) = read_rels(&mut pkg, "_rels/.rels", Role::Probe)
+    if let Ok(rels) = read_rels(&pkg, "_rels/.rels", Role::Probe)
         && let Some(rel) = rels.first_of_type(rel_type::OFFICE_DOCUMENT)
         && let Ok(target) = crate::package::path::resolve("", &rel.target)
     {

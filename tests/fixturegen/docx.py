@@ -614,7 +614,7 @@ def malformed(out):
         zip_without(docx, m / "missing-styles--skips.docx", "word/styles.xml")
         zip_replace(docx, m / "corrupt-styles--skips.docx", "word/styles.xml",
                     b"\x00\x01garbage <notxml")
-    # hand-built recovery-class XML shapes
+    # hand-built ill-formed XML shapes
     unclosed_doc = (f'<?xml version="1.0"?><w:document {W}><w:body>'
                     f'<w:p><w:r><w:t>Unclosed paragraph text')
     mismatched_doc = (f'<?xml version="1.0"?><w:document {W}><w:body>'
@@ -622,14 +622,25 @@ def malformed(out):
                       f'</w:body></w:document>')
     styles_min = (f'<?xml version="1.0"?><w:styles {W}/>')
     ct = CONTENT_TYPES_BASE.format(extra="")
-    for name, doc in [("unclosed--recovers.docx", unclosed_doc),
-                      ("mismatched--recovers.docx", mismatched_doc)]:
+    for name, doc in [("unclosed--errors.docx", unclosed_doc),
+                      ("mismatched--errors.docx", mismatched_doc)]:
         write_zip(m / name, [
             ("[Content_Types].xml", ct),
             ("_rels/.rels", ROOT_RELS),
             ("word/document.xml", doc),
             ("word/styles.xml", styles_min),
         ])
+    # an optional part's repair is reported, the required part converts
+    whole_doc = (f'<?xml version="1.0"?><w:document {W}><w:body>'
+                 f'<w:p><w:r><w:t>Body text</w:t></w:r></w:p></w:body></w:document>')
+    unclosed_notes = (f'<?xml version="1.0"?><w:footnotes {W}>'
+                      f'<w:footnote w:id="2"><w:p><w:r><w:t>Unclosed note')
+    write_zip(m / "unclosed-notes--recovers.docx", [
+        ("[Content_Types].xml", ct),
+        ("_rels/.rels", ROOT_RELS),
+        ("word/document.xml", whole_doc),
+        ("word/footnotes.xml", unclosed_notes),
+    ])
     (m / "empty--errors.docx").write_bytes(b"")
 
 

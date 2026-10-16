@@ -18,7 +18,7 @@ CSV = FIXTURES / "csv" / "sheet.csv"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
-UNCLOSED = FIXTURES / "malformed" / "unclosed--recovers.docx"
+UNCLOSED = FIXTURES / "malformed" / "unclosed-notes--recovers.docx"
 
 
 class AlmiladocTest(unittest.TestCase):
@@ -86,7 +86,7 @@ class AlmiladocTest(unittest.TestCase):
 
         with self.assertRaises(almiladoc.IncompleteError) as caught:
             almiladoc.to_markdown(UNCLOSED)
-        self.assertEqual(caught.exception.diagnostics, [("recovered_xml", "lost", "body", None, 1)])
+        self.assertEqual(caught.exception.diagnostics, [("recovered_xml", "lost", "note", None, 1)])
         self.assertIn("recovered_xml", str(caught.exception))
 
         with self.assertRaises(almiladoc.ResourceLimitError) as caught:

@@ -55,7 +55,7 @@ impl AssetSink {
 /// package and are retained as assets. Failures degrade to `None` per the
 /// unified policy; fatal errors propagate.
 pub fn rel_image_source(
-    pkg: &RefCell<Package>,
+    pkg: &Package,
     rels: &Relationships,
     base_part: &str,
     assets: &RefCell<AssetSink>,

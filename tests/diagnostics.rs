@@ -293,12 +293,6 @@ const CASES: &[Case] = &[
     case(
         Fixture("docx/text.docx"),
         Format::Docx,
-        &[("word/document.xml", Recover)],
-        &[(RECOVERED, Body, None, 1)],
-    ),
-    case(
-        Fixture("docx/text.docx"),
-        Format::Docx,
         &[("word/footnotes.xml", Corrupt)],
         &[(PART, Note, None, 1)],
     ),
@@ -384,12 +378,6 @@ const CASES: &[Case] = &[
     case(
         Fixture("pptx/pres.pptx"),
         Format::Pptx,
-        &[("ppt/presentation.xml", Recover)],
-        &[(RECOVERED, Body, None, 1)],
-    ),
-    case(
-        Fixture("pptx/pres.pptx"),
-        Format::Pptx,
         &[("ppt/_rels/presentation.xml.rels", Recover)],
         &[(RECOVERED, Body, None, 1)],
     ),
@@ -468,12 +456,6 @@ const CASES: &[Case] = &[
     case(
         Fixture("odt/text.odt"),
         Format::Odt,
-        &[("content.xml", Recover)],
-        &[(RECOVERED, Body, None, 1)],
-    ),
-    case(
-        Fixture("odt/text.odt"),
-        Format::Odt,
         &[("styles.xml", Corrupt)],
         &[(PART, Body, None, 1)],
     ),
@@ -501,18 +483,6 @@ const CASES: &[Case] = &[
         Format::Odt,
         &[("Pictures/100000010000000100000001C4EE90A9.png", Corrupt)],
         &[(DiagnosticCode::ImageUnavailable, Body, None, 1)],
-    ),
-    case(
-        Fixture("epub/book.epub"),
-        Format::Epub,
-        &[("META-INF/container.xml", Recover)],
-        &[(RECOVERED, Body, None, 1)],
-    ),
-    case(
-        Fixture("epub/book.epub"),
-        Format::Epub,
-        &[("EPUB/content.opf", Recover)],
-        &[(RECOVERED, Body, None, 1)],
     ),
     case(
         Fixture("epub/book.epub"),
@@ -574,12 +544,6 @@ const CASES: &[Case] = &[
         Format::Excel,
         &[("xl/worksheets/sheet2.xml", Recover)],
         &[(RECOVERED, Body, Some(2), 1)],
-    ),
-    case(
-        Fixture("xlsx/sheet.xlsx"),
-        Format::Excel,
-        &[("xl/workbook.xml", Recover)],
-        &[(RECOVERED, Body, None, 1)],
     ),
     case(
         Fixture("xlsx/sheet.xlsx"),

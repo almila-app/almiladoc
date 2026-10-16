@@ -20,14 +20,13 @@ const DR3D: &str = "urn:oasis:names:tc:opendocument:xmlns:dr3d:1.0";
 const OFFICEOOO: &str = "http://openoffice.org/2009/office";
 
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = RefCell::new(Package::open(parse_ctx, bytes, PackageKind::Odf)?);
+    let pkg = Package::open(parse_ctx, bytes, PackageKind::Odf)?;
 
     if is_encrypted(&pkg)? {
         return Err(ConvertError::Encrypted);
     }
 
-    let content_tree =
-        pkg.borrow_mut().required_xml_part("content.xml", Role::Content(Region::Body))?;
+    let content_tree = pkg.required_xml_part("content.xml", Role::Content(Region::Body))?;
     let body = content_tree
         .find(ns::OFFICE, "document-content")
         .and_then(|d| d.find(ns::OFFICE, "body"))
@@ -38,7 +37,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     } else {
         Role::Content(Region::Body)
     };
-    let styles_tree = pkg.borrow_mut().optional_xml_part("styles.xml", styles_role)?;
+    let styles_tree = pkg.optional_xml_part("styles.xml", styles_role)?;
     let mut styles = styles::OdfStyles::default();
     if let Some(tree) = &styles_tree {
         styles.collect(tree);
@@ -74,9 +73,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
 /// classify a document as encrypted over a mere comment. An absent or
 /// unreadable manifest proves nothing (content parsing decides), but fatal
 /// resource-limit errors propagate.
-fn is_encrypted(pkg: &RefCell<Package>) -> Result<bool, ConvertError> {
-    let Some(tree) = pkg.borrow_mut().optional_xml_part("META-INF/manifest.xml", Role::Probe)?
-    else {
+fn is_encrypted(pkg: &Package) -> Result<bool, ConvertError> {
+    let Some(tree) = pkg.optional_xml_part("META-INF/manifest.xml", Role::Probe)? else {
         return Ok(false);
     };
     Ok(tree.first_descendant(ns::MANIFEST, "encryption-data").is_some())

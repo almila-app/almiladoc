@@ -2,4 +2,6 @@
 source: tests/snapshots.rs
 expression: output
 ---
-Mismatched tags
+Body text
+
+[^1]: Unclosed note

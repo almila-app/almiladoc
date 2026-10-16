@@ -14,9 +14,10 @@ use crate::model::{
 };
 use crate::package::archive::{Role, probe_ole, report};
 use crate::package::relationships::{
-    RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_type, rels_part_for,
+    RelTarget, Relationships, TargetMode, read_rels, rel_target_bytes, rel_target_path, rel_type,
+    rels_part_for,
 };
-use crate::package::xml::{Element, ns, parse_xml};
+use crate::package::xml::{Element, ns};
 use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::AssetSink;
 use crate::shared::delta::rebase_emphasis;
@@ -147,29 +148,28 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         Err(e @ ConvertError::Malformed { .. }) => return Err(probe_ole(bytes).unwrap_or(e)),
         Err(e) => return Err(e),
     };
-    let pkg = RefCell::new(pkg);
 
-    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels", Role::Reported(Region::Body))?;
+    let root_rels = read_rels(&pkg, "_rels/.rels", Role::Reported(Region::Body))?;
     let pres_part = match root_rels
         .first_of_type(rel_type::OFFICE_DOCUMENT)
         .map(|rel| path::resolve("", &rel.target))
     {
         Some(Ok(target)) => target.path,
         _ => {
-            if pkg.borrow().has_part("_rels/.rels") {
+            if pkg.has_part("_rels/.rels") {
                 parse_ctx.emit(DiagnosticCode::ConventionalPartUsed, Region::Container);
             }
             "ppt/presentation.xml".to_string()
         }
     };
-    let pres = pkg.borrow_mut().required_xml_part(&pres_part, Role::Content(Region::Body))?;
-    let pres_rels =
-        read_rels(&mut pkg.borrow_mut(), &rels_part_for(&pres_part), Role::Content(Region::Body))?;
+    let pres = pkg.required_xml_part(&pres_part, Role::Content(Region::Body))?;
+    let pres_rels = read_rels(&pkg, &rels_part_for(&pres_part), Role::Content(Region::Body))?;
 
     let default_text =
         cascade::parse_level_styles(pres.first_descendant(ns::P, "defaultTextStyle"));
 
     let mut slide_paths: Vec<(usize, String)> = Vec::new();
+    let mut listed_parts: HashSet<String> = HashSet::new();
     let listed = pres
         .first_descendant(ns::P, "sldIdLst")
         .into_iter()
@@ -180,6 +180,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
             .and_then(|rid| pres_rels.internal_target(rid))
             .and_then(|target| path::resolve(&pres_part, target).ok());
         match target {
+            Some(t) if !listed_parts.insert(t.path.to_ascii_lowercase()) => {}
             Some(t) => slide_paths.push((position, t.path)),
             None if pres_rels.reported() => {}
             None => {
@@ -210,11 +211,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let mut all_rels: Vec<Relationships> = Vec::with_capacity(slide_paths.len());
     for (position, p) in &slide_paths {
         let _unit = parse_ctx.enter_unit(*position);
-        all_rels.push(read_rels(
-            &mut pkg.borrow_mut(),
-            &rels_part_for(p),
-            Role::Content(Region::Body),
-        )?);
+        all_rels.push(read_rels(&pkg, &rels_part_for(p), Role::Content(Region::Body))?);
     }
     let targeted: HashSet<String> = slide_paths
         .iter()
@@ -230,7 +227,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
 
     for ((position, slide_path), slide_rels) in slide_paths.iter().zip(&all_rels) {
         let _unit = parse_ctx.enter_unit(*position);
-        let tree = pkg.borrow_mut().related_xml_part(slide_path, Role::Reported(Region::Body))?;
+        let tree = pkg.related_xml_part(slide_path, Role::Reported(Region::Body))?;
         let slide = tree.as_ref().and_then(|t| t.find(ns::P, "sld"));
         let c_sld = slide.and_then(|s| s.find(ns::P, "cSld"));
         let Some(sp_tree) = c_sld.and_then(|c| c.find(ns::P, "spTree")) else {
@@ -306,11 +303,8 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
             None => None,
         };
         if let Some((notes_path, notes_tree)) = notes {
-            let notes_rels = read_rels(
-                &mut pkg.borrow_mut(),
-                &rels_part_for(&notes_path),
-                Role::Content(Region::Note),
-            )?;
+            let notes_rels =
+                read_rels(&pkg, &rels_part_for(&notes_path), Role::Content(Region::Note))?;
             let notes_ctx = SlideCtx {
                 rels: &notes_rels,
                 base_part: &notes_path,
@@ -358,12 +352,12 @@ fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Optio
 /// rooted elsewhere is reported by `role`.
 fn rooted_part(
     parse_ctx: &ParseCtx,
-    pkg: &RefCell<Package>,
+    pkg: &Package,
     part: &str,
     role: Role,
     root: &str,
 ) -> Result<Option<Element>, ConvertError> {
-    match pkg.borrow_mut().related_xml_part(part, role)? {
+    match pkg.related_xml_part(part, role)? {
         Some(tree) if tree.find(ns::P, root).is_none() => {
             report(parse_ctx, role.unreadable());
             Ok(None)
@@ -374,7 +368,7 @@ fn rooted_part(
 
 fn load_layout(
     parse_ctx: &ParseCtx,
-    pkg: &RefCell<Package>,
+    pkg: &Package,
     layout_path: &str,
 ) -> Result<LayoutInfo, ConvertError> {
     let tree = rooted_part(parse_ctx, pkg, layout_path, Role::Content(Region::Body), "sldLayout")?;
@@ -384,15 +378,14 @@ fn load_layout(
         .map(cascade::collect_placeholders)
         .unwrap_or_default();
     let backdrop = Backdrop::of(tree.as_ref().and_then(|t| t.find(ns::P, "sldLayout")));
-    let rels =
-        read_rels(&mut pkg.borrow_mut(), &rels_part_for(layout_path), Role::Content(Region::Body))?;
+    let rels = read_rels(pkg, &rels_part_for(layout_path), Role::Content(Region::Body))?;
     let master_path = rel_target_of_type(&rels, layout_path, MASTER_REL);
     Ok(LayoutInfo { placeholders, master_path, backdrop })
 }
 
 fn load_master(
     parse_ctx: &ParseCtx,
-    pkg: &RefCell<Package>,
+    pkg: &Package,
     master_path: &str,
 ) -> Result<MasterInfo, ConvertError> {
     let mut info = MasterInfo {
@@ -416,9 +409,9 @@ fn load_master(
             info.placeholders = cascade::collect_placeholders(sp_tree);
         }
     }
-    let rels = read_rels(&mut pkg.borrow_mut(), &rels_part_for(master_path), Role::Probe)?;
+    let rels = read_rels(pkg, &rels_part_for(master_path), Role::Probe)?;
     if let Some(theme_path) = rel_target_of_type(&rels, master_path, THEME_REL)
-        && let Some(theme) = pkg.borrow_mut().related_xml_part(&theme_path, Role::Probe)?
+        && let Some(theme) = pkg.related_xml_part(&theme_path, Role::Probe)?
     {
         info.theme = ThemeFills::read(&theme);
     }
@@ -490,7 +483,7 @@ fn side_placeholder(parse_ctx: &ParseCtx, sp: &Element, ph_type: &str) -> bool {
 
 struct SlideCtx<'a, 'b> {
     parse_ctx: &'b ParseCtx<'b>,
-    pkg: &'b RefCell<Package<'a>>,
+    pkg: &'b Package<'a>,
     rels: &'b Relationships,
     base_part: &'b str,
     region: Region,
@@ -561,31 +554,29 @@ impl SlideCtx<'_, '_> {
         }
     }
 
-    /// A chart or diagram part's tree, rooted at `namespace:root`; one that
-    /// is unnamed, absent, does not parse or is rooted elsewhere is reported.
-    fn graphic_part(
+    /// The blocks `extract` makes of a chart or diagram part rooted at
+    /// `namespace:root`; one that is unnamed, absent, does not parse or is
+    /// rooted elsewhere is reported.
+    fn graphic_blocks(
         &self,
         rel_id: Option<&str>,
         namespace: &str,
         root: &str,
-    ) -> Result<Option<Element>, ConvertError> {
-        let loaded = match rel_id {
-            Some(rel_id) => self.rel_part(rel_id)?,
-            None => None,
-        };
-        let Some((_, bytes)) = loaded else {
+        extract: impl FnOnce(&Element) -> Vec<Block>,
+    ) -> Result<Vec<Block>, ConvertError> {
+        let Some(path) = rel_id.and_then(|id| rel_target_path(self.rels, self.base_part, id))
+        else {
             match rel_id {
                 Some(_) => self.emit_related(DiagnosticCode::GraphicUnread),
                 None => self.emit(DiagnosticCode::GraphicUnread),
             }
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        match parse_xml(self.parse_ctx, &bytes, Role::Reported(self.region)) {
-            Ok(tree) if tree.find(namespace, root).is_some() => Ok(Some(tree)),
-            Err(e) if e.is_fatal() => Err(e),
-            Ok(_) | Err(_) => {
+        match self.pkg.related_xml_tree(&path, Role::Reported(self.region))? {
+            Some(tree) if tree.find(namespace, root).is_some() => Ok(extract(&tree)),
+            Some(_) | None => {
                 self.emit(DiagnosticCode::GraphicUnread);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }
@@ -938,17 +929,21 @@ fn parse_graphic_frame(
         return Ok(());
     }
     if let Some(chart) = first_in(&content, ns::CHART, "chart") {
-        let tree = ctx.graphic_part(chart.attr_qualified(ns::R, "id"), ns::CHART, "chartSpace")?;
-        if let Some(tree) = tree {
-            blocks.extend(crate::shared::drawingml::chart_blocks(ctx.parse_ctx, &tree, ctx.region));
-        }
+        blocks.extend(ctx.graphic_blocks(
+            chart.attr_qualified(ns::R, "id"),
+            ns::CHART,
+            "chartSpace",
+            |root| crate::shared::drawingml::chart_blocks(ctx.parse_ctx, root, ctx.region),
+        )?);
         return Ok(());
     }
     if let Some(rel_ids) = first_in(&content, ns::DGM, "relIds") {
-        let tree = ctx.graphic_part(rel_ids.attr_qualified(ns::R, "dm"), ns::DGM, "dataModel")?;
-        if let Some(tree) = tree {
-            blocks.extend(crate::shared::drawingml::diagram_blocks(&tree));
-        }
+        blocks.extend(ctx.graphic_blocks(
+            rel_ids.attr_qualified(ns::R, "dm"),
+            ns::DGM,
+            "dataModel",
+            crate::shared::drawingml::diagram_blocks,
+        )?);
         return Ok(());
     }
     let dropped = data.is_some_and(|data| {

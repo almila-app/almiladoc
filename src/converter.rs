@@ -331,8 +331,11 @@ mod tests {
     }
 
     fn recovered_docx() -> Vec<u8> {
-        let document = format!("<w:document {W}><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p>");
-        zip_of(&[("word/document.xml", &document)])
+        let document = format!(
+            "<w:document {W}><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let notes = format!("<w:footnotes {W}><w:footnote w:id=\"2\">");
+        zip_of(&[("word/document.xml", &document), ("word/footnotes.xml", &notes)])
     }
 
     fn docx(body: &str, parts: &[(&str, &str)]) -> Vec<u8> {

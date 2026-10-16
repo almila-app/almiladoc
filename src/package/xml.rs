@@ -2,17 +2,20 @@
 //!
 //! Parses from bytes so BOMs and encoding declarations are honored. Element
 //! and attribute names carry their resolved namespace URI (interned). Depth
-//! and node caps are enforced during parsing; recoverable malformations
-//! (unclosed or mismatched tags, ill-formed attributes) and undecodable bytes
-//! are repaired deliberately and reported by the reading call's role.
+//! and node caps are enforced during parsing. Unclosed or mismatched tags and
+//! ill-formed attributes are repaired and the repair returned to the reader;
+//! undecodable bytes and references the part's [`Dialect`] does not resolve
+//! report by the reading call's role; markup a repair would misread fails.
 
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::package::archive::{Role, report};
+use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -199,49 +202,169 @@ impl<'a> Iterator for DescendantNodes<'a> {
     }
 }
 
+/// Which named references a part's markup may use: declared (DTD) entities
+/// never expand in either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// XML's five predefined entities alone: OOXML and OpenDocument parts.
+    Xml,
+    /// HTML5's named references as well: EPUB's XHTML and package documents.
+    Xhtml,
+}
+
+impl Dialect {
+    fn named(self, name: &str) -> Option<&'static str> {
+        match self {
+            Dialect::Xml => quick_xml::escape::resolve_xml_entity(name),
+            // quick-xml 0.42's table cuts each five-digit `*fr`, `*scr` and `*opf`
+            // code point to its first four digits, all in U+1D00..=U+1DFF, a
+            // block no HTML5 reference names.
+            Dialect::Xhtml => quick_xml::escape::resolve_html5_entity(name).filter(|value| {
+                let mut chars = value.chars();
+                !matches!((chars.next(), chars.next()), (Some('\u{1D00}'..='\u{1DFF}'), None))
+            }),
+        }
+    }
+
+    fn reference(self, name: &str) -> Reference {
+        if let Some(number) = name.strip_prefix('#') {
+            return char_reference(number).map_or(Reference::Unresolved, Reference::Char);
+        }
+        if !is_name(name) {
+            return Reference::Literal;
+        }
+        self.named(name).map_or(Reference::Unresolved, Reference::Named)
+    }
+}
+
+/// A reference's reading: a character, a named replacement, a name the
+/// dialect does not know (kept literally, a loss), or an ampersand that
+/// begins no reference (kept literally, as written).
+enum Reference {
+    Char(char),
+    Named(&'static str),
+    Unresolved,
+    Literal,
+}
+
+/// A character reference's number as XML reads it: decimal, or hexadecimal
+/// after a lowercase `x`, unsigned, naming a scalar value other than NUL.
+fn char_reference(number: &str) -> Option<char> {
+    let (digits, radix) = match number.strip_prefix('x') {
+        Some(hex) => (hex, 16),
+        None => (number, 10),
+    };
+    if digits.starts_with(['+', '-']) {
+        return None;
+    }
+    let code = u32::from_str_radix(digits, radix).ok().filter(|&code| code != 0)?;
+    char::from_u32(code)
+}
+
+/// Whether `name` is an XML 1.0 (fifth edition) `Name`, so `&name;` is a
+/// reference rather than an ampersand followed by text.
+fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
+}
+
+/// XML 1.0 (fifth edition) `NameStartChar`.
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        ':' | 'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// XML 1.0 (fifth edition) `NameChar`.
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
+/// A parsed part, what building it saw that the tree cannot show, and the
+/// nodes it holds.
+pub(crate) struct Parsed {
+    pub root: Element,
+    pub marks: Marks,
+    pub nodes: u64,
+}
+
+/// [`parse`] in the XML dialect, with its marks reported by `role`.
+#[cfg(test)]
+pub(crate) fn parse_xml(
+    parse_ctx: &ParseCtx,
+    bytes: &[u8],
+    role: Role,
+) -> Result<Element, ConvertError> {
+    let parsed = parse(parse_ctx, bytes, Dialect::Xml)?;
+    parsed.marks.report(parse_ctx, role);
+    Ok(parsed.root)
+}
+
 /// Parse an XML part into a synthetic root element containing the top-level
-/// nodes. Encoding comes from the BOM or XML declaration; the part is
-/// transcoded to UTF-8 before parsing so namespace resolution sees one
-/// consistent encoding. Undecodable bytes and recovered markup report once
-/// per part by `role`.
-pub fn parse_xml(parse_ctx: &ParseCtx, bytes: &[u8], role: Role) -> Result<Element, ConvertError> {
+/// nodes, and return what the tree cannot show as [`Marks`] for each
+/// reading call to report by its role. Encoding comes from the BOM or XML
+/// declaration; the part is transcoded to UTF-8 before parsing so namespace
+/// resolution sees one consistent encoding. Markup a repair would misread is
+/// `Malformed`: a `<` that opens no well-formed tag, a declaration or
+/// document type inside the content, and in [`Dialect::Xml`] a document
+/// type with an internal subset.
+pub(crate) fn parse(
+    parse_ctx: &ParseCtx,
+    bytes: &[u8],
+    dialect: Dialect,
+) -> Result<Parsed, ConvertError> {
     let limits = parse_ctx.limits();
     let (utf8, undecodable) = to_utf8(bytes);
     let mut reader = NsReader::from_reader(utf8.as_ref());
     reader.config_mut().check_end_names = false;
+    reader.config_mut().allow_dangling_amp = true;
 
     let mut interner: HashMap<String, Rc<str>> = HashMap::new();
     let mut root =
         Element { ns: None, local: String::new(), attrs: Vec::new(), children: Vec::new() };
     let mut stack: Vec<Element> = Vec::new();
+    let mut open_names: Vec<Box<str>> = Vec::new();
     let mut nodes: u64 = 0;
-    let mut recovered = false;
+    let mut marks = Marks { undecodable, ..Marks::default() };
 
     loop {
         let event = reader.read_event().map_err(|_| ConvertError::malformed("unparseable xml"))?;
         parse_ctx.charge(1)?;
         match event {
             Event::Start(e) => {
+                check_start_tag(&e)?;
                 if stack.len() as u64 >= limits.max_nesting_depth {
                     return Err(ConvertError::limit(Limit::NestingDepth, limits.max_nesting_depth));
                 }
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                stack.push(start_to_element(&e, &reader, &mut interner, &mut recovered));
+                stack.push(start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?);
+                open_names.push(e.name().as_ref().into());
             }
             Event::Empty(e) => {
+                check_start_tag(&e)?;
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                let elem = start_to_element(&e, &reader, &mut interner, &mut recovered);
+                let elem = start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?;
                 attach(&mut stack, &mut root, Node::Elem(elem));
             }
-            Event::End(end) => match stack.pop() {
-                Some(elem) => {
-                    if elem.local != end.local_name().as_ref() {
-                        recovered = true;
-                    }
-                    attach(&mut stack, &mut root, Node::Elem(elem));
+            Event::End(end) => {
+                if end.trim().is_empty() || end.contains('<') {
+                    return Err(ConvertError::malformed("bare `<` in markup"));
                 }
-                None => recovered = true,
-            },
+                match stack.pop() {
+                    Some(elem) => {
+                        if open_names.pop().as_deref() != Some(end.name().as_ref()) {
+                            marks.recovered = true;
+                        }
+                        attach(&mut stack, &mut root, Node::Elem(elem));
+                    }
+                    None => marks.recovered = true,
+                }
+            }
             Event::Text(e) => {
                 let text = e.into_inner().into_owned();
                 if !text.is_empty() {
@@ -250,39 +373,104 @@ pub fn parse_xml(parse_ctx: &ParseCtx, bytes: &[u8], role: Role) -> Result<Eleme
                 }
             }
             Event::GeneralRef(e) => {
-                let name = e.into_inner();
-                let resolved = resolve_entity(&name).unwrap_or_else(|| format!("&{name};"));
+                let text = match dialect.reference(&e) {
+                    Reference::Char(c) => c.to_string(),
+                    Reference::Named(replacement) => replacement.to_owned(),
+                    Reference::Unresolved => {
+                        marks.unresolved = true;
+                        format!("&{};", &*e)
+                    }
+                    Reference::Literal => format!("&{};", &*e),
+                };
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
-                push_text(&mut stack, &mut root, resolved);
+                push_text(&mut stack, &mut root, text);
             }
             Event::CData(e) => {
                 let text = e.into_inner().into_owned();
                 bump_nodes(&mut nodes, limits.max_xml_nodes)?;
                 push_text(&mut stack, &mut root, text);
             }
+            Event::PI(e) if !is_name(e.target()) => {
+                return Err(ConvertError::malformed("processing instruction without a target"));
+            }
+            Event::Decl(_) | Event::DocType(_) if began(&stack, &root) => {
+                return Err(ConvertError::malformed("declaration inside the content"));
+            }
+            Event::DocType(e) if dialect == Dialect::Xml && has_internal_subset(&e) => {
+                return Err(ConvertError::malformed("document type with an internal subset"));
+            }
             Event::Eof => break,
-            _ => {}
+            Event::PI(_) | Event::Decl(_) | Event::DocType(_) | Event::Comment(_) => {}
         }
     }
     if !stack.is_empty() {
-        recovered = true;
+        marks.recovered = true;
         while let Some(elem) = stack.pop() {
             attach(&mut stack, &mut root, Node::Elem(elem));
         }
     }
-    if undecodable {
-        report(parse_ctx, role.undecodable());
+    Ok(Parsed { root, marks, nodes })
+}
+
+/// What a parse saw that its tree cannot show.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Marks {
+    /// Unclosed tags, an end tag that does not repeat its start tag's
+    /// qualified name, or ill-formed attributes, were repaired.
+    pub recovered: bool,
+    /// A reference the dialect does not resolve stayed literal.
+    pub unresolved: bool,
+    /// Bytes did not decode in the part's encoding.
+    pub undecodable: bool,
+}
+
+impl Marks {
+    /// Report each mark by `role`, the repair last.
+    pub(crate) fn report(self, parse_ctx: &ParseCtx, role: Role) {
+        if self.undecodable {
+            report(parse_ctx, role.undecodable());
+        }
+        if self.unresolved {
+            report(parse_ctx, role.unresolved());
+        }
+        if self.recovered {
+            report(parse_ctx, role.recovered());
+        }
     }
-    if recovered {
-        report(parse_ctx, role.recovered());
+}
+
+/// A start tag whose name is empty or that holds a `<`: quick-xml reads a
+/// bare `<` in text, and the markup after it up to the next `>`, as one tag;
+/// the end-tag arm applies the same rule.
+fn check_start_tag(e: &BytesStart) -> Result<(), ConvertError> {
+    if e.name().as_ref().is_empty() || e.contains('<') {
+        return Err(ConvertError::malformed("bare `<` in markup"));
     }
-    Ok(root)
+    Ok(())
+}
+
+fn began(stack: &[Element], root: &Element) -> bool {
+    !stack.is_empty() || root.child_elems().next().is_some()
+}
+
+/// Whether a document type declaration holds an internal subset, a `[`
+/// outside its quoted identifiers.
+fn has_internal_subset(doctype: &str) -> bool {
+    let mut quote = None;
+    for c in doctype.chars() {
+        match (quote, c) {
+            (None, '[') => return true,
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(open), c) if c == open => quote = None,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Transcode an XML part to UTF-8 based on its BOM or encoding declaration,
 /// and say whether any bytes did not decode.
-fn to_utf8(bytes: &[u8]) -> (std::borrow::Cow<'_, [u8]>, bool) {
-    use std::borrow::Cow;
+fn to_utf8(bytes: &[u8]) -> (Cow<'_, [u8]>, bool) {
     let decoded = |encoding: &'static encoding_rs::Encoding| {
         let (s, _, had_errors) = encoding.decode(bytes);
         (Cow::Owned(s.into_owned().into_bytes()), had_errors)
@@ -355,8 +543,9 @@ fn start_to_element(
     e: &BytesStart,
     reader: &NsReader<&[u8]>,
     interner: &mut HashMap<String, Rc<str>>,
-    recovered: &mut bool,
-) -> Element {
+    dialect: Dialect,
+    marks: &mut Marks,
+) -> Result<Element, ConvertError> {
     let (res, local) = reader.resolver().resolve_element(e.name());
     let ns = match res {
         ResolveResult::Bound(namespace) => Some(intern(interner, namespace.as_ref())),
@@ -366,7 +555,7 @@ fn start_to_element(
     let mut attrs = Vec::new();
     for attr in e.attributes() {
         let Ok(attr) = attr else {
-            *recovered = true;
+            marks.recovered = true;
             continue;
         };
         // Namespace declarations are consumed by the reader's resolver; the
@@ -379,10 +568,7 @@ fn start_to_element(
             ResolveResult::Bound(namespace) => Some(intern(interner, namespace.as_ref())),
             _ => None,
         };
-        let value = attr
-            .normalized_value(XmlVersion::Implicit1_0)
-            .unwrap_or_else(|_| attr.value.clone())
-            .into_owned();
+        let value = attribute_value(attr, dialect, marks)?;
         attrs.push(Attr { ns: ans, local: alocal.as_ref().to_owned(), value });
     }
     // `mc:Choice/@Requires` holds namespace *prefixes* evaluated in the
@@ -408,7 +594,59 @@ fn start_to_element(
             .collect::<Vec<_>>()
             .join(" ");
     }
-    Element { ns, local, attrs, children: Vec::new() }
+    Ok(Element { ns, local, attrs, children: Vec::new() })
+}
+
+/// An attribute's value normalized as XML 1.0 does, its references read as
+/// text reads them: one the dialect does not know stays literal and marks
+/// the part, and an ampersand that begins no reference stays as written.
+fn attribute_value(
+    attr: Attribute,
+    dialect: Dialect,
+    marks: &mut Marks,
+) -> Result<String, ConvertError> {
+    let value = escape_unread_references(attr.value, dialect, marks);
+    let attr = Attribute { key: attr.key, value };
+    let value = attr
+        .normalized_value_with(XmlVersion::Implicit1_0, 2, |name| match dialect.named(name)? {
+            "&" => Some("&amp;"),
+            replacement => Some(replacement),
+        })
+        .map_err(|_| ConvertError::malformed("unparseable attribute value"))?;
+    Ok(value.into_owned())
+}
+
+/// `raw` with every `&` that begins no reference the dialect reads written
+/// as `&amp;`, so the normalization keeps it literally.
+fn escape_unread_references<'v>(
+    raw: Cow<'v, str>,
+    dialect: Dialect,
+    marks: &mut Marks,
+) -> Cow<'v, str> {
+    if !raw.contains('&') {
+        return raw;
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw.as_ref();
+    while let Some((before, after)) = rest.split_once('&') {
+        out.push_str(before);
+        let name = match after.find([';', '&']) {
+            Some(end) if after.as_bytes().get(end) == Some(&b';') => after.get(..end),
+            _ => None,
+        };
+        let read = match name.map(|name| dialect.reference(name)) {
+            Some(Reference::Char(_) | Reference::Named(_)) => true,
+            Some(Reference::Unresolved) => {
+                marks.unresolved = true;
+                false
+            }
+            Some(Reference::Literal) | None => false,
+        };
+        out.push_str(if read { "&" } else { "&amp;" });
+        rest = after;
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 fn push_text(stack: &mut [Element], root: &mut Element, text: String) {
@@ -421,66 +659,6 @@ fn push_text(stack: &mut [Element], root: &mut Element, text: String) {
     } else {
         target.push(Node::Text(text));
     }
-}
-
-/// Resolve entity references quick-xml surfaces as GeneralRef events.
-fn resolve_entity(name: &str) -> Option<String> {
-    if let Some(num) = name.strip_prefix('#') {
-        let code = if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
-            u32::from_str_radix(hex, 16).ok()?
-        } else {
-            num.parse().ok()?
-        };
-        return char::from_u32(code).map(String::from);
-    }
-    let ch = match name {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "apos" => '\'',
-        "quot" => '"',
-        "nbsp" => '\u{a0}',
-        "shy" => '\u{ad}',
-        "mdash" => '\u{2014}',
-        "ndash" => '\u{2013}',
-        "lsquo" => '\u{2018}',
-        "rsquo" => '\u{2019}',
-        "ldquo" => '\u{201c}',
-        "rdquo" => '\u{201d}',
-        "hellip" => '\u{2026}',
-        "copy" => '\u{a9}',
-        "reg" => '\u{ae}',
-        "trade" => '\u{2122}',
-        "deg" => '\u{b0}',
-        "middot" => '\u{b7}',
-        "bull" => '\u{2022}',
-        "sect" => '\u{a7}',
-        "para" => '\u{b6}',
-        "laquo" => '\u{ab}',
-        "raquo" => '\u{bb}',
-        "times" => '\u{d7}',
-        "divide" => '\u{f7}',
-        "plusmn" => '\u{b1}',
-        "frac12" => '\u{bd}',
-        "frac14" => '\u{bc}',
-        "eacute" => '\u{e9}',
-        "egrave" => '\u{e8}',
-        "agrave" => '\u{e0}',
-        "ccedil" => '\u{e7}',
-        "uuml" => '\u{fc}',
-        "ouml" => '\u{f6}',
-        "auml" => '\u{e4}',
-        "szlig" => '\u{df}',
-        "aring" => '\u{e5}',
-        "oslash" => '\u{f8}',
-        "aelig" => '\u{e6}',
-        "euro" => '\u{20ac}',
-        "pound" => '\u{a3}',
-        "yen" => '\u{a5}',
-        "cent" => '\u{a2}',
-        _ => return None,
-    };
-    Some(ch.to_string())
 }
 
 #[cfg(test)]
@@ -741,6 +919,20 @@ mod tests {
     }
 
     #[test]
+    fn an_end_tag_that_does_not_repeat_its_start_tags_qualified_name_is_repaired() {
+        let recovered = |inner: &str| {
+            let xml = format!("<r xmlns:w=\"urn:w\" xmlns:x=\"urn:w\">{inner}</r>");
+            parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xml).unwrap().marks.recovered
+        };
+        for inner in ["<w:t>a</x:t>", "<t>a</w:t>", "<w:t>a</t>"] {
+            assert!(recovered(inner), "{inner}");
+        }
+        for inner in ["<w:t>a</w:t>", "<w:t>a</w:t >", "<t>a</t>"] {
+            assert!(!recovered(inner), "{inner}");
+        }
+    }
+
+    #[test]
     fn unclosed_elements_recovered() {
         let root = parse_xml(&ParseCtx::default(), b"<a><b>text", Role::Probe).unwrap();
         let a = root.child_elems().next().unwrap();
@@ -773,5 +965,237 @@ mod tests {
         let root = parse_xml(&ParseCtx::default(), &xml, Role::Probe).unwrap();
         assert_eq!(root.text(), "leaf");
         assert_eq!(root.descendants("", "never").count(), 0);
+    }
+
+    fn parsed(
+        xml: &str,
+        dialect: Dialect,
+    ) -> Result<(String, Vec<(DiagnosticCode, Region)>), ConvertError> {
+        let parse_ctx = ParseCtx::default();
+        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect)?;
+        assert!(!parsed.marks.recovered, "{xml}");
+        parsed.marks.report(&parse_ctx, Role::Content(Region::Note));
+        let reported = parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region)).collect();
+        Ok((parsed.root.text(), reported))
+    }
+
+    fn attribute(xml: &str, dialect: Dialect) -> (String, Vec<(DiagnosticCode, Region)>) {
+        let parse_ctx = ParseCtx::default();
+        let parsed = parse(&parse_ctx, xml.as_bytes(), dialect).unwrap();
+        parsed.marks.report(&parse_ctx, Role::Content(Region::Note));
+        let value = parsed.root.child_elems().next().unwrap().attr_any("a").unwrap().to_owned();
+        (value, parse_ctx.into_diagnostics().iter().map(|d| (d.code, d.region)).collect())
+    }
+
+    const UNRESOLVED: [(DiagnosticCode, Region); 1] =
+        [(DiagnosticCode::UnresolvedEntity, Region::Note)];
+    const DIALECTS: [Dialect; 2] = [Dialect::Xml, Dialect::Xhtml];
+
+    #[test]
+    fn a_bare_less_than_or_a_misplaced_declaration_is_malformed() {
+        const BARE: &str = "bare `<` in markup";
+        const UNPARSEABLE: &str = "unparseable xml";
+        const DECLARATION: &str = "declaration inside the content";
+        for (xml, reason) in [
+            ("<r>Pump A < pump B</r>", BARE),
+            ("<r>< First paragraph.</r>", BARE),
+            ("<r>Pump A <pump B</r>", BARE),
+            ("<r>< >later</r>", BARE),
+            ("<r>< /></r>", BARE),
+            ("<r a=\"bare < delimiter\"/>", BARE),
+            ("<r>A <? B</r>", UNPARSEABLE),
+            ("<r>A <? B ?> C</r>", "processing instruction without a target"),
+            ("<r>A <! B</r>", UNPARSEABLE),
+            ("<r>A <!- B -></r>", UNPARSEABLE),
+            ("<r>A <!DOCTYPE B> C</r>", DECLARATION),
+            ("<r>A <?xml version=\"1.0\"?> C</r>", DECLARATION),
+            ("<r>t</r><!DOCTYPE r>", DECLARATION),
+            ("<r/><?xml version=\"1.0\"?>", DECLARATION),
+            ("<r>a </ b</r>c", BARE),
+            ("<r><s>a </s b</r>c", BARE),
+            ("<r>a </>b</r>", BARE),
+            ("<r>a </ >b</r>", BARE),
+            ("<r><s>a </ >b</r>", BARE),
+        ] {
+            for dialect in DIALECTS {
+                let err = parsed(xml, dialect).unwrap_err();
+                assert!(
+                    matches!(err, ConvertError::Malformed { part: None, reason: r } if r == reason),
+                    "{xml}: {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn escapes_cdata_comments_and_instructions_keep_every_word() {
+        let xml = "<?xml version=\"1.0\"?><!DOCTYPE r><?mso-application progid=\"x\"?>\
+            <r>before &lt; middle <![CDATA[< after]]><!-- c --><?pi data?> end</r>";
+        for dialect in DIALECTS {
+            assert_eq!(
+                parsed(xml, dialect).unwrap(),
+                ("before < middle < after end".into(), vec![])
+            );
+        }
+    }
+
+    #[test]
+    fn an_ampersand_that_begins_no_reference_stays_as_written() {
+        for xml in [
+            "<r>Tom & Jerry</r>",
+            "<r>a & b; c</r>",
+            "<r>a &</r>",
+            "<r>x &&amp; y</r>",
+            "<r>p &<b/>q</r>",
+            "<r>a &1b; c</r>",
+            "<r>&-x;</r>",
+            "<r>&.x;</r>",
+            "<r>a &\u{d7}; b</r>",
+            "<r>&\u{f7};</r>",
+            "<r>&\u{2014}x;</r>",
+            "<r>&a\u{d7}b;</r>",
+            "<r>&\u{b7}b;</r>",
+        ] {
+            let expected = xml
+                .replace("<r>", "")
+                .replace("</r>", "")
+                .replace("<b/>", "")
+                .replace("&amp;", "&");
+            for dialect in DIALECTS {
+                assert_eq!(parsed(xml, dialect).unwrap(), (expected.clone(), vec![]), "{xml}");
+            }
+        }
+    }
+
+    #[test]
+    fn named_references_resolve_by_dialect_and_the_rest_stay_literal() {
+        let xml = "<r>&amp;&lt;&#65;&#x42;&quot; &nbsp;&eacute;&AMP;</r>";
+        assert_eq!(parsed(xml, Dialect::Xhtml).unwrap(), ("&<AB\" \u{a0}\u{e9}&".into(), vec![]));
+        assert_eq!(
+            parsed(xml, Dialect::Xml).unwrap(),
+            ("&<AB\" &nbsp;&eacute;&AMP;".into(), UNRESOLVED.to_vec())
+        );
+        for truncated in ["&Ascr;", "&Aopf;", "&zfr;"] {
+            let xml = format!("<r>{truncated}</r>");
+            assert_eq!(
+                parsed(&xml, Dialect::Xhtml).unwrap(),
+                (truncated.into(), UNRESOLVED.to_vec())
+            );
+            let xml = format!("<r a=\"{truncated}\"/>");
+            assert_eq!(attribute(&xml, Dialect::Xhtml), (truncated.into(), UNRESOLVED.to_vec()));
+        }
+        for unknown in ["&bogus;", "&#X41;", "&#0;", "&#+65;", "&#xD800;", "&#;", "&#x110000;"] {
+            let xml = format!("<r>{unknown}</r>");
+            for dialect in DIALECTS {
+                assert_eq!(parsed(&xml, dialect).unwrap(), (unknown.into(), UNRESOLVED.to_vec()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_reference_name_is_an_xml_name_whatever_its_script() {
+        for name in ["&\u{e9}t\u{e9};", "&a\u{b7}b;", "&\u{20ac}x;", "&\u{3b1}\u{301};"] {
+            for dialect in DIALECTS {
+                let xml = format!("<r>{name}</r>");
+                assert_eq!(parsed(&xml, dialect).unwrap(), (name.into(), UNRESOLVED.to_vec()));
+                let xml = format!("<r a=\"{name}\"/>");
+                assert_eq!(attribute(&xml, dialect), (name.into(), UNRESOLVED.to_vec()), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unresolved_reference_reports_once_by_role() {
+        let xml = b"<r a=\"&bogus;\">&nbsp;&nbsp;</r>";
+        for (role, expected) in [
+            (
+                Role::Content(Region::Footer),
+                vec![(DiagnosticCode::UnresolvedEntity, LossClass::Lost, Region::Footer, 1)],
+            ),
+            (
+                Role::Reported(Region::Body),
+                vec![(DiagnosticCode::UnresolvedEntity, LossClass::Lost, Region::Body, 1)],
+            ),
+            (Role::Formatting, vec![]),
+            (Role::Probe, vec![]),
+        ] {
+            assert_eq!(reported(xml, role), expected, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn attributes_read_references_as_text_does() {
+        for dialect in DIALECTS {
+            for (value, expected) in [
+                ("Tom & Jerry", "Tom & Jerry"),
+                ("a & b; c", "a & b; c"),
+                ("x&amp;\ty&#10;&#x41;&lt;", "x& y\nA<"),
+                ("&&amp;", "&&"),
+                ("end &", "end &"),
+                ("a &1b; c", "a &1b; c"),
+                ("&-x;", "&-x;"),
+                ("a &\u{d7}; b", "a &\u{d7}; b"),
+                ("&\u{2014}x;", "&\u{2014}x;"),
+                ("&a\u{d7}b;", "&a\u{d7}b;"),
+                ("&\u{b7}b;", "&\u{b7}b;"),
+            ] {
+                let xml = format!("<r a=\"{value}\"/>");
+                assert_eq!(attribute(&xml, dialect), (expected.into(), vec![]), "{value}");
+            }
+        }
+        let xml = "<r a=\"&nbsp;&AMP;&eacute;\"/>";
+        assert_eq!(attribute(xml, Dialect::Xhtml), ("\u{a0}&\u{e9}".into(), vec![]));
+        assert_eq!(
+            attribute(xml, Dialect::Xml),
+            ("&nbsp;&AMP;&eacute;".into(), UNRESOLVED.to_vec())
+        );
+        for unknown in ["&bogus;", "&#X41;", "&#xD800;"] {
+            let xml = format!("<r a=\"{unknown} &amp;\"/>");
+            for dialect in DIALECTS {
+                assert_eq!(attribute(&xml, dialect), (format!("{unknown} &"), UNRESOLVED.to_vec()));
+            }
+        }
+    }
+
+    #[test]
+    fn an_internal_subset_is_malformed_in_xml_and_ignored_in_xhtml() {
+        let subset = "<!DOCTYPE r [<!ENTITY e \"expanded\">]><r>&e;&eacute;</r>";
+        let err = parsed(subset, Dialect::Xml).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConvertError::Malformed { reason: "document type with an internal subset", .. }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            parsed(subset, Dialect::Xhtml).unwrap(),
+            ("&e;\u{e9}".into(), UNRESOLVED.to_vec())
+        );
+        for doctype in
+            ["<!DOCTYPE r>", "<!DOCTYPE r SYSTEM \"a[b\">", "<!DOCTYPE r PUBLIC 'p[' 's'>"]
+        {
+            let xml = format!("{doctype}<r>t</r>");
+            for dialect in DIALECTS {
+                assert_eq!(parsed(&xml, dialect).unwrap(), ("t".into(), vec![]), "{doctype}");
+            }
+        }
+    }
+
+    #[test]
+    fn marks_are_returned_not_reported() {
+        let marks = |xml: &[u8]| {
+            let parse_ctx = ParseCtx::default();
+            let parsed = parse(&parse_ctx, xml, Dialect::Xml).unwrap();
+            assert!(parse_ctx.diagnostics().is_empty());
+            let Marks { recovered, unresolved, undecodable } = parsed.marks;
+            (recovered, unresolved, undecodable)
+        };
+        for xml in ["<a><b>text", "<a><b>text</c></a>", "<a><b x=\"1\" x=\"2\"/></a>"] {
+            assert_eq!(marks(xml.as_bytes()), (true, false, false), "{xml}");
+        }
+        assert_eq!(marks(b"<a>&bogus;</a>"), (false, true, false));
+        assert_eq!(marks(&utf16("<a>text</a>", false, true)), (false, false, true));
+        assert_eq!(marks(b"<a>text</a>"), (false, false, false));
     }
 }

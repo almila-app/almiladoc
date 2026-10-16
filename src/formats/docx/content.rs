@@ -10,8 +10,10 @@ use crate::model::{
 };
 use crate::package::Package;
 use crate::package::archive::Role;
-use crate::package::relationships::{RelTarget, Relationships, TargetMode, rel_target_bytes};
-use crate::package::xml::{Element, ns, parse_xml};
+use crate::package::relationships::{
+    RelTarget, Relationships, TargetMode, rel_target_bytes, rel_target_path,
+};
+use crate::package::xml::{Element, ns};
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::{FieldFrame, field_result};
@@ -43,7 +45,7 @@ use crate::shared::assets::AssetSink;
 
 pub(super) struct Ctx<'a, 'b> {
     pub parse_ctx: &'b ParseCtx<'b>,
-    pub pkg: &'b RefCell<Package<'a>>,
+    pub pkg: &'b Package<'a>,
     pub rels: Relationships,
     pub base_part: String,
     pub region: Region,
@@ -762,38 +764,35 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     fn chart_blocks(&self, rel_id: &str) -> Result<Vec<Block>, ConvertError> {
         let parse_ctx = self.ctx.parse_ctx;
         let region = self.ctx.region;
-        Ok(self
-            .graphic_part(rel_id, ns::CHART, "chartSpace")?
-            .map(|root| crate::shared::drawingml::chart_blocks(parse_ctx, &root, region))
-            .unwrap_or_default())
+        self.graphic_blocks(rel_id, ns::CHART, "chartSpace", |root| {
+            crate::shared::drawingml::chart_blocks(parse_ctx, root, region)
+        })
     }
 
     /// Textual extraction of a SmartArt data part via `shared::drawingml`.
     fn diagram_blocks(&self, rel_id: &str) -> Result<Vec<Block>, ConvertError> {
-        Ok(self
-            .graphic_part(rel_id, ns::DGM, "dataModel")?
-            .map(|root| crate::shared::drawingml::diagram_blocks(&root))
-            .unwrap_or_default())
+        self.graphic_blocks(rel_id, ns::DGM, "dataModel", crate::shared::drawingml::diagram_blocks)
     }
 
-    /// A chart or diagram part's tree, rooted at `namespace:root`; one that
-    /// is absent, does not parse or is rooted elsewhere is reported.
-    fn graphic_part(
+    /// The blocks `extract` makes of a chart or diagram part rooted at
+    /// `namespace:root`; one that is absent, does not parse or is rooted
+    /// elsewhere is reported.
+    fn graphic_blocks(
         &self,
         rel_id: &str,
         namespace: &str,
         root: &str,
-    ) -> Result<Option<Element>, ConvertError> {
-        let Some((_, bytes)) = self.ctx.rel_part(rel_id)? else {
+        extract: impl FnOnce(&Element) -> Vec<Block>,
+    ) -> Result<Vec<Block>, ConvertError> {
+        let Some(path) = rel_target_path(&self.ctx.rels, &self.ctx.base_part, rel_id) else {
             self.ctx.emit_related(DiagnosticCode::GraphicUnread);
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        match parse_xml(self.ctx.parse_ctx, &bytes, Role::Reported(self.ctx.region)) {
-            Ok(tree) if tree.find(namespace, root).is_some() => Ok(Some(tree)),
-            Err(e) if e.is_fatal() => Err(e),
-            Ok(_) | Err(_) => {
+        match self.ctx.pkg.related_xml_tree(&path, Role::Reported(self.ctx.region))? {
+            Some(tree) if tree.find(namespace, root).is_some() => Ok(extract(&tree)),
+            Some(_) | None => {
                 self.ctx.emit(DiagnosticCode::GraphicUnread);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
     }

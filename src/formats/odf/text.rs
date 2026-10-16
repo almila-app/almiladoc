@@ -23,7 +23,7 @@ use std::collections::HashMap;
 pub struct Ctx<'a, 'b> {
     pub parse_ctx: &'b ParseCtx<'b>,
     pub styles: &'b OdfStyles<'b>,
-    pub pkg: &'b RefCell<Package<'a>>,
+    pub pkg: &'b Package<'a>,
     pub assets: &'b RefCell<AssetSink>,
     pub notes: RefCell<Vec<Note>>,
     /// Continuation counters per (list style, depth): the next number a
@@ -40,7 +40,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
     pub fn new(
         parse_ctx: &'b ParseCtx<'b>,
         styles: &'b OdfStyles<'b>,
-        pkg: &'b RefCell<Package<'a>>,
+        pkg: &'b Package<'a>,
         assets: &'b RefCell<AssetSink>,
     ) -> Self {
         Ctx {
@@ -657,8 +657,7 @@ pub(super) fn read_object(ctx: &Ctx, object: &Element) -> Result<Object, Convert
     else {
         return Ok(unread);
     };
-    let Some(tree) =
-        ctx.pkg.borrow_mut().related_xml_part(&target.path, Role::Reported(ctx.region.get()))?
+    let Some(tree) = ctx.pkg.related_xml_part(&target.path, Role::Reported(ctx.region.get()))?
     else {
         return Ok(unread);
     };
@@ -693,8 +692,7 @@ fn load_image(ctx: &Ctx, href: &str) -> Result<Option<ImageSource>, ConvertError
     let Ok(target) = crate::package::path::resolve("content.xml", href) else {
         return Ok(None);
     };
-    let bytes =
-        ctx.pkg.borrow_mut().related_part(&target.path, Role::Reported(ctx.region.get()))?;
+    let bytes = ctx.pkg.related_part(&target.path, Role::Reported(ctx.region.get()))?;
     let Some(bytes) = bytes else {
         return Ok(None);
     };

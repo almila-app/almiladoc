@@ -29,29 +29,27 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         }
         Err(e) => return Err(e),
     };
-    let pkg = RefCell::new(pkg);
 
-    let root_rels = read_rels(&mut pkg.borrow_mut(), "_rels/.rels", Role::Reported(Region::Body))?;
+    let root_rels = read_rels(&pkg, "_rels/.rels", Role::Reported(Region::Body))?;
     let main_part = match root_rels
         .first_of_type(rel_type::OFFICE_DOCUMENT)
         .map(|rel| crate::package::path::resolve("", &rel.target))
     {
         Some(Ok(target)) => target.path,
         _ => {
-            if pkg.borrow().has_part("_rels/.rels") {
+            if pkg.has_part("_rels/.rels") {
                 parse_ctx.emit(DiagnosticCode::ConventionalPartUsed, Region::Container);
             }
             "word/document.xml".to_string()
         }
     };
-    let doc_rels =
-        read_rels(&mut pkg.borrow_mut(), &rels_part_for(&main_part), Role::Content(Region::Body))?;
+    let doc_rels = read_rels(&pkg, &rels_part_for(&main_part), Role::Content(Region::Body))?;
 
     let typed =
         |rel_type, fallback| typed_part_path(parse_ctx, &doc_rels, &main_part, rel_type, fallback);
     let numbering_part = typed(rel_type::NUMBERING, "numbering.xml");
     let styles_part = typed(rel_type::STYLES, "styles.xml");
-    let styles_role = if pkg.borrow().has_part(&numbering_part.path) {
+    let styles_role = if pkg.has_part(&numbering_part.path) {
         Role::Content(Region::Body)
     } else {
         Role::Formatting
@@ -67,7 +65,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         None => Default::default(),
     };
 
-    let doc_tree = pkg.borrow_mut().required_xml_part(&main_part, Role::Content(Region::Body))?;
+    let doc_tree = pkg.required_xml_part(&main_part, Role::Content(Region::Body))?;
     let body = doc_tree
         .find(ns::W, "document")
         .and_then(|d| d.find(ns::W, "body"))
@@ -108,11 +106,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
             continue;
         };
         commented |= root.first_descendant(ns::W, "commentReference").is_some();
-        let note_rels = read_rels(
-            &mut pkg.borrow_mut(),
-            &rels_part_for(&part.path),
-            Role::Content(Region::Note),
-        )?;
+        let note_rels = read_rels(&pkg, &rels_part_for(&part.path), Role::Content(Region::Note))?;
         let note_ctx = ctx.for_part(note_rels, part.path, Region::Note);
         for note in root.find_all(ns::W, elem_name) {
             if matches!(
@@ -174,14 +168,14 @@ impl TypedPart {
     fn read(
         &self,
         parse_ctx: &ParseCtx,
-        pkg: &RefCell<Package>,
+        pkg: &Package,
         role: Role,
         root: &str,
     ) -> Result<(Option<Element>, bool), ConvertError> {
         let tree = if self.related {
-            pkg.borrow_mut().related_xml_part(&self.path, role)?
+            pkg.related_xml_part(&self.path, role)?
         } else {
-            pkg.borrow_mut().optional_xml_part(&self.path, role)?
+            pkg.optional_xml_part(&self.path, role)?
         };
         match tree {
             Some(tree) if tree.find(ns::W, root).is_some() => Ok((Some(tree), false)),
@@ -189,7 +183,7 @@ impl TypedPart {
                 report(parse_ctx, role.unreadable());
                 Ok((None, true))
             }
-            None => Ok((None, self.related || pkg.borrow().has_part(&self.path))),
+            None => Ok((None, self.related || pkg.has_part(&self.path))),
         }
     }
 }

@@ -15,11 +15,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
-    let pkg = RefCell::new(Package::open(parse_ctx, bytes, PackageKind::Epub)?);
+    let pkg = Package::open(parse_ctx, bytes, PackageKind::Epub)?;
 
-    let container = pkg
-        .borrow_mut()
-        .required_xml_part("META-INF/container.xml", Role::Content(Region::Body))?;
+    let container = pkg.required_xml_part("META-INF/container.xml", Role::Content(Region::Body))?;
     let opf_path = container
         .descendants_any("rootfile")
         .next()
@@ -27,7 +25,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         .ok_or_else(|| ConvertError::malformed_part("META-INF/container.xml", "no rootfile entry"))?
         .to_string();
 
-    let opf = pkg.borrow_mut().required_xml_part(&opf_path, Role::Content(Region::Body))?;
+    let opf = pkg.required_xml_part(&opf_path, Role::Content(Region::Body))?;
 
     let mut doc = Document::default();
     if let Some(title) = opf.descendants_any("title").next().map(|t| t.text()) {
@@ -78,9 +76,7 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let mut converted = 0usize;
     for (position, chapter_path) in spine_paths.iter().enumerate() {
         let _unit = parse_ctx.enter_unit(position);
-        let Some(tree) =
-            pkg.borrow_mut().related_xml_part(chapter_path, Role::Reported(Region::Body))?
-        else {
+        let Some(tree) = pkg.related_xml_part(chapter_path, Role::Reported(Region::Body))? else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             continue;
         };
@@ -130,7 +126,7 @@ fn chapter_stylesheet(
     parse_ctx: &ParseCtx,
     tree: &Element,
     chapter_path: &str,
-    pkg: &RefCell<Package>,
+    pkg: &Package,
     sheets: &mut Sheets,
 ) -> Result<Stylesheet, ConvertError> {
     let mut css = Stylesheet::default();
@@ -149,16 +145,15 @@ fn chapter_stylesheet(
                         continue;
                     };
                     if !sheets.parts.contains_key(&target.path) {
-                        let text = pkg
-                            .borrow_mut()
-                            .related_part(&target.path, Role::Formatting)?
-                            .map(|bytes| match std::str::from_utf8(&bytes) {
+                        let text = pkg.related_part(&target.path, Role::Formatting)?.map(|bytes| {
+                            match std::str::from_utf8(&bytes) {
                                 Ok(text) => text.to_string(),
                                 Err(_) => {
                                     report(parse_ctx, Role::Formatting.undecodable());
                                     String::from_utf8_lossy(&bytes).into_owned()
                                 }
-                            });
+                            }
+                        });
                         sheets.parts.insert(target.path.clone(), text);
                     }
                     if let Some(Some(text)) = sheets.parts.get(&target.path) {
@@ -179,7 +174,7 @@ fn chapter_stylesheet(
 
 struct ChapterCtx<'a, 'b> {
     parse_ctx: &'b ParseCtx<'a>,
-    pkg: &'b RefCell<Package<'a>>,
+    pkg: &'b Package<'a>,
     assets: &'b RefCell<AssetSink>,
     chapter_path: String,
     spine_parts: &'b HashSet<String>,
@@ -218,7 +213,6 @@ impl HtmlCtx for ChapterCtx<'_, '_> {
         let bytes = match path::resolve(&self.chapter_path, src) {
             Ok(target) => self
                 .pkg
-                .borrow_mut()
                 .related_part(&target.path, Role::Reported(Region::Body))?
                 .map(|bytes| (target.path, bytes)),
             Err(_) => None,

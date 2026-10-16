@@ -62,6 +62,7 @@ path = [
     "tests/fixtures/abuse/max_total_bytes--paddedparts--errors.docx",
     "tests/fixtures/abuse/max_xml_nodes--flatflood--errors.docx",
     "tests/fixtures/docx/handmade-run-marks.docx",
+    "tests/fixtures/malformed/unclosed-notes--recovers.docx",
     "tests/fixtures/pdf/handmade-arabic.pdf",
     "tests/fixtures/pdf/handmade-ligatures.pdf",
     "tests/fixtures/xlsb/handmade-trailing-space.xlsb",
@@ -77,11 +78,12 @@ path = [
     "tests/snapshots/snapshots__epub__handmade-features.epub.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__brokenpersist--recovers.ppt.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.diagnostics.snap",
-    "tests/snapshots/snapshots__malformed__mismatched--recovers.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__mismatched--errors.docx.snap",
     "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__nosheet--errors.xls.snap",
     "tests/snapshots/snapshots__malformed__unbalanced--recovers.rtf.diagnostics.snap",
-    "tests/snapshots/snapshots__malformed__unclosed--recovers.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__unclosed--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__unclosed-notes--recovers.docx.diagnostics.snap",
     "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.diagnostics.snap",
     "tests/snapshots/snapshots__ods__sheet.ods.diagnostics.snap",
     "tests/snapshots/snapshots__pdf__handmade-arabic.pdf.snap",
@@ -146,7 +148,6 @@ path = [
     "src/formats/pdf.rs",
     "src/formats/ppt/mod.rs",
     "src/formats/ppt/styletext.rs",
-    "src/formats/pptx/mod.rs",
     "src/formats/rtf/lexer.rs",
     "src/formats/rtf/table.rs",
     "src/formats/rtf/tables.rs",
@@ -204,7 +205,9 @@ path = [
     "tests/fixtures/abuse/max_entry_bytes--imagebomb--errors.docx",
     "tests/fixtures/abuse/max_entry_bytes--zipbomb--errors.docx",
     "tests/fixtures/docx/handmade-numbering.docx",
+    "tests/fixtures/malformed/mismatched--errors.docx",
     "tests/fixtures/malformed/nosheet--errors.xls",
+    "tests/fixtures/malformed/unclosed--errors.docx",
     "tests/fixtures/malformed/unended-globals--recovers.xls",
     "tests/fixtures/pdf/handmade-inline-image-no-colorspace.pdf",
     "tests/fixtures/rtf/text.rtf",
@@ -220,6 +223,7 @@ path = [
     "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.snap",
     "tests/snapshots/snapshots__malformed__truncated--errors.doc.snap",
     "tests/snapshots/snapshots__malformed__truncated--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__unclosed-notes--recovers.docx.snap",
     "tests/snapshots/snapshots__pdf__handmade-inline-image-no-colorspace.pdf.snap",
     "tests/snapshots/snapshots__pdf__handmade-ligatures.pdf.snap",
     "tests/snapshots/snapshots__pdf__text.pdf.snap",
@@ -260,6 +264,17 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 HanZephyr <50990263+HanZephyr@users.noreply.github.com>",
     "2026 breken <312387581+breken-ai@users.noreply.github.com>",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/pptx/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
 
@@ -311,6 +326,8 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+    "2026 Vaibhav Dabas <145040528+vaibhavdabas16@users.noreply.github.com>",
+    "2026 XuJian <265865031+xujiantop-crypto@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
 

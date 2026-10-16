@@ -5,7 +5,8 @@ use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::package::directory::{self, ContainerFacts};
-use crate::package::xml::{Element, parse_xml};
+use crate::package::xml::{Dialect, Element, Marks, Parsed, parse};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Cursor, ErrorKind, Read};
 use std::rc::Rc;
@@ -64,6 +65,15 @@ impl Role {
             Role::Probe => None,
         }
     }
+
+    pub(crate) fn unresolved(self) -> Option<(DiagnosticCode, Region)> {
+        match self {
+            Role::Content(region) | Role::Reported(region) => {
+                Some((DiagnosticCode::UnresolvedEntity, region))
+            }
+            Role::Formatting | Role::Probe => None,
+        }
+    }
 }
 
 pub(crate) fn report(parse_ctx: &ParseCtx, diagnostic: Option<(DiagnosticCode, Region)>) {
@@ -80,7 +90,8 @@ enum Absent {
     Lost,
 }
 
-/// A ZIP-based document package (OOXML, ODF, EPUB).
+/// A ZIP-based document package (OOXML, ODF, EPUB). Each borrow of its
+/// caches is scoped to one method, and none is held while an entry inflates.
 pub struct Package<'a> {
     parse_ctx: &'a ParseCtx<'a>,
     kind: PackageKind,
@@ -89,13 +100,27 @@ pub struct Package<'a> {
     /// Entry indices by ASCII-lowercased name, for OPC alone: its part names
     /// compare case-insensitively in ASCII (ECMA-376 Part 2).
     folded: HashMap<Vec<u8>, usize>,
-    total_read: u64,
+    total_read: Cell<u64>,
     /// Decompressed parts by entry: repeated references are served from the
     /// cache instead of re-decompressing and re-charging the total-bytes
     /// budget (which would falsely trip on valid documents that reference one
     /// part many times). Bounded by `max_total_bytes`. Buffers are shared
     /// (`Rc`), so a cache hit never copies the bytes.
-    cache: HashMap<usize, Rc<[u8]>>,
+    cache: RefCell<HashMap<usize, Rc<[u8]>>>,
+    /// Shared trees by entry, `None` for a part that could not be read or
+    /// parsed. Together they hold at most `max_xml_nodes` nodes, so the
+    /// cache never keeps more than one part at its limit could.
+    trees: RefCell<HashMap<usize, Option<SharedTree>>>,
+    cached_nodes: Cell<u64>,
+}
+
+/// A parsed part shared by every reference that names it, beside the node
+/// count each reuse charges and the marks each reuse reports.
+#[derive(Clone)]
+struct SharedTree {
+    root: Rc<Element>,
+    nodes: u64,
+    marks: Marks,
 }
 
 impl<'a> Package<'a> {
@@ -112,13 +137,30 @@ impl<'a> Package<'a> {
             PackageKind::Opc => folded_names(&zip)?,
             PackageKind::Odf | PackageKind::Epub => HashMap::new(),
         };
-        Ok(Package { parse_ctx, kind, zip, facts, folded, total_read: 0, cache: HashMap::new() })
+        Ok(Package {
+            parse_ctx,
+            kind,
+            zip,
+            facts,
+            folded,
+            total_read: Cell::new(0),
+            cache: RefCell::new(HashMap::new()),
+            trees: RefCell::new(HashMap::new()),
+            cached_nodes: Cell::new(0),
+        })
     }
 
     /// The entry count and sizes the central directory declares.
     #[cfg_attr(not(test), expect(dead_code, reason = "no caller inspects a package yet"))]
     pub fn facts(&self) -> ContainerFacts {
         self.facts
+    }
+
+    fn dialect(&self) -> Dialect {
+        match self.kind {
+            PackageKind::Opc | PackageKind::Odf => Dialect::Xml,
+            PackageKind::Epub => Dialect::Xhtml,
+        }
     }
 
     fn index_of(&self, name: &str) -> Option<usize> {
@@ -132,17 +174,17 @@ impl<'a> Package<'a> {
     /// state for optional parts); `Err` means it exists but cannot be read.
     /// Callers apply the unified policy: skip and report by role when useful
     /// output remains, propagate when the part is the primary content.
-    pub fn part(&mut self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
+    pub fn part(&self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
         // OPC part URIs may carry a leading slash; entries never do.
         let name = name.trim_start_matches('/');
         let Some(index) = self.index_of(name) else {
             return Ok(None);
         };
-        if let Some(bytes) = self.cache.get(&index) {
+        if let Some(bytes) = self.cache.borrow().get(&index) {
             return Ok(Some(Rc::clone(bytes)));
         }
-        let mut file = self
-            .zip
+        let mut zip = self.zip.clone();
+        let mut file = zip
             .by_index(index)
             .map_err(|_| ConvertError::malformed_part(name, "unreadable archive entry"))?;
         let limits = self.parse_ctx.limits();
@@ -151,16 +193,16 @@ impl<'a> Package<'a> {
         }
         // zip fails a read past the declared size, so only the whole-archive
         // total can still run out mid-entry.
-        let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read);
+        let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read.get());
         let cap = limits.max_entry_bytes.min(remaining_total);
         let bytes = read_entry(self.parse_ctx, &mut file, cap, name)?;
         let read = bytes.len() as u64;
         if read > cap {
             return Err(ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes));
         }
-        self.total_read += read;
+        self.total_read.set(self.total_read.get() + read);
         let bytes: Rc<[u8]> = Rc::from(bytes);
-        self.cache.insert(index, Rc::clone(&bytes));
+        self.cache.borrow_mut().insert(index, Rc::clone(&bytes));
         Ok(Some(bytes))
     }
 
@@ -170,35 +212,27 @@ impl<'a> Package<'a> {
     }
 
     /// Read a part that must exist for any meaningful output.
-    pub fn required_part(&mut self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
+    pub fn required_part(&self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::missing_part(name))
     }
 
     /// Read an optional part a conventional name points at: absent is a
     /// valid state, and an unreadable part reports by `role` and reads as
     /// absent; a fatal error propagates.
-    pub fn optional_part(
-        &mut self,
-        name: &str,
-        role: Role,
-    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+    pub fn optional_part(&self, name: &str, role: Role) -> Result<Option<Rc<[u8]>>, ConvertError> {
         self.read_part(name, role, Absent::Valid)
     }
 
     /// Read a part a relationship or reference names: absent or unreadable,
     /// it reports by `role` and reads as absent; a fatal error propagates.
-    pub fn related_part(
-        &mut self,
-        name: &str,
-        role: Role,
-    ) -> Result<Option<Rc<[u8]>>, ConvertError> {
+    pub fn related_part(&self, name: &str, role: Role) -> Result<Option<Rc<[u8]>>, ConvertError> {
         self.read_part(name, role, Absent::Lost)
     }
 
     /// [`Package::optional_part`], parsed as XML: a part that does not parse
     /// reports by `role` and reads as absent.
     pub fn optional_xml_part(
-        &mut self,
+        &self,
         name: &str,
         role: Role,
     ) -> Result<Option<Element>, ConvertError> {
@@ -208,22 +242,77 @@ impl<'a> Package<'a> {
     /// [`Package::related_part`], parsed as XML: a part that does not parse
     /// reports by `role` and reads as absent.
     pub fn related_xml_part(
-        &mut self,
+        &self,
         name: &str,
         role: Role,
     ) -> Result<Option<Element>, ConvertError> {
         self.read_xml_part(name, role, Absent::Lost)
     }
 
+    /// [`Package::related_xml_part`], shared while the shared trees stay
+    /// within `max_xml_nodes` in total: every reuse charges the tree's node
+    /// count before it gets the tree, and every reference reports the
+    /// part's loss and marks by its own role, in its region and unit. A part
+    /// past that budget parses at every reference.
+    pub fn related_xml_tree(
+        &self,
+        name: &str,
+        role: Role,
+    ) -> Result<Option<Rc<Element>>, ConvertError> {
+        let Some(index) = self.index_of(name.trim_start_matches('/')) else {
+            return self.related_xml_part(name, role).map(|tree| tree.map(Rc::new));
+        };
+        let cached = self.trees.borrow().get(&index).cloned();
+        let shared = match cached {
+            Some(Some(shared)) => {
+                self.parse_ctx.charge(shared.nodes)?;
+                shared
+            }
+            Some(None) => {
+                report(self.parse_ctx, role.unreadable());
+                return Ok(None);
+            }
+            None => {
+                let Some(parsed) = self.read_xml(name, role, Absent::Lost)? else {
+                    self.trees.borrow_mut().insert(index, None);
+                    return Ok(None);
+                };
+                let shared = SharedTree {
+                    root: Rc::new(parsed.root),
+                    nodes: parsed.nodes,
+                    marks: parsed.marks,
+                };
+                let cached_nodes = self.cached_nodes.get().saturating_add(shared.nodes);
+                if cached_nodes <= self.parse_ctx.limits().max_xml_nodes {
+                    self.cached_nodes.set(cached_nodes);
+                    self.trees.borrow_mut().insert(index, Some(shared.clone()));
+                }
+                shared
+            }
+        };
+        shared.marks.report(self.parse_ctx, role);
+        Ok(Some(shared.root))
+    }
+
     /// Read and parse an XML part that must exist and parse for any
-    /// meaningful output; its recovery and decoding report by `role`.
-    pub fn required_xml_part(&mut self, name: &str, role: Role) -> Result<Element, ConvertError> {
+    /// meaningful output: markup it would need repaired is `Malformed`, and
+    /// its decoding and references report by `role`.
+    pub fn required_xml_part(&self, name: &str, role: Role) -> Result<Element, ConvertError> {
         let bytes = self.required_part(name)?;
-        parse_xml(self.parse_ctx, &bytes, role)
+        let parsed = self.parse_part(name, &bytes)?;
+        if parsed.marks.recovered {
+            return Err(ConvertError::malformed_part(name, "ill-formed xml"));
+        }
+        parsed.marks.report(self.parse_ctx, role);
+        Ok(parsed.root)
+    }
+
+    fn parse_part(&self, name: &str, bytes: &[u8]) -> Result<Parsed, ConvertError> {
+        parse(self.parse_ctx, bytes, self.dialect()).map_err(|e| e.within(name))
     }
 
     fn read_part(
-        &mut self,
+        &self,
         name: &str,
         role: Role,
         absent: Absent,
@@ -236,15 +325,29 @@ impl<'a> Package<'a> {
     }
 
     fn read_xml_part(
-        &mut self,
+        &self,
         name: &str,
         role: Role,
         absent: Absent,
     ) -> Result<Option<Element>, ConvertError> {
+        Ok(self.read_xml(name, role, absent)?.map(|parsed| {
+            parsed.marks.report(self.parse_ctx, role);
+            parsed.root
+        }))
+    }
+
+    /// A part read and parsed, its loss reported by `role` and its marks
+    /// left to the caller.
+    fn read_xml(
+        &self,
+        name: &str,
+        role: Role,
+        absent: Absent,
+    ) -> Result<Option<Parsed>, ConvertError> {
         let Some(bytes) = self.read_part(name, role, absent)? else {
             return Ok(None);
         };
-        skip_unreadable(self.parse_ctx, role, parse_xml(self.parse_ctx, &bytes, role).map(Some))
+        skip_unreadable(self.parse_ctx, role, self.parse_part(name, &bytes).map(Some))
     }
 }
 
@@ -490,7 +593,7 @@ mod tests {
             for read in 0..4 {
                 let data = if read < 2 { &corrupt } else { &unparseable };
                 let parse_ctx = ParseCtx::default();
-                let mut pkg = Package::open(&parse_ctx, data, PackageKind::Opc).unwrap();
+                let pkg = Package::open(&parse_ctx, data, PackageKind::Opc).unwrap();
                 match read {
                     0 => assert!(pkg.optional_part("word/a.xml", role).unwrap().is_none()),
                     1 => assert!(pkg.related_part("word/a.xml", role).unwrap().is_none()),
@@ -507,7 +610,7 @@ mod tests {
         let data = package_of(&[("word/document.xml", b"<document/>")]);
         for (role, expected) in ROLES {
             let parse_ctx = ParseCtx::default();
-            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
             assert!(pkg.optional_part("word/a.xml", role).unwrap().is_none());
             assert!(pkg.optional_xml_part("word/a.xml", role).unwrap().is_none());
             assert_eq!(reported(&parse_ctx), [], "{role:?}");
@@ -523,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recovered_part_reports_by_the_reading_role() {
+    fn a_recovered_part_reports_by_the_reading_role_and_fails_where_required() {
         let data = package_of(&[("word/a.xml", b"<a><b>text</a>")]);
         let cases = [
             (Role::Content(Region::Note), vec![(DiagnosticCode::RecoveredXml, Region::Note, 1)]),
@@ -533,13 +636,18 @@ mod tests {
         ];
         for (role, expected) in cases {
             let parse_ctx = ParseCtx::default();
-            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
             assert!(pkg.optional_xml_part("word/a.xml", role).unwrap().is_some());
             assert_eq!(reported(&parse_ctx), expected, "{role:?}");
             let parse_ctx = ParseCtx::default();
-            let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
-            assert!(pkg.required_xml_part("word/a.xml", role).is_ok());
-            assert_eq!(reported(&parse_ctx), expected, "{role:?} required");
+            let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            let err = pkg.required_xml_part("word/a.xml", role).unwrap_err();
+            assert!(
+                matches!(&err, ConvertError::Malformed { part: Some(part), reason: "ill-formed xml" }
+                    if part.as_str() == "word/a.xml"),
+                "{role:?}: {err:?}"
+            );
+            assert_eq!(reported(&parse_ctx), [], "{role:?} required");
         }
     }
 
@@ -547,25 +655,25 @@ mod tests {
     fn a_corrupt_entry_is_neither_cached_nor_charged() {
         let data = corrupt_entry("word/document.xml");
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("word/document.xml").unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. }));
-        assert!(pkg.cache.is_empty());
-        assert_eq!(pkg.total_read, 0);
+        assert!(pkg.cache.borrow().is_empty());
+        assert_eq!(pkg.total_read.get(), 0);
         assert!(pkg.optional_part("word/document.xml", Role::Probe).unwrap().is_none());
         assert!(pkg.optional_xml_part("word/document.xml", Role::Probe).unwrap().is_none());
-        assert_eq!(pkg.total_read, 0);
+        assert_eq!(pkg.total_read.get(), 0);
     }
 
     #[test]
     fn repeated_reads_are_cached_and_charged_once() {
         let data = one_part_zip("media/a.bin", &[7u8; 4096]);
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         for _ in 0..5 {
             assert_eq!(pkg.part("media/a.bin").unwrap().unwrap().len(), 4096);
         }
-        assert_eq!(pkg.total_read, 4096, "repeated reads must not re-charge the budget");
+        assert_eq!(pkg.total_read.get(), 4096, "repeated reads must not re-charge the budget");
     }
 
     #[test]
@@ -578,7 +686,7 @@ mod tests {
         let data = w.finish().unwrap().into_inner();
         let limits = Limits { max_total_bytes: 4096 + 100, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("a.bin").unwrap().is_some());
         let err = pkg.part("b.bin").unwrap_err();
         assert!(
@@ -621,7 +729,7 @@ mod tests {
         understate(central + 24, &mut data);
         let limits = Limits { max_entry_bytes: 64, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("a.bin").unwrap_err();
         assert!(
             matches!(&err, ConvertError::Malformed { part: Some(part), reason: "corrupt archive entry" }
@@ -639,7 +747,7 @@ mod tests {
         }
         let data = w.finish().unwrap().into_inner();
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let mut spent = Vec::new();
         for name in ["a.bin", "b.bin", "c.bin", "a.bin"] {
             pkg.part(name).unwrap();
@@ -664,13 +772,13 @@ mod tests {
             data[i..i + 4].copy_from_slice(&corrupt);
         }
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
         assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
         assert_eq!(parse_ctx.fuel(), 8);
         let limits = Limits { max_work: 3, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let read = pkg.optional_part("word/comments.xml", Role::Content(Region::Comment));
         assert!(
             matches!(read, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3 })),
@@ -683,13 +791,13 @@ mod tests {
         let data = one_part_zip("word/comments.xml", b"<comments/>");
         let token = crate::ledger::CancelToken::new();
         let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("word/comments.xml").unwrap().is_some());
         token.cancel();
         let role = Role::Content(Region::Comment);
         let read = pkg.optional_xml_part("word/comments.xml", role);
         assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let read = pkg.related_part("word/comments.xml", role);
         assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
         assert_eq!(reported(&parse_ctx), []);
@@ -699,7 +807,7 @@ mod tests {
     fn leading_slash_part_names_normalize() {
         let data = one_part_zip("word/document.xml", b"<x/>");
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
     }
 
@@ -739,7 +847,7 @@ mod tests {
         );
         for kind in [PackageKind::Odf, PackageKind::Epub] {
             let parse_ctx = ParseCtx::default();
-            let mut pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            let pkg = Package::open(&parse_ctx, &data, kind).unwrap();
             assert_eq!(&*pkg.part("word/a.xml").unwrap().unwrap(), b"<lower/>");
             assert_eq!(&*pkg.part("word/A.xml").unwrap().unwrap(), b"<upper/>");
         }
@@ -749,15 +857,18 @@ mod tests {
     fn opc_names_resolve_after_ascii_case_folding_and_are_cached_once() {
         let data = one_part_zip("word/document.xml", &[7u8; 2048]);
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.has_part("/Word/Document.XML"));
         for name in ["word/Document.xml", "WORD/DOCUMENT.XML", "word/document.xml"] {
             assert_eq!(pkg.part(name).unwrap().unwrap().len(), 2048, "{name}");
         }
-        assert_eq!((pkg.total_read, pkg.cache.len(), parse_ctx.fuel()), (2048, 1, 2));
+        assert_eq!(
+            (pkg.total_read.get(), pkg.cache.borrow().len(), parse_ctx.fuel()),
+            (2048, 1, 2)
+        );
         assert!(pkg.part("word/document.xm").unwrap().is_none());
         for kind in [PackageKind::Odf, PackageKind::Epub] {
-            let mut pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            let pkg = Package::open(&parse_ctx, &data, kind).unwrap();
             assert!(!pkg.has_part("word/Document.xml"), "{kind:?}");
             assert!(pkg.part("word/Document.xml").unwrap().is_none(), "{kind:?}");
             assert!(pkg.part("word/document.xml").unwrap().is_some(), "{kind:?}");
@@ -826,8 +937,106 @@ mod tests {
     fn a_package_after_prepended_bytes_opens_where_zip_finds_it() {
         let data = [b"prefix!!".as_slice(), &one_part_zip("word/document.xml", b"<d/>")].concat();
         let parse_ctx = ParseCtx::default();
-        let mut pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert_eq!(&*pkg.part("word/document.xml").unwrap().unwrap(), b"<d/>");
         assert_eq!(pkg.facts().entries, 1);
+    }
+
+    #[test]
+    fn a_part_that_does_not_parse_is_malformed_by_name_where_required() {
+        let data = package_of(&[("word/a.xml", b"<a>A < B</a>")]);
+        let parse_ctx = ParseCtx::default();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let err = pkg.required_xml_part("word/a.xml", Role::Content(Region::Body)).unwrap_err();
+        assert!(
+            matches!(&err, ConvertError::Malformed { part: Some(part), reason: "bare `<` in markup" }
+                if part.as_str() == "word/a.xml"),
+            "{err:?}"
+        );
+        assert!(
+            pkg.optional_xml_part("word/a.xml", Role::Content(Region::Body)).unwrap().is_none()
+        );
+        assert_eq!(reported(&parse_ctx), [(DiagnosticCode::PartUnreadable, Region::Body, 1)]);
+    }
+
+    #[test]
+    fn each_reuse_of_a_shared_tree_charges_its_nodes_and_reports_its_marks() {
+        let data = package_of(&[
+            ("c/a.xml", b"<a><b/>t</a>"),
+            ("c/r.xml", b"<a><b>t</a>"),
+            ("c/bad.xml", b"<a>A < B</a>"),
+        ]);
+        let parse_ctx = ParseCtx::default();
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let role = Role::Reported(Region::Note);
+        let first = pkg.related_xml_tree("c/a.xml", role).unwrap().unwrap();
+        assert_eq!(parse_ctx.fuel(), 6);
+        for name in ["c/a.xml", "/C/A.xml"] {
+            let fuel = parse_ctx.fuel();
+            assert!(Rc::ptr_eq(&first, &pkg.related_xml_tree(name, role).unwrap().unwrap()));
+            assert_eq!(parse_ctx.fuel() - fuel, 3, "{name}");
+        }
+        for (name, nodes) in [("c/r.xml", 3), ("c/bad.xml", 0), ("c/absent.xml", 0)] {
+            let once = pkg.related_xml_tree(name, role).unwrap().map(|tree| tree.text());
+            let fuel = parse_ctx.fuel();
+            assert_eq!(pkg.related_xml_tree(name, role).unwrap().map(|tree| tree.text()), once);
+            assert_eq!(parse_ctx.fuel() - fuel, nodes, "{name}");
+        }
+        assert_eq!(pkg.trees.borrow().len(), 3);
+        for role in [Role::Reported(Region::Body), Role::Content(Region::Footer)] {
+            assert_eq!(pkg.related_xml_tree("c/r.xml", role).unwrap().unwrap().text(), "t");
+            assert!(pkg.related_xml_tree("c/bad.xml", role).unwrap().is_none());
+        }
+        assert_eq!(
+            reported(&parse_ctx),
+            [
+                (DiagnosticCode::PartUnreadable, Region::Footer, 1),
+                (DiagnosticCode::RecoveredXml, Region::Body, 1),
+                (DiagnosticCode::RecoveredXml, Region::Footer, 1),
+                (DiagnosticCode::RecoveredXml, Region::Note, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_trees_stay_within_the_node_budget_and_a_part_past_it_parses_each_time() {
+        let names: Vec<String> = (0..10).map(|i| format!("c/{i}.xml")).collect();
+        let parts: Vec<(&str, &[u8])> =
+            names.iter().map(|name| (name.as_str(), b"<a><b/>t</a>".as_slice())).collect();
+        let data = package_of(&parts);
+        let limits = Limits { max_xml_nodes: 10, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let role = Role::Reported(Region::Body);
+        for name in &names {
+            assert_eq!(pkg.related_xml_tree(name, role).unwrap().unwrap().text(), "t", "{name}");
+        }
+        let cached: u64 = pkg.trees.borrow().values().flatten().map(|tree| tree.nodes).sum();
+        assert_eq!(cached, 9);
+        for (name, charged) in [("c/0.xml", 3), ("c/9.xml", 5), ("c/9.xml", 5)] {
+            let fuel = parse_ctx.fuel();
+            assert_eq!(pkg.related_xml_tree(name, role).unwrap().unwrap().text(), "t", "{name}");
+            assert_eq!(parse_ctx.fuel() - fuel, charged, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_epub_reads_html_named_references() {
+        let data = package_of(&[("a.xml", b"<a t=\"&eacute;\">&nbsp;</a>")]);
+        for (kind, text, unresolved) in [
+            (PackageKind::Opc, "&nbsp;", 1),
+            (PackageKind::Odf, "&nbsp;", 1),
+            (PackageKind::Epub, "\u{a0}", 0),
+        ] {
+            let parse_ctx = ParseCtx::default();
+            let pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            let tree = pkg.required_xml_part("a.xml", Role::Content(Region::Body)).unwrap();
+            assert_eq!(tree.text(), text, "{kind:?}");
+            let expected: Vec<_> = (unresolved > 0)
+                .then_some((DiagnosticCode::UnresolvedEntity, Region::Body, unresolved))
+                .into_iter()
+                .collect();
+            assert_eq!(reported(&parse_ctx), expected, "{kind:?}");
+        }
     }
 }

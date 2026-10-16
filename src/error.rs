@@ -203,6 +203,14 @@ impl ConvertError {
         ConvertError::Malformed { part: Some(PartName::new(part)), reason }
     }
 
+    /// The error with `part` named, when it is a `Malformed` that names none.
+    pub(crate) fn within(self, part: &str) -> Self {
+        match self {
+            ConvertError::Malformed { part: None, reason } => Self::malformed_part(part, reason),
+            other => other,
+        }
+    }
+
     pub(crate) fn missing_part(part: &str) -> Self {
         ConvertError::MissingPart { part: PartName::new(part) }
     }
