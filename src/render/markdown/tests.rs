@@ -1,4 +1,5 @@
-use super::document_to_markdown;
+use super::{RenderLoss, Unread, document_to_markdown, render_losses};
+use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::model::{
     AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
     MarkerKind, Note, NoteKind, Style, Table, TableKind,
@@ -780,4 +781,159 @@ fn cell_edge_whitespace_is_trimmed() {
         0,
     )]);
     assert_eq!(md, "|  |  |\n| --- | --- |\n| padded | plain |\n");
+}
+
+#[test]
+fn rendering_reports_what_it_loses() {
+    use DiagnosticCode::{DanglingReference as DANGLING, DuplicateNote as DUPLICATE};
+    const READ: Unread = Unread { notes: false, units: false };
+    let para = |inlines: Vec<Inline>| Block::Paragraph(inlines);
+    let text = |t: &str| para(vec![Inline::plain(t)]);
+    let note_ref = |id: &str| Inline::NoteRef(id.into());
+    let link = |id: &str| Inline::Link {
+        content: vec![Inline::plain("label")],
+        target: LinkTarget::Anchor(id.into()),
+    };
+    let cell = Cell::new;
+    let empty_table =
+        || Block::Table(Table::from_rows(vec![vec![cell(Vec::new())]], 0, TableKind::Data));
+    type Case = (&'static str, Vec<Block>, Vec<Note>, Unread, Vec<RenderLoss>);
+    let cases: Vec<Case> = vec![
+        (
+            "a second body under a defined note id",
+            vec![para(vec![note_ref("a")])],
+            vec![note("a", vec![text("First.")]), note("a", vec![text("Second.")])],
+            READ,
+            vec![(DUPLICATE, Region::Note, 1)],
+        ),
+        (
+            "a second body that renders empty",
+            vec![para(vec![note_ref("a")])],
+            vec![note("a", vec![text("First.")]), note("a", vec![empty_table()])],
+            READ,
+            vec![],
+        ),
+        (
+            "a link to an anchor that exists nowhere",
+            vec![para(vec![link("nowhere")])],
+            vec![],
+            READ,
+            vec![(DANGLING, Region::Body, 1)],
+        ),
+        (
+            "a link to an anchor that exists",
+            vec![para(vec![Inline::Anchor("here".into()), link("here")])],
+            vec![],
+            READ,
+            vec![],
+        ),
+        ("a link with an empty anchor", vec![para(vec![link("")])], vec![], READ, vec![]),
+        (
+            "a reference with no note",
+            vec![para(vec![note_ref("missing")])],
+            vec![],
+            READ,
+            vec![(DANGLING, Region::Body, 1)],
+        ),
+        (
+            "a reference to a note",
+            vec![para(vec![note_ref("a")])],
+            vec![note("a", vec![text("Body.")])],
+            READ,
+            vec![],
+        ),
+        (
+            "references and links in every kind of block",
+            vec![
+                Block::heading(1, vec![note_ref("h")]),
+                Block::List(List {
+                    marker: MarkerKind::Bullet,
+                    start: 1,
+                    items: vec![ListItem {
+                        blocks: vec![para(vec![link("l")])],
+                        marker_label: None,
+                    }],
+                }),
+                Block::Table(Table::from_rows(
+                    vec![vec![cell(vec![para(vec![note_ref("t")])])]],
+                    0,
+                    TableKind::Data,
+                )),
+                Block::BlockQuote(vec![para(vec![Inline::Link {
+                    content: vec![note_ref("q"), link("inner")],
+                    target: LinkTarget::External("https://example.com".into()),
+                }])]),
+            ],
+            vec![],
+            READ,
+            vec![(DANGLING, Region::Body, 5)],
+        ),
+        (
+            "a reference and a link in a note body",
+            vec![para(vec![note_ref("a")])],
+            vec![note("a", vec![para(vec![Inline::plain("Body"), note_ref("x"), link("y")])])],
+            READ,
+            vec![(DANGLING, Region::Note, 2)],
+        ),
+        (
+            "a reference in a dropped second body",
+            vec![para(vec![note_ref("a")])],
+            vec![
+                note("a", vec![text("First.")]),
+                note("a", vec![para(vec![Inline::plain("Second"), note_ref("x")])]),
+            ],
+            READ,
+            vec![(DUPLICATE, Region::Note, 1)],
+        ),
+        (
+            "a reference in a note that renders no definition",
+            vec![text("Body.")],
+            vec![note("a", vec![para(vec![note_ref("x")])])],
+            READ,
+            vec![],
+        ),
+        (
+            "references whose notes part the parse counted unreadable",
+            vec![para(vec![note_ref("missing"), link("nowhere")])],
+            vec![note("a", vec![para(vec![Inline::plain("Body"), note_ref("x")])])],
+            Unread { notes: true, units: false },
+            vec![(DANGLING, Region::Body, 1)],
+        ),
+        (
+            "links whose anchors a unit the parse counted unreadable held",
+            vec![para(vec![note_ref("missing"), link("nowhere")])],
+            vec![note("a", vec![para(vec![Inline::plain("Body"), link("y")])])],
+            Unread { notes: false, units: true },
+            vec![(DANGLING, Region::Body, 1)],
+        ),
+    ];
+    for (name, blocks, notes, unread, expected) in cases {
+        let document = Document { blocks, notes, assets: Vec::new() };
+        assert_eq!(render_losses(&document, unread), expected, "{name}");
+    }
+}
+
+#[test]
+fn the_causes_that_silence_render_losses_are_read_from_the_parse() {
+    use DiagnosticCode::{PartUnreadable, UnitUnreadable};
+    let cases = [
+        ("none", vec![], (false, false)),
+        ("a notes part", vec![(PartUnreadable, Region::Note)], (true, false)),
+        ("a body part", vec![(PartUnreadable, Region::Body)], (false, false)),
+        ("a unit", vec![(UnitUnreadable, Region::Body)], (false, true)),
+        ("a unit in notes", vec![(UnitUnreadable, Region::Note)], (false, true)),
+        (
+            "both",
+            vec![(UnitUnreadable, Region::Body), (PartUnreadable, Region::Note)],
+            (true, true),
+        ),
+    ];
+    for (name, reported, expected) in cases {
+        let mut diagnostics = Diagnostics::default();
+        for (code, region) in reported {
+            diagnostics.add(code, region, None, 1);
+        }
+        let unread = Unread::of(&diagnostics);
+        assert_eq!((unread.notes, unread.units), expected, "{name}");
+    }
 }

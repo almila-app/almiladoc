@@ -16,7 +16,7 @@ use crate::model::{
 use crate::package::xml::{Element, Node};
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::header::resolve_header_rows;
-use crate::shared::math::{mathml_is_display, mathml_to_tex};
+use crate::shared::math::{MathTex, mathml_is_display, mathml_to_tex};
 use crate::shared::text::{clean_text, collapse_ws};
 use std::collections::HashMap;
 
@@ -449,7 +449,8 @@ impl Builder<'_> {
                 self.blocks.push(Block::Rule);
             }
             "math" => {
-                let tex = mathml_to_tex(elem);
+                let MathTex { tex, glyphs } = mathml_to_tex(elem);
+                self.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, Region::Body, glyphs);
                 if tex.is_empty() {
                 } else if mathml_is_display(elem) {
                     self.flush_paragraph();
@@ -942,7 +943,9 @@ mod tests {
 
     #[test]
     fn content_left_unread_or_hidden_reports_once_per_element() {
-        use DiagnosticCode::{BlockUnread, EmbeddedObject, GraphicUnread, HiddenOmitted};
+        use DiagnosticCode::{
+            BlockUnread, EmbeddedObject, GraphicUnread, HiddenOmitted, UnmappedSymbol,
+        };
         const BODY: Region = Region::Body;
         let cases: &[(&str, &str, &str, &[Reported])] = &[
             (
@@ -1055,6 +1058,25 @@ mod tests {
                 &[(EmbeddedObject, BODY, 1)],
             ),
             ("embed", r#"<embed src="a.swf"/>"#, "", &[(EmbeddedObject, BODY, 1)]),
+            (
+                "glyphs in math",
+                "<p><math><mi>x</mi><mglyph/></math><math><mglyph/><mglyph/></math></p>",
+                "",
+                &[(UnmappedSymbol, BODY, 3)],
+            ),
+            (
+                "only a glyph in display math",
+                r#"<math display="block"><mglyph alt="a"/></math>"#,
+                "",
+                &[(UnmappedSymbol, BODY, 1)],
+            ),
+            ("empty math", "<p><math><mrow/></math></p>", "", &[]),
+            (
+                "hidden math",
+                r#"<p style="display: none"><math><mi>x</mi><mglyph/></math></p>"#,
+                "",
+                &[(HiddenOmitted, BODY, 1)],
+            ),
             ("iframe", r#"<iframe src="a.xhtml"/>"#, "", &[(EmbeddedObject, BODY, 1)]),
             (
                 "caption and columns",

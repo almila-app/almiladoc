@@ -14,7 +14,9 @@ fn mathml(body: &str) -> String {
     let xml = format!(r#"<math xmlns="http://www.w3.org/1998/Math/MathML">{body}</math>"#);
     let root: Element =
         parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
-    mathml_to_tex(root.child_elems().next().unwrap())
+    let formula = mathml_to_tex(root.child_elems().next().unwrap());
+    assert_eq!(formula.glyphs, 0, "{body}");
+    formula.tex
 }
 
 #[test]
@@ -87,4 +89,103 @@ fn mathml_display_attribute_selects_block_layout() {
         r#"<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mi>x</mi></math>"#;
     let root = parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
     assert!(mathml_is_display(root.child_elems().next().unwrap()));
+}
+
+#[test]
+fn mathml_counts_the_image_glyphs_it_drops_where_they_would_show() {
+    let cases: &[(&str, &str, &str, u64)] = &[
+        ("a glyph", r#"<mglyph src="a.png" alt="star"/>"#, "", 1),
+        ("a glyph beside text", "<mi>x</mi><mglyph/>", "x", 1),
+        ("a glyph in an identifier", "<mi><mglyph/></mi>", "", 1),
+        ("a glyph in a number", "<mn>1<mglyph/></mn>", "1", 1),
+        ("a glyph in an operator", "<mo>+<mglyph/></mo>", "+", 1),
+        ("a glyph in text", "<mtext>a<mglyph/></mtext>", "\\text{a}", 1),
+        ("a glyph in a string", "<ms><mglyph/></ms>", "\\text{\"\"}", 1),
+        ("glyphs in a fraction", "<mfrac><mglyph/><mrow><mglyph/></mrow></mfrac>", "\\frac{}{}", 2),
+        ("a glyph in a script", "<msup><mi>x</mi><mglyph/></msup>", "x^{}", 1),
+        (
+            "a glyph in a cell",
+            "<mtable><mtr><mtd><mglyph/></mtd></mtr></mtable>",
+            "\\begin{matrix} \\end{matrix}",
+            1,
+        ),
+        ("a glyph in an accent", "<mover><mi>v</mi><mo>→<mglyph/></mo></mover>", "\\vec{v}", 1),
+        ("a glyph over a base", "<mover><mi>v</mi><mglyph/></mover>", "\\overset{}{v}", 1),
+        (
+            "a glyph in a big operator",
+            "<munderover><mo>∑<mglyph/></mo><mi>a</mi><mi>b</mi></munderover>",
+            "\\sum_{a}^{b}",
+            1,
+        ),
+        ("a phantom glyph", "<mphantom><mglyph/></mphantom>", "\\phantom{}", 0),
+        ("a phantom glyph in a token", "<mi>x<mphantom><mglyph/></mphantom></mi>", "x", 0),
+        (
+            "a phantom glyph in an accent",
+            "<mover><mi>v</mi><mo>→<mphantom><mglyph/></mphantom></mo></mover>",
+            "\\vec{v}",
+            0,
+        ),
+        (
+            "a glyph in an annotation",
+            "<semantics><mi>x</mi><annotation-xml><mglyph/></annotation-xml></semantics>",
+            "x",
+            0,
+        ),
+        (
+            "a glyph under a TeX annotation",
+            r#"<semantics><mglyph/><annotation encoding="application/x-tex">y</annotation></semantics>"#,
+            "y",
+            0,
+        ),
+        (
+            "a glyph in a token under a TeX annotation",
+            r#"<mi><semantics><mglyph/><annotation encoding="application/x-tex">y</annotation></semantics></mi>"#,
+            "y",
+            0,
+        ),
+        (
+            "a glyph in the presentation of a token",
+            r#"<mi><semantics><mglyph/><annotation encoding="StarMath 5.0">y</annotation></semantics></mi>"#,
+            "y",
+            1,
+        ),
+        (
+            "a glyph after the presentation of a token",
+            "<mi><semantics><mglyph/><mglyph/></semantics></mi>",
+            "",
+            1,
+        ),
+        (
+            "a glyph in an annotation in a token",
+            "<mi>x<annotation><mglyph/></annotation></mi>",
+            "x",
+            0,
+        ),
+        (
+            "a glyph in an annotation-xml in a token",
+            "<mi>x<annotation-xml><mglyph/></annotation-xml></mi>",
+            "x",
+            0,
+        ),
+        ("a glyph in a stray annotation", "<annotation-xml><mglyph/></annotation-xml>", "", 0),
+        (
+            "a glyph after a leading annotation-xml",
+            "<semantics><annotation-xml><mglyph/></annotation-xml><mglyph/></semantics>",
+            "",
+            1,
+        ),
+        (
+            "a glyph in the presentation",
+            r#"<semantics><mrow><mglyph/></mrow><annotation-xml><mglyph/></annotation-xml></semantics>"#,
+            "",
+            1,
+        ),
+    ];
+    for &(name, body, tex, glyphs) in cases {
+        let xml = format!(r#"<math xmlns="http://www.w3.org/1998/Math/MathML">{body}</math>"#);
+        let root =
+            parse_xml(&crate::ctx::ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
+        let formula = mathml_to_tex(root.child_elems().next().unwrap());
+        assert_eq!(formula, MathTex { tex: tex.to_string(), glyphs }, "{name}");
+    }
 }

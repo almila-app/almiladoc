@@ -8,7 +8,10 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use crate::model::{Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty};
+use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
+use crate::model::{
+    Block, Document, Inline, LinkTarget, List, MarkerKind, Note, TableKind, inlines_are_empty,
+};
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
 use inline::render_inlines;
@@ -37,23 +40,16 @@ pub(crate) struct Ctx {
     anchors: AnchorMap,
 }
 
+impl Ctx {
+    fn of(doc: &Document) -> Self {
+        Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) }
+    }
+}
+
 pub fn document_to_markdown(doc: &Document) -> String {
-    let rc = Ctx { nums: number_notes(doc), anchors: resolve_anchors(doc) };
+    let rc = Ctx::of(doc);
     let mut parts: Vec<String> = doc.blocks.iter().filter_map(|b| render_block(b, &rc)).collect();
-    let mut rendered_defs: HashSet<usize> = HashSet::new();
-    let mut ordered: Vec<(&Note, usize)> =
-        doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
-    ordered.sort_by_key(|(_, num)| *num);
-    for (note, num) in ordered {
-        let body = render_blocks(&note.blocks, &rc);
-        if body.is_empty() {
-            continue;
-        }
-        // The first non-empty definition for a duplicate id wins.
-        if !rendered_defs.insert(num) {
-            log::debug!("duplicate note id {:?} dropped from output", note.id);
-            continue;
-        }
+    for (num, _, body) in note_definitions(doc, &rc).defined {
         let mut lines = body.lines();
         let first = lines.next().unwrap_or("");
         let mut s = format!("[^{num}]: {first}");
@@ -71,6 +67,139 @@ pub fn document_to_markdown(doc: &Document) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Which causes the parse already counted, silencing the render losses they
+/// cover.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Unread {
+    /// A notes part did not read, so references to its notes dangle.
+    pub(crate) notes: bool,
+    /// A whole unit did not read, so links to its anchors dangle.
+    pub(crate) units: bool,
+}
+
+impl Unread {
+    /// The causes `diagnostics` counts: any `part_unreadable` in Note, any
+    /// `unit_unreadable`.
+    pub(crate) fn of(diagnostics: &Diagnostics) -> Self {
+        Unread {
+            notes: diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::PartUnreadable && d.region == Region::Note),
+            units: diagnostics.iter().any(|d| d.code == DiagnosticCode::UnitUnreadable),
+        }
+    }
+}
+
+/// One loss rendering reports: its code, region and count.
+pub(crate) type RenderLoss = (DiagnosticCode, Region, u64);
+
+/// What rendering `doc` loses, by code, region and count: note bodies under
+/// an id already defined, and links to anchors and note references whose
+/// target exists nowhere, unless `unread` names their cause.
+pub(crate) fn render_losses(doc: &Document, unread: Unread) -> Vec<RenderLoss> {
+    let rc = Ctx::of(doc);
+    let definitions = note_definitions(doc, &rc);
+    let mut body = Dangling::default();
+    visit_inlines(&doc.blocks, &mut |inline| body.tally(inline, &rc));
+    let mut notes = Dangling::default();
+    for (_, note, _) in &definitions.defined {
+        visit_inlines(&note.blocks, &mut |inline| notes.tally(inline, &rc));
+    }
+    let dangling = |found: Dangling| {
+        let links = if unread.units { 0 } else { found.links };
+        links.saturating_add(if unread.notes { 0 } else { found.note_refs })
+    };
+    [
+        (DiagnosticCode::DuplicateNote, Region::Note, definitions.duplicates),
+        (DiagnosticCode::DanglingReference, Region::Body, dangling(body)),
+        (DiagnosticCode::DanglingReference, Region::Note, dangling(notes)),
+    ]
+    .into_iter()
+    .filter(|&(_, _, count)| count > 0)
+    .collect()
+}
+
+#[derive(Default)]
+struct Dangling {
+    links: u64,
+    note_refs: u64,
+}
+
+impl Dangling {
+    fn tally(&mut self, inline: &Inline, rc: &Ctx) {
+        match inline {
+            Inline::Link { target: LinkTarget::Anchor(id), .. }
+                if !id.is_empty() && rc.anchors.fragment(id).is_none() =>
+            {
+                self.links = self.links.saturating_add(1);
+            }
+            Inline::NoteRef(id) if !rc.nums.contains_key(id) => {
+                self.note_refs = self.note_refs.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn visit_inlines(blocks: &[Block], visit: &mut impl FnMut(&Inline)) {
+    fn walk(inlines: &[Inline], visit: &mut impl FnMut(&Inline)) {
+        for inline in inlines {
+            visit(inline);
+            if let Inline::Link { content, .. } = inline {
+                walk(content, visit);
+            }
+        }
+    }
+    for block in blocks {
+        match block {
+            Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } => {
+                walk(inlines, visit)
+            }
+            Block::List(list) => {
+                for item in &list.items {
+                    visit_inlines(&item.blocks, visit);
+                }
+            }
+            Block::Table(t) => {
+                for row in &t.grid {
+                    for slot in row {
+                        if let crate::model::CellSlot::Origin(cell) = slot {
+                            visit_inlines(&cell.blocks, visit);
+                        }
+                    }
+                }
+            }
+            Block::BlockQuote(blocks) => visit_inlines(blocks, visit),
+            Block::CodeBlock { .. } | Block::Rule | Block::Math(_) => {}
+        }
+    }
+}
+
+struct NoteDefinitions<'d> {
+    defined: Vec<(usize, &'d Note, String)>,
+    duplicates: u64,
+}
+
+fn note_definitions<'d>(doc: &'d Document, rc: &Ctx) -> NoteDefinitions<'d> {
+    let mut ordered: Vec<(&Note, usize)> =
+        doc.notes.iter().filter_map(|n| rc.nums.get(&n.id).map(|&num| (n, num))).collect();
+    ordered.sort_by_key(|(_, num)| *num);
+    let mut definitions = NoteDefinitions { defined: Vec::new(), duplicates: 0 };
+    let mut numbers: HashSet<usize> = HashSet::new();
+    for (note, num) in ordered {
+        let body = render_blocks(&note.blocks, rc);
+        if body.is_empty() {
+            continue;
+        }
+        if numbers.insert(num) {
+            definitions.defined.push((num, note, body));
+        } else {
+            definitions.duplicates = definitions.duplicates.saturating_add(1);
+        }
+    }
+    definitions
 }
 
 /// Number notes in first-reference order; unreferenced notes follow at the

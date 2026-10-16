@@ -614,7 +614,7 @@ mod tests {
     use DiagnosticCode::{
         BlockUnread, CommentOmitted, EmbeddedObject, FooterOmitted, FormControlUnread,
         GraphicUnread, HeaderOmitted, ImageUnavailable, ImageUnplaced, RecoveredXml,
-        RevisionOmitted, TableSpanRepaired, TextBoxUnread,
+        RevisionOmitted, TableSpanRepaired, TextBoxUnread, UnmappedSymbol,
     };
 
     fn frame(content: &str) -> String {
@@ -888,6 +888,74 @@ mod tests {
                 odf.parts = &parts;
                 assert_eq!(diagnose(&odf), [(code, BODY, unit, 1)], "{anchor} {media}");
             }
+        }
+    }
+
+    #[test]
+    fn a_formula_reports_the_image_glyphs_it_drops_where_it_renders() {
+        let math = |body: &str| {
+            format!(
+                r#"<math:math xmlns:math="http://www.w3.org/1998/Math/MathML">{body}</math:math>"#
+            )
+        };
+        let (glyph, lone) = (math("<math:mi>x</math:mi><math:mglyph/>"), math("<math:mglyph/>"));
+        let linked = format!(
+            "<office:document-content {NS}><office:body>{glyph}</office:body></office:document-content>"
+        );
+        let parts = [("Pictures/a.png", "png"), ("Object 1/content.xml", linked.as_str())];
+        let object = |inner: &str| format!("<draw:object>{inner}</draw:object>");
+        let inline = |content: &str| format!("<text:p>t{}</text:p>", frame(content));
+        let lost = |region, unit, count| vec![(UnmappedSymbol, region, unit, count)];
+        let cases: Vec<(&str, Odf, &str, Vec<Reported>)> = vec![
+            ("inline", text(&inline(&object(&glyph))), "t$x$\n", lost(BODY, None, 1)),
+            (
+                "linked",
+                text(&inline(r#"<draw:object xlink:href="./Object 1"/>"#)),
+                "t$x$\n",
+                lost(BODY, None, 1),
+            ),
+            ("only glyphs", text(&inline(&object(&lone))), "t\n", lost(BODY, None, 1)),
+            (
+                "only glyphs before the picture",
+                text(&inline(&format!(
+                    r#"{}<draw:image xlink:href="Pictures/a.png"/><svg:title xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">f</svg:title>"#,
+                    object(&lone)
+                ))),
+                "tf\n",
+                lost(BODY, None, 1),
+            ),
+            ("empty", text(&inline(&object(&math("")))), "t\n", vec![]),
+            (
+                "in a note",
+                text(&format!(
+                    r#"<text:p>t<text:note text:id="n"><text:note-body>{}</text:note-body></text:note></text:p>"#,
+                    inline(&object(&glyph))
+                )),
+                "t[^1]\n\n[^1]: t$x$\n",
+                lost(Region::Note, None, 1),
+            ),
+            (
+                "on a slide",
+                slides(&format!("<draw:page>{}</draw:page>", frame(&object(&glyph)))),
+                "$$\nx\n$$\n",
+                lost(BODY, Some(1), 1),
+            ),
+            (
+                "page-anchored",
+                text(&frame(&object(&glyph))),
+                "",
+                vec![(EmbeddedObject, BODY, None, 1)],
+            ),
+            (
+                "page-anchored, only glyphs",
+                text(&frame(&object(&lone))),
+                "",
+                vec![(EmbeddedObject, BODY, None, 1)],
+            ),
+        ];
+        for (name, mut odf, md, expected) in cases {
+            odf.parts = &parts;
+            assert_eq!(convert(&odf), (md.to_string(), expected), "{name}");
         }
     }
 

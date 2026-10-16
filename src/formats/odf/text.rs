@@ -15,7 +15,7 @@ use crate::package::xml::{Element, Node, ns};
 use crate::shared::assets::{AssetSink, media_type_for};
 use crate::shared::blockstyle::StyledRun;
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
-use crate::shared::math::mathml_to_tex;
+use crate::shared::math::{MathTex, mathml_to_tex};
 use crate::shared::text::{clean_text, collapse_ws};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -592,7 +592,13 @@ pub(super) fn walk_frame(
 pub(super) fn frame_graphic(frame: &Element, ctx: &Ctx) -> Result<Option<Inline>, ConvertError> {
     let object_loss = if let Some(object) = frame.find(ns::DRAW, "object") {
         match read_object(ctx, object)? {
-            Object::Formula(tex) => return Ok(Some(Inline::Math(tex))),
+            Object::Formula(MathTex { tex, glyphs }) => {
+                ctx.emit_count(DiagnosticCode::UnmappedSymbol, glyphs);
+                if !tex.is_empty() {
+                    return Ok(Some(Inline::Math(tex)));
+                }
+                None
+            }
             Object::Empty => None,
             Object::Unread(code) => Some(code),
         }
@@ -627,7 +633,8 @@ pub(super) fn frame_graphic(frame: &Element, ctx: &Ctx) -> Result<Option<Inline>
 
 /// What a `draw:object` converts to.
 pub(super) enum Object {
-    Formula(String),
+    /// A formula with LaTeX to show or image glyphs it drops.
+    Formula(MathTex),
     /// A formula with nothing to show.
     Empty,
     /// The loss to report: the object's content is not converted.
@@ -666,8 +673,12 @@ pub(super) fn read_object(ctx: &Ctx, object: &Element) -> Result<Object, Convert
 }
 
 fn formula(math: &Element) -> Object {
-    let tex = mathml_to_tex(math);
-    if tex.is_empty() { Object::Empty } else { Object::Formula(tex) }
+    let formula = mathml_to_tex(math);
+    if formula.tex.is_empty() && formula.glyphs == 0 {
+        Object::Empty
+    } else {
+        Object::Formula(formula)
+    }
 }
 
 /// A picture's bytes into the asset store; `None` when the href names no

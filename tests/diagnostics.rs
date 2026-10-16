@@ -350,7 +350,7 @@ const CASES: &[Case] = &[
             ("word/charts/chart1.xml", Put(CHART)),
             ("word/charts/chart1.xml", Recover),
         ],
-        &[(RECOVERED, Note, None, 1)],
+        &[(RECOVERED, Note, None, 1), (DiagnosticCode::DanglingReference, Body, None, 1)],
     ),
     case(
         Fixture("docx/text.docx"),
@@ -361,7 +361,7 @@ const CASES: &[Case] = &[
             ("word/diagrams/data1.xml", Put(DIAGRAM)),
             ("word/diagrams/data1.xml", Recover),
         ],
-        &[(RECOVERED, Note, None, 1)],
+        &[(RECOVERED, Note, None, 1), (DiagnosticCode::DanglingReference, Body, None, 1)],
     ),
     case(
         Fixture("pptx/pres.pptx"),

@@ -15,7 +15,7 @@ use crate::ledger::CancelToken;
 use crate::limits::Limit;
 use crate::model::Document;
 use crate::pool::run_on_pool;
-use crate::render::markdown::document_to_markdown;
+use crate::render::markdown::{Unread, document_to_markdown, render_losses};
 
 /// Converts documents under one validated [`Config`]; share it across threads
 /// and calls.
@@ -45,7 +45,8 @@ impl Converter {
     }
 
     /// Parse `input` into the document model, with the diagnostics of what it
-    /// could not read; losses fail only when [`Parsed::render`] finishes it.
+    /// could not read and what rendering its document drops; losses fail only
+    /// when [`Parsed::render`] finishes it.
     ///
     /// # Errors
     ///
@@ -56,11 +57,8 @@ impl Converter {
     /// in a build without the `pdf` feature.
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
         self.admit(&input)?;
-        let (document, diagnostics) = self.on_pool(|| {
-            let parse_ctx = self.parse_ctx(&input);
-            let document = formats::parse(&parse_ctx, input.bytes, input.format)?;
-            Ok((document, parse_ctx.into_diagnostics()))
-        })?;
+        let (document, diagnostics) =
+            self.on_pool(|| parse_document(self.parse_ctx(&input), input.bytes, input.format))?;
         Ok(Parsed { document, diagnostics, config: Arc::clone(&self.config) })
     }
 
@@ -76,12 +74,18 @@ impl Converter {
         self.admit(&input)?;
         self.on_pool(|| {
             let parse_ctx = self.parse_ctx(&input);
-            let markdown = match input.format {
+            let (markdown, diagnostics) = match input.format {
                 #[cfg(feature = "pdf")]
-                Format::Pdf => formats::pdf::to_markdown(&parse_ctx, input.bytes)?,
-                format => document_to_markdown(&formats::parse(&parse_ctx, input.bytes, format)?),
+                Format::Pdf => (
+                    formats::pdf::to_markdown(&parse_ctx, input.bytes)?,
+                    parse_ctx.into_diagnostics(),
+                ),
+                format => {
+                    let (document, diagnostics) = parse_document(parse_ctx, input.bytes, format)?;
+                    (document_to_markdown(&document), diagnostics)
+                }
             };
-            conclude(self.config.on_loss, markdown, parse_ctx.into_diagnostics())
+            conclude(self.config.on_loss, markdown, diagnostics)
         })
     }
 
@@ -164,7 +168,8 @@ impl Parsed {
         self.document
     }
 
-    /// What the parse could not carry into the document.
+    /// What the parse could not carry into the document, and what rendering
+    /// it drops.
     #[must_use]
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
@@ -191,6 +196,19 @@ impl Parsed {
     ) -> Result<T, ConvertError> {
         run_on_pool(&self.config, work)
     }
+}
+
+fn parse_document(
+    parse_ctx: ParseCtx<'_>,
+    bytes: &[u8],
+    format: Format,
+) -> Result<(Document, Diagnostics), ConvertError> {
+    let document = formats::parse(&parse_ctx, bytes, format)?;
+    let mut diagnostics = parse_ctx.into_diagnostics();
+    for (code, region, count) in render_losses(&document, Unread::of(&diagnostics)) {
+        diagnostics.add(code, region, None, count);
+    }
+    Ok((document, diagnostics))
 }
 
 fn conclude(
@@ -242,7 +260,7 @@ impl Conversion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::DiagnosticCode;
+    use crate::diagnostics::{DiagnosticCode, Region};
 
     const CSV: &[u8] = b"a,b\n1,2\n";
 
@@ -271,13 +289,75 @@ mod tests {
         }
     }
 
-    fn recovered_docx() -> Vec<u8> {
-        let w = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
-        let document = format!("<w:document {w}><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p>");
+    const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+
+    fn zip_of(parts: &[(&str, &str)]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut zip, document.as_bytes()).unwrap();
+        for (name, text) in parts {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+        }
         zip.finish().unwrap().into_inner()
+    }
+
+    fn recovered_docx() -> Vec<u8> {
+        let document = format!("<w:document {W}><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p>");
+        zip_of(&[("word/document.xml", &document)])
+    }
+
+    fn docx(body: &str, parts: &[(&str, &str)]) -> Vec<u8> {
+        let document = format!("<w:document {W}><w:body>{body}</w:body></w:document>");
+        zip_of(&[&[("word/document.xml", document.as_str())], parts].concat())
+    }
+
+    #[test]
+    fn parse_and_convert_report_what_rendering_loses_alike() {
+        let body = concat!(
+            r#"<w:p><w:hyperlink w:anchor="nowhere"><w:r><w:t>label</w:t></w:r></w:hyperlink>"#,
+            r#"<w:r><w:footnoteReference w:id="7"/></w:r></w:p>"#,
+        );
+        let rels = |part: &str| {
+            format!(
+                concat!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+                    r#"<Relationship Id="rId1" Target="{0}.xml" "#,
+                    r#"Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{0}"/>"#,
+                    "</Relationships>",
+                ),
+                part
+            )
+        };
+        let (footnotes, numbering) = (rels("footnotes"), rels("numbering"));
+        let cases: [(&[(&str, &str)], &[_]); 3] = [
+            (&[], &[(DiagnosticCode::DanglingReference, Region::Body, None, 2)]),
+            (
+                &[("word/_rels/document.xml.rels", &footnotes)],
+                &[
+                    (DiagnosticCode::PartUnreadable, Region::Note, None, 1),
+                    (DiagnosticCode::DanglingReference, Region::Body, None, 1),
+                ],
+            ),
+            (
+                &[("word/_rels/document.xml.rels", &numbering)],
+                &[
+                    (DiagnosticCode::PartUnreadable, Region::Body, None, 1),
+                    (DiagnosticCode::DanglingReference, Region::Body, None, 2),
+                ],
+            ),
+        ];
+        for (parts, expected) in cases {
+            let bytes = docx(body, parts);
+            let converted = reporting().convert(Input::new(&bytes, Format::Docx)).unwrap();
+            let parsed = reporting().parse(Input::new(&bytes, Format::Docx)).unwrap();
+            assert_eq!(converted.markdown(), "label\n");
+            assert_eq!(parsed.render().unwrap(), converted);
+            let reported: Vec<_> = converted
+                .diagnostics()
+                .iter()
+                .map(|d| (d.code, d.region, d.unit, d.count))
+                .collect();
+            assert_eq!(reported, expected, "{parts:?}");
+        }
     }
 
     fn reporting() -> Converter {
@@ -317,7 +397,7 @@ mod tests {
             DiagnosticCode::StylePartUnreadable,
         ] {
             let mut diagnostics = Diagnostics::default();
-            diagnostics.add(code, crate::diagnostics::Region::Body, None, 1);
+            diagnostics.add(code, Region::Body, None, 1);
             let lost = code.class() == crate::diagnostics::LossClass::Lost;
             let reported = conclude(OnLoss::Report, "md".to_string(), diagnostics.clone()).unwrap();
             assert_eq!(reported.is_complete(), !lost, "{code}");
@@ -384,7 +464,7 @@ mod tests {
         let expected = [(
             DiagnosticCode::GarbledFontEncoding,
             crate::diagnostics::LossClass::Lost,
-            crate::diagnostics::Region::Body,
+            Region::Body,
         )];
         let reported = |diagnostics: &Diagnostics| -> Vec<_> {
             diagnostics.iter().map(|d| (d.code, d.class, d.region)).collect()

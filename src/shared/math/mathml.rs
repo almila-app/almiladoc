@@ -5,11 +5,21 @@
 use super::tex::{Tex, Variant, accent, delimiter, function_name, symbol};
 use crate::package::xml::{Element, Node};
 
-/// A `math` element as LaTeX source without delimiters.
-pub fn mathml_to_tex(math: &Element) -> String {
-    let mut tex = Tex::new();
-    walk_children(math, &mut tex);
-    tex.finish()
+/// A formula as LaTeX, with the image glyphs it could not carry.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MathTex {
+    /// LaTeX source without delimiters.
+    pub tex: String,
+    /// The `mglyph` images it would show, which have no character.
+    pub glyphs: u64,
+}
+
+/// A `math` element as LaTeX source without delimiters, counting the image
+/// glyphs it drops where they would show.
+pub fn mathml_to_tex(math: &Element) -> MathTex {
+    let mut glyphs = 0;
+    let tex = sub_children(&mut glyphs, math);
+    MathTex { tex: tex.finish(), glyphs }
 }
 
 /// Whether a `math` element asks for display (block) layout.
@@ -17,10 +27,10 @@ pub fn mathml_is_display(math: &Element) -> bool {
     math.attr_any("display").is_some_and(|d| d == "block")
 }
 
-fn walk_children(elem: &Element, tex: &mut Tex) {
+fn walk_children(glyphs: &mut u64, elem: &Element, tex: &mut Tex) {
     for node in &elem.children {
         match node {
-            Node::Elem(child) => walk_elem(child, tex),
+            Node::Elem(child) => walk_elem(glyphs, child, tex),
             // Text outside token elements is layout whitespace.
             Node::Text(_) => {}
         }
@@ -33,28 +43,42 @@ fn args(elem: &Element) -> Vec<&Element> {
     elem.child_elems().collect()
 }
 
-fn sub(elem: &Element) -> Tex {
+fn presentation(semantics: &Element) -> Option<&Element> {
+    semantics.child_elems().find(|c| !matches!(c.local.as_str(), "annotation" | "annotation-xml"))
+}
+
+fn glyphs_in(e: &Element) -> u64 {
+    match e.local.as_str() {
+        "mglyph" => 1,
+        "mphantom" | "annotation" | "annotation-xml" => 0,
+        "semantics" if tex_annotation(e).is_some() => 0,
+        "semantics" => presentation(e).map_or(0, glyphs_in),
+        _ => e.child_elems().map(glyphs_in).fold(0, u64::saturating_add),
+    }
+}
+
+fn sub(glyphs: &mut u64, elem: &Element) -> Tex {
     let mut tex = Tex::new();
-    walk_elem(elem, &mut tex);
+    walk_elem(glyphs, elem, &mut tex);
     tex
 }
 
-fn sub_children(elem: &Element) -> Tex {
+fn sub_children(glyphs: &mut u64, elem: &Element) -> Tex {
     let mut tex = Tex::new();
-    walk_children(elem, &mut tex);
+    walk_children(glyphs, elem, &mut tex);
     tex
 }
 
-fn walk_elem(e: &Element, tex: &mut Tex) {
+fn walk_elem(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
+    if matches!(e.local.as_str(), "mi" | "mn" | "mo" | "mtext" | "ms") {
+        *glyphs = glyphs.saturating_add(glyphs_in(e));
+    }
     match e.local.as_str() {
         "semantics" => {
             if let Some(annotation) = tex_annotation(e) {
                 tex.push_str(&annotation);
-            } else if let Some(first) = e
-                .child_elems()
-                .find(|c| !matches!(c.local.as_str(), "annotation" | "annotation-xml"))
-            {
-                walk_elem(first, tex);
+            } else if let Some(first) = presentation(e) {
+                walk_elem(glyphs, first, tex);
             }
         }
         "annotation" | "annotation-xml" => {}
@@ -99,9 +123,9 @@ fn walk_elem(e: &Element, tex: &mut Tex) {
         "mfrac" => {
             let parts = args(e);
             let (Some(num), Some(den)) = (parts.first(), parts.get(1)) else {
-                return walk_children(e, tex);
+                return walk_children(glyphs, e, tex);
             };
-            let (num, den) = (sub(num), sub(den));
+            let (num, den) = (sub(glyphs, num), sub(glyphs, den));
             if e.attr_any("bevelled").is_some_and(|b| b == "true") {
                 tex.push_group(&num);
                 tex.push_char('/');
@@ -118,22 +142,22 @@ fn walk_elem(e: &Element, tex: &mut Tex) {
                 tex.push_group(&den);
             }
         }
-        "msqrt" => tex.push_command("\\sqrt", &sub_children(e)),
+        "msqrt" => tex.push_command("\\sqrt", &sub_children(glyphs, e)),
         "mroot" => {
             let parts = args(e);
             tex.push_macro("\\sqrt");
             if let Some(index) = parts.get(1) {
                 tex.push_char('[');
-                tex.push_tex(&sub(index));
+                tex.push_tex(&sub(glyphs, index));
                 tex.push_char(']');
             }
             if let Some(base) = parts.first() {
-                tex.push_group(&sub(base));
+                tex.push_group(&sub(glyphs, base));
             }
         }
-        "msup" | "msub" | "msubsup" => scripts(e, tex),
-        "munder" | "mover" | "munderover" => under_over(e, tex),
-        "mmultiscripts" => multiscripts(e, tex),
+        "msup" | "msub" | "msubsup" => scripts(glyphs, e, tex),
+        "munder" | "mover" | "munderover" => under_over(glyphs, e, tex),
+        "mmultiscripts" => multiscripts(glyphs, e, tex),
         "mfenced" => {
             let open = e.attr_any("open").unwrap_or("(");
             let close = e.attr_any("close").unwrap_or(")");
@@ -153,16 +177,16 @@ fn walk_elem(e: &Element, tex: &mut Tex) {
                         tex.push_math_char(*sep);
                     }
                 }
-                tex.push_tex(&sub(part));
+                tex.push_tex(&sub(glyphs, part));
             }
             tex.push_macro("\\right");
             tex.push_str(close.chars().next().map_or(".", delimiter));
         }
-        "mtable" => table(e, tex),
-        "mphantom" => tex.push_command("\\phantom", &sub_children(e)),
+        "mtable" => table(glyphs, e, tex),
+        "mphantom" => tex.push_command("\\phantom", &sub_children(&mut 0, e)),
         "menclose" => {
             let notation = e.attr_any("notation").unwrap_or("longdiv");
-            let inner = sub_children(e);
+            let inner = sub_children(glyphs, e);
             match notation.split_whitespace().next() {
                 Some("box") | Some("roundedbox") => tex.push_command("\\boxed", &inner),
                 Some("top") => tex.push_command("\\overline", &inner),
@@ -173,10 +197,11 @@ fn walk_elem(e: &Element, tex: &mut Tex) {
                 _ => tex.push_group(&inner),
             }
         }
-        "mglyph" | "maligngroup" | "malignmark" | "none" | "mprescripts" => {}
+        "mglyph" => *glyphs = glyphs.saturating_add(1),
+        "maligngroup" | "malignmark" | "none" | "mprescripts" => {}
         // mrow, mstyle, mpadded, merror, maction, math itself, and anything
         // unknown: the children carry the content.
-        _ => walk_children(e, tex),
+        _ => walk_children(glyphs, e, tex),
     }
 }
 
@@ -239,32 +264,32 @@ fn operator(e: &Element, tex: &mut Tex) {
     tex.push_math_text(text);
 }
 
-fn scripts(e: &Element, tex: &mut Tex) {
+fn scripts(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     let parts = args(e);
     let Some(base) = parts.first() else { return };
-    let base_tex = sub(base);
+    let base_tex = sub(glyphs, base);
     if is_big_operator(base) {
         tex.push_tex(&base_tex);
     } else {
         tex.push_base(&base_tex);
     }
     match e.local.as_str() {
-        "msup" => script(tex, '^', parts.get(1)),
-        "msub" => script(tex, '_', parts.get(1)),
+        "msup" => script(glyphs, tex, '^', parts.get(1)),
+        "msub" => script(glyphs, tex, '_', parts.get(1)),
         _ => {
-            script(tex, '_', parts.get(1));
-            script(tex, '^', parts.get(2));
+            script(glyphs, tex, '_', parts.get(1));
+            script(glyphs, tex, '^', parts.get(2));
         }
     }
 }
 
-fn script(tex: &mut Tex, mark: char, arg: Option<&&Element>) {
+fn script(glyphs: &mut u64, tex: &mut Tex, mark: char, arg: Option<&&Element>) {
     let Some(arg) = arg else { return };
     tex.push_char(mark);
-    tex.push_group(&sub(arg));
+    tex.push_group(&sub(glyphs, arg));
 }
 
-fn under_over(e: &Element, tex: &mut Tex) {
+fn under_over(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     let parts = args(e);
     let Some(base) = parts.first() else { return };
     let (under, over) = match e.local.as_str() {
@@ -275,21 +300,21 @@ fn under_over(e: &Element, tex: &mut Tex) {
     // Limits on a big operator or a named function take script form,
     // which LaTeX places under and over by itself.
     if is_big_operator(base) || is_named_function(base) {
-        tex.push_tex(&sub(base));
-        script(tex, '_', under);
-        script(tex, '^', over);
+        tex.push_tex(&sub(glyphs, base));
+        script(glyphs, tex, '_', under);
+        script(glyphs, tex, '^', over);
         return;
     }
     // An explicit accent="false" / accentunder="false" asks for a plain
     // over- or under-script even on an accent character.
     let plain_over = e.attr_any("accent").is_some_and(|v| v == "false");
     let plain_under = e.attr_any("accentunder").is_some_and(|v| v == "false");
-    let mut body = sub(base);
+    let mut body = sub(glyphs, base);
     if let Some(over) = over {
-        body = decorate(over, body, true, plain_over);
+        body = decorate(glyphs, over, body, true, plain_over);
     }
     if let Some(under) = under {
-        body = decorate(under, body, false, plain_under);
+        body = decorate(glyphs, under, body, false, plain_under);
     }
     tex.push_tex(&body);
 }
@@ -297,7 +322,7 @@ fn under_over(e: &Element, tex: &mut Tex) {
 /// `body` with `mark` placed over or under it: an accent command where
 /// the mark is an accent character (unless `plain`), `\overset` /
 /// `\underset` otherwise.
-fn decorate(mark: &Element, body: Tex, over: bool, plain: bool) -> Tex {
+fn decorate(glyphs: &mut u64, mark: &Element, body: Tex, over: bool, plain: bool) -> Tex {
     let mut out = Tex::new();
     let text = mark.text();
     let text = text.trim();
@@ -313,16 +338,17 @@ fn decorate(mark: &Element, body: Tex, over: bool, plain: bool) -> Tex {
             ("\\overbrace", false) => "\\underbrace",
             (cmd, _) => cmd,
         };
+        *glyphs = glyphs.saturating_add(glyphs_in(mark));
         out.push_command(cmd, &body);
         return out;
     }
     out.push_macro(if over { "\\overset" } else { "\\underset" });
-    out.push_group(&sub(mark));
+    out.push_group(&sub(glyphs, mark));
     out.push_group(&body);
     out
 }
 
-fn multiscripts(e: &Element, tex: &mut Tex) {
+fn multiscripts(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     let parts = args(e);
     let Some((base, rest)) = parts.split_first() else { return };
     let split = rest.iter().position(|p| p.local == "mprescripts").unwrap_or(rest.len());
@@ -330,26 +356,26 @@ fn multiscripts(e: &Element, tex: &mut Tex) {
     let pre = pre.get(1..).unwrap_or(&[]);
     for pair in pre.chunks(2) {
         tex.push_str("{}");
-        script_pair(tex, pair);
+        script_pair(glyphs, tex, pair);
     }
-    tex.push_group(&sub(base));
+    tex.push_group(&sub(glyphs, base));
     for pair in post.chunks(2) {
-        script_pair(tex, pair);
+        script_pair(glyphs, tex, pair);
     }
 }
 
-fn script_pair(tex: &mut Tex, pair: &[&Element]) {
+fn script_pair(glyphs: &mut u64, tex: &mut Tex, pair: &[&Element]) {
     if let Some(sub_) = pair.first().filter(|p| p.local != "none") {
         tex.push_char('_');
-        tex.push_group(&sub(sub_));
+        tex.push_group(&sub(glyphs, sub_));
     }
     if let Some(sup) = pair.get(1).filter(|p| p.local != "none") {
         tex.push_char('^');
-        tex.push_group(&sub(sup));
+        tex.push_group(&sub(glyphs, sup));
     }
 }
 
-fn table(e: &Element, tex: &mut Tex) {
+fn table(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     tex.push_str("\\begin{matrix}");
     let rows = e.child_elems().filter(|r| matches!(r.local.as_str(), "mtr" | "mlabeledtr"));
     for (i, row) in rows.enumerate() {
@@ -359,7 +385,7 @@ fn table(e: &Element, tex: &mut Tex) {
         let cells = row.child_elems().filter(|c| c.local == "mtd");
         for (j, cell) in cells.enumerate() {
             tex.push_str(if j > 0 { " & " } else { " " });
-            tex.push_tex(&sub_children(cell));
+            tex.push_tex(&sub_children(glyphs, cell));
         }
     }
     tex.push_str(" \\end{matrix}");

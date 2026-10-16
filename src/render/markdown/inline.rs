@@ -161,7 +161,6 @@ fn render_link(
             Some(fragment) => format!("#{fragment}"),
             None => {
                 // Target exists nowhere in the document: degrade to plain text.
-                log::debug!("unresolved internal link target: {id}");
                 out.push_str(&render_inlines_mode(content, ctx, false, rc));
                 return;
             }
