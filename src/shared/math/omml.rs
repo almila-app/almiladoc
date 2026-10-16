@@ -4,6 +4,7 @@
 //! (`{\mtype lin}`) and a run's text sits directly in the run.
 
 use super::tex::{Tex, accent, delimiter, function_name, symbol};
+use super::{DROPPED, GUESSED};
 use crate::package::xml::{Element, Node, ns};
 
 /// One `m:oMath` as LaTeX source without delimiters.
@@ -95,7 +96,9 @@ fn walk_elem(e: &Element, tex: &mut Tex, mode: Mode) {
             tex.push_group(&arg(e, "e", Mode::Math));
         }
         "acc" => {
-            let chr = prop(e, "accPr", "chr").and_then(|v| v.chars().next()).unwrap_or('\u{302}');
+            let chr = marked_prop(e, "accPr", "chr")
+                .and_then(|v| prop_char(&v, tex))
+                .unwrap_or('\u{302}');
             tex.push_command(accent(chr).unwrap_or("\\hat"), &arg(e, "e", Mode::Math));
         }
         "bar" => {
@@ -126,14 +129,37 @@ fn arg(parent: &Element, name: &str, mode: Mode) -> Tex {
     tex
 }
 
-/// A property value: `parent/pr/name/@m:val`, or the element's own text
-/// where the tree came from rtf.
+/// A property value without reader markers, so a marked conversion takes
+/// the decisions an unmarked one does.
 fn prop(parent: &Element, pr: &str, name: &str) -> Option<String> {
+    let value = marked_prop(parent, pr, name)?;
+    Some(value.chars().filter(|&c| !is_marker(c)).collect::<String>().trim().to_string())
+}
+
+/// A property value: `parent/pr/name/@m:val`, or the element's own text
+/// where the tree came from rtf, with any reader markers in it.
+fn marked_prop(parent: &Element, pr: &str, name: &str) -> Option<String> {
     let elem = parent.find(ns::M, pr)?.find(ns::M, name)?;
     Some(match elem.attr(ns::M, "val") {
         Some(v) => v.to_string(),
         None => direct_text(elem).trim().to_string(),
     })
+}
+
+/// A character property's character: the first of `value` after any reader
+/// markers, which go to `tex` so the output keeps the marks on what it shows.
+fn prop_char(value: &str, tex: &mut Tex) -> Option<char> {
+    for c in value.chars() {
+        if !is_marker(c) {
+            return Some(c);
+        }
+        tex.push_char(c);
+    }
+    None
+}
+
+fn is_marker(c: char) -> bool {
+    c == GUESSED || c == DROPPED
 }
 
 /// An on/off property: absent is `None`; present with no value is on.
@@ -255,20 +281,19 @@ fn fraction(e: &Element, tex: &mut Tex) {
 
 fn delimited(e: &Element, tex: &mut Tex) {
     // An explicitly empty character means no delimiter on that side.
-    let chr = |name: &str, default: char| -> Option<char> {
-        match prop(e, "dPr", name) {
-            Some(v) => v.chars().next(),
+    let chr = |name: &str, default: char, tex: &mut Tex| -> Option<char> {
+        match marked_prop(e, "dPr", name) {
+            Some(v) => prop_char(&v, tex),
             None => Some(default),
         }
     };
-    let beg = chr("begChr", '(');
-    let end = chr("endChr", ')');
-    let sep = chr("sepChr", '|');
+    let beg = chr("begChr", '(', tex);
+    let end = chr("endChr", ')', tex);
     tex.push_macro("\\left");
     tex.push_str(beg.map_or(".", delimiter));
     for (i, part) in e.find_all(ns::M, "e").enumerate() {
         if i > 0 {
-            if let Some(sep) = sep {
+            if let Some(sep) = chr("sepChr", '|', tex) {
                 tex.push_macro("\\middle");
                 tex.push_str(delimiter(sep));
             } else {
@@ -284,7 +309,7 @@ fn delimited(e: &Element, tex: &mut Tex) {
 }
 
 fn nary(e: &Element, tex: &mut Tex) {
-    let chr = prop(e, "naryPr", "chr").and_then(|v| v.chars().next()).unwrap_or('∫');
+    let chr = marked_prop(e, "naryPr", "chr").and_then(|v| prop_char(&v, tex)).unwrap_or('∫');
     match symbol(chr) {
         Some(op) if op.starts_with('\\') => tex.push_macro(op),
         _ => {
@@ -318,7 +343,8 @@ fn nary(e: &Element, tex: &mut Tex) {
 }
 
 fn group_char(e: &Element, tex: &mut Tex) {
-    let chr = prop(e, "groupChrPr", "chr").and_then(|v| v.chars().next()).unwrap_or('\u{23df}');
+    let chr =
+        marked_prop(e, "groupChrPr", "chr").and_then(|v| prop_char(&v, tex)).unwrap_or('\u{23df}');
     let top = prop(e, "groupChrPr", "pos").is_some_and(|p| p == "top");
     let body = arg(e, "e", Mode::Math);
     match accent(chr) {

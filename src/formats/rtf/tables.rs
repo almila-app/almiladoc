@@ -2,15 +2,53 @@
 //! per-font charsets), the style sheet, and the list/list-override tables.
 
 use crate::ctx::ParseCtx;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::formats::rtf::lexer::{Lexer, Token, destination_groups};
 use crate::shared::blockstyle::{self, BlockStyle};
 use crate::shared::delta::StyleDelta;
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, NumberText};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::BitOrAssign;
 
 pub const LIST_LEVELS: usize = 9;
+
+/// A text encoding, and whether the document left it to be guessed.
+#[derive(Debug, Clone, Copy)]
+pub struct Codepage {
+    pub encoding: &'static encoding_rs::Encoding,
+    pub assumed: bool,
+}
+
+impl Codepage {
+    /// An encoding the document declares.
+    pub const fn declared(encoding: &'static encoding_rs::Encoding) -> Self {
+        Codepage { encoding, assumed: false }
+    }
+
+    /// Decode `bytes`, and what a reader loses in the result.
+    pub fn decode(self, bytes: &[u8]) -> (String, TextLoss) {
+        let (text, _, invalid) = self.encoding.decode(bytes);
+        let assumed = self.assumed && !bytes.is_ascii();
+        (text.into_owned(), TextLoss { invalid, assumed })
+    }
+}
+
+/// What decoded text loses: bytes that did not decode, and non-ASCII bytes
+/// read in a guessed code page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextLoss {
+    pub invalid: bool,
+    pub assumed: bool,
+}
+
+impl BitOrAssign for TextLoss {
+    fn bitor_assign(&mut self, other: TextLoss) {
+        self.invalid |= other.invalid;
+        self.assumed |= other.assumed;
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ListLevelDef {
@@ -18,32 +56,38 @@ pub struct ListLevelDef {
     pub start: u64,
     /// `\leveltext` with `\levelnumbers` placeholders and `\levellegal`.
     pub pattern: NumberPattern,
+    /// What the pattern's literal text lost in decoding.
+    pub loss: TextLoss,
 }
 
 impl Default for ListLevelDef {
     fn default() -> Self {
-        ListLevelDef { marker: Some(MarkerKind::Bullet), start: 1, pattern: Default::default() }
+        ListLevelDef {
+            marker: Some(MarkerKind::Bullet),
+            start: 1,
+            pattern: Default::default(),
+            loss: TextLoss::default(),
+        }
     }
 }
 
 /// Build a number pattern from a `\leveltext` payload (first byte = length,
 /// then the characters) and the 1-based placeholder positions listed in
-/// `\levelnumbers` (each placeholder byte is a zero-based level index).
-fn build_pattern(
-    text: &[u8],
-    positions: &[u8],
-    enc: &'static encoding_rs::Encoding,
-) -> Vec<NumberText> {
+/// `\levelnumbers` (each placeholder byte is a zero-based level index),
+/// with what its literal text lost in decoding.
+fn build_pattern(text: &[u8], positions: &[u8], enc: Codepage) -> (Vec<NumberText>, TextLoss) {
+    let mut loss = TextLoss::default();
     let Some((&count, rest)) = text.split_first() else {
-        return Vec::new();
+        return (Vec::new(), loss);
     };
     let chars = &rest[..rest.len().min(count as usize)];
     let mut out: Vec<NumberText> = Vec::new();
     let mut literal: Vec<u8> = Vec::new();
-    let flush = |literal: &mut Vec<u8>, out: &mut Vec<NumberText>| {
+    let mut flush = |literal: &mut Vec<u8>, out: &mut Vec<NumberText>| {
         if !literal.is_empty() {
-            let (s, _, _) = enc.decode(literal);
-            out.push(NumberText::Literal(s.into_owned()));
+            let (s, lost) = enc.decode(literal);
+            loss |= lost;
+            out.push(NumberText::Literal(s));
             literal.clear();
         }
     };
@@ -56,7 +100,7 @@ fn build_pattern(
         }
     }
     flush(&mut literal, &mut out);
-    out
+    (out, loss)
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +119,7 @@ pub struct StyleDef {
 #[derive(Debug, Default)]
 pub struct Prelude {
     /// Font number -> encoding, from `\fcharsetN`.
-    pub fonts: HashMap<i32, &'static encoding_rs::Encoding>,
+    pub fonts: HashMap<i32, Codepage>,
     /// Paragraph style id (`\sN`) -> definition.
     pub styles: HashMap<i32, StyleDef>,
     /// `\lsN` -> resolved list definition (through the override table).
@@ -85,7 +129,7 @@ pub struct Prelude {
 pub fn parse_prelude(
     parse_ctx: &ParseCtx,
     bytes: &[u8],
-    default_encoding: &'static encoding_rs::Encoding,
+    default_encoding: Codepage,
 ) -> Result<Prelude, ConvertError> {
     let mut prelude = Prelude::default();
 
@@ -125,28 +169,25 @@ impl LevelTextCollector {
         }
     }
 
-    /// The finished pattern for an ordered level; bullets carry glyph text,
-    /// not a pattern.
-    fn finish(
-        &mut self,
-        marker: Option<MarkerKind>,
-        enc: &'static encoding_rs::Encoding,
-    ) -> NumberPattern {
-        let pattern = if marker.is_some_and(MarkerKind::ordered) {
-            NumberPattern { text: build_pattern(&self.text, &self.numbers, enc), legal: self.legal }
+    /// The finished pattern for an ordered level, with what its literal
+    /// text lost; bullets carry glyph text, not a pattern.
+    fn finish(&mut self, marker: Option<MarkerKind>, enc: Codepage) -> (NumberPattern, TextLoss) {
+        let finished = if marker.is_some_and(MarkerKind::ordered) {
+            let (text, loss) = build_pattern(&self.text, &self.numbers, enc);
+            (NumberPattern { text, legal: self.legal }, loss)
         } else {
-            NumberPattern::default()
+            (NumberPattern::default(), TextLoss::default())
         };
         *self = LevelTextCollector::default();
-        pattern
+        finished
     }
 }
 
 fn parse_fonttbl(
     parse_ctx: &ParseCtx,
     group: &[u8],
-    fonts: &mut HashMap<i32, &'static encoding_rs::Encoding>,
-    default_encoding: &'static encoding_rs::Encoding,
+    fonts: &mut HashMap<i32, Codepage>,
+    default_encoding: Codepage,
 ) -> Result<(), ConvertError> {
     let mut lexer = Lexer::new(parse_ctx, group);
     let mut current: Option<i32> = None;
@@ -173,7 +214,7 @@ fn parse_stylesheet(
     parse_ctx: &ParseCtx,
     group: &[u8],
     styles: &mut HashMap<i32, StyleDef>,
-    enc: &'static encoding_rs::Encoding,
+    enc: Codepage,
 ) -> Result<(), ConvertError> {
     let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
@@ -188,7 +229,10 @@ fn parse_stylesheet(
                 if depth == 1
                     && let Some((id, mut def, base)) = current.take()
                 {
-                    let (text, _, _) = enc.decode(&name);
+                    let (text, loss) = enc.decode(&name);
+                    if loss.invalid {
+                        parse_ctx.emit(DiagnosticCode::InvalidStyleEncoding, Region::Container);
+                    }
                     def.block = blockstyle::from_style_name(text.trim_end_matches(';'));
                     raw.insert(id, (def, base));
                 }
@@ -202,8 +246,8 @@ fn parse_stylesheet(
                     name.clear();
                 }
                 "sbasedon" => {
-                    if let Some((_, _, base)) = current.as_mut() {
-                        *base = param.filter(|&b| b != NULL_STYLE);
+                    if let Some((id, _, base)) = current.as_mut() {
+                        *base = param.filter(|&b| b != NULL_STYLE && b != *id);
                     }
                 }
                 "outlinelevel" => {
@@ -228,24 +272,25 @@ fn parse_stylesheet(
             _ => {}
         }
     }
-    // Resolve every \sbasedon chain root-to-leaf: the child's own settings
-    // win over inherited ones. A cycle is bounded by the visited set and
-    // resolves from the acyclic prefix.
+    let mut cycles: HashSet<i32> = HashSet::new();
     for &id in raw.keys() {
-        let mut chain: Vec<&StyleDef> = Vec::new();
-        let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut chain: Vec<(i32, &StyleDef)> = Vec::new();
+        let mut seen: HashSet<i32> = HashSet::new();
         let mut cursor = Some(id);
         while let Some(cur) = cursor {
             if !seen.insert(cur) {
-                log::warn!("style inheritance cycle at rtf style {cur}");
+                let cycle = chain.iter().skip_while(|&&(link, _)| link != cur);
+                if cycle.map(|&(link, _)| link).min().is_some_and(|least| cycles.insert(least)) {
+                    parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
+                }
                 break;
             }
             let Some((def, base)) = raw.get(&cur) else { break };
-            chain.push(def);
+            chain.push((cur, def));
             cursor = *base;
         }
         let mut resolved = StyleDef::default();
-        for def in chain.iter().rev() {
+        for (_, def) in chain.iter().rev() {
             resolved.delta = resolved.delta.merge(def.delta);
             resolved.outline = def.outline.or(resolved.outline);
             resolved.block = def.block.or(resolved.block);
@@ -259,7 +304,7 @@ fn parse_listtable(
     parse_ctx: &ParseCtx,
     group: &[u8],
     by_list_id: &mut HashMap<i32, ListDef>,
-    enc: &'static encoding_rs::Encoding,
+    enc: Codepage,
 ) -> Result<(), ConvertError> {
     let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
@@ -278,8 +323,8 @@ fn parse_listtable(
                 if in_level && Some(depth) == list_depth.map(|d| d + 1) {
                     in_level = false;
                     if level_index < LIST_LEVELS {
-                        levels[level_index].pattern =
-                            collector.finish(levels[level_index].marker, enc);
+                        let level = &mut levels[level_index];
+                        (level.pattern, level.loss) = collector.finish(level.marker, enc);
                     }
                     level_index += 1;
                 }
@@ -342,7 +387,7 @@ fn parse_overrides(
     group: &[u8],
     by_list_id: &HashMap<i32, ListDef>,
     lists: &mut HashMap<i32, ListDef>,
-    enc: &'static encoding_rs::Encoding,
+    enc: Codepage,
 ) -> Result<(), ConvertError> {
     let mut lexer = Lexer::new(parse_ctx, group);
     let mut depth = 0usize;
@@ -377,8 +422,9 @@ fn parse_overrides(
                 if let Some((text, numbers, legal)) = &texts[level]
                     && def.levels[level].marker.is_some_and(MarkerKind::ordered)
                 {
-                    def.levels[level].pattern =
-                        NumberPattern { text: build_pattern(text, numbers, enc), legal: *legal };
+                    let (text, loss) = build_pattern(text, numbers, enc);
+                    def.levels[level].pattern = NumberPattern { text, legal: *legal };
+                    def.levels[level].loss = loss;
                 }
             }
             lists.insert(ls_n, def);
@@ -463,13 +509,12 @@ fn marker_for_nfc(nfc: i32) -> Option<MarkerKind> {
     }
 }
 
-/// `\fcharsetN` -> encoding.
-fn charset_encoding(
-    charset: i32,
-    default_encoding: &'static encoding_rs::Encoding,
-) -> &'static encoding_rs::Encoding {
-    match charset {
-        0 | 1 => default_encoding,
+/// `\fcharsetN` -> encoding; a charset with no code page here is guessed
+/// to be the document's.
+fn charset_encoding(charset: i32, default_encoding: Codepage) -> Codepage {
+    let encoding = match charset {
+        // The symbol charset maps glyphs, not a code page's letters.
+        0..=2 => return default_encoding,
         128 => encoding_rs::SHIFT_JIS,
         129 => encoding_rs::EUC_KR,
         134 => encoding_rs::GBK,
@@ -483,12 +528,14 @@ fn charset_encoding(
         204 => encoding_rs::WINDOWS_1251,
         222 => encoding_rs::WINDOWS_874,
         238 => encoding_rs::WINDOWS_1250,
-        _ => default_encoding,
-    }
+        _ => return Codepage { assumed: true, ..default_encoding },
+    };
+    Codepage::declared(encoding)
 }
 
-pub fn codepage_encoding(cp: u32) -> &'static encoding_rs::Encoding {
-    match cp {
+/// `\ansicpgN` -> encoding, or `None` for a code page this reader lacks.
+pub fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
+    Some(match cp {
         932 => encoding_rs::SHIFT_JIS,
         936 => encoding_rs::GBK,
         949 => encoding_rs::EUC_KR,
@@ -502,6 +549,7 @@ pub fn codepage_encoding(cp: u32) -> &'static encoding_rs::Encoding {
         1257 => encoding_rs::WINDOWS_1257,
         1258 => encoding_rs::WINDOWS_1258,
         874 => encoding_rs::WINDOWS_874,
-        _ => encoding_rs::WINDOWS_1252,
-    }
+        1252 => encoding_rs::WINDOWS_1252,
+        _ => return None,
+    })
 }

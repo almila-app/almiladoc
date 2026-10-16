@@ -1,6 +1,6 @@
 //! Position-explicit RTF lexer. `\binN` consumes exactly N raw bytes, so
 //! binary payloads can never corrupt group state; unbalanced groups are the
-//! caller's to recover (deliberately, with a log).
+//! caller's to recover and report.
 
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
