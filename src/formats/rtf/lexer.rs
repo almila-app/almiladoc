@@ -34,6 +34,11 @@ impl<'a> Lexer<'a> {
         Lexer { parse_ctx, bytes, pos: 0 }
     }
 
+    /// The offset of the next byte to lex.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     /// The next token, charging one unit of work per token and per skipped
     /// line break or NUL.
     pub fn next_token(&mut self) -> Result<Option<Token<'a>>, ConvertError> {
@@ -117,52 +122,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Extract the balanced content of destination groups named `name`
-/// (`{\name ...}` or `{\*\name ...}`), bin-aware. Returns the byte ranges of
-/// the group bodies including the destination word.
-pub fn destination_groups<'a>(
-    parse_ctx: &'a ParseCtx<'a>,
-    bytes: &'a [u8],
-    name: &str,
-) -> Result<Vec<&'a [u8]>, ConvertError> {
-    let mut out = Vec::new();
-    let mut lexer = Lexer::new(parse_ctx, bytes);
-    // Track group starts; when a group's first control word (skipping `\*`)
-    // matches, remember its start depth and capture until it closes.
-    let mut depth = 0usize;
-    let mut expecting_word_at: Option<usize> = None;
-    let mut capture: Option<(usize, usize)> = None; // (depth, start_pos)
-    loop {
-        let before = lexer.pos;
-        let Some(token) = lexer.next_token()? else { break };
-        match token {
-            Token::Open => {
-                depth += 1;
-                expecting_word_at = Some(depth);
-            }
-            Token::Close => {
-                if let Some((d, start)) = capture
-                    && depth == d
-                {
-                    out.push(&bytes[start..before]);
-                    capture = None;
-                }
-                depth = depth.saturating_sub(1);
-                expecting_word_at = None;
-            }
-            Token::Symbol(b'*') if expecting_word_at == Some(depth) => {}
-            Token::Word { name: w, .. } => {
-                if expecting_word_at == Some(depth) && w == name && capture.is_none() {
-                    capture = Some((depth, lexer.pos));
-                }
-                expecting_word_at = None;
-            }
-            _ => expecting_word_at = None,
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,17 +163,6 @@ mod tests {
             }
             assert_eq!((pars, symbols), (1, 0), "source: {:?}", String::from_utf8_lossy(src));
         }
-    }
-
-    #[test]
-    fn destination_extraction() {
-        let src = br"{\rtf1{\*\listtable{\list\listid5}}{\fonttbl{\f0 Arial;}} body}";
-        let parse_ctx = ParseCtx::default();
-        let lists = destination_groups(&parse_ctx, src, "listtable").unwrap();
-        assert_eq!(lists.len(), 1);
-        assert!(lists[0].starts_with(br"{\list"));
-        let fonts = destination_groups(&parse_ctx, src, "fonttbl").unwrap();
-        assert_eq!(fonts.len(), 1);
     }
 
     #[test]

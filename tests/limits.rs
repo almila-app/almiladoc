@@ -1,5 +1,6 @@
 //! Each abuse input trips its limit at default `Limits`: a committed fixture
 //! named `<limit>--<shape>--errors.<ext>`, or an input over 1 MiB built here.
+//! An ordinary input as large as `max_input_bytes` converts.
 
 mod common;
 
@@ -62,15 +63,71 @@ fn an_input_past_max_input_bytes_is_refused_before_any_parse() {
     assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
 }
 
-#[test]
-fn an_rtf_control_word_flood_trips_max_work() {
+/// An RTF of one picture in Word's hex form, 128 digits a line, filling
+/// `max_input_bytes`: one token per byte.
+fn hex_picture_rtf() -> Vec<u8> {
     let max_input = usize::try_from(Limits::default().max_input_bytes).unwrap();
-    let header = b"{\\rtf1 ".as_slice();
-    let flood = [header, &b"\\b".repeat((max_input - header.len()) / 2)].concat();
-    let error = converter(1).convert(Input::new(&flood, Format::Rtf)).unwrap_err();
+    let head = b"{\\rtf1\\ansi\\ansicpg1252{\\fonttbl{\\f0 Calibri;}}\\pard Figure\\par{\\pict\\pngblip\\picw64\\pich64\r\n89504e470d0a1a0a".as_slice();
+    let tail = b"}\\par}".as_slice();
+    let line = [b"0".repeat(128).as_slice(), b"\r\n"].concat();
+    let mut rtf = head.to_vec();
+    while rtf.len() + line.len() + tail.len() <= max_input {
+        rtf.extend_from_slice(&line);
+    }
+    rtf.resize(max_input - tail.len(), b'0');
+    rtf.extend_from_slice(tail);
+    rtf
+}
+
+#[test]
+fn a_hex_picture_rtf_at_max_input_bytes_converts() {
+    let rtf = hex_picture_rtf();
+    let parsed = converter(1).parse(Input::new(&rtf, Format::Rtf)).unwrap();
+    assert_eq!(parsed.document().assets.len(), 1);
+}
+
+/// A legacy PowerPoint file whose `PowerPoint Document` stream is `records`,
+/// with no `Current User` stream, so it is read in stream order.
+fn ppt(records: &[u8]) -> Vec<u8> {
+    let mut file = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+    std::io::Write::write_all(&mut file.create_stream("PowerPoint Document").unwrap(), records)
+        .unwrap();
+    file.flush().unwrap();
+    file.into_inner().into_inner()
+}
+
+fn atom(rec_type: u16, body: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(body.len()).unwrap().to_le_bytes();
+    [&0u16.to_le_bytes()[..], &rec_type.to_le_bytes(), &len, body].concat()
+}
+
+#[test]
+fn ppt_links_each_over_one_long_text_trip_max_work() {
     let max = Limits::default().max_work;
+    let units: u32 = 1 << 22;
+    let text = atom(0x0FA0, &b"a\0".repeat(units as usize));
+    let mut info = [0u8; 16];
+    info[4] = 1;
+    info[8] = 4;
+    let range = [0u32.to_le_bytes(), units.to_le_bytes()].concat();
+    let link = [atom(0x0FF3, &info), atom(0x0FDF, &range)].concat();
+    let links = usize::try_from(max / (2 * u64::from(units)) + 1).unwrap();
+    let deck = ppt(&[text, link.repeat(links)].concat());
+    assert!(deck.len() < 10 << 20);
+    let error = converter(1).convert(Input::new(&deck, Format::Ppt)).unwrap_err();
     assert!(
         matches!(error, ConvertError::ResourceLimit { limit: Limit::Work, max: m, .. } if m == max),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_ppt_stream_of_max_records_empty_atoms_trips_max_records() {
+    let max = Limits::default().max_records;
+    let deck = ppt(&atom(0, &[]).repeat(usize::try_from(max + 1).unwrap()));
+    let error = converter(1).convert(Input::new(&deck, Format::Ppt)).unwrap_err();
+    assert!(
+        matches!(error, ConvertError::ResourceLimit { limit: Limit::Records, max: m, .. } if m == max),
         "{error:?}"
     );
 }

@@ -630,6 +630,8 @@ impl Runs {
     }
 }
 
+/// The runs of the FKP pages the bin table at `fib_off` names, each page read
+/// once: a page's runs carry absolute FCs, so a page named again repeats them.
 fn parse_fkps(
     parse_ctx: &ParseCtx,
     word_doc: &[u8],
@@ -643,15 +645,20 @@ fn parse_fkps(
         parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body);
         return Ok(runs);
     };
+    let mut read = vec![false; word_doc.len() / 512];
     for i in 0..bin_table.n {
-        let pn = get_u32(bin_table.data(i), 0).unwrap_or(0) & 0x3F_FFFF;
-        let page = (pn as usize)
+        let pn = (get_u32(bin_table.data(i), 0).unwrap_or(0) & 0x3F_FFFF) as usize;
+        let page = pn
             .checked_mul(512)
             .and_then(|off| word_doc.get(off..))
             .and_then(|rest| rest.get(..512));
-        match page {
-            Some(page) => parse_fkp_page(parse_ctx, page, kind, data, &mut runs)?,
-            None => parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body),
+        match (page, read.get_mut(pn)) {
+            (Some(_), Some(true)) => {}
+            (Some(page), Some(seen)) => {
+                *seen = true;
+                parse_fkp_page(parse_ctx, page, kind, data, &mut runs)?;
+            }
+            _ => parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Body),
         }
     }
     Ok(runs)
@@ -2306,18 +2313,34 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn every_fkp_run_is_charged_once() {
-        let mut word_doc = vec![0u8; 1024];
-        for (k, fc) in [0u32, 10, 20, 30].into_iter().enumerate() {
-            word_doc[512 + k * 4..512 + k * 4 + 4].copy_from_slice(&fc.to_le_bytes());
+    /// The runs and fuel of a CHPX bin table naming `pns`, over two FKP pages
+    /// of three runs each.
+    fn fkp_runs(pns: &[u32]) -> (usize, u64) {
+        let mut word_doc = vec![0u8; 1536];
+        for (page, start) in [(1, 0u32), (2, 30)] {
+            for k in 0..4u32 {
+                let at = page * 512 + k as usize * 4;
+                word_doc[at..at + 4].copy_from_slice(&(start + k * 10).to_le_bytes());
+            }
+            word_doc[page * 512 + 511] = 3;
         }
-        word_doc[1023] = 3;
-        word_doc[0xFE..0x102].copy_from_slice(&20u32.to_le_bytes());
-        let table: Vec<u8> = [0u32, 30, 60, 1, 1].into_iter().flat_map(u32::to_le_bytes).collect();
+        let cps = (0..=pns.len() as u32).map(|i| i * 30);
+        let table: Vec<u8> = cps.chain(pns.iter().copied()).flat_map(u32::to_le_bytes).collect();
+        word_doc[0xFE..0x102].copy_from_slice(&(table.len() as u32).to_le_bytes());
         let parse_ctx = ParseCtx::default();
         let runs = parse_fkps(&parse_ctx, &word_doc, &table, 0xFA, FkpKind::Chpx, &[]).unwrap();
-        assert_eq!((runs.len(), parse_ctx.fuel()), (6, 6));
+        assert_eq!(parse_ctx.diagnostics().iter().count(), 0);
+        (runs.len(), parse_ctx.fuel())
+    }
+
+    #[test]
+    fn every_fkp_run_is_charged_once() {
+        assert_eq!(fkp_runs(&[1, 2]), (6, 6));
+    }
+
+    #[test]
+    fn an_fkp_page_the_bin_table_names_again_is_read_once() {
+        assert_eq!(fkp_runs(&[1, 1, 1, 2, 1]), (6, 6));
     }
 
     #[test]

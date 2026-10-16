@@ -57,8 +57,9 @@ pub const MAX_PAGES: u64 = 100_000;
 /// Maximum Markdown bytes one conversion writes: 256 MiB.
 pub const MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Maximum work units one conversion charges: 200 million.
-pub const MAX_WORK: u64 = 200_000_000;
+/// Maximum work units one conversion charges: two per byte of the largest
+/// input, 536 870 912.
+pub const MAX_WORK: u64 = 2 * MAX_INPUT_BYTES;
 
 /// The safety limits of one [`Converter`](crate::Converter), each crossing
 /// failing [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit)
@@ -118,12 +119,16 @@ pub struct Limits {
     pub max_output_bytes: u64,
     /// Work units one conversion charges, bounding its time
     /// deterministically: one per XML event, KiB decompressed from an
-    /// archive, RTF token or skipped line break or NUL in each lexing pass
-    /// (six over the input, and one more over each font, style and list table
-    /// group), CSV field, PPT record, DOC formatting run, and XLSX, XLSB or XLS
-    /// grid position. The default is far above the costliest test-corpus
-    /// document (34 033 units) and below a 256 MiB RTF flood of `\b` control
-    /// words (805 306 356 units), which yields no content.
+    /// archive, RTF token or skipped line break or NUL (one pass over the
+    /// input, and one more over each font, style and list table group), CSV
+    /// field, PPT record or text unit a hyperlink range reads, DOC formatting
+    /// run, and XLSX, XLSB or XLS grid position. The default, two units per
+    /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
+    /// linear at that rate: a 256 MiB RTF of one hex picture charges
+    /// 268 435 404 units and the costliest test-corpus document 6 970. Work
+    /// that grows faster than the input crosses it: a PPT of 65 hyperlinks
+    /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging
+    /// its range read and its label compared, asks 545 259 782.
     pub max_work: u64,
 }
 
@@ -318,7 +323,7 @@ mod tests {
                 (Limit::CompressionRatio, 1000),
                 (Limit::Pages, 100_000),
                 (Limit::OutputBytes, 256 * 1024 * 1024),
-                (Limit::Work, 200_000_000),
+                (Limit::Work, 536_870_912),
             ]
         );
         assert_eq!(limits.max_nesting_depth, MAX_NESTING_DEPTH as u64);

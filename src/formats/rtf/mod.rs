@@ -1,7 +1,7 @@
-//! RTF frontend: a position-explicit lexer feeding a state machine, with the
-//! font/style/list tables parsed into typed definitions up front. Numbering
-//! comes from the list tables - never guessed from label text. Page
-//! headers/footers are excluded (fixed policy).
+//! RTF frontend: a position-explicit lexer feeding a state machine in one
+//! pass, with the font/style/list tables parsed into typed definitions as
+//! their groups close. Numbering comes from the list tables - never guessed
+//! from label text. Page headers/footers are excluded (fixed policy).
 
 mod lexer;
 mod table;
@@ -23,42 +23,15 @@ use lexer::{Lexer, Token};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use table::TableState;
-use tables::{Codepage, LIST_LEVELS, Prelude, TextLoss, codepage_encoding, parse_prelude};
+use tables::{Codepage, LIST_LEVELS, Prelude, TableScan, TextLoss, codepage_encoding};
 
 pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     if !bytes.starts_with(b"{\\rtf") {
         return Err(ConvertError::malformed("not an RTF file"));
     }
-    // The code page must be known before the font table decodes; scan the
-    // header for \ansicpg first.
-    let default_encoding = scan_codepage(parse_ctx, bytes)?;
-    let prelude = parse_prelude(parse_ctx, bytes, default_encoding)?;
-    let mut parser = Parser::new(parse_ctx, bytes, prelude, default_encoding);
+    let mut parser = Parser::new(parse_ctx, bytes);
     parser.run()?;
     parser.finish()
-}
-
-/// The document's code page: its `\ansicpg`, else windows-1252, which is
-/// a guess unless the character set is `\ansi`.
-fn scan_codepage(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Codepage, ConvertError> {
-    // \ansicpg sits in the header, but generator comments and extra header
-    // words can push it past any fixed prefix; the lexer scan is linear and
-    // stops at the first match.
-    let mut lexer = Lexer::new(parse_ctx, bytes);
-    let mut assumed = false;
-    while let Some(token) = lexer.next_token()? {
-        match token {
-            Token::Word { name: "ansicpg", param: Some(cp) } => {
-                return Ok(match codepage_encoding(cp.max(0) as u32) {
-                    Some(encoding) => Codepage::declared(encoding),
-                    None => Codepage { encoding: encoding_rs::WINDOWS_1252, assumed: true },
-                });
-            }
-            Token::Word { name: "mac" | "pc" | "pca", .. } => assumed = true,
-            _ => {}
-        }
-    }
-    Ok(Codepage { encoding: encoding_rs::WINDOWS_1252, assumed })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -709,11 +682,15 @@ const SUPPRESSED_DESTINATIONS: &[&str] = &[
 
 struct Parser<'a> {
     parse_ctx: &'a ParseCtx<'a>,
+    bytes: &'a [u8],
     lexer: Lexer<'a>,
     stack: Vec<CharState>,
     state: CharState,
     prelude: Prelude,
+    tables: TableScan,
     decoder: TextDecoder,
+    /// Whether `\ansicpg` has declared the code page; the first one holds.
+    codepage_declared: bool,
     /// Whether `encoding_assumed` has been reported; it is reported once.
     assumed_reported: bool,
     /// The list levels (`\ls`, level) whose damaged label text has been
@@ -734,19 +711,20 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(
-        parse_ctx: &'a ParseCtx<'a>,
-        bytes: &'a [u8],
-        prelude: Prelude,
-        default_encoding: Codepage,
-    ) -> Self {
+    fn new(parse_ctx: &'a ParseCtx<'a>, bytes: &'a [u8]) -> Self {
         Parser {
             parse_ctx,
+            bytes,
             lexer: Lexer::new(parse_ctx, bytes),
             stack: Vec::new(),
             state: CharState::default(),
-            prelude,
-            decoder: TextDecoder::new(default_encoding),
+            prelude: Prelude::default(),
+            tables: TableScan::default(),
+            decoder: TextDecoder::new(Codepage {
+                encoding: encoding_rs::WINDOWS_1252,
+                assumed: false,
+            }),
+            codepage_declared: false,
             assumed_reported: false,
             labels_reported: HashSet::new(),
             deleted_range: None,
@@ -761,8 +739,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The one lexing pass: the prelude's tables are read as their groups
+    /// close, before the body that uses them.
     fn run(&mut self) -> Result<(), ConvertError> {
         while let Some(token) = self.lexer.next_token()? {
+            let depth = self.stack.len() + usize::from(matches!(token, Token::Open));
+            if let Some((table, body)) = self.tables.token(&token, depth, self.lexer.pos()) {
+                let group = self.bytes.get(body).unwrap_or_default();
+                let codepage = self.decoder.default_encoding;
+                self.prelude.read(self.parse_ctx, table, group, codepage)?;
+            }
             match token {
                 Token::Open => {
                     let max = self.parse_ctx.limits().max_nesting_depth;
@@ -996,6 +982,9 @@ impl<'a> Parser<'a> {
     /// Dispatch a control word to its subsystem handler; unhandled words
     /// that name a suppressed destination silence their group.
     fn control_word(&mut self, word: &str, param: Option<i32>) -> Result<(), ConvertError> {
+        if self.codepage_control(word, param) {
+            return Ok(());
+        }
         if self.math_control(word, param) {
             return Ok(());
         }
@@ -1020,6 +1009,27 @@ impl<'a> Parser<'a> {
             self.state.capture = Capture::None;
         }
         Ok(())
+    }
+
+    /// The document's code page: its first `\ansicpg`, else windows-1252,
+    /// a guess once `\mac`, `\pc` or `\pca` names another character set.
+    fn codepage_control(&mut self, word: &str, param: Option<i32>) -> bool {
+        let codepage = match (word, param) {
+            ("ansicpg", Some(cp)) => match codepage_encoding(cp.max(0) as u32) {
+                Some(encoding) => Codepage::declared(encoding),
+                None => Codepage { encoding: encoding_rs::WINDOWS_1252, assumed: true },
+            },
+            ("mac" | "pc" | "pca", _) => {
+                Codepage { assumed: true, ..self.decoder.default_encoding }
+            }
+            _ => return false,
+        };
+        if !self.codepage_declared {
+            self.flush_pending();
+            self.codepage_declared = word == "ansicpg";
+            self.decoder.default_encoding = codepage;
+        }
+        true
     }
 
     /// Character- and paragraph-level controls: text encoding, styling,
@@ -1576,7 +1586,7 @@ impl<'a> Parser<'a> {
     ) -> Option<(ListKey, usize, u64, Option<String>, TextLoss)> {
         if let Some(ls) = self.state.ls {
             let level = self.state.ilvl;
-            if let Some(list) = self.prelude.lists.get(&ls) {
+            if let Some(list) = self.prelude.list(ls) {
                 let def = &list.levels[level.min(LIST_LEVELS - 1)];
                 let marker = def.marker?;
                 let (number, label, loss) = if marker.ordered() {
@@ -1793,10 +1803,68 @@ mod tests {
     }
 
     #[test]
-    fn every_pass_over_the_input_charges_its_tokens() {
+    fn one_pass_reads_the_code_page_and_the_four_tables() {
+        let fonts = r"{\f1\fcharset0 A;}";
+        let styles = r"{\s1\outlinelevel0 H;}";
+        let lists =
+            r"{\list{\listlevel\levelnfc0{\leveltext\'02\'00.;}{\levelnumbers\'01;}}\listid7}";
+        let overrides = r"{\listoverride\listid7\ls2}";
+        let src = format!(
+            r"{{\rtf1\ansi\ansicpg1251{{\fonttbl{fonts}}}{{\stylesheet{styles}}}{{\*\listtable{lists}}}{{\*\listoverridetable{overrides}}}\ansicpg1252\s1 \'e0\par}}"
+        );
         let parse_ctx = ParseCtx::default();
-        parse(&parse_ctx, br"{\rtf1{\fonttbl{\f0 A;}}x}").unwrap();
-        assert_eq!(parse_ctx.fuel(), 6 * 12 + 5);
+        let mut parser = Parser::new(&parse_ctx, src.as_bytes());
+        parser.run().unwrap();
+        assert_eq!(parser.decoder.default_encoding.encoding, encoding_rs::WINDOWS_1251);
+        assert!(parser.prelude.fonts.contains_key(&1));
+        assert_eq!(parser.prelude.styles.get(&1).and_then(|style| style.outline), Some(1));
+        let level = parser.prelude.list(2).map(|list| list.levels[0].marker);
+        assert_eq!(level, Some(Some(MarkerKind::Decimal)));
+        let markdown = crate::render::markdown::document_to_markdown(&parser.finish().unwrap());
+        assert_eq!(markdown, "# \u{430}\n");
+        let tokens = |bytes: &str| {
+            let lexing = ParseCtx::default();
+            let mut lexer = Lexer::new(&lexing, bytes.as_bytes());
+            while lexer.next_token().unwrap().is_some() {}
+            lexing.fuel()
+        };
+        let tables = [fonts, styles, lists, overrides].map(tokens).iter().sum::<u64>();
+        assert_eq!(parse_ctx.fuel(), tokens(&src) + tables);
+    }
+
+    #[test]
+    fn a_table_group_inside_one_of_its_kind_is_read_once() {
+        let tokens = |bytes: &str| {
+            let lexing = ParseCtx::default();
+            let mut lexer = Lexer::new(&lexing, bytes.as_bytes());
+            while lexer.next_token().unwrap().is_some() {}
+            lexing.fuel()
+        };
+        let body = r"{\fonttbl{\f1 A;}}";
+        let src = format!(r"{{\rtf1{{\fonttbl{body}}}x}}");
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, src.as_bytes()).unwrap();
+        assert_eq!(parse_ctx.fuel(), tokens(&src) + tokens(body));
+    }
+
+    #[test]
+    fn an_override_table_before_its_list_table_resolves_through_it() {
+        let src = r"{\rtf1{\*\listoverridetable{\listoverride\listid7\ls2}}{\*\listtable{\list{\listlevel\levelnfc0{\leveltext\'02\'00.;}{\levelnumbers\'01;}}\listid7}}\pard\ls2\ilvl0 a\par}";
+        assert_eq!(markdown(src), "1. a\n");
+    }
+
+    #[test]
+    fn a_declared_code_page_overrides_a_guessed_character_set() {
+        let src = r"{\rtf1\mac\ansicpg1252 \'e9\par}";
+        assert_eq!(markdown(src), "\u{e9}\n");
+        assert_eq!(reported(src), []);
+    }
+
+    #[test]
+    fn a_code_page_declared_after_text_leaves_that_text_as_read() {
+        let doc = parse(&ParseCtx::default(), br"{\rtf1 \'e0\ansicpg1251 \'e0\par}").unwrap();
+        let markdown = crate::render::markdown::document_to_markdown(&doc);
+        assert_eq!(markdown, "\u{e0}\u{430}\n");
     }
 
     type Reported = (DiagnosticCode, Region, u64);

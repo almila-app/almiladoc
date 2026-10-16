@@ -4,13 +4,13 @@
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
-use crate::formats::rtf::lexer::{Lexer, Token, destination_groups};
+use crate::formats::rtf::lexer::{Lexer, Token};
 use crate::shared::blockstyle::{self, BlockStyle};
 use crate::shared::delta::StyleDelta;
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, NumberText};
 use std::collections::{HashMap, HashSet};
-use std::ops::BitOrAssign;
+use std::ops::{BitOrAssign, Range};
 
 pub const LIST_LEVELS: usize = 9;
 
@@ -116,37 +116,145 @@ pub struct StyleDef {
     pub block: Option<BlockStyle>,
 }
 
+/// A prelude table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    Fonts,
+    Styles,
+    Lists,
+    Overrides,
+}
+
+impl Table {
+    /// The table whose destination word is `word`.
+    fn named(word: &str) -> Option<Table> {
+        match word {
+            "fonttbl" => Some(Table::Fonts),
+            "stylesheet" => Some(Table::Styles),
+            "listtable" => Some(Table::Lists),
+            "listoverridetable" => Some(Table::Overrides),
+            _ => None,
+        }
+    }
+}
+
+/// Finds the table groups (`{\name ...}` or `{\*\name ...}`) in the one
+/// lexing pass over the input, bin-aware since it follows the lexer.
+#[derive(Debug, Default)]
+pub struct TableScan {
+    /// The depth of the group whose first control word, after any `\*`, is
+    /// still to come.
+    opening: Option<usize>,
+    /// Each open table group: its table, its depth and where its body starts.
+    open: Vec<(Table, usize, usize)>,
+}
+
+impl TableScan {
+    /// Follow `token`, lexed at group depth `depth` (after an `Open` pushes,
+    /// before a `Close` pops) and ending at byte `end`: the table and body
+    /// range of the table group it closes.
+    pub fn token(
+        &mut self,
+        token: &Token,
+        depth: usize,
+        end: usize,
+    ) -> Option<(Table, Range<usize>)> {
+        let opening = self.opening.take();
+        match *token {
+            Token::Open => self.opening = Some(depth),
+            Token::Symbol(b'*') => self.opening = opening,
+            Token::Word { name, .. } if opening == Some(depth) => {
+                if let Some(table) = Table::named(name)
+                    && !self.open.iter().any(|&(open, ..)| open == table)
+                {
+                    self.open.push((table, depth, end));
+                }
+            }
+            Token::Close if self.open.last().is_some_and(|&(_, open, _)| open == depth) => {
+                let (table, _, start) = self.open.pop()?;
+                return Some((table, start..end.saturating_sub(1)));
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Prelude {
     /// Font number -> encoding, from `\fcharsetN`.
     pub fonts: HashMap<i32, Codepage>,
     /// Paragraph style id (`\sN`) -> definition.
     pub styles: HashMap<i32, StyleDef>,
-    /// `\lsN` -> resolved list definition (through the override table).
-    pub lists: HashMap<i32, ListDef>,
+    /// `\lsN` -> its override, resolved through `by_list_id` at first use.
+    overrides: HashMap<i32, Override>,
+    /// `\lsN` -> list definition, resolved once.
+    lists: HashMap<i32, ListDef>,
+    /// `\listidN` -> list definition, which overrides resolve through.
+    by_list_id: HashMap<i32, ListDef>,
 }
 
-pub fn parse_prelude(
-    parse_ctx: &ParseCtx,
-    bytes: &[u8],
-    default_encoding: Codepage,
-) -> Result<Prelude, ConvertError> {
-    let mut prelude = Prelude::default();
+impl Prelude {
+    /// Read the body of one `table` group, decoding its text in `enc`.
+    pub fn read(
+        &mut self,
+        parse_ctx: &ParseCtx,
+        table: Table,
+        group: &[u8],
+        enc: Codepage,
+    ) -> Result<(), ConvertError> {
+        match table {
+            Table::Fonts => parse_fonttbl(parse_ctx, group, &mut self.fonts, enc),
+            Table::Styles => parse_stylesheet(parse_ctx, group, &mut self.styles, enc),
+            Table::Lists => parse_listtable(parse_ctx, group, &mut self.by_list_id, enc),
+            Table::Overrides => parse_overrides(parse_ctx, group, &mut self.overrides, enc),
+        }
+    }
 
-    for group in destination_groups(parse_ctx, bytes, "fonttbl")? {
-        parse_fonttbl(parse_ctx, group, &mut prelude.fonts, default_encoding)?;
+    /// The list definition `\lsN` names, resolved through the list table
+    /// read by its first use, wherever the two tables sit.
+    pub fn list(&mut self, ls: i32) -> Option<&ListDef> {
+        let over = self.overrides.get(&ls)?;
+        Some(self.lists.entry(ls).or_insert_with(|| over.resolve(&self.by_list_id)))
     }
-    for group in destination_groups(parse_ctx, bytes, "stylesheet")? {
-        parse_stylesheet(parse_ctx, group, &mut prelude.styles, default_encoding)?;
+}
+
+/// One `\listoverride`: the list it names and what it overrides per level.
+#[derive(Debug)]
+struct Override {
+    list_id: i32,
+    levels: [LevelOverride; LIST_LEVELS],
+}
+
+/// One `\lfolevel`: an overridden start, marker or number text.
+#[derive(Debug, Default)]
+struct LevelOverride {
+    start: Option<u64>,
+    marker: Option<Option<MarkerKind>>,
+    pattern: Option<(NumberPattern, TextLoss)>,
+}
+
+impl Override {
+    fn resolve(&self, by_list_id: &HashMap<i32, ListDef>) -> ListDef {
+        let mut def = by_list_id.get(&self.list_id).cloned().unwrap_or_else(|| ListDef {
+            levels: std::array::from_fn(|_| ListLevelDef::default()),
+        });
+        for (level, over) in def.levels.iter_mut().zip(&self.levels) {
+            if let Some(marker) = over.marker {
+                level.marker = marker;
+            }
+            if let Some(start) = over.start {
+                level.start = start;
+            }
+            if let Some((pattern, loss)) = &over.pattern
+                && level.marker.is_some_and(MarkerKind::ordered)
+            {
+                level.pattern = pattern.clone();
+                level.loss = *loss;
+            }
+        }
+        def
     }
-    let mut by_list_id: HashMap<i32, ListDef> = HashMap::new();
-    for group in destination_groups(parse_ctx, bytes, "listtable")? {
-        parse_listtable(parse_ctx, group, &mut by_list_id, default_encoding)?;
-    }
-    for group in destination_groups(parse_ctx, bytes, "listoverridetable")? {
-        parse_overrides(parse_ctx, group, &by_list_id, &mut prelude.lists, default_encoding)?;
-    }
-    Ok(prelude)
 }
 
 /// Collector for the byte payloads of `\leveltext` / `\levelnumbers`
@@ -379,14 +487,10 @@ fn parse_listtable(
     Ok(())
 }
 
-/// Raw override number text: (`\leveltext` bytes, `\levelnumbers` bytes, legal).
-type RawLevelText = (Vec<u8>, Vec<u8>, bool);
-
 fn parse_overrides(
     parse_ctx: &ParseCtx,
     group: &[u8],
-    by_list_id: &HashMap<i32, ListDef>,
-    lists: &mut HashMap<i32, ListDef>,
+    overrides: &mut HashMap<i32, Override>,
     enc: Codepage,
 ) -> Result<(), ConvertError> {
     let mut lexer = Lexer::new(parse_ctx, group);
@@ -399,39 +503,15 @@ fn parse_overrides(
     // overridden start and/or an overriding format (embedded `\listlevel`
     // with its own number text).
     let mut level_index = 0usize;
-    let mut starts: [Option<u64>; LIST_LEVELS] = [None; LIST_LEVELS];
-    let mut markers: [Option<Option<MarkerKind>>; LIST_LEVELS] = [None; LIST_LEVELS];
-    let mut texts: [Option<RawLevelText>; LIST_LEVELS] = std::array::from_fn(|_| None);
+    let mut levels: [LevelOverride; LIST_LEVELS] = Default::default();
     let mut collector = LevelTextCollector::default();
     let mut flush = |ls: &mut Option<i32>,
                      list_id: &mut Option<i32>,
-                     starts: &mut [Option<u64>; LIST_LEVELS],
-                     markers: &mut [Option<Option<MarkerKind>>; LIST_LEVELS],
-                     texts: &mut [Option<RawLevelText>; LIST_LEVELS]| {
-        if let (Some(ls_n), Some(id)) = (ls.take(), list_id.take()) {
-            let mut def = by_list_id.get(&id).cloned().unwrap_or_else(|| ListDef {
-                levels: std::array::from_fn(|_| ListLevelDef::default()),
-            });
-            for level in 0..LIST_LEVELS {
-                if let Some(m) = markers[level] {
-                    def.levels[level].marker = m;
-                }
-                if let Some(s) = starts[level] {
-                    def.levels[level].start = s;
-                }
-                if let Some((text, numbers, legal)) = &texts[level]
-                    && def.levels[level].marker.is_some_and(MarkerKind::ordered)
-                {
-                    let (text, loss) = build_pattern(text, numbers, enc);
-                    def.levels[level].pattern = NumberPattern { text, legal: *legal };
-                    def.levels[level].loss = loss;
-                }
-            }
-            lists.insert(ls_n, def);
+                     levels: &mut [LevelOverride; LIST_LEVELS]| {
+        let levels = std::mem::take(levels);
+        if let (Some(ls), Some(list_id)) = (ls.take(), list_id.take()) {
+            overrides.insert(ls, Override { list_id, levels });
         }
-        *starts = [None; LIST_LEVELS];
-        *markers = [None; LIST_LEVELS];
-        *texts = std::array::from_fn(|_| None);
     };
     while let Some(token) = lexer.next_token()? {
         match token {
@@ -441,17 +521,15 @@ fn parse_overrides(
                 if lfo_depth == Some(depth) {
                     lfo_depth = None;
                     if level_index < LIST_LEVELS && !collector.text.is_empty() {
-                        texts[level_index] = Some((
-                            std::mem::take(&mut collector.text),
-                            std::mem::take(&mut collector.numbers),
-                            collector.legal,
-                        ));
+                        let (text, loss) = build_pattern(&collector.text, &collector.numbers, enc);
+                        let pattern = NumberPattern { text, legal: collector.legal };
+                        levels[level_index].pattern = Some((pattern, loss));
                     }
                     collector = LevelTextCollector::default();
                     level_index += 1;
                 }
                 if over_depth == Some(depth) {
-                    flush(&mut ls, &mut list_id, &mut starts, &mut markers, &mut texts);
+                    flush(&mut ls, &mut list_id, &mut levels);
                     level_index = 0;
                     over_depth = None;
                 }
@@ -460,7 +538,7 @@ fn parse_overrides(
             Token::Word { name, param } => match name {
                 "listoverride" => {
                     // A previous override group left unclosed still counts.
-                    flush(&mut ls, &mut list_id, &mut starts, &mut markers, &mut texts);
+                    flush(&mut ls, &mut list_id, &mut levels);
                     over_depth = Some(depth);
                     level_index = 0;
                 }
@@ -474,12 +552,12 @@ fn parse_overrides(
                     if level_index < LIST_LEVELS
                         && let Some(n) = param
                     {
-                        starts[level_index] = Some(n.max(0) as u64);
+                        levels[level_index].start = Some(n.max(0) as u64);
                     }
                 }
                 "levelnfc" | "levelnfcn" if lfo_depth.is_some() => {
                     if level_index < LIST_LEVELS {
-                        markers[level_index] = Some(marker_for_nfc(param.unwrap_or(0)));
+                        levels[level_index].marker = Some(marker_for_nfc(param.unwrap_or(0)));
                     }
                 }
                 "leveltext" if lfo_depth.is_some() => collector.active = Some(true),
@@ -491,7 +569,7 @@ fn parse_overrides(
             _ => {}
         }
     }
-    flush(&mut ls, &mut list_id, &mut starts, &mut markers, &mut texts);
+    flush(&mut ls, &mut list_id, &mut levels);
     Ok(())
 }
 

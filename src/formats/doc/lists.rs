@@ -214,6 +214,27 @@ fn parse_lvl(plf: &[u8], pos: usize, origin: usize) -> Option<(LevelDef, usize)>
 
 const LFO_SIZE: usize = 16;
 
+/// Each LFO's `lsid` and `clfolvl`, held in no more room than `plf` has
+/// records for, and whether every LFO its count declares read.
+fn lfo_headers(plf: &[u8]) -> (Vec<(u32, usize)>, bool) {
+    let Some(count) = get_u32(plf, 0).map(|v| v as usize) else {
+        return (Vec::new(), false);
+    };
+    let (records, _) = plf.get(4..).unwrap_or_default().as_chunks::<LFO_SIZE>();
+    let lfos: Vec<(u32, usize)> = records
+        .iter()
+        .take(count)
+        .map(|record| {
+            (
+                u32::from_le_bytes([record[0], record[1], record[2], record[3]]),
+                usize::from(record[12]),
+            )
+        })
+        .collect();
+    let read = lfos.len() == count;
+    (lfos, read)
+}
+
 /// Resolve each LFO of `plf`, which starts at table-stream offset `origin`,
 /// into `lists`, and whether every LFOLVL read. Each LFO's LFOData opens
 /// with a 4-byte `cp`, overrides or none; one missing at the end loses
@@ -224,25 +245,11 @@ fn parse_plf_lfo(
     by_lsid: &HashMap<u32, [LevelDef; LEVELS]>,
     lists: &mut Lists,
 ) -> bool {
-    let Some(count) = get_u32(plf, 0).map(|v| v as usize) else {
+    let (lfos, read) = lfo_headers(plf);
+    if !read {
         return false;
-    };
-    let mut lfos: Vec<(u32, usize)> = Vec::with_capacity(count);
-    let mut pos = 4;
-    for _ in 0..count {
-        let Some(record) = plf.get(pos..).and_then(|rest| rest.get(..LFO_SIZE)) else {
-            return false;
-        };
-        let Some(lsid) = get_u32(record, 0) else {
-            return false;
-        };
-        let clfolvl = record[12] as usize;
-        lfos.push((lsid, clfolvl));
-        let Some(next) = pos.checked_add(LFO_SIZE) else {
-            return false;
-        };
-        pos = next;
     }
+    let mut pos = 4 + lfos.len() * LFO_SIZE;
     let mut complete = true;
     for (i, (lsid, clfolvl)) in lfos.into_iter().enumerate() {
         let ilfo = (i + 1) as u16;
@@ -315,6 +322,15 @@ fn marker_for_nfc(nfc: u8) -> Option<MarkerKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_lfo_count_past_the_records_is_held_in_the_room_they_take() {
+        let mut plf = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+        plf.extend_from_slice(&[0u8; 2 * LFO_SIZE]);
+        let (lfos, read) = lfo_headers(&plf);
+        assert_eq!((lfos.len(), lfos.capacity(), read), (2, 2, false));
+        assert!(!parse_plf_lfo(&plf, 0, &HashMap::new(), &mut Lists::default()));
+    }
 
     /// A hand-built LVL: LVLF header + xst "\x00-\x01)" with placeholders
     /// at one-based offsets 1 and 3.

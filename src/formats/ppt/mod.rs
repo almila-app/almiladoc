@@ -125,6 +125,14 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
     Ok(Pictures { assets: sink.assets, undecodable, unreadable: false })
 }
 
+fn check_record_depth(parse_ctx: &ParseCtx, depth: usize) -> Result<(), ConvertError> {
+    let max = parse_ctx.limits().max_record_depth;
+    if depth as u64 >= max {
+        return Err(ConvertError::limit(Limit::RecordDepth, max));
+    }
+    Ok(())
+}
+
 /// A record's (verAndInstance, recType, body).
 type Record<'a> = (u16, u16, &'a [u8]);
 
@@ -833,11 +841,17 @@ impl<'c> Extractor<'c> {
         let mut stack: Vec<(&[u8], usize, u16, Option<UnitScope<'_>>)> = vec![(data, 0, 0, None)];
         while let Some((buf, pos, ..)) = stack.last_mut() {
             let Some((ver_inst, rec_type, body)) = record_at(buf, *pos) else {
-                if let Some((.., Some(_))) = stack.last() {
-                    self.settle_link()?;
-                    self.finish_shape()?;
+                match stack.pop() {
+                    Some((.., 0x03F0, _)) => {
+                        self.end_segment(None)?;
+                        self.current_is_notes = false;
+                    }
+                    Some((.., Some(_))) => {
+                        self.settle_link()?;
+                        self.finish_shape()?;
+                    }
+                    _ => {}
                 }
-                stack.pop();
                 continue;
             };
             *pos += 8 + body.len();
@@ -857,11 +871,10 @@ impl<'c> Extractor<'c> {
                 // set) marks the notes master: template chrome, excluded.
                 0x03F0 if self.recovering => {
                     if !notes_owner(body).is_some_and(|id| id & 0x8000_0000 != 0) {
+                        check_record_depth(parse_ctx, stack.len())?;
                         self.end_segment(None)?;
                         self.current_is_notes = true;
-                        self.walk(body)?;
-                        self.end_segment(None)?;
-                        self.current_is_notes = false;
+                        stack.push((body, 0, rec_type, None));
                     }
                 }
                 // Notes, master, and handout containers are walked via their
@@ -870,10 +883,7 @@ impl<'c> Extractor<'c> {
                 // Only instance 0 of SlideListWithText holds slide text here.
                 0x0FF0 if ver_inst >> 4 != 0 => {}
                 _ => {
-                    let max = parse_ctx.limits().max_record_depth;
-                    if stack.len() as u64 >= max {
-                        return Err(ConvertError::limit(Limit::RecordDepth, max));
-                    }
+                    check_record_depth(parse_ctx, stack.len())?;
                     let unit = (self.recovering && rec_type == 0x03EE).then(|| {
                         self.recovered_slides = self.recovered_slides.saturating_add(1);
                         parse_ctx.enter_unit(self.recovered_slides - 1)
@@ -1285,6 +1295,19 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         Extractor::new(&parse_ctx).walk(&data).unwrap();
         assert_eq!(parse_ctx.fuel(), 4);
+    }
+
+    #[test]
+    fn a_notes_page_read_in_stream_order_ends_with_its_container() {
+        let text = |text: &str| record(0, 0x0FA0, &utf16(text));
+        let data = [notes(0, &[text("n")]), text("s")].concat();
+        let parse_ctx = ParseCtx::default();
+        let mut ex = Extractor::new(&parse_ctx);
+        ex.recovering = true;
+        ex.walk(&data).unwrap();
+        ex.end_segment(None).unwrap();
+        let pages: Vec<bool> = ex.segments.iter().map(|&(_, _, is_notes)| is_notes).collect();
+        assert_eq!(pages, [true, false]);
     }
 
     fn atom32(rec_type: u16, words: &[u32]) -> Vec<u8> {

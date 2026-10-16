@@ -1,6 +1,7 @@
 //! Every recursion over input nesting converts at the deepest
 //! `max_nesting_depth` a converter accepts, on the pool's stack, and refuses
-//! one level more as `ResourceLimit`.
+//! one level more as `ResourceLimit`; the legacy binary readers' record
+//! nesting and optional streams stay within their limits.
 
 use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit, Limits, OnLoss};
 
@@ -167,6 +168,67 @@ fn a_chain_of_notes_each_referencing_the_next_numbers_in_reference_order() {
         &markdown[..80]
     );
     assert!(markdown.ends_with(&format!("[^{notes}]: n{}\n", notes - 1)));
+}
+
+fn limited(set: impl FnOnce(&mut Limits)) -> Converter {
+    let mut config = Config::default();
+    set(&mut config.limits);
+    config.on_loss = OnLoss::Report;
+    Converter::new(config).unwrap()
+}
+
+/// A PowerPoint stream read in stream order whose notes containers nest
+/// `depth` deep, each the only child of the one around it.
+fn ppt_nested_notes(depth: usize) -> Vec<u8> {
+    let mut stream = Vec::with_capacity(depth * 8);
+    for level in (0..depth).rev() {
+        let len = u32::try_from(level * 8).unwrap();
+        stream.extend_from_slice(
+            &[&0x000Fu16.to_le_bytes()[..], &0x03F0u16.to_le_bytes(), &len.to_le_bytes()].concat(),
+        );
+    }
+    let mut file = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+    std::io::Write::write_all(&mut file.create_stream("PowerPoint Document").unwrap(), &stream)
+        .unwrap();
+    file.flush().unwrap();
+    file.into_inner().into_inner()
+}
+
+#[test]
+fn notes_nested_in_a_stream_order_read_stop_at_max_record_depth() {
+    let refused_depth = |result: Result<almiladoc::Conversion, ConvertError>, max: u64| matches!(result, Err(ConvertError::ResourceLimit { limit: Limit::RecordDepth, max: m, .. }) if m == max);
+    let max = Limits::default().max_record_depth;
+    let deep = ppt_nested_notes(200_000);
+    assert!(refused_depth(limited(|_| {}).convert(Input::new(&deep, Format::Ppt)), max));
+    let notes = ppt_nested_notes(8);
+    let at = |max_record_depth| {
+        limited(|limits| limits.max_record_depth = max_record_depth)
+            .convert(Input::new(&notes, Format::Ppt))
+    };
+    assert!(at(9).is_ok());
+    assert!(refused_depth(at(8), 8));
+}
+
+#[test]
+fn a_doc_data_stream_past_max_entry_bytes_is_a_limit() {
+    let doc = word_document(b"x\r");
+    let mut file = cfb::CompoundFile::open(std::io::Cursor::new(doc)).unwrap();
+    std::io::Write::write_all(&mut file.create_stream("Data").unwrap(), &[0u8; 4096]).unwrap();
+    file.flush().unwrap();
+    let doc = file.into_inner().into_inner();
+    let at = |max_entry_bytes| {
+        limited(|limits| limits.max_entry_bytes = max_entry_bytes)
+            .convert(Input::new(&doc, Format::Doc))
+    };
+    assert!(at(4096).is_ok());
+    let refusal = at(4095);
+    assert!(
+        matches!(
+            refusal,
+            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095, .. })
+        ),
+        "{refusal:?}"
+    );
 }
 
 fn zip(parts: &[(&str, &str)]) -> Vec<u8> {
