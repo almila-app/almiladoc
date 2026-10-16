@@ -35,13 +35,10 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
         }
     }
 
-    let mut manifest: HashMap<String, (String, String)> = HashMap::new();
-    for item in opf.descendants_any("item") {
-        if let (Some(id), Some(href)) = (item.attr_any("id"), item.attr_any("href")) {
-            let media = item.attr_any("media-type").unwrap_or("").to_string();
-            manifest.insert(id.to_string(), (href.to_string(), media));
-        }
-    }
+    let manifest: HashMap<&str, Option<&str>> = opf
+        .descendants_any("item")
+        .filter_map(|item| Some((item.attr_any("id")?, item.attr_any("href"))))
+        .collect();
 
     // Every spine part in spine order: non-linear items are auxiliary but
     // still publication content, and unusable parts degrade at parse time.
@@ -52,13 +49,14 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let mut spine_entries = 0usize;
     let mut spine_paths: Vec<String> = Vec::new();
     let mut spine_parts: HashSet<String> = HashSet::new();
-    for href in opf
-        .descendants_any("itemref")
-        .filter_map(|ir| ir.attr_any("idref"))
-        .filter_map(|idref| manifest.get(idref))
-        .map(|(href, _)| href.as_str())
-    {
+    for itemref in opf.descendants_any("itemref") {
         spine_entries += 1;
+        let href =
+            itemref.attr_any("idref").and_then(|idref| manifest.get(idref).copied().flatten());
+        let Some(href) = href else {
+            parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
+            continue;
+        };
         let target = match path::resolve(&opf_path, href) {
             Ok(t) => t,
             Err(_) => {

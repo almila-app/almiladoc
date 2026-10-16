@@ -4,6 +4,8 @@
 //! XML never converts short: markup a repair would misread fails, a repaired
 //! required part fails, a slide listed or a chart drawn many times parses
 //! once, and every drawing reports the part's loss and damage in its unit.
+//! An EPUB spine item that names no chapter is reported, and a spine that
+//! names none fails.
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -230,15 +232,27 @@ fn presentation(slides: &[&str], shapes: &str, parts: &[(&str, &[u8])]) -> Vec<u
     archive(&all)
 }
 
-fn epub(chapter: &str) -> Vec<u8> {
+fn book(manifest: &str, spine: &str, chapters: &[(&str, &str)]) -> Vec<u8> {
     let container = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#;
-    let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#;
-    archive(&[
+    let opf = format!(
+        r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>{manifest}</manifest><spine>{spine}</spine></package>"#
+    );
+    let names: Vec<String> = chapters.iter().map(|(name, _)| format!("OEBPS/{name}")).collect();
+    let mut parts: Vec<(&str, &[u8])> = vec![
         ("mimetype", b"application/epub+zip"),
         ("META-INF/container.xml", container.as_bytes()),
         ("OEBPS/content.opf", opf.as_bytes()),
-        ("OEBPS/c1.xhtml", chapter.as_bytes()),
-    ])
+    ];
+    parts.extend(
+        names.iter().zip(chapters).map(|(name, (_, body))| (name.as_str(), body.as_bytes())),
+    );
+    archive(&parts)
+}
+
+const CHAPTER_ITEM: &str = r#"<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>"#;
+
+fn epub(chapter: &str) -> Vec<u8> {
+    book(CHAPTER_ITEM, r#"<itemref idref="c1"/>"#, &[("c1.xhtml", chapter)])
 }
 
 fn xhtml(doctype: &str, body: &str) -> String {
@@ -357,6 +371,77 @@ fn an_internal_subset_fails_ooxml_and_is_ignored_in_epub() {
     assert_eq!(reported, [(DiagnosticCode::UnresolvedEntity, Region::Body)]);
 }
 
+fn reporting_converter() -> Converter {
+    let mut config = Config::default();
+    config.on_loss = OnLoss::Report;
+    Converter::new(config).unwrap()
+}
+
+#[test]
+fn every_spine_item_naming_no_chapter_is_reported_outside_any_unit() {
+    let chapter = xhtml("", "<p>Chapter one</p>");
+    let chapters = [("c1.xhtml", chapter.as_str())];
+    let dangling = [
+        ("no idref", "", "<itemref/>"),
+        ("idref absent from the manifest", "", r#"<itemref idref="gone"/>"#),
+        (
+            "manifest item without href",
+            r#"<item id="bare" media-type="application/xhtml+xml"/>"#,
+            r#"<itemref idref="bare"/>"#,
+        ),
+    ];
+    let every_item: String = dangling.iter().map(|(_, item, _)| *item).collect();
+    let every_ref: String = dangling.iter().map(|(_, _, itemref)| *itemref).collect();
+    let mut cases: Vec<(&str, String, String, u64)> = dangling
+        .iter()
+        .map(|(name, item, itemref)| (*name, (*item).to_string(), (*itemref).to_string(), 1))
+        .collect();
+    cases.push(("all three", every_item.clone(), every_ref.clone(), 3));
+    for (name, item, itemref, count) in cases {
+        let data = book(
+            &format!("{CHAPTER_ITEM}{item}"),
+            &format!(r#"{itemref}<itemref idref="c1"/>"#),
+            &chapters,
+        );
+        assert!(
+            matches!(convert(&data, Format::Epub), Err(ConvertError::Incomplete { .. })),
+            "{name}"
+        );
+        let converted = reporting_converter().convert(Input::new(&data, Format::Epub)).unwrap();
+        assert_eq!(converted.markdown(), "Chapter one\n", "{name}");
+        assert_eq!(
+            reported_as(&converted, DiagnosticCode::UnitUnreadable),
+            [(Region::Body, None, count)],
+            "{name}"
+        );
+    }
+    let data = book(&format!("{CHAPTER_ITEM}{every_item}"), &every_ref, &chapters);
+    let err = reporting_converter().convert(Input::new(&data, Format::Epub)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConvertError::Malformed { reason: "no chapter in the book could be read", .. }
+        ),
+        "{err:?}"
+    );
+    let data = book(CHAPTER_ITEM, "", &chapters);
+    assert_eq!(convert(&data, Format::Epub).unwrap(), "");
+}
+
+#[test]
+fn a_title_page_with_a_bare_ampersand_renders_before_the_first_chapter() {
+    let title = xhtml("", "<h1>Pride & Prejudice</h1>");
+    let chapter = xhtml("", "<p>Chapter one</p>");
+    let data = book(
+        &format!(
+            r#"<item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>{CHAPTER_ITEM}"#
+        ),
+        r#"<itemref idref="title"/><itemref idref="c1"/>"#,
+        &[("c1.xhtml", &chapter), ("title.xhtml", &title)],
+    );
+    assert_eq!(convert(&data, Format::Epub).unwrap(), "# Pride & Prejudice\n\nChapter one\n");
+}
+
 fn fuel_limited(max_work: u64) -> Converter {
     let mut config = Config::default();
     config.limits.max_work = max_work;
@@ -432,11 +517,11 @@ fn chart_converter(max_work: u64) -> Converter {
     Converter::new(config).unwrap()
 }
 
-fn unread_graphics(conversion: &Conversion) -> Vec<(Region, Option<u32>, u64)> {
+fn reported_as(conversion: &Conversion, code: DiagnosticCode) -> Vec<(Region, Option<u32>, u64)> {
     conversion
         .diagnostics()
         .iter()
-        .filter(|d| d.code == DiagnosticCode::GraphicUnread)
+        .filter(|d| d.code == code)
         .map(|d| (d.region, d.unit.map(std::num::NonZeroU32::get), d.count))
         .collect()
 }
@@ -448,7 +533,11 @@ fn a_chart_drawn_many_times_parses_once_and_reports_each_drawing() {
     {
         let converted = converter.convert(Input::new(data, *format)).unwrap();
         assert_eq!(converted.markdown().matches("**Sales**").count(), 10_000, "{format:?}");
-        assert_eq!(unread_graphics(&converted), [(Region::Body, unit, 10_000)], "{format:?}");
+        assert_eq!(
+            reported_as(&converted, DiagnosticCode::GraphicUnread),
+            [(Region::Body, unit, 10_000)],
+            "{format:?}"
+        );
     }
 }
 
@@ -469,7 +558,8 @@ fn each_drawing_of_a_part_rooted_elsewhere_charges_its_nodes() {
     let part = "<x/>".repeat(1_000);
     for (data, format) in charts_drawn(&part, 400) {
         let converted = chart_converter(1_000_000).convert(Input::new(&data, format)).unwrap();
-        let unread: u64 = unread_graphics(&converted).iter().map(|d| d.2).sum();
+        let unread: u64 =
+            reported_as(&converted, DiagnosticCode::GraphicUnread).iter().map(|d| d.2).sum();
         assert_eq!(unread, 400, "{format:?}");
     }
     let out_of_fuel: Vec<_> = charts_drawn(&part, 2_000)
@@ -499,7 +589,7 @@ fn a_lossy_chart_on_two_slides_is_reported_in_each_slide() {
     let converted = chart_converter(1_000_000).convert(Input::new(&data, Format::Pptx)).unwrap();
     assert_eq!(converted.markdown().matches("**Sales**").count(), 2);
     assert_eq!(
-        unread_graphics(&converted),
+        reported_as(&converted, DiagnosticCode::GraphicUnread),
         [(Region::Body, Some(1), 1), (Region::Body, Some(2), 1)]
     );
 }

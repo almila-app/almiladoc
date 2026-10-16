@@ -139,7 +139,6 @@ path = [
     "src/formats/doc/stsh.rs",
     "src/formats/docx/mod.rs",
     "src/formats/docx/styles.rs",
-    "src/formats/epub/mod.rs",
     "src/formats/mod.rs",
     "src/formats/odf/mod.rs",
     "src/formats/odf/styles.rs",
@@ -338,5 +337,15 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
     "2026 APZN <129354802+jsk1004ha@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/epub/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Ray Tien <29456968+Ray0907@users.noreply.github.com>",
 ]
 SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
