@@ -3,9 +3,8 @@
 //! An error means a complete conversion was impossible: the input was
 //! unreadable or structurally unusable, encrypted, crossed a safety limit,
 //! or lost content under [`OnLoss::Fail`](crate::OnLoss::Fail). Recoverable
-//! producer quirks are recovered or skipped, and reported as [`Diagnostics`]
-//! or through the `log` facade. No message carries input text beyond a
-//! [`PartName`].
+//! producer quirks are recovered or skipped, and reported as [`Diagnostics`].
+//! No message carries input text beyond a [`PartName`].
 
 use std::fmt;
 

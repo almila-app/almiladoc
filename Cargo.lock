@@ -52,7 +52,6 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "insta",
- "log",
  "pdf-inspector",
  "proptest",
  "quick-xml",

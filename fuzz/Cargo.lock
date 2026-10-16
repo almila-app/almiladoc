@@ -51,7 +51,6 @@ dependencies = [
  "csv",
  "encoding_rs",
  "flate2",
- "log",
  "pdf-inspector",
  "quick-xml",
  "rayon",

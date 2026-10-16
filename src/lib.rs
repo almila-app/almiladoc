@@ -13,9 +13,8 @@
 //! What a conversion cannot carry into its output is reported as
 //! [`Diagnostics`]: content [`Lost`](LossClass::Lost) fails the conversion
 //! with [`ConvertError::Incomplete`] under the default [`OnLoss::Fail`], and
-//! [`OnLoss::Report`] returns it beside the Markdown. Recovery and
-//! skipped-content events not yet reported that way go through the [`log`]
-//! facade, whose messages are not a stable API.
+//! [`OnLoss::Report`] returns it beside the Markdown. Every piece of input
+//! skipped or repaired on the way is reported in [`Diagnostics`] too.
 
 #![warn(missing_docs)]
 
