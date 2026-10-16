@@ -440,12 +440,17 @@ const CASES: &[Case] = &[
         &[("Object 1/content.xml", Recover)],
         &[(RECOVERED, Body, None, 1)],
     ),
-    case(Fixture("odt/handmade-math.odt"), Format::Odt, &[("Object 1/content.xml", Corrupt)], &[]),
+    case(
+        Fixture("odt/handmade-math.odt"),
+        Format::Odt,
+        &[("Object 1/content.xml", Corrupt)],
+        &[(DiagnosticCode::EmbeddedObject, Body, None, 1)],
+    ),
     case(
         Fixture("odt/text.odt"),
         Format::Odt,
         &[("Pictures/100000010000000100000001C4EE90A9.png", Corrupt)],
-        &[],
+        &[(DiagnosticCode::ImageUnavailable, Body, None, 1)],
     ),
     case(
         Fixture("epub/book.epub"),

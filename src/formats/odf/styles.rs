@@ -76,6 +76,10 @@ pub struct OdfStyles<'a> {
     /// `style:default-style` per family: the base beneath every named chain
     /// (and the delta for unstyled content of that family).
     defaults: HashMap<String, StyleDelta>,
+    /// `style:master-page` by name, and the document's first, which a page
+    /// naming none uses.
+    masters: HashMap<&'a str, &'a Element>,
+    first_master: Option<&'a Element>,
 }
 
 fn key(family: &str, name: &str) -> String {
@@ -88,6 +92,15 @@ impl<'a> OdfStyles<'a> {
     pub fn collect(&mut self, tree: &'a Element) {
         for root in tree.child_elems() {
             for section in root.child_elems() {
+                if section.is(ns::OFFICE, "master-styles") {
+                    for master in section.find_all(ns::STYLE, "master-page") {
+                        self.first_master.get_or_insert(master);
+                        if let Some(name) = master.attr(ns::STYLE, "name") {
+                            self.masters.entry(name).or_insert(master);
+                        }
+                    }
+                    continue;
+                }
                 if !(section.is(ns::OFFICE, "automatic-styles") || section.is(ns::OFFICE, "styles"))
                 {
                     continue;
@@ -181,6 +194,36 @@ impl<'a> OdfStyles<'a> {
     /// The document's heading numbering (`text:outline-style`) levels.
     pub fn outline_levels(&self) -> Option<&[ListLevel; LIST_LEVELS]> {
         self.outline.as_ref()
+    }
+
+    /// A named style's own definition.
+    pub fn style(&self, family: &str, name: &str) -> Option<&'a Element> {
+        self.raw.get(&key(family, name)).map(|(def, _)| *def)
+    }
+
+    /// The master page a style starts, by name, through its
+    /// `parent-style-name` chain; an empty name starts none.
+    pub fn style_master_page(&self, family: &str, name: &str) -> Option<&'a str> {
+        let mut id = key(family, name);
+        let mut visited: HashSet<String> = HashSet::new();
+        while visited.insert(id.clone()) {
+            let (def, parent) = self.raw.get(&id)?;
+            if let Some(master) = def.attr(ns::STYLE, "master-page-name") {
+                return Some(master).filter(|n| !n.is_empty());
+            }
+            id = parent.clone()?;
+        }
+        None
+    }
+
+    /// A master page by its `style:name`.
+    pub fn master_page(&self, name: &str) -> Option<&'a Element> {
+        self.masters.get(name).copied()
+    }
+
+    /// The document's first master page, which a page naming none uses.
+    pub fn first_master_page(&self) -> Option<&'a Element> {
+        self.first_master
     }
 }
 

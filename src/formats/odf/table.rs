@@ -8,8 +8,9 @@
 //! at the end, empty cells at a row's end) is elided. All materialization is
 //! charged against the expansion budget.
 
+use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
-use crate::formats::odf::text::{Ctx, parse_container};
+use crate::formats::odf::text::{Ctx, parse_children, report_unplaced};
 use crate::limits::{Limit, Limits};
 use crate::model::{Block, Cell, GridBuilder, Inline, TableKind};
 use crate::package::xml::{Element, ns};
@@ -79,16 +80,18 @@ fn read_checkboxes(table: &Element) -> HashMap<String, Vec<Inline>> {
 }
 
 /// Append the checkboxes anchored in a cell after its content, on the same
-/// line. Controls under `table:shapes` are anchored to the page by
-/// coordinates alone, so they are not placed.
-fn append_cell_checkboxes(
+/// line, and report every other control anchored there, including one the
+/// table does not declare.
+fn append_cell_controls(
     cell: &Element,
+    ctx: &Ctx,
     checkboxes: &HashMap<String, Vec<Inline>>,
     blocks: &mut Vec<Block>,
 ) {
     for control in cell.find_all(ns::DRAW, "control") {
         let Some(found) = control.attr(ns::DRAW, "control").and_then(|id| checkboxes.get(id))
         else {
+            ctx.emit(DiagnosticCode::FormControlUnread);
             continue;
         };
         match blocks.last_mut() {
@@ -196,6 +199,11 @@ fn walk_rows(
                 }
             }
             "table-rows" | "table-row-group" => walk_rows(child, ctx, state, false)?,
+            "shapes" => {
+                for shape in child.child_elems() {
+                    report_unplaced(shape, ctx)?;
+                }
+            }
             "table-row" => {
                 let repeat: u64 = child
                     .attr(ns::TABLE, "number-rows-repeated")
@@ -245,7 +253,7 @@ fn emit_row(
     for _ in 0..repeat {
         state.builder.next_row();
         state.rows_emitted += 1;
-        emit_parsed_cells(&cells, state)?;
+        emit_parsed_cells(&cells, ctx, state)?;
     }
     Ok(())
 }
@@ -281,15 +289,20 @@ fn parse_row_cells(
             .unwrap_or(1)
             .max(1);
         let mut blocks = cell_blocks(cell, ctx)?;
-        append_cell_checkboxes(cell, checkboxes, &mut blocks);
+        append_cell_controls(cell, ctx, checkboxes, &mut blocks);
         let bytes = block_bytes(&blocks);
         out.push(RowCell::Cell { repeat, col_span, row_span, blocks, bytes });
     }
     Ok(out)
 }
 
-fn emit_parsed_cells(cells: &[RowCell], state: &mut TableState) -> Result<(), ConvertError> {
+fn emit_parsed_cells(
+    cells: &[RowCell],
+    ctx: &Ctx,
+    state: &mut TableState,
+) -> Result<(), ConvertError> {
     let mut pending_cells: u64 = 0;
+    let mut stray: u64 = 0;
     for cell in cells {
         match cell {
             RowCell::Covered { repeat } => {
@@ -300,7 +313,7 @@ fn emit_parsed_cells(cells: &[RowCell], state: &mut TableState) -> Result<(), Co
                 state.charge(*repeat)?;
                 for _ in 0..*repeat {
                     if !state.builder.covered() {
-                        log::debug!("covered table cell without a spanning origin");
+                        stray = stray.saturating_add(1);
                     }
                 }
             }
@@ -316,6 +329,9 @@ fn emit_parsed_cells(cells: &[RowCell], state: &mut TableState) -> Result<(), Co
                 }
             }
         }
+    }
+    if stray > 0 {
+        ctx.emit_count(DiagnosticCode::TableSpanRepaired, stray);
     }
     Ok(())
 }
@@ -337,7 +353,7 @@ fn flush_gap(state: &mut TableState, pending: &mut u64) -> Result<(), ConvertErr
 /// A cell's blocks: its text content, or a typed value-attribute fallback
 /// when the producer wrote no display text.
 fn cell_blocks(cell: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
-    let blocks = parse_container(cell, ctx)?;
+    let blocks = parse_children(cell.child_elems().filter(|e| !e.is(ns::DRAW, "control")), ctx)?;
     let has_content = blocks.iter().any(|b| match b {
         Block::Paragraph(inlines) => !crate::model::inlines_are_empty(inlines),
         _ => true,
@@ -462,7 +478,15 @@ pub fn parse_spreadsheet(sheet: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conve
     let tables: Vec<&Element> = sheet.child_elems().filter(|e| e.is(ns::TABLE, "table")).collect();
     let multi_sheet = tables.len() > 1;
     let mut blocks = Vec::new();
-    for table in tables {
+    for (position, table) in tables.into_iter().enumerate() {
+        let _unit = ctx.parse_ctx.enter_unit(position);
+        let master = table
+            .attr(ns::TABLE, "style-name")
+            .and_then(|style| ctx.styles.style_master_page("table", style))
+            .map_or_else(|| ctx.styles.first_master_page(), |name| ctx.styles.master_page(name));
+        if let Some(master) = master {
+            super::report_running(master, ctx.parse_ctx);
+        }
         let name = table.attr(ns::TABLE, "name").unwrap_or("");
         let content = parse_table(table, ctx)?;
         if content.is_empty() {

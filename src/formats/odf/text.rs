@@ -1,7 +1,7 @@
 //! Block and inline walking for ODF text content.
 
 use crate::ctx::ParseCtx;
-use crate::diagnostics::Region;
+use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::formats::odf::styles::{LIST_LEVELS, OdfStyles, parse_start};
 use crate::formats::odf::table::parse_table;
@@ -17,7 +17,7 @@ use crate::shared::blockstyle::StyledRun;
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::math::mathml_to_tex;
 use crate::shared::text::{clean_text, collapse_ws};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 pub struct Ctx<'a, 'b> {
@@ -33,6 +33,7 @@ pub struct Ctx<'a, 'b> {
     list_ids: RefCell<HashMap<String, u64>>,
     /// Heading numbering state for `text:outline-style` (values, started).
     heading_counters: RefCell<([u64; LIST_LEVELS], [bool; LIST_LEVELS])>,
+    region: Cell<Region>,
 }
 
 impl<'a, 'b> Ctx<'a, 'b> {
@@ -51,14 +52,40 @@ impl<'a, 'b> Ctx<'a, 'b> {
             list_counters: Default::default(),
             list_ids: Default::default(),
             heading_counters: Default::default(),
+            region: Cell::new(Region::Body),
         }
+    }
+
+    /// Report one occurrence of `code` in the region being walked.
+    pub fn emit(&self, code: DiagnosticCode) {
+        self.emit_count(code, 1);
+    }
+
+    /// Report `count` occurrences of `code` in the region being walked.
+    pub fn emit_count(&self, code: DiagnosticCode, count: u64) {
+        self.parse_ctx.emit_count(code, self.region.get(), count);
+    }
+
+    /// Walk `f` with its losses reported in `region`.
+    pub fn in_region<T>(&self, region: Region, f: impl FnOnce() -> T) -> T {
+        let outer = self.region.replace(region);
+        let out = f();
+        self.region.set(outer);
+        out
     }
 }
 
 pub fn parse_container(parent: &Element, ctx: &Ctx) -> Result<Vec<Block>, ConvertError> {
+    parse_children(parent.child_elems(), ctx)
+}
+
+pub fn parse_children<'e>(
+    children: impl Iterator<Item = &'e Element>,
+    ctx: &Ctx,
+) -> Result<Vec<Block>, ConvertError> {
     let mut blocks = Vec::new();
     let mut run = StyledRun::default();
-    for child in parent.child_elems() {
+    for child in children {
         parse_block_elem(child, ctx, &mut blocks, &mut run)?;
     }
     run.flush(&mut blocks);
@@ -124,20 +151,133 @@ fn parse_block_elem(
                 blocks.extend(parse_container(elem, ctx)?);
                 return Ok(());
             }
-            "table-of-content" | "alphabetical-index" | "bibliography" | "illustration-index" => {
+            "table-of-content" | "alphabetical-index" | "bibliography" | "illustration-index"
+            | "table-index" | "object-index" | "user-index" => {
                 // The stored index body is real document text (the generated
                 // entries are written into `text:index-body`).
                 blocks.extend(parse_container(elem, ctx)?);
                 return Ok(());
             }
-            _ => return Ok(()),
+            "numbered-paragraph" => ctx.emit(DiagnosticCode::BlockUnread),
+            "tracked-changes" => report_deletions(elem, ctx),
+            _ => {}
         }
+        return Ok(());
     }
     if elem.is(ns::TABLE, "table") {
         run.flush(blocks);
         blocks.extend(parse_table(elem, ctx)?);
+    } else if elem.is(ns::OFFICE, "annotation") {
+        ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+    } else {
+        report_unplaced(elem, ctx)?;
     }
     Ok(())
+}
+
+/// Report the deleted text a `text:tracked-changes` holds, which accepted
+/// revisions leave out.
+fn report_deletions(changes: &Element, ctx: &Ctx) {
+    let deletions =
+        changes.descendants(ns::TEXT, "deletion").fold(0u64, |n, _| n.saturating_add(1));
+    if deletions > 0 {
+        ctx.emit_count(DiagnosticCode::RevisionOmitted, deletions);
+    }
+}
+
+/// Report a drawing a container holds outside its text, which no output
+/// places: a frame's picture, text box, object or media, a form control,
+/// or a shape's text.
+pub(super) fn report_unplaced(elem: &Element, ctx: &Ctx) -> Result<(), ConvertError> {
+    let code = if elem.is(super::DR3D, "scene") {
+        holds_content(elem).then_some(DiagnosticCode::GraphicUnread)
+    } else if elem.ns.as_deref() != Some(ns::DRAW) {
+        None
+    } else {
+        match elem.local.as_str() {
+            "frame" => frame_loss(elem, ctx)?,
+            "g" | "a" => {
+                for child in elem.child_elems() {
+                    report_unplaced(child, ctx)?;
+                }
+                None
+            }
+            "control" => Some(DiagnosticCode::FormControlUnread),
+            "custom-shape" | "rect" | "ellipse" | "circle" | "polygon" | "polyline"
+            | "regular-polygon" | "path" | "line" | "connector" | "caption" | "measure" => {
+                holds_content(elem).then_some(DiagnosticCode::GraphicUnread)
+            }
+            _ => None,
+        }
+    };
+    if let Some(code) = code {
+        ctx.emit(code);
+    }
+    Ok(())
+}
+
+/// What a frame no output places loses: its first text box, object or
+/// media, else its picture, which is only their replacement when they are
+/// present.
+fn frame_loss(frame: &Element, ctx: &Ctx) -> Result<Option<DiagnosticCode>, ConvertError> {
+    let Some(content) = frame
+        .child_elems()
+        .find(|c| c.is(ns::DRAW, "text-box") || (is_graphic(c) && c.local != "image"))
+        .or_else(|| frame.find(ns::DRAW, "image"))
+    else {
+        return Ok(None);
+    };
+    Ok(match content.local.as_str() {
+        "text-box" => holds_content(content).then_some(DiagnosticCode::TextBoxUnread),
+        "object" => match read_object(ctx, content)? {
+            Object::Formula(_) => Some(DiagnosticCode::EmbeddedObject),
+            Object::Empty => None,
+            Object::Unread(code) => Some(code),
+        },
+        "image" => Some(DiagnosticCode::ImageUnplaced),
+        _ => media_loss(content),
+    })
+}
+
+/// Whether a frame child is a picture, an object or media, which a frame
+/// shows as a graphic.
+pub(super) fn is_graphic(content: &Element) -> bool {
+    content.ns.as_deref() == Some(ns::DRAW)
+        && matches!(
+            content.local.as_str(),
+            "image" | "object" | "object-ole" | "plugin" | "floating-frame" | "applet"
+        )
+}
+
+/// The loss of a frame's OLE object, plugin (audio or video), floating
+/// frame or applet, of which only a preview picture can render.
+fn media_loss(content: &Element) -> Option<DiagnosticCode> {
+    match content.local.as_str() {
+        "plugin" => Some(DiagnosticCode::GraphicUnread),
+        "object-ole" | "floating-frame" | "applet" => Some(DiagnosticCode::EmbeddedObject),
+        _ => None,
+    }
+}
+
+/// Whether an element shows anything: text, a picture, an object or media.
+/// Comments and tracked deletions, which no output shows, do not count.
+pub(super) fn holds_content(elem: &Element) -> bool {
+    let mut pending = vec![elem];
+    while let Some(parent) = pending.pop() {
+        for node in &parent.children {
+            match node {
+                Node::Text(text) if !text.trim().is_empty() => return true,
+                Node::Text(_) => {}
+                Node::Elem(e) if is_graphic(e) => return true,
+                Node::Elem(e)
+                    if e.is(ns::OFFICE, "annotation")
+                        || e.is(super::OFFICEOOO, "annotation")
+                        || e.is(ns::TEXT, "tracked-changes") => {}
+                Node::Elem(e) => pending.push(e),
+            }
+        }
+    }
+    false
 }
 
 /// One `text:list` -> blocks: list headers render without markers (as
@@ -333,7 +473,7 @@ fn walk_inlines(
             }
             Node::Elem(child) => {
                 let in_text = child.ns.as_deref().is_some_and(|n| n == ns::TEXT);
-                if in_text {
+                if in_text || child.is(ns::DRAW, "a") {
                     match child.local.as_str() {
                         "span" => {
                             let merged = match child.attr(ns::TEXT, "style-name") {
@@ -391,7 +531,9 @@ fn walk_inlines(
                                 _ => NoteKind::Footnote,
                             };
                             let note_blocks = match child.find(ns::TEXT, "note-body") {
-                                Some(b) => parse_container(b, ctx)?,
+                                Some(b) => {
+                                    ctx.in_region(Region::Note, || parse_container(b, ctx))?
+                                }
                                 None => Vec::new(),
                             };
                             ctx.notes.borrow_mut().push(Note {
@@ -402,12 +544,24 @@ fn walk_inlines(
                             out.push(Inline::NoteRef(id));
                             continue;
                         }
-                        "annotation" | "tracked-changes" | "soft-page-break" => continue,
+                        "tracked-changes" => {
+                            report_deletions(child, ctx);
+                            continue;
+                        }
+                        "soft-page-break" => continue,
                         _ => {}
                     }
                 }
+                if child.is(ns::OFFICE, "annotation") {
+                    ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+                    continue;
+                }
                 if child.is(ns::DRAW, "frame") {
                     walk_frame(child, ctx, out, boxes)?;
+                    continue;
+                }
+                if child.is(ns::DRAW, "control") {
+                    ctx.emit(DiagnosticCode::FormControlUnread);
                     continue;
                 }
                 walk_inlines(child, ctx, delta, out, boxes)?;
@@ -429,11 +583,24 @@ pub(super) fn walk_frame(
         boxes.extend(parse_container(text_box, ctx)?);
         return Ok(());
     }
-    if let Some(object) = frame.find(ns::DRAW, "object")
-        && let Some(tex) = formula_tex(ctx, object)?
-    {
-        out.push(Inline::Math(tex));
-        return Ok(());
+    out.extend(frame_graphic(frame, ctx)?);
+    Ok(())
+}
+
+/// A frame's formula, or else its picture: the object's own replacement
+/// image when the object itself does not convert.
+pub(super) fn frame_graphic(frame: &Element, ctx: &Ctx) -> Result<Option<Inline>, ConvertError> {
+    let object_loss = if let Some(object) = frame.find(ns::DRAW, "object") {
+        match read_object(ctx, object)? {
+            Object::Formula(tex) => return Ok(Some(Inline::Math(tex))),
+            Object::Empty => None,
+            Object::Unread(code) => Some(code),
+        }
+    } else {
+        frame.child_elems().filter(|c| c.ns.as_deref() == Some(ns::DRAW)).find_map(media_loss)
+    };
+    if let Some(code) = object_loss {
+        ctx.emit(code);
     }
     let alt = frame
         .first_descendant(ns::SVG_COMPAT, "title")
@@ -444,49 +611,67 @@ pub(super) fn walk_frame(
     if let Some(image) = frame.first_descendant(ns::DRAW, "image") {
         let href = image.attr(ns::XLINK, "href").unwrap_or("");
         let source = load_image(ctx, href)?;
-        if source.is_some() || !alt.is_empty() {
-            out.push(Inline::Image { alt, source: source.unwrap_or(ImageSource::Unavailable) });
+        if source.is_none() && object_loss.is_none() {
+            ctx.emit(DiagnosticCode::ImageUnavailable);
         }
-        return Ok(());
+        if source.is_some() || !alt.is_empty() {
+            return Ok(Some(Inline::Image {
+                alt,
+                source: source.unwrap_or(ImageSource::Unavailable),
+            }));
+        }
+        return Ok(None);
     }
-    if !alt.is_empty() {
-        out.push(Inline::Image { alt, source: ImageSource::Unavailable });
-    }
-    Ok(())
+    Ok((!alt.is_empty()).then_some(Inline::Image { alt, source: ImageSource::Unavailable }))
 }
 
-/// The LaTeX of a `draw:object` holding a formula: MathML inline in the
-/// object, or in the `content.xml` of the object directory it links to.
-/// `None` for any other embedded object.
-pub(super) fn formula_tex(ctx: &Ctx, object: &Element) -> Result<Option<String>, ConvertError> {
+/// What a `draw:object` converts to.
+pub(super) enum Object {
+    Formula(String),
+    /// A formula with nothing to show.
+    Empty,
+    /// The loss to report: the object's content is not converted.
+    Unread(DiagnosticCode),
+}
+
+/// Read a `draw:object`: MathML inline in the object, or in the
+/// `content.xml` of the object directory it links to, converts; a chart or
+/// any other object does not.
+pub(super) fn read_object(ctx: &Ctx, object: &Element) -> Result<Object, ConvertError> {
     if let Some(math) = object.find(ns::MATHML, "math") {
-        return Ok(Some(mathml_to_tex(math)).filter(|t| !t.is_empty()));
+        return Ok(formula(math));
     }
+    let unread = Object::Unread(DiagnosticCode::EmbeddedObject);
     let href = object.attr(ns::XLINK, "href").unwrap_or("");
     if href.is_empty() || crate::shared::uri::is_absolute_uri(href) {
-        return Ok(None);
+        return Ok(unread);
     }
-    let target = match crate::package::path::resolve("content.xml", &format!("{href}/content.xml"))
-    {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("skipping unresolvable object reference {href:?}: {e}");
-            return Ok(None);
-        }
+    let Ok(target) = crate::package::path::resolve("content.xml", &format!("{href}/content.xml"))
+    else {
+        return Ok(unread);
     };
     let Some(tree) =
-        ctx.pkg.borrow_mut().related_xml_part(&target.path, Role::Reported(Region::Body))?
+        ctx.pkg.borrow_mut().related_xml_part(&target.path, Role::Reported(ctx.region.get()))?
     else {
-        return Ok(None);
+        return Ok(unread);
     };
-    let Some(math) = tree.first_descendant(ns::MATHML, "math") else {
-        return Ok(None);
-    };
-    Ok(Some(mathml_to_tex(math)).filter(|t| !t.is_empty()))
+    if let Some(math) = tree.first_descendant(ns::MATHML, "math") {
+        return Ok(formula(math));
+    }
+    let chart = tree
+        .find(ns::OFFICE, "document-content")
+        .and_then(|d| d.find(ns::OFFICE, "body"))
+        .is_some_and(|b| b.find(ns::OFFICE, "chart").is_some());
+    Ok(if chart { Object::Unread(DiagnosticCode::GraphicUnread) } else { unread })
 }
 
-/// Failures degrade (log + `None`) per the unified policy; resource-limit
-/// errors always propagate.
+fn formula(math: &Element) -> Object {
+    let tex = mathml_to_tex(math);
+    if tex.is_empty() { Object::Empty } else { Object::Formula(tex) }
+}
+
+/// A picture's bytes into the asset store; `None` when the href names no
+/// part the package holds. Fatal errors propagate.
 fn load_image(ctx: &Ctx, href: &str) -> Result<Option<ImageSource>, ConvertError> {
     if href.is_empty() {
         return Ok(None);
@@ -494,24 +679,17 @@ fn load_image(ctx: &Ctx, href: &str) -> Result<Option<ImageSource>, ConvertError
     if crate::shared::uri::is_absolute_uri(href) {
         return Ok(Some(ImageSource::External(href.to_string())));
     }
-    let target = match crate::package::path::resolve("content.xml", href) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("skipping unresolvable image reference {href:?}: {e}");
-            return Ok(None);
-        }
+    let Ok(target) = crate::package::path::resolve("content.xml", href) else {
+        return Ok(None);
     };
-    match ctx.pkg.borrow_mut().related_part(&target.path, Role::Reported(Region::Body))? {
-        Some(bytes) => {
-            let media = media_type_for(&target.path);
-            let id = ctx.assets.borrow_mut().add(media, target.path, &bytes)?;
-            Ok(Some(ImageSource::Asset(id)))
-        }
-        None => {
-            log::warn!("image part {} is missing", target.path);
-            Ok(None)
-        }
-    }
+    let bytes =
+        ctx.pkg.borrow_mut().related_part(&target.path, Role::Reported(ctx.region.get()))?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let media = media_type_for(&target.path);
+    let id = ctx.assets.borrow_mut().add(media, target.path, &bytes)?;
+    Ok(Some(ImageSource::Asset(id)))
 }
 
 /// ODF hrefs: external URLs, package-relative paths, or `#target` internal
