@@ -1,14 +1,14 @@
 //! In-house legacy Excel reader (.xls): OLE2 compound file holding a BIFF
 //! record stream ([MS-XLS]). BIFF8 is the target; BIFF5/BIFF7 streams
 //! degrade to their byte-string record layouts instead of erroring. Cell
-//! values resolve their number format through the same engine and grid
-//! assembly as the SpreadsheetML reader, so a workbook saved as .xls and as
+//! values resolve their number format through the same engine and shared
+//! grid as the SpreadsheetML reader, so a workbook saved as .xls and as
 //! .xlsx converts identically.
 
 use super::controls::Checkbox;
-use super::xlsx::{
-    CellFormat, CellXfs, LinkTarget, SheetContent, SheetLink, build_table, format_as_text,
-    render_number, resolve_format,
+use super::grid::{
+    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MergePolicy, SheetContent,
+    SheetLink, build_table, format_as_text, render_number, resolve_format,
 };
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
@@ -59,7 +59,7 @@ const HLINK: u16 = 0x01B8;
 const WORKSHEET_SUBSTREAM: u16 = 0x0010;
 
 /// The BIFF8 grid is 256 columns; a larger column index is not a real cell.
-const MAX_COLS: u32 = 256;
+const BIFF8_COLS: u32 = 256;
 
 pub(super) fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertError> {
     let mut ole = cfb::CompoundFile::open(Cursor::new(bytes))
@@ -376,7 +376,7 @@ struct BoundSheet {
 
 struct Globals {
     biff8: bool,
-    date1904: bool,
+    dates: DateSystem,
     encoding: &'static encoding_rs::Encoding,
     /// Each shared string with whether it needed a replacement character.
     sst: Vec<(String, bool)>,
@@ -410,7 +410,7 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
     }
     let mut globals = Globals {
         biff8: get_u16(body, 0) == Some(0x0600),
-        date1904: false,
+        dates: DateSystem::Since1900,
         encoding: encoding_rs::WINDOWS_1252,
         sst: Vec::new(),
         xfs: CellXfs::new(Vec::new()),
@@ -436,7 +436,7 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
                     globals.encoding = codepage_encoding(cp);
                 }
             }
-            DATEMODE => globals.date1904 = get_u16(body, 0) == Some(1),
+            DATEMODE => globals.dates = DateSystem::from_date1904(get_u16(body, 0) == Some(1)),
             BOUNDSHEET => {
                 if let Some(sheet) = read_boundsheet(body, &globals) {
                     globals.sheets.push(sheet);
@@ -527,13 +527,13 @@ fn read_sst(segs: &[&[u8]]) -> Vec<(String, bool)> {
     out
 }
 
-/// A cell record's leading (row, column, ixfe); `None` when the column is
-/// outside the grid the format defines.
-fn cell_ref(body: &[u8]) -> Option<(u32, u32, u16)> {
+/// A cell record's leading cell and ixfe; `None` when the column is outside
+/// the grid the format defines.
+fn cell_ref(body: &[u8]) -> Option<(CellRef, u16)> {
     let row = u32::from(get_u16(body, 0)?);
     let col = u32::from(get_u16(body, 2)?);
     let ixfe = get_u16(body, 4)?;
-    (col < MAX_COLS).then_some((row, col, ixfe))
+    (col < BIFF8_COLS).then_some((CellRef::new(row, col), ixfe))
 }
 
 fn get_f64(body: &[u8], off: usize) -> Option<f64> {
@@ -557,9 +557,9 @@ fn read_sheet(
     }
     let mut out = SheetContent::default();
     let mut depth = 1usize;
-    // A FORMULA whose cached value is a string: (row, col, ixfe) waiting
+    // A FORMULA whose cached value is a string: its cell and ixfe waiting
     // for the STRING record that carries the text.
-    let mut pending: Option<(u32, u32, u16)> = None;
+    let mut pending: Option<(CellRef, u16)> = None;
     // A drawing object's shape arrives in MSODRAWING ahead of its OBJ, and
     // its text in the TXO after it.
     let mut shape: Option<Shape> = None;
@@ -580,7 +580,7 @@ fn read_sheet(
                 if body.get(12).is_some_and(|flags| flags & 0x20 != 0)
                     && let Some(row) = get_u16(body, 0)
                 {
-                    out.hidden_rows.insert(u32::from(row));
+                    out.hide_row(u32::from(row));
                 }
             }
             COLINFO => {
@@ -589,7 +589,7 @@ fn read_sheet(
                     && flags & 0x01 != 0
                     && first <= last
                 {
-                    out.hidden_cols.push((u32::from(first), u32::from(last).min(MAX_COLS - 1)));
+                    out.hide_cols(u32::from(first), u32::from(last).min(BIFF8_COLS - 1));
                 }
             }
             MERGEDCELLS => {
@@ -605,45 +605,44 @@ fn read_sheet(
                     ) else {
                         break;
                     };
-                    let (r1, r2) = (u32::from(r1.min(r2)), u32::from(r1.max(r2)));
-                    let (c1, c2) = (u32::from(c1.min(c2)), u32::from(c1.max(c2)));
-                    if c1 >= MAX_COLS || (r1 == r2 && c1 == c2) {
-                        continue;
-                    }
-                    out.merges.push((r1, c1, r2, c2.min(MAX_COLS - 1)));
+                    let range = CellRange::spanning(
+                        CellRef::new(u32::from(r1), u32::from(c1)),
+                        CellRef::new(u32::from(r2), u32::from(c2)),
+                    );
+                    out.merge(parse_ctx, range, MergePolicy::ClampCols(BIFF8_COLS));
                 }
             }
             LABELSST => {
-                if let Some((row, col, ixfe)) = cell_ref(body)
+                if let Some((at, ixfe)) = cell_ref(body)
                     && let Some(isst) = get_u32(body, 6)
                 {
                     let text = globals.sst.get(isst as usize).cloned();
-                    put_string(&mut out, row, col, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text);
                 }
             }
             LABEL | RSTRING => {
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
-                if let Some((row, col, ixfe)) = cell_ref(body) {
+                if let Some((at, ixfe)) = cell_ref(body) {
                     // RSTRING's trailing rich runs are formatting, not text.
                     let text = string_reader(&segs, 6)
                         .and_then(|mut r| globals.read_string(&mut r, false));
-                    put_string(&mut out, row, col, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text);
                 }
             }
             NUMBER => {
-                if let Some((row, col, ixfe)) = cell_ref(body)
+                if let Some((at, ixfe)) = cell_ref(body)
                     && let Some(n) = get_f64(body, 6)
                 {
-                    put_number(&mut out, row, col, globals, ixfe, n);
+                    put_number(&mut out, at, globals, ixfe, n);
                 }
             }
             RK => {
-                if let Some((row, col, ixfe)) = cell_ref(body)
+                if let Some((at, ixfe)) = cell_ref(body)
                     && let Some(rk) = get_u32(body, 6)
                 {
                     let n = rk_number(rk);
-                    put_number(&mut out, row, col, globals, ixfe, n);
+                    put_number(&mut out, at, globals, ixfe, n);
                 }
             }
             MULRK => {
@@ -657,15 +656,16 @@ fn read_sheet(
                             break;
                         };
                         let col = u32::from(col_first) + i as u32;
-                        if col >= MAX_COLS {
+                        if col >= BIFF8_COLS {
                             break;
                         }
-                        put_number(&mut out, u32::from(row), col, globals, ixfe, rk_number(rk));
+                        let at = CellRef::new(u32::from(row), col);
+                        put_number(&mut out, at, globals, ixfe, rk_number(rk));
                     }
                 }
             }
             BOOLERR => {
-                if let Some((row, col, _ixfe)) = cell_ref(body)
+                if let Some((at, _ixfe)) = cell_ref(body)
                     && let (Some(&value), Some(&is_err)) = (body.get(6), body.get(7))
                 {
                     let text = match (is_err, value) {
@@ -675,33 +675,31 @@ fn read_sheet(
                         _ => None,
                     };
                     match text {
-                        Some(text) => put(&mut out, row, col, text.to_string()),
-                        None => lose(&mut out, row, col, DiagnosticCode::CellValueUnreadable),
+                        Some(text) => out.put(at, text.to_string()),
+                        None => out.lose(at, DiagnosticCode::CellValueUnreadable),
                     }
                 }
             }
             FORMULA => {
-                if let Some((row, col, ixfe)) = cell_ref(body)
+                if let Some((at, ixfe)) = cell_ref(body)
                     && let Some(value) = body.get(6..14)
                 {
                     if value[6] == 0xFF && value[7] == 0xFF {
                         match value[0] {
-                            0x00 => pending = Some((row, col, ixfe)),
+                            0x00 => pending = Some((at, ixfe)),
                             0x01 => {
                                 let text = if value[2] == 0 { "FALSE" } else { "TRUE" };
-                                put(&mut out, row, col, text.to_string());
+                                out.put(at, text.to_string());
                             }
                             0x02 => match error_literal(value[2]) {
-                                Some(text) => put(&mut out, row, col, text.to_string()),
-                                None => {
-                                    lose(&mut out, row, col, DiagnosticCode::CellValueUnreadable)
-                                }
+                                Some(text) => out.put(at, text.to_string()),
+                                None => out.lose(at, DiagnosticCode::CellValueUnreadable),
                             },
                             // 0x03 is a blank string result.
                             _ => {}
                         }
                     } else if let Some(n) = get_f64(body, 6) {
-                        put_number(&mut out, row, col, globals, ixfe, n);
+                        put_number(&mut out, at, globals, ixfe, n);
                     }
                 }
             }
@@ -722,7 +720,7 @@ fn read_sheet(
                         parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body)
                     }
                     Some(Obj::Checkbox(Some(checked))) => match shape {
-                        Some(Shape { anchor: at, .. }) if at.1 < MAX_COLS => {
+                        Some(Shape { anchor: at, .. }) if at.col < BIFF8_COLS => {
                             let caption = String::new();
                             out.checkboxes
                                 .entry(at)
@@ -733,8 +731,8 @@ fn read_sheet(
                         _ => parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body),
                     },
                     Some(Obj::Checkbox(None)) => match shape {
-                        Some(Shape { anchor: (row, col), .. }) if col < MAX_COLS => {
-                            lose(&mut out, row, col, DiagnosticCode::FormControlUnread)
+                        Some(Shape { anchor, .. }) if anchor.col < BIFF8_COLS => {
+                            out.lose(anchor, DiagnosticCode::FormControlUnread)
                         }
                         _ => parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body),
                     },
@@ -761,7 +759,7 @@ fn read_sheet(
                         {
                             b.caption = clean_text(&caption);
                             if replaced {
-                                lose(&mut out, at.0, at.1, DiagnosticCode::InvalidEncoding);
+                                out.lose(at, DiagnosticCode::InvalidEncoding);
                             }
                         }
                     }
@@ -776,10 +774,10 @@ fn read_sheet(
             STRING => {
                 let (segs, after) = continued(data, body, pos, records)?;
                 pos = after;
-                if let Some((row, col, ixfe)) = pending.take() {
+                if let Some((at, ixfe)) = pending.take() {
                     let text = string_reader(&segs, 0)
                         .and_then(|mut r| globals.read_string(&mut r, false));
-                    put_string(&mut out, row, col, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text);
                 }
             }
             NOTE => parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
@@ -815,7 +813,7 @@ fn read_sheet(
 /// The drawing object a TXO's text belongs to.
 enum TextOf {
     /// A checkbox's caption, by the cell it is anchored in.
-    Checkbox((u32, u32)),
+    Checkbox(CellRef),
     /// A shown shape's text, which the grid does not hold.
     Shape,
 }
@@ -831,7 +829,7 @@ fn opens_text_box(body: &[u8]) -> bool {
 /// What an OBJ needs from its shape: the cell the client anchor starts in,
 /// and whether the shape is hidden.
 struct Shape {
-    anchor: (u32, u32),
+    anchor: CellRef,
     hidden: bool,
 }
 
@@ -860,7 +858,7 @@ fn last_shape(data: &[u8]) -> Option<Shape> {
         match rec_type {
             CLIENT_ANCHOR => {
                 if let (Some(col), Some(row)) = (get_u16(body, 2), get_u16(body, 6)) {
-                    anchor = Some((u32::from(row), u32::from(col)));
+                    anchor = Some(CellRef::new(u32::from(row), u32::from(col)));
                 }
             }
             OPT => {
@@ -978,7 +976,7 @@ fn hlink(body: &[u8]) -> Option<Option<SheetLink>> {
         return Some(None);
     }
     let target = body.get(32..).and_then(|data| hlink_target(data, flags));
-    let range = (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2));
+    let range = CellRange::spanning(CellRef::new(r1, c1), CellRef::new(r2, c2));
     let target = target.map_or(LinkTarget::Unknown, |url| LinkTarget::Url(Rc::from(url)));
     Some(Some(SheetLink { range, target }))
 }
@@ -1057,27 +1055,14 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
     Some(decode_utf16(units))
 }
 
-/// Record only non-empty cell text, like the xlsx reader.
-fn put(out: &mut SheetContent, row: u32, col: u32, text: String) {
-    if !text.is_empty() {
-        out.cells.insert((row, col), text);
-    }
-}
-
-/// Record what a cell lost, reported once the grid shows the cell.
-fn lose(out: &mut SheetContent, row: u32, col: u32, code: DiagnosticCode) {
-    out.losses.push((row, col, code));
-}
-
-fn put_number(out: &mut SheetContent, row: u32, col: u32, globals: &Globals, ixfe: u16, n: f64) {
-    let rendered = render_number(&globals.format(ixfe), n, globals.date1904);
-    put_rendered(out, row, col, globals, ixfe, rendered);
+fn put_number(out: &mut SheetContent, at: CellRef, globals: &Globals, ixfe: u16, n: f64) {
+    let rendered = render_number(&globals.format(ixfe), n, globals.dates);
+    put_rendered(out, at, globals, ixfe, rendered);
 }
 
 fn put_string(
     out: &mut SheetContent,
-    row: u32,
-    col: u32,
+    at: CellRef,
     globals: &Globals,
     ixfe: u16,
     text: Option<(String, bool)>,
@@ -1089,24 +1074,23 @@ fn put_string(
         ),
         None => (String::new(), Some(DiagnosticCode::CellValueUnreadable)),
     };
-    put_rendered(out, row, col, globals, ixfe, rendered);
+    put_rendered(out, at, globals, ixfe, rendered);
 }
 
 /// Record a cell's text, what rendering it lost, and a replacement
 /// character its format code put in it.
 fn put_rendered(
     out: &mut SheetContent,
-    row: u32,
-    col: u32,
+    at: CellRef,
     globals: &Globals,
     ixfe: u16,
     (text, loss): (String, Option<DiagnosticCode>),
 ) {
     let format_replaced = loss != Some(DiagnosticCode::InvalidEncoding)
         && globals.xfs.replaced_in(usize::from(ixfe), &text);
-    put(out, row, col, text);
+    out.put(at, text);
     for code in loss.into_iter().chain(format_replaced.then_some(DiagnosticCode::InvalidEncoding)) {
-        lose(out, row, col, code);
+        out.lose(at, code);
     }
 }
 
@@ -1457,6 +1441,22 @@ mod tests {
             panic!("expected the merge origin at (0,0)");
         };
         assert_eq!((cell.col_span, cell.row_span), (10, 3));
+    }
+
+    #[test]
+    fn a_merge_past_the_biff8_columns_is_clamped_to_them() {
+        let mut records = label(0, 250, 0, "wide");
+        let mut merged = 1u16.to_le_bytes().to_vec();
+        for v in [0u16, 0, 250, 300] {
+            merged.extend(v.to_le_bytes());
+        }
+        records.extend(rec(MERGEDCELLS, &merged));
+        let doc = parse(&ParseCtx::default(), &one_sheet(records).build()).unwrap();
+        let table = first_table(&doc);
+        let CellSlot::Origin(cell) = &table.grid[0][0] else {
+            panic!("expected the merge origin at (0,0)");
+        };
+        assert_eq!((table.grid[0].len(), cell.col_span), (6, 6));
     }
 
     #[test]

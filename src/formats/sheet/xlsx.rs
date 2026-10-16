@@ -5,24 +5,22 @@
 //! print headers and footers, comments and the referenced drawing are read
 //! only to report what the grid does not carry.
 
-use super::controls::{Checkboxes, cell_inlines, read_vml_checkboxes};
-use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code};
-use super::{format_duration_days, format_float, format_time_of_day};
+use super::controls::read_vml_checkboxes;
+use super::grid::{
+    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MAX_COLS, MAX_ROWS,
+    MergePolicy, SheetContent, SheetLink, build_table, format_as_text, render_number,
+    resolve_format,
+};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
-use crate::limits::Limit;
-use crate::model::{
-    Block, Cell, Document, GridBuilder, Inline, Table, TableKind, inlines_to_plain_text,
-};
+use crate::model::{Block, Document, Inline};
 use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, path};
-use crate::shared::header::resolve_header_rows;
-use crate::shared::link_label::{label_is_absolute_url, label_shows_target};
 use crate::shared::text::clean_text;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub(super) const SHARED_STRINGS_REL: &str =
@@ -30,11 +28,6 @@ pub(super) const SHARED_STRINGS_REL: &str =
 
 const COMMENTS_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
-
-/// The grid bounds the format defines; a reference outside them is not a
-/// real cell.
-pub(super) const MAX_ROWS: u32 = 1_048_576;
-pub(super) const MAX_COLS: u32 = 16_384;
 
 pub(super) fn parse(
     parse_ctx: &ParseCtx,
@@ -48,10 +41,12 @@ pub(super) fn parse(
         return Err(ConvertError::malformed("main part is not a workbook"));
     }
     let wb_rels = read_rels(pkg, &rels_part_for(wb_part), Role::Content(Region::Body))?;
-    let date1904 = workbook
-        .first_descendant(ns::SML, "workbookPr")
-        .and_then(|e| e.attr_unqualified("date1904"))
-        .is_some_and(bool_attr);
+    let dates = DateSystem::from_date1904(
+        workbook
+            .first_descendant(ns::SML, "workbookPr")
+            .and_then(|e| e.attr_unqualified("date1904"))
+            .is_some_and(bool_attr),
+    );
 
     let shared = match Sibling::of(&wb_rels, wb_part, SHARED_STRINGS_REL, "sharedStrings.xml")
         .read_xml(pkg, Role::Reported(Region::Body))?
@@ -108,7 +103,7 @@ pub(super) fn parse(
             failed += 1;
             continue;
         };
-        let mut content = read_sheet(parse_ctx, worksheet, &shared, &styles, date1904);
+        let mut content = read_sheet(parse_ctx, worksheet, &shared, &styles, dates);
         let drawing =
             worksheet.find(ns::SML, "drawing").and_then(|d| d.attr_qualified(ns::R, "id"));
         read_sheet_parts(parse_ctx, pkg, part, drawing, &mut content)?;
@@ -167,7 +162,7 @@ pub(super) fn read_sheet_parts(
                     return Ok(());
                 };
                 let mut losses = Vec::new();
-                drawing_losses(drawing, false, &mut losses);
+                drawing_losses(drawing, Branch::Other, &mut losses);
                 for code in losses {
                     parse_ctx.emit(code, Region::Body);
                 }
@@ -179,24 +174,31 @@ pub(super) fn read_sheet_parts(
     Ok(())
 }
 
+/// Where a drawing walk is: inside an alternate content Choice, or not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Branch {
+    Choice,
+    Other,
+}
+
 /// The pictures, charts and text-bearing shapes a sheet drawing places,
 /// none of which the grid holds. Hidden objects show nothing; alternate
 /// content counts its Choice, which the application shows, there leaving
 /// out the form controls a legacy drawing also carries, or its Fallback
 /// when the Choice holds nothing counted.
-fn drawing_losses(parent: &Element, in_choice: bool, out: &mut Vec<DiagnosticCode>) {
+fn drawing_losses(parent: &Element, branch: Branch, out: &mut Vec<DiagnosticCode>) {
     for child in parent.child_elems() {
         if child.is(ns::MC, "AlternateContent") {
-            let mut branch = Vec::new();
+            let mut shown = Vec::new();
             if let Some(choice) = child.find(ns::MC, "Choice") {
-                drawing_losses(choice, true, &mut branch);
+                drawing_losses(choice, Branch::Choice, &mut shown);
             }
-            if branch.is_empty()
+            if shown.is_empty()
                 && let Some(fallback) = child.find(ns::MC, "Fallback")
             {
-                drawing_losses(fallback, in_choice, &mut branch);
+                drawing_losses(fallback, branch, &mut shown);
             }
-            out.append(&mut branch);
+            out.append(&mut shown);
             continue;
         }
         if child.ns.as_deref() != Some(ns::XDR) {
@@ -207,14 +209,14 @@ fn drawing_losses(parent: &Element, in_choice: bool, out: &mut Vec<DiagnosticCod
             .find(|e| e.ns.as_deref() == Some(ns::XDR) && e.local.starts_with("nv"))
             .and_then(|nv| nv.find(ns::XDR, "cNvPr"));
         let hidden = properties.and_then(|pr| pr.attr_unqualified("hidden")).is_some_and(bool_attr);
-        let compat_control = in_choice
+        let compat_control = branch == Branch::Choice
             && properties.is_some_and(|pr| pr.descendants(ns::A14, "compatExt").next().is_some());
         match child.local.as_str() {
             "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
-                drawing_losses(child, in_choice, out)
+                drawing_losses(child, branch, out)
             }
             _ if hidden || compat_control => {}
-            "grpSp" => drawing_losses(child, in_choice, out),
+            "grpSp" => drawing_losses(child, branch, out),
             "pic" => out.push(DiagnosticCode::ImageUnplaced),
             "graphicFrame" => out.push(DiagnosticCode::GraphicUnread),
             "sp" => {
@@ -304,55 +306,6 @@ fn rich_text(item: &Element) -> String {
     out
 }
 
-/// A cell's resolved number format: General, a parsed format code, or
-/// General standing in for a format that could not be applied, which a
-/// numeric cell reports as the code it carries. Shared with the BIFF reader,
-/// whose XF and FORMAT records resolve into the same representation.
-#[derive(Clone)]
-pub(super) enum CellFormat {
-    General,
-    Fmt(Rc<NumberFormat>),
-    Fallback(DiagnosticCode),
-}
-
-/// The ordered cell formats of a workbook, which a cell names by index,
-/// each with whether its format code needed a replacement character.
-pub(super) struct CellXfs {
-    xfs: Vec<(CellFormat, bool)>,
-    /// The styles part did not read and reported that, so a cell naming an
-    /// index it would have held reports nothing more.
-    reported: bool,
-}
-
-impl CellXfs {
-    pub(super) fn new(xfs: Vec<(CellFormat, bool)>) -> CellXfs {
-        CellXfs { xfs, reported: false }
-    }
-
-    /// No styles part was read; `reported` when its read reported the loss.
-    pub(super) fn unread(reported: bool) -> CellXfs {
-        CellXfs { xfs: Vec::new(), reported }
-    }
-
-    /// The format at `index`; one outside the table renders General, as the
-    /// application repairs it, and the default index 0 of a workbook with no
-    /// formats is General.
-    pub(super) fn get(&self, index: usize) -> CellFormat {
-        match self.xfs.get(index) {
-            Some((format, _)) => format.clone(),
-            None if self.reported || (index == 0 && self.xfs.is_empty()) => CellFormat::General,
-            None => CellFormat::Fallback(DiagnosticCode::NumberFormatFallback),
-        }
-    }
-
-    /// Whether the format at `index` put a replacement character into the
-    /// cell text it rendered.
-    pub(super) fn replaced_in(&self, index: usize, text: &str) -> bool {
-        self.xfs.get(index).is_some_and(|&(_, replaced)| replaced)
-            && text.contains(char::REPLACEMENT_CHARACTER)
-    }
-}
-
 /// `xl/styles.xml` reduced to what rendering needs: the ordered `cellXfs`
 /// list, each entry's numFmtId resolved to a parsed format.
 struct Styles {
@@ -398,110 +351,12 @@ impl Styles {
     }
 }
 
-/// A numFmtId's format: the file's own `numFmt` entries first, then the
-/// built-in table. Unknown ids and unsupported codes fall back to General -
-/// never to a guess - and carry what that fallback costs.
-pub(super) fn resolve_format(id: u32, custom: &HashMap<u32, &str>) -> CellFormat {
-    let code = custom.get(&id).copied().or_else(|| builtin_code(id));
-    let unread = match code {
-        Some(code) => match NumberFormat::parse(code) {
-            Some(f) => return CellFormat::Fmt(Rc::new(f)),
-            None => shows_more_than_its_number(code),
-        },
-        None if id == 0 => return CellFormat::General,
-        None => matches!(id, 5..=8 | 27..=36 | 42 | 44 | 50..=58 | 71..=81),
-    };
-    CellFormat::Fallback(if unread {
-        DiagnosticCode::NumberFormatUnread
-    } else {
-        DiagnosticCode::NumberFormatFallback
-    })
-}
-
-/// Whether a format code shows more than the number General shows: a date
-/// or time token, an elapsed-time bracket, literal text, or a currency or
-/// unit symbol. A `[$-…]` bracket names only a locale, and the `General`
-/// keyword shows the number.
-fn shows_more_than_its_number(code: &str) -> bool {
-    const CURRENCY: &[char] = &['$', '¢', '£', '¥', '₩', '₪', '₫', '€', '₱', '₹', '₺', '₽', '฿'];
-    let mut rest = code;
-    loop {
-        let mut chars = rest.chars();
-        let Some(c) = chars.next() else {
-            return false;
-        };
-        let after = chars.as_str();
-        rest = match c {
-            '[' => {
-                let (bracket, tail) = after.split_once(']').unwrap_or((after, ""));
-                let currency =
-                    bracket.strip_prefix('$').is_some_and(|s| !s.is_empty() && !s.starts_with('-'));
-                let elapsed = !bracket.is_empty()
-                    && bracket.chars().all(|c| matches!(c.to_ascii_lowercase(), 'h' | 'm' | 's'));
-                if currency || elapsed {
-                    return true;
-                }
-                tail
-            }
-            '"' | '\\' => return true,
-            '_' | '*' => {
-                chars.next();
-                chars.as_str()
-            }
-            'E' | 'e' if after.starts_with(['+', '-']) => after.get(1..).unwrap_or_default(),
-            'G' | 'g' if rest.get(..7).is_some_and(|w| w.eq_ignore_ascii_case("general")) => {
-                rest.get(7..).unwrap_or_default()
-            }
-            c if c.is_alphabetic() || CURRENCY.contains(&c) => return true,
-            _ => after,
-        };
-    }
-}
-
-/// One worksheet, parsed but not yet filtered or gridded. Shared with the
-/// BIFF reader, which fills it from records instead of XML.
-#[derive(Default)]
-pub(super) struct SheetContent {
-    /// Rendered text by zero-based (row, col); empty results are absent.
-    pub(super) cells: HashMap<(u32, u32), String>,
-    /// Form control checkboxes by the cell they are anchored in.
-    pub(super) checkboxes: Checkboxes,
-    pub(super) hidden_rows: HashSet<u32>,
-    /// Inclusive zero-based column ranges hidden by `cols/col` entries.
-    pub(super) hidden_cols: Vec<(u32, u32)>,
-    /// Inclusive zero-based merge regions (r1, c1, r2, c2), area > 1.
-    pub(super) merges: Vec<(u32, u32, u32, u32)>,
-    /// External hyperlinks by the cells whose text labels them.
-    pub(super) links: Vec<SheetLink>,
-    /// What each zero-based (row, col) lost, reported only where the cell
-    /// survives hidden filtering and no merge covers it.
-    pub(super) losses: Vec<(u32, u32, DiagnosticCode)>,
-}
-
-/// A hyperlink to a target outside the workbook over an inclusive
-/// zero-based range (r1, c1, r2, c2).
-pub(super) struct SheetLink {
-    pub(super) range: (u32, u32, u32, u32),
-    pub(super) target: LinkTarget,
-}
-
-pub(super) enum LinkTarget {
-    /// A relationship id not yet looked up in the worksheet's relationships.
-    Related(String),
-    /// A target held once per relationship, however many links name it.
-    Url(Rc<str>),
-    /// The target is gone and nothing has reported it.
-    Unknown,
-    /// The target is gone with a relationships part already reported.
-    Reported,
-}
-
 fn read_sheet(
     parse_ctx: &ParseCtx,
     worksheet: &Element,
     shared: &[String],
     styles: &Styles,
-    date1904: bool,
+    dates: DateSystem,
 ) -> SheetContent {
     let mut out = SheetContent::default();
     for cols in worksheet.find_all(ns::SML, "cols") {
@@ -514,10 +369,8 @@ fn read_sheet(
                     .and_then(|v| v.parse::<u32>().ok())
                     .and_then(|v| v.checked_sub(1))
             };
-            if let (Some(min), Some(max)) = (bound("min"), bound("max"))
-                && min <= max
-            {
-                out.hidden_cols.push((min, max.min(MAX_COLS - 1)));
+            if let (Some(min), Some(max)) = (bound("min"), bound("max")) {
+                out.hide_cols(min, max);
             }
         }
     }
@@ -533,43 +386,37 @@ fn read_sheet(
         }
         next_row = r + 1;
         if row.attr_unqualified("hidden").is_some_and(bool_attr) {
-            out.hidden_rows.insert(r);
+            out.hide_row(r);
         }
         let mut next_col: u32 = 0;
         for c in row.find_all(ns::SML, "c") {
             // Position comes from the cell's own reference: a row may skip
             // cells entirely, so iteration order says nothing.
-            let (cr, cc) = match c.attr_unqualified("r").map(parse_ref) {
-                Some(Some(rc)) => rc,
+            let at = match c.attr_unqualified("r").map(parse_ref) {
+                Some(Some(at)) => at,
                 Some(None) => {
-                    out.losses.push((r, next_col, DiagnosticCode::CellValueUnreadable));
+                    out.lose(CellRef::new(r, next_col), DiagnosticCode::CellValueUnreadable);
                     continue;
                 }
-                None => (r, next_col),
+                None => CellRef::new(r, next_col),
             };
-            next_col = cc + 1;
-            if cr >= MAX_ROWS || cc >= MAX_COLS {
+            next_col = at.col + 1;
+            if at.row >= MAX_ROWS || at.col >= MAX_COLS {
                 continue;
             }
-            let (text, loss) = cell_text(c, shared, styles, date1904);
+            let (text, loss) = cell_text(c, shared, styles, dates);
             if let Some(code) = loss {
-                out.losses.push((cr, cc, code));
+                out.lose(at, code);
             }
-            if !text.is_empty() {
-                out.cells.insert((cr, cc), text);
-            }
+            out.put(at, text);
         }
     }
     for merge in
         worksheet.find_all(ns::SML, "mergeCells").flat_map(|mc| mc.find_all(ns::SML, "mergeCell"))
     {
-        let Some(region) = merge.attr_unqualified("ref").and_then(parse_region) else {
-            parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
-            continue;
-        };
-        let (r1, c1, r2, c2) = region;
-        if r1 != r2 || c1 != c2 {
-            out.merges.push(region);
+        match merge.attr_unqualified("ref").and_then(parse_region) {
+            Some(range) => out.merge(parse_ctx, range, MergePolicy::Drop),
+            None => parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body),
         }
     }
     for link in worksheet
@@ -606,7 +453,7 @@ fn cell_text(
     c: &Element,
     shared: &[String],
     styles: &Styles,
-    date1904: bool,
+    dates: DateSystem,
 ) -> (String, Option<DiagnosticCode>) {
     let fmt = styles.for_cell(c.attr_unqualified("s"));
     let v = c.find(ns::SML, "v").map(|v| v.text());
@@ -637,427 +484,16 @@ fn cell_text(
         _ if value.is_empty() && formula => return unread(),
         _ if value.is_empty() => String::new(),
         _ => match value.parse::<f64>() {
-            Ok(n) => return render_number(&fmt, n, date1904),
+            Ok(n) => return render_number(&fmt, n, dates),
             Err(_) => return unread(),
         },
     };
     (text, None)
 }
 
-/// Render a numeric cell through its resolved format, with the code a
-/// fallback to General costs. Shared with the BIFF and binary readers so
-/// every container formats identically.
-pub(super) fn render_number(
-    fmt: &CellFormat,
-    n: f64,
-    date1904: bool,
-) -> (String, Option<DiagnosticCode>) {
-    let (text, loss) = match fmt {
-        CellFormat::General => (format_float(n), None),
-        CellFormat::Fallback(code) => (format_float(n), Some(*code)),
-        CellFormat::Fmt(f) => match f.format_number(n) {
-            Rendered::General { value, prefix, suffix } => {
-                (format!("{prefix}{}{suffix}", format_float(value)), None)
-            }
-            Rendered::Text(s) => (s, None),
-            Rendered::DateTime(parts) => (render_serial(n, parts, date1904), None),
-        },
-    };
-    (clean_text(&text), loss)
-}
-
-pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> String {
-    match fmt {
-        CellFormat::Fmt(f) => match f.format_text(text) {
-            Some(s) => clean_text(&s),
-            None => text.to_string(),
-        },
-        CellFormat::General | CellFormat::Fallback(_) => text.to_string(),
-    }
-}
-
-/// Materialize a sheet's grid: visibility filtering, the populated extent
-/// widened to cover intersecting merge regions (a merge anchored on the
-/// only populated cell must survive at full size), and merges remapped onto
-/// the surviving rows and columns.
-pub(super) fn build_table(
-    parse_ctx: &ParseCtx,
-    mut sheet: SheetContent,
-    slots: &mut u64,
-) -> Result<Option<Table>, ConvertError> {
-    // Hidden coordinates as sorted lists: lookups and first-visible scans
-    // stay logarithmic, so an adversarial pile of hidden rows or column
-    // ranges cannot force quadratic work.
-    let hidden_rows = {
-        let mut rows: Vec<u32> = sheet.hidden_rows.iter().copied().collect();
-        rows.sort_unstable();
-        rows
-    };
-    let hidden_cols = expand_ranges(&mut sheet.hidden_cols);
-    let hidden_row = |r: u32| hidden_rows.binary_search(&r).is_ok();
-    let hidden_col = |c: u32| hidden_cols.binary_search(&c).is_ok();
-
-    // Cell text and anchored checkboxes become one inline map; the rest of
-    // the assembly no longer cares which was which.
-    let mut cells: HashMap<(u32, u32), Vec<Inline>> = HashMap::new();
-    for (at, boxes) in sheet.checkboxes.drain() {
-        if at.0 < MAX_ROWS && at.1 < MAX_COLS {
-            cells.insert(at, cell_inlines(sheet.cells.remove(&at), &boxes));
-        }
-    }
-    for (at, text) in sheet.cells.drain() {
-        cells.insert(at, vec![Inline::plain(text)]);
-    }
-    // A merge with no surviving row or column disappears with its content.
-    // One whose origin is hidden keeps its content at the first surviving
-    // position it covers, so the value is not lost.
-    let mut moved: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
-    sheet.merges.retain(|&(r1, c1, r2, c2)| {
-        let vr = first_visible(&hidden_rows, r1, r2);
-        let vc = first_visible(&hidden_cols, c1, c2);
-        let (Some(vr), Some(vc)) = (vr, vc) else {
-            return false;
-        };
-        if (vr, vc) != (r1, c1) {
-            moved.insert((r1, c1), (vr, vc));
-            if let Some(text) = cells.remove(&(r1, c1)) {
-                cells.insert((vr, vc), text);
-            }
-        }
-        true
-    });
-    let place = |at: (u32, u32)| moved.get(&at).copied().unwrap_or(at);
-    // A link shows in the first visible cell of its range, or where its
-    // range's origin moved with a merge.
-    let candidates: Vec<((u32, u32), bool, &SheetLink)> = sheet
-        .links
-        .iter()
-        .filter_map(|link| {
-            let (r1, c1, r2, c2) = link.range;
-            match moved.get(&(r1, c1)) {
-                Some(&at) => Some((at, true, link)),
-                None => first_visible(&hidden_rows, r1, r2)
-                    .zip(first_visible(&hidden_cols, c1, c2))
-                    .map(|at| (at, false, link)),
-            }
-        })
-        .collect();
-    let covered = merge_covered(
-        parse_ctx,
-        &sheet.merges,
-        sheet
-            .losses
-            .iter()
-            .map(|&(r, c, _)| (r, c))
-            .chain(candidates.iter().filter(|&&(_, moved, _)| !moved).map(|&(at, _, _)| at)),
-    )?;
-    // An uncovered cell is judged once, by its own label. A link a single
-    // merge hides whole is not shown; one that leaves the merge is judged
-    // at its covered first cell, which shows no label.
-    let mut judged: HashSet<(u32, u32)> = HashSet::new();
-    let mut links: Vec<((u32, u32), bool, &LinkTarget)> = Vec::new();
-    for (at, moved, link) in candidates {
-        match covered.get(&at).filter(|_| !moved) {
-            None => {
-                if judged.insert(at) {
-                    links.push((at, true, &link.target));
-                }
-            }
-            Some(&merge) if !merge_hides(merge, link.range) => {
-                links.push((at, false, &link.target));
-            }
-            Some(_) => {}
-        }
-    }
-    let losses: Vec<((u32, u32), DiagnosticCode)> = sheet
-        .losses
-        .iter()
-        .filter(|&&(r, c, _)| !covered.contains_key(&(r, c)))
-        .map(|&(r, c, code)| (place((r, c)), code))
-        .collect();
-    let held: HashSet<(u32, u32)> =
-        cells.keys().copied().chain(losses.iter().map(|&(at, _)| at)).collect();
-    let hidden_rows_held: HashSet<u32> =
-        held.iter().map(|&(r, _)| r).filter(|&r| hidden_row(r)).collect();
-    let hidden_cols_held: HashSet<u32> =
-        held.iter().map(|&(_, c)| c).filter(|&c| hidden_col(c)).collect();
-    let hidden_lines = hidden_rows_held.len().saturating_add(hidden_cols_held.len());
-    let hidden_lines = u64::try_from(hidden_lines).unwrap_or(u64::MAX);
-    parse_ctx.emit_count(DiagnosticCode::HiddenOmitted, Region::Body, hidden_lines);
-    let shown = |(r, c): (u32, u32)| !hidden_row(r) && !hidden_col(c);
-    for (at, code) in losses {
-        if shown(at) {
-            parse_ctx.emit(code, Region::Body);
-        }
-    }
-    for (at, labelled, target) in links {
-        let label =
-            cells.get(&at).filter(|_| labelled).map(|inlines| inlines_to_plain_text(inlines));
-        let label = label.as_deref().unwrap_or_default();
-        let lost = match target {
-            LinkTarget::Url(url) => {
-                parse_ctx.charge(label.len().saturating_add(url.len()) as u64)?;
-                !label_shows_target(label, url)
-            }
-            LinkTarget::Related(_) | LinkTarget::Unknown => {
-                parse_ctx.charge(label.len() as u64)?;
-                !label_is_absolute_url(label)
-            }
-            LinkTarget::Reported => false,
-        };
-        if lost {
-            parse_ctx.emit(DiagnosticCode::LinkTargetUnread, Region::Body);
-        }
-    }
-
-    // Populated extent over visible cells only.
-    let mut bounds: Option<(u32, u32, u32, u32)> = None;
-    for &(r, c) in cells.keys() {
-        if hidden_row(r) || hidden_col(c) {
-            continue;
-        }
-        bounds = Some(match bounds {
-            None => (r, c, r, c),
-            Some((r1, c1, r2, c2)) => (r1.min(r), c1.min(c), r2.max(r), c2.max(c)),
-        });
-    }
-    let Some((mut r1, mut c1, mut r2, mut c2)) = bounds else {
-        return Ok(None);
-    };
-    // Merge regions touching the populated extent widen it to their full
-    // size; the rest are dropped, so a crafted merge list can neither force
-    // unbounded materialization nor saturate onto (0,0).
-    sheet.merges.retain(|&(mr1, mc1, mr2, mc2)| mr1 <= r2 && mr2 >= r1 && mc1 <= c2 && mc2 >= c1);
-    for &(mr1, mc1, mr2, mc2) in &sheet.merges {
-        (r1, c1, r2, c2) = (r1.min(mr1), c1.min(mc1), r2.max(mr2), c2.max(mc2));
-    }
-
-    let row_map: Vec<u32> = (r1..=r2).filter(|&r| !hidden_row(r)).collect();
-    let col_map: Vec<u32> = (c1..=c2).filter(|&c| !hidden_col(c)).collect();
-    if row_map.is_empty() || col_map.is_empty() {
-        return Ok(None);
-    }
-    // Charged before materializing, and across the workbook rather than per
-    // sheet: the extent comes from cell coordinates, so a handful of cells
-    // describes a whole sheet and a handful of sheets multiplies it.
-    let limits = parse_ctx.limits();
-    let positions = row_map.len() as u64 * col_map.len() as u64;
-    *slots = slots.saturating_add(positions);
-    if *slots > limits.max_grid_slots {
-        return Err(ConvertError::limit(Limit::GridSlots, limits.max_grid_slots));
-    }
-    parse_ctx.charge(positions)?;
-
-    // Remap merges onto the surviving coordinates. The covered-position set
-    // is charged against the expansion budget up front, before any
-    // insertion work, mirroring what placement would charge.
-    let visible_span = |map: &[u32], lo: u32, hi: u32| {
-        let a = map.partition_point(|&x| x < lo);
-        let b = map.partition_point(|&x| x <= hi);
-        (a, b - a)
-    };
-    let mut origins: HashMap<(usize, usize), (u32, u32)> = HashMap::new();
-    let mut covered: HashSet<(usize, usize)> = HashSet::new();
-    let mut expansion = 0u64;
-    for &(mr1, mc1, mr2, mc2) in &sheet.merges {
-        let (r0, rn) = visible_span(&row_map, mr1, mr2);
-        let (c0, cn) = visible_span(&col_map, mc1, mc2);
-        if rn * cn <= 1 {
-            continue;
-        }
-        expansion = expansion.saturating_add((rn as u64) * (cn as u64) - 1);
-        if expansion > limits.max_expansion {
-            return Err(ConvertError::limit(Limit::Expansion, limits.max_expansion));
-        }
-        origins.insert((r0, c0), (cn as u32, rn as u32));
-        for r in r0..r0 + rn {
-            for c in c0..c0 + cn {
-                if (r, c) != (r0, c0) {
-                    covered.insert((r, c));
-                }
-            }
-        }
-    }
-
-    let mut builder = GridBuilder::new(limits.max_expansion);
-    // A merge is real extent: trailing rows it covers stay in the grid.
-    builder.keep_covered_tail();
-    for (ri, &row) in row_map.iter().enumerate() {
-        builder.next_row();
-        for (ci, &col) in col_map.iter().enumerate() {
-            if covered.contains(&(ri, ci)) {
-                builder.covered();
-                continue;
-            }
-            let cell = match cells.remove(&(row, col)) {
-                Some(inlines) => Cell::from_inlines(inlines),
-                None => Cell::default(),
-            };
-            match origins.get(&(ri, ci)) {
-                Some(&(col_span, row_span)) => {
-                    builder.place(Cell::spanning(cell.blocks, col_span, row_span))?
-                }
-                None => builder.place(cell)?,
-            }
-        }
-    }
-    // A spreadsheet marks no header row, so the shape of the data decides.
-    let mut table = builder.finish(TableKind::Data);
-    if table.grid.is_empty() {
-        return Ok(None);
-    }
-    table.header_rows = resolve_header_rows(&table, 0);
-    Ok(Some(table))
-}
-
-/// An inclusive zero-based cell range (r1, c1, r2, c2).
-type Span = (u32, u32, u32, u32);
-
-/// The positions among `at` that a merge covers without being its origin,
-/// which the application does not show, each with a merge that covers it.
-/// Each position a merge's range visits is charged.
-fn merge_covered(
-    parse_ctx: &ParseCtx,
-    merges: &[(u32, u32, u32, u32)],
-    at: impl Iterator<Item = (u32, u32)>,
-) -> Result<HashMap<(u32, u32), Span>, ConvertError> {
-    let at: BTreeSet<(u32, u32)> = at.collect();
-    let mut covered = HashMap::new();
-    for &(r1, c1, r2, c2) in merges {
-        for &(r, c) in at.range((r1, c1)..=(r2, c2)) {
-            parse_ctx.charge(1)?;
-            if (c1..=c2).contains(&c) && (r, c) != (r1, c1) {
-                covered.insert((r, c), (r1, c1, r2, c2));
-            }
-        }
-    }
-    Ok(covered)
-}
-
-/// True when `merge` holds the whole of `range`: given a covered first
-/// visible cell, the range then leaves out the merge's origin and no cell of
-/// it is shown.
-fn merge_hides(merge: Span, range: Span) -> bool {
-    let (mr1, mc1, mr2, mc2) = merge;
-    let (r1, c1, r2, c2) = range;
-    mr1 <= r1 && r2 <= mr2 && mc1 <= c1 && c2 <= mc2
-}
-
-/// Flatten inclusive ranges into a sorted, deduplicated coordinate list.
-/// Coalescing before expansion bounds the output by the coordinate space,
-/// not by the range count.
-fn expand_ranges(ranges: &mut [(u32, u32)]) -> Vec<u32> {
-    ranges.sort_unstable();
-    let mut out = Vec::new();
-    let mut next = 0u32;
-    for &(a, b) in ranges.iter() {
-        out.extend(a.max(next)..=b);
-        next = next.max(b.saturating_add(1));
-    }
-    out
-}
-
-/// First coordinate in `lo..=hi` absent from the sorted hidden list. The
-/// consecutive hidden run starting at `lo` is measured by binary search, so
-/// a long run cannot force a linear scan per query.
-fn first_visible(hidden: &[u32], lo: u32, hi: u32) -> Option<u32> {
-    let tail = &hidden[hidden.partition_point(|&h| h < lo)..];
-    // `tail[j] - j` never decreases, so "the run still holds at j" is a
-    // prefix property.
-    let (mut a, mut b) = (0usize, tail.len());
-    while a < b {
-        let mid = (a + b) / 2;
-        if tail[mid] == lo + mid as u32 {
-            a = mid + 1;
-        } else {
-            b = mid;
-        }
-    }
-    let first = lo.checked_add(u32::try_from(a).ok()?)?;
-    (first <= hi).then_some(first)
-}
-
-/// Render a date/time serial the way the crate always has: elapsed formats
-/// as a duration, sub-day serials as a time of day, everything else as an
-/// ISO-like date with the midnight time omitted.
-fn render_serial(serial: f64, parts: DateParts, date1904: bool) -> String {
-    if !serial.is_finite() {
-        return format_float(serial);
-    }
-    if parts.elapsed {
-        return format_duration_days(serial);
-    }
-    if !parts.date {
-        return format_time_of_day(serial.fract());
-    }
-    // A serial carrying no whole day has no date for a date format to show;
-    // the clock a combined format also names still renders.
-    if serial.abs() < 1.0 {
-        return if parts.time { format_time_of_day(serial) } else { format_float(serial) };
-    }
-    // Out of the representable date range (through 9999-12-31): the serial
-    // is not a date, show the number.
-    if !(0.0..2_958_466.0).contains(&serial) {
-        return format_float(serial);
-    }
-    let mut days = serial.trunc() as i64;
-    // The fictitious 1900-02-29 has no date to render and would otherwise
-    // collapse onto serial 59. Tested before the seconds carry, so a value
-    // late on serial 59 still resolves as the date it belongs to.
-    if !date1904 && days == 60 {
-        return format_float(serial);
-    }
-    let mut secs = (serial.fract() * 86_400.0).round() as i64;
-    if secs >= 86_400 {
-        secs = 0;
-        days += 1;
-    }
-    let civil_days = if date1904 {
-        days + days_from_civil(1904, 1, 1)
-    } else {
-        // 1900 system: serial 1 is 1900-01-01, and the fictitious
-        // 1900-02-29 (serial 60) offsets everything after it by one day.
-        days - i64::from(days >= 60) + days_from_civil(1899, 12, 31)
-    };
-    let (y, m, d) = civil_from_days(civil_days);
-    if !(1..=9999).contains(&y) {
-        return format_float(serial);
-    }
-    let mut out = format!("{y:04}-{m:02}-{d:02}");
-    if parts.time && secs != 0 {
-        out.push_str(&format!(" {:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60));
-    }
-    out
-}
-
-/// Days from 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = y - i64::from(m <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = i64::from((m + 9) % 12);
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// A civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (y + i64::from(m <= 2), m, d)
-}
-
-/// A cell reference (`C3`) as zero-based (row, column); the column letters
-/// are bijective base-26.
-fn parse_ref(r: &str) -> Option<(u32, u32)> {
+/// A cell reference (`C3`) as a zero-based cell; the column letters are
+/// bijective base-26.
+fn parse_ref(r: &str) -> Option<CellRef> {
     let digits_at = r.find(|c: char| c.is_ascii_digit())?;
     let (letters, digits) = r.split_at(digits_at);
     if letters.is_empty() {
@@ -1077,16 +513,13 @@ fn parse_ref(r: &str) -> Option<(u32, u32)> {
     if !(1..=MAX_ROWS).contains(&row) {
         return None;
     }
-    Some((row - 1, col - 1))
+    Some(CellRef::new(row - 1, col - 1))
 }
 
-/// A merge reference (`F1:O3`, or a single cell) as an inclusive normalized
-/// region.
-fn parse_region(r: &str) -> Option<(u32, u32, u32, u32)> {
+/// A merge reference (`F1:O3`, or a single cell) as a cell range.
+fn parse_region(r: &str) -> Option<CellRange> {
     let (a, b) = r.split_once(':').unwrap_or((r, r));
-    let (r1, c1) = parse_ref(a.trim())?;
-    let (r2, c2) = parse_ref(b.trim())?;
-    Some((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)))
+    Some(CellRange::spanning(parse_ref(a.trim())?, parse_ref(b.trim())?))
 }
 
 /// XML schema boolean attribute.
@@ -1097,7 +530,8 @@ fn bool_attr(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CellSlot, inlines_to_plain_text};
+    use crate::limits::Limit;
+    use crate::model::{CellSlot, Table, inlines_to_plain_text};
     use std::io::Write;
 
     const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -1434,29 +868,6 @@ mod tests {
         );
     }
 
-    const DATE_ONLY: DateParts = DateParts { date: true, time: false, elapsed: false };
-
-    #[test]
-    fn the_fictitious_leap_day_keeps_its_own_value() {
-        // Serial 60 is 1900-02-29, a day that never existed, and mapping it
-        // onto a real date would make it indistinguishable from serial 59.
-        assert_eq!(render_serial(59.0, DATE_ONLY, false), "1900-02-28");
-        assert_eq!(render_serial(60.0, DATE_ONLY, false), "60");
-        assert_eq!(render_serial(61.0, DATE_ONLY, false), "1900-03-01");
-        // A value late on serial 59 still belongs to its own day.
-        assert_eq!(render_serial(59.9999999, DATE_ONLY, false), "1900-02-28");
-        // The 1904 system has no such day.
-        assert_eq!(render_serial(60.0, DATE_ONLY, true), "1904-03-01");
-    }
-
-    #[test]
-    fn a_sub_day_serial_keeps_the_clock_a_combined_format_names() {
-        let both = DateParts { date: true, time: true, elapsed: false };
-        assert_eq!(render_serial(0.5, both, false), "12:00:00");
-        // A date-only format still has nothing to show but the number.
-        assert_eq!(render_serial(0.5, DATE_ONLY, false), "0.5");
-    }
-
     const VML_REL: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing";
 
@@ -1514,17 +925,6 @@ mod tests {
         let limits = crate::limits::Limits { max_expansion: 5, ..Default::default() };
         let err = super::super::parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
         assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 5 }));
-    }
-
-    #[test]
-    fn every_grid_position_is_charged_once() {
-        let sheet = SheetContent {
-            cells: HashMap::from([((0, 0), "a".to_string()), ((1, 2), "b".to_string())]),
-            ..SheetContent::default()
-        };
-        let parse_ctx = ParseCtx::default();
-        assert!(build_table(&parse_ctx, sheet, &mut 0).unwrap().is_some());
-        assert_eq!(parse_ctx.fuel(), 6);
     }
 
     type Reported = (DiagnosticCode, Region, Option<u32>, u64);
@@ -1595,35 +995,6 @@ mod tests {
         let unstyled =
             Wb { styles: Some(r#"<cellXfs><xf numFmtId="0"/></cellXfs>"#), ..one_sheet(&body) };
         assert_eq!(diagnose(&unstyled), [(FALLBACK, BODY, Some(1), 1)]);
-    }
-
-    #[test]
-    fn literal_text_dates_and_currency_are_more_than_the_number() {
-        for code in [
-            "[DBNum1]yyyy",
-            "abc0",
-            "€0.00",
-            "0\" kg\"",
-            "\\$0",
-            "[$€-407]0.0.0",
-            "[DBNum1][h]",
-            "[MM]0.0.0",
-        ] {
-            assert!(shows_more_than_its_number(code), "{code}");
-        }
-        for code in [
-            "0.0.0",
-            "0;0;0;0;0",
-            "[DBNum1]0",
-            "0.0E+0",
-            "_(0_)",
-            "[Red]0",
-            "[$-409]0",
-            "[$-409]0.0.0",
-            "[DBNum1][$-804]General",
-        ] {
-            assert!(!shows_more_than_its_number(code), "{code}");
-        }
     }
 
     #[test]
@@ -1744,42 +1115,6 @@ mod tests {
     }
 
     #[test]
-    fn a_link_target_is_charged_per_judged_cell() {
-        let target: Rc<str> = format!("https://example.org/{}", "a".repeat(10_000)).into();
-        let sheet = || SheetContent {
-            cells: (0..100).map(|c| ((0, c), "a".to_string())).collect(),
-            links: (0..100)
-                .map(|c| SheetLink { range: (0, c, 0, c), target: LinkTarget::Url(target.clone()) })
-                .collect(),
-            ..SheetContent::default()
-        };
-        let limits = crate::limits::Limits { max_work: 2_000_000, ..Default::default() };
-        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
-        let limits = crate::limits::Limits { max_work: 500_000, ..Default::default() };
-        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
-    }
-
-    #[test]
-    fn a_link_label_is_charged_once_per_cell() {
-        let sheet = || SheetContent {
-            cells: HashMap::from([((0, 0), "a".repeat(10_000))]),
-            links: (0..1_000)
-                .map(|_| SheetLink {
-                    range: (0, 0, 0, 0),
-                    target: LinkTarget::Url("https://example.org/".into()),
-                })
-                .collect(),
-            ..SheetContent::default()
-        };
-        let limits = crate::limits::Limits { max_work: 20_000, ..Default::default() };
-        assert!(build_table(&ParseCtx::new(&limits), sheet(), &mut 0).is_ok());
-        let limits = crate::limits::Limits { max_work: 5_000, ..Default::default() };
-        let err = build_table(&ParseCtx::new(&limits), sheet(), &mut 0).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
-    }
-
-    #[test]
     fn a_hyperlink_under_a_reported_relationships_part_adds_nothing() {
         let body = format!(
             r#"<sheetData><row r="1">{}</row></sheetData><hyperlinks xmlns:r="{R}"><hyperlink ref="A1" r:id="rId1"/></hyperlinks>"#,
@@ -1897,6 +1232,28 @@ mod tests {
         assert_eq!(
             diagnose(&drawing_wb(&only_drawing, &named, parts)),
             [(DiagnosticCode::PartUnreadable, BODY, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn a_compat_control_is_left_out_only_inside_a_choice() {
+        let control = r#"<xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="c"><a:extLst><a:ext><a14:compatExt spid="_x0000_s1025"/></a:ext></a:extLst></xdr:cNvPr></xdr:nvSpPr><xdr:txBody><a:p><a:r><a:t>Check Box 1</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:twoCellAnchor>"#;
+        let rels = format!(
+            r#"<Relationship Id="rId1" Type="{DRAWING_REL}" Target="../drawings/drawing1.xml"/>"#
+        );
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData><drawing xmlns:r="{R}" r:id="rId1"/>"#
+        );
+        let chosen = drawing(&format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="a14">{control}</mc:Choice></mc:AlternateContent>"#
+        ));
+        let parts = vec![("xl/drawings/drawing1.xml", chosen.as_str())];
+        assert_eq!(diagnose(&drawing_wb(&rels, &body, parts)), []);
+        let bare = drawing(control);
+        let parts = vec![("xl/drawings/drawing1.xml", bare.as_str())];
+        assert_eq!(
+            diagnose(&drawing_wb(&rels, &body, parts)),
+            [(DiagnosticCode::GraphicUnread, BODY, Some(1), 1)]
         );
     }
 

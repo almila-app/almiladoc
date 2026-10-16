@@ -3,6 +3,7 @@
 //! the worksheet's legacy VML drawing part; BIFF keeps them in OBJ records.
 //! Either way a checkbox lands in the cell its anchor starts in.
 
+use super::grid::CellRef;
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -25,7 +26,7 @@ pub(super) struct Checkbox {
 }
 
 /// Checkboxes anchored in each cell, in drawing order.
-pub(super) type Checkboxes = HashMap<(u32, u32), Vec<Checkbox>>;
+pub(super) type Checkboxes = HashMap<CellRef, Vec<Checkbox>>;
 
 /// A cell's inlines: its own text, then each checkbox with its caption.
 pub(super) fn cell_inlines(text: Option<String>, boxes: &[Checkbox]) -> Vec<Inline> {
@@ -112,11 +113,11 @@ fn vml_checkboxes(parse_ctx: &ParseCtx, root: &Element, out: &mut Checkboxes) {
     }
 }
 
-/// The (row, col) an `x:Anchor` starts in: `LeftColumn, LeftOffset, TopRow, TopOffset, ...`.
-fn anchor_cell(anchor: &str) -> Option<(u32, u32)> {
+/// The cell an `x:Anchor` starts in: `LeftColumn, LeftOffset, TopRow, TopOffset, ...`.
+fn anchor_cell(anchor: &str) -> Option<CellRef> {
     let mut parts = anchor.split(',').map(|p| p.trim().parse::<u32>().ok());
     let col = parts.next()??;
     parts.next()??;
     let row = parts.next()??;
-    Some((row, col))
+    Some(CellRef::new(row, col))
 }

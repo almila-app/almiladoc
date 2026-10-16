@@ -142,6 +142,7 @@ path = [
     "src/formats/rtf/table.rs",
     "src/formats/rtf/tables.rs",
     "src/formats/sheet/controls.rs",
+    "src/formats/sheet/grid.rs",
     "src/formats/sheet/mod.rs",
     "src/formats/sheet/xls.rs",
     "src/formats/sheet/xlsb.rs",

@@ -1,15 +1,17 @@
 //! In-house binary SpreadsheetML reader (.xlsb): the same OPC package as
 //! xlsx with binary record streams (MS-XLSB) in place of XML parts. Cell
 //! values, number formats, visibility, merges, hyperlinks, print headers and
-//! footers and the drawing reference are decoded here; grid
-//! materialization, format resolution and date rendering are shared with
-//! the xlsx reader so both containers convert identically.
+//! footers and the drawing reference are decoded here. `grid.rs` does grid
+//! materialization, format resolution and date rendering, and `xlsx.rs`
+//! reads the package parts beside the cells, so both containers convert
+//! identically.
 
-use super::xlsx::{
-    CellFormat, CellXfs, LinkTarget, MAX_COLS, MAX_ROWS, SHARED_STRINGS_REL, SheetContent,
-    SheetLink, Sibling, build_table, format_as_text, read_sheet_parts, render_number,
+use super::grid::{
+    CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, MAX_COLS, MAX_ROWS,
+    MergePolicy, SheetContent, SheetLink, build_table, format_as_text, render_number,
     resolve_format,
 };
+use super::xlsx::{SHARED_STRINGS_REL, Sibling, read_sheet_parts};
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -55,7 +57,7 @@ pub(super) fn parse(
     wb_part: &str,
 ) -> Result<Document, ConvertError> {
     let workbook = pkg.required_part(wb_part)?;
-    let (date1904, bundles) = read_workbook(parse_ctx, &workbook)?;
+    let (dates, bundles) = read_workbook(parse_ctx, &workbook)?;
     let wb_rels = read_rels(pkg, &rels_part_for(wb_part), Role::Content(Region::Body))?;
 
     let shared = read_optional(
@@ -106,7 +108,7 @@ pub(super) fn parse(
         let _unit = parse_ctx.enter_unit(*position);
         let content = pkg
             .related_part(part, Role::Reported(Region::Body))?
-            .map(|bytes| read_sheet(parse_ctx, &bytes, &shared, &xfs, date1904));
+            .map(|bytes| read_sheet(parse_ctx, &bytes, &shared, &xfs, dates));
         let (mut content, drawing) = match content {
             Some(Ok(read)) => read,
             Some(Err(e)) if e.is_fatal() => return Err(e),
@@ -168,13 +170,18 @@ struct Bundle {
 
 /// `xl/workbook.bin`: the 1904 date flag from BrtWbProp, and each sheet's
 /// name, relationship id and visibility from its BrtBundleSh.
-fn read_workbook(parse_ctx: &ParseCtx, data: &[u8]) -> Result<(bool, Vec<Bundle>), ConvertError> {
-    let mut date1904 = false;
+fn read_workbook(
+    parse_ctx: &ParseCtx,
+    data: &[u8],
+) -> Result<(DateSystem, Vec<Bundle>), ConvertError> {
+    let mut dates = DateSystem::Since1900;
     let mut sheets = Vec::new();
     let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
         match id {
-            BRT_WB_PROP => date1904 = Fields::new(payload).u32()? & 1 != 0,
+            BRT_WB_PROP => {
+                dates = DateSystem::from_date1904(Fields::new(payload).u32()? & 1 != 0);
+            }
             BRT_BUNDLE_SH => {
                 let mut f = Fields::new(payload);
                 let state = f.u32()?;
@@ -189,7 +196,7 @@ fn read_workbook(parse_ctx: &ParseCtx, data: &[u8]) -> Result<(bool, Vec<Bundle>
             _ => {}
         }
     }
-    Ok((date1904, sheets))
+    Ok((dates, sheets))
 }
 
 /// `styles.bin` reduced to the ordered cellXfs list, each entry's format id
@@ -258,7 +265,7 @@ fn read_sheet(
     data: &[u8],
     shared: &[(String, bool)],
     xfs: &CellXfs,
-    date1904: bool,
+    dates: DateSystem,
 ) -> Result<(SheetContent, Option<String>), ConvertError> {
     let mut out = SheetContent::default();
     let mut drawing = None;
@@ -276,7 +283,7 @@ fn read_sheet(
                 f.skip(7)?; // ixfe, miyRw, fExtraAsc/fExtraDsc byte
                 if f.u8()? & 0x10 != 0 {
                     // fDyZero: the row is hidden.
-                    out.hidden_rows.insert(rw);
+                    out.hide_row(rw);
                 }
             }
             BRT_COL_INFO => {
@@ -284,19 +291,12 @@ fn read_sheet(
                 let last = f.u32()?;
                 f.skip(8)?; // coldx, ixfe
                 let hidden = f.u16()? & 1 != 0;
-                if hidden && first <= last && first < MAX_COLS {
-                    out.hidden_cols.push((first, last.min(MAX_COLS - 1)));
+                if hidden {
+                    out.hide_cols(first, last);
                 }
             }
             BRT_MERGE_CELL => {
-                let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
-                if r1.max(r2) >= MAX_ROWS || c1.max(c2) >= MAX_COLS {
-                    parse_ctx.emit(DiagnosticCode::TableSpanRepaired, Region::Body);
-                    continue;
-                }
-                if r1 != r2 || c1 != c2 {
-                    out.merges.push((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)));
-                }
+                out.merge(parse_ctx, range(&mut f)?, MergePolicy::Drop);
             }
             BRT_CELL_RK | BRT_CELL_ERROR | BRT_CELL_BOOL | BRT_CELL_REAL | BRT_CELL_ST
             | BRT_CELL_ISST | BRT_CELL_RSTRING | BRT_FMLA_STRING | BRT_FMLA_NUM | BRT_FMLA_BOOL
@@ -310,17 +310,15 @@ fn read_sheet(
                 if r >= MAX_ROWS || col >= MAX_COLS {
                     continue;
                 }
-                let style = style as usize;
-                let (text, loss) = cell_text(id, &mut f, &xfs.get(style), shared, date1904)?;
+                let (at, style) = (CellRef::new(r, col), style as usize);
+                let (text, loss) = cell_text(id, &mut f, &xfs.get(style), shared, dates)?;
                 if let Some(code) = loss {
-                    out.losses.push((r, col, code));
+                    out.lose(at, code);
                 }
                 if loss != Some(DiagnosticCode::InvalidEncoding) && xfs.replaced_in(style, &text) {
-                    out.losses.push((r, col, DiagnosticCode::InvalidEncoding));
+                    out.lose(at, DiagnosticCode::InvalidEncoding);
                 }
-                if !text.is_empty() {
-                    out.cells.insert((r, col), text);
-                }
+                out.put(at, text);
             }
             BRT_HLINK => match hyperlink(&mut f) {
                 Ok(Some(link)) => out.links.push(link),
@@ -349,12 +347,15 @@ fn read_sheet(
 /// A BrtHLink's range and relationship id; `None` for a link within the
 /// workbook, which names no relationship.
 fn hyperlink(f: &mut Fields) -> Result<Option<SheetLink>, ConvertError> {
-    let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
+    let range = range(f)?;
     let rel = f.nullable_wide_string()?.map(|(rel, _)| rel).filter(|rel| !rel.is_empty());
-    Ok(rel.map(|rel| SheetLink {
-        range: (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)),
-        target: LinkTarget::Related(rel),
-    }))
+    Ok(rel.map(|rel| SheetLink { range, target: LinkTarget::Related(rel) }))
+}
+
+/// An UncheckedRfX: first and last row, then first and last column.
+fn range(f: &mut Fields) -> Result<CellRange, ConvertError> {
+    let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
+    Ok(CellRange::spanning(CellRef::new(r1, c1), CellRef::new(r2, c2)))
 }
 
 /// Report each non-blank header and footer of a BrtBeginHeaderFooter, in
@@ -382,7 +383,7 @@ fn cell_text(
     f: &mut Fields,
     fmt: &CellFormat,
     shared: &[(String, bool)],
-    date1904: bool,
+    dates: DateSystem,
 ) -> Result<(String, Option<DiagnosticCode>), ConvertError> {
     let unread = (String::new(), Some(DiagnosticCode::CellValueUnreadable));
     let string = |(text, replaced): (String, bool)| {
@@ -392,8 +393,8 @@ fn cell_text(
         )
     };
     Ok(match id {
-        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), date1904),
-        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, date1904),
+        BRT_CELL_RK => render_number(fmt, rk_number(f.u32()?), dates),
+        BRT_CELL_REAL | BRT_FMLA_NUM => render_number(fmt, f.f64()?, dates),
         BRT_CELL_ST | BRT_FMLA_STRING => string(f.wide_string()?),
         BRT_CELL_RSTRING => {
             f.u8()?; // RichStr flags; runs and phonetic data trail the string
