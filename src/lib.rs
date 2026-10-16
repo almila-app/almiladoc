@@ -107,12 +107,39 @@ pub enum Format {
 impl Format {
     /// Detect the format from the content itself: the signature and identity
     /// each container specification designates (PDF header, RTF open group,
-    /// OLE stream names, ZIP package mimetype/content types). Plain-text
-    /// formats (CSV) carry no signature and return `None`; so does anything
-    /// unrecognized.
+    /// OLE stream names, ZIP package mimetype/content types). A package is
+    /// read only as far as its identity: 256 bytes of `mimetype`, 1 MiB of
+    /// each of its relationships, content types and manifest, and the first
+    /// 16 KiB of its main part. Plain-text formats (CSV) carry no signature
+    /// and return `None`; so does anything unrecognized.
+    ///
+    /// [`Converter::parse`] and [`Converter::convert`] run the same detection
+    /// on the input and fail [`UnsupportedKind::FormatMismatch`], naming the
+    /// detected format, when it is not the format named; a PDF header past
+    /// the first byte does not contradict a CSV label.
     #[must_use]
     pub fn sniff(bytes: &[u8]) -> Option<Format> {
         formats::detect::from_bytes(bytes)
+    }
+
+    /// The format's name: the extension that identifies it, `xlsx` for
+    /// every Excel workbook.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Format::Doc => "doc",
+            Format::Docx => "docx",
+            Format::Odt => "odt",
+            Format::Pdf => "pdf",
+            Format::Ppt => "ppt",
+            Format::Pptx => "pptx",
+            Format::Rtf => "rtf",
+            Format::Epub => "epub",
+            Format::Excel => "xlsx",
+            Format::Ods => "ods",
+            Format::Odp => "odp",
+            Format::Csv => "csv",
+        }
     }
 
     /// The format a bare extension names (no leading dot), matched
@@ -134,5 +161,39 @@ impl Format {
             "csv" => Format::Csv,
             _ => return None,
         })
+    }
+}
+
+impl std::fmt::Display for Format {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Format;
+
+    #[test]
+    fn every_format_is_named_by_the_extension_that_names_it() {
+        let names = [
+            (Format::Doc, "doc"),
+            (Format::Docx, "docx"),
+            (Format::Odt, "odt"),
+            (Format::Pdf, "pdf"),
+            (Format::Ppt, "ppt"),
+            (Format::Pptx, "pptx"),
+            (Format::Rtf, "rtf"),
+            (Format::Epub, "epub"),
+            (Format::Excel, "xlsx"),
+            (Format::Ods, "ods"),
+            (Format::Odp, "odp"),
+            (Format::Csv, "csv"),
+        ];
+        for (format, name) in names {
+            assert_eq!(format.as_str(), name);
+            assert_eq!(format.to_string(), name);
+            assert_eq!(Format::from_extension(name), Some(format));
+        }
     }
 }

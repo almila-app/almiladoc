@@ -83,6 +83,7 @@ impl Converter {
             let (markdown, diagnostics) = match input.format {
                 #[cfg(feature = "pdf")]
                 Format::Pdf => {
+                    formats::detect::check_label(&parse_ctx, input.bytes, Format::Pdf)?;
                     let markdown = formats::pdf::to_markdown(&parse_ctx, input.bytes)?;
                     if markdown.len() as u64 > limits.max_output_bytes {
                         return Err(ConvertError::limit(

@@ -15,6 +15,7 @@ OUTLINE = FIXTURES / "docx" / "handmade-outline.docx"
 RICH = FIXTURES / "docx" / "handmade-rich.docx"
 TABLES = FIXTURES / "docx" / "handmade-tables.docx"
 CSV = FIXTURES / "csv" / "sheet.csv"
+RTF = FIXTURES / "rtf" / "text.rtf"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
@@ -102,6 +103,20 @@ class AlmiladocTest(unittest.TestCase):
         with self.assertRaises(almiladoc.MissingPartError) as caught:
             almiladoc.to_markdown_bytes(package.getvalue(), "docx")
         self.assertEqual(caught.exception.part, "word/document.xml")
+
+    def test_content_its_format_contradicts_names_the_format_to_retry_with(self):
+        data = RTF.read_bytes()
+        with self.assertRaisesRegex(almiladoc.UnsupportedError, "the content is rtf") as caught:
+            almiladoc.to_markdown_bytes(data, "doc")
+        self.assertEqual(caught.exception.detected, "rtf")
+        self.assertTrue(almiladoc.to_markdown_bytes(data, format=caught.exception.detected))
+
+        with self.assertRaises(almiladoc.UnsupportedError) as caught:
+            almiladoc.to_document(MIXED.read_bytes(), "pdf")
+        self.assertIsNone(caught.exception.detected)
+        with self.assertRaises(almiladoc.UnsupportedError) as caught:
+            almiladoc.to_document(CSV.read_bytes())
+        self.assertIsNone(caught.exception.detected)
 
     def test_every_failure_class_subclasses_the_base(self):
         for name in [

@@ -5,14 +5,15 @@
 //! required part fails, a slide listed or a chart drawn many times parses
 //! once, and every drawing reports the part's loss and damage in its unit.
 //! An EPUB spine item that names no chapter is reported, and a spine that
-//! names none fails.
+//! names none fails. Content its label contradicts fails, naming the format
+//! detected.
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use almiladoc::{
     Config, Conversion, ConvertError, Converter, DiagnosticCode, Format, Input, Limit, OnLoss,
-    Region,
+    Region, UnsupportedKind,
 };
 use zip::write::SimpleFileOptions;
 
@@ -629,4 +630,31 @@ fn a_damaged_chart_on_two_slides_reports_its_damage_in_each_slide() {
             ("unresolved_entity", Region::Body, Some(2), 1),
         ]
     );
+}
+
+fn detected(result: Result<impl std::fmt::Debug, ConvertError>) -> Format {
+    match result {
+        Err(ConvertError::Unsupported {
+            kind: UnsupportedKind::FormatMismatch { detected, .. },
+            ..
+        }) => detected,
+        other => panic!("expected a format mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn content_its_label_contradicts_fails_naming_the_format_detected() {
+    let converter = Converter::new(Config::default()).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
+    let cases = [
+        ("rtf/text.rtf", Format::Doc, Format::Rtf),
+        ("ods/sheet.ods", Format::Odt, Format::Ods),
+        ("docx/text.docx", Format::Pdf, Format::Docx),
+    ];
+    for (path, label, format) in cases {
+        let bytes = std::fs::read(fixtures.join(path)).unwrap();
+        assert_eq!(detected(converter.convert(Input::new(&bytes, label))), format, "{path}");
+        assert_eq!(detected(converter.parse(Input::new(&bytes, label))), format, "{path}");
+        assert!(converter.convert(Input::new(&bytes, format)).is_ok(), "{path}");
+    }
 }

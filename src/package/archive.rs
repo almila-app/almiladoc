@@ -100,7 +100,6 @@ pub struct Package<'a> {
     /// Entry indices by ASCII-lowercased name, for OPC alone: its part names
     /// compare case-insensitively in ASCII (ECMA-376 Part 2).
     folded: HashMap<Vec<u8>, usize>,
-    total_read: Cell<u64>,
     /// Decompressed parts by entry: repeated references are served from the
     /// cache instead of re-decompressing and re-charging the total-bytes
     /// budget (which would falsely trip on valid documents that reference one
@@ -133,6 +132,21 @@ impl<'a> Package<'a> {
         let zip = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|_| ConvertError::malformed("not a readable zip archive"))?;
         let facts = directory::inspect(&zip, bytes, parse_ctx.limits())?;
+        Self::assemble(parse_ctx, kind, zip, facts)
+    }
+
+    /// The same archive read as a package of `kind`, without admitting its
+    /// directory again.
+    pub fn reopen(&self, kind: PackageKind) -> Result<Self, ConvertError> {
+        Self::assemble(self.parse_ctx, kind, self.zip.clone(), self.facts)
+    }
+
+    fn assemble(
+        parse_ctx: &'a ParseCtx<'a>,
+        kind: PackageKind,
+        zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+        facts: ContainerFacts,
+    ) -> Result<Self, ConvertError> {
         let folded = match kind {
             PackageKind::Opc => folded_names(&zip)?,
             PackageKind::Odf | PackageKind::Epub => HashMap::new(),
@@ -143,7 +157,6 @@ impl<'a> Package<'a> {
             zip,
             facts,
             folded,
-            total_read: Cell::new(0),
             cache: RefCell::new(HashMap::new()),
             trees: RefCell::new(HashMap::new()),
             cached_nodes: Cell::new(0),
@@ -193,17 +206,65 @@ impl<'a> Package<'a> {
         }
         // zip fails a read past the declared size, so only the whole-archive
         // total can still run out mid-entry.
-        let remaining_total = limits.max_total_bytes.saturating_sub(self.total_read.get());
+        let remaining_total = limits.max_total_bytes.saturating_sub(self.parse_ctx.archive_bytes());
         let cap = limits.max_entry_bytes.min(remaining_total);
         let bytes = read_entry(self.parse_ctx, &mut file, cap, name)?;
         let read = bytes.len() as u64;
         if read > cap {
             return Err(ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes));
         }
-        self.total_read.set(self.total_read.get() + read);
+        self.parse_ctx.count_archive_bytes(read);
         let bytes: Rc<[u8]> = Rc::from(bytes);
         self.cache.borrow_mut().insert(index, Rc::clone(&bytes));
         Ok(Some(bytes))
+    }
+
+    /// The first `cap` bytes of a part, whatever size it declares, counted
+    /// against the entry and total budgets and never cached. An absent or
+    /// unreadable part reads as absent; a fatal error propagates.
+    pub fn probe_head(&self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ConvertError> {
+        Ok(self.probe(name, cap)?.map(|(mut bytes, cap)| {
+            bytes.truncate(usize::try_from(cap).unwrap_or(usize::MAX));
+            bytes
+        }))
+    }
+
+    /// A part of at most `cap` bytes, and within the entry and total
+    /// budgets: a larger part, or one that does not read, reads as absent; a
+    /// fatal error propagates.
+    pub fn probe_part(&self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ConvertError> {
+        Ok(self.probe(name, cap)?.and_then(|(bytes, cap)| {
+            u64::try_from(bytes.len()).is_ok_and(|len| len <= cap).then_some(bytes)
+        }))
+    }
+
+    fn probe(&self, name: &str, cap: u64) -> Result<Option<(Vec<u8>, u64)>, ConvertError> {
+        let name = name.trim_start_matches('/');
+        let Some(index) = self.index_of(name) else {
+            return Ok(None);
+        };
+        let limits = self.parse_ctx.limits();
+        let remaining_total = limits.max_total_bytes.saturating_sub(self.parse_ctx.archive_bytes());
+        let cap = cap.min(limits.max_entry_bytes).min(remaining_total);
+        let mut zip = self.zip.clone();
+        let read = zip
+            .by_index(index)
+            .map_err(|_| ConvertError::malformed_part(name, "unreadable archive entry"))
+            .and_then(|mut file| read_entry(self.parse_ctx, &mut file, cap, name));
+        if let Ok(bytes) = &read {
+            self.parse_ctx.count_archive_bytes(bytes.len() as u64);
+        }
+        skip_unreadable(self.parse_ctx, Role::Probe, read.map(|bytes| Some((bytes, cap))))
+    }
+
+    /// [`Package::probe_part`], parsed as XML: a part that does not parse
+    /// reads as absent too.
+    pub fn probe_xml_part(&self, name: &str, cap: u64) -> Result<Option<Element>, ConvertError> {
+        let Some(bytes) = self.probe_part(name, cap)? else {
+            return Ok(None);
+        };
+        let parsed = self.parse_part(name, &bytes, &mut WholeTree).map(|parsed| Some(parsed.root));
+        skip_unreadable(self.parse_ctx, Role::Probe, parsed)
     }
 
     /// True when a part exists, without reading (or budget-charging) it.
@@ -679,10 +740,10 @@ mod tests {
         let err = pkg.part("word/document.xml").unwrap_err();
         assert!(matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. }));
         assert!(pkg.cache.borrow().is_empty());
-        assert_eq!(pkg.total_read.get(), 0);
+        assert_eq!(parse_ctx.archive_bytes(), 0);
         assert!(pkg.optional_part("word/document.xml", Role::Probe).unwrap().is_none());
         assert!(pkg.optional_xml_part("word/document.xml", Role::Probe).unwrap().is_none());
-        assert_eq!(pkg.total_read.get(), 0);
+        assert_eq!(parse_ctx.archive_bytes(), 0);
     }
 
     #[test]
@@ -693,7 +754,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(pkg.part("media/a.bin").unwrap().unwrap().len(), 4096);
         }
-        assert_eq!(pkg.total_read.get(), 4096, "repeated reads must not re-charge the budget");
+        assert_eq!(parse_ctx.archive_bytes(), 4096, "repeated reads must not re-charge the budget");
     }
 
     #[test]
@@ -883,7 +944,7 @@ mod tests {
             assert_eq!(pkg.part(name).unwrap().unwrap().len(), 2048, "{name}");
         }
         assert_eq!(
-            (pkg.total_read.get(), pkg.cache.borrow().len(), parse_ctx.fuel()),
+            (parse_ctx.archive_bytes(), pkg.cache.borrow().len(), parse_ctx.fuel()),
             (2048, 1, 2)
         );
         assert!(pkg.part("word/document.xm").unwrap().is_none());

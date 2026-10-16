@@ -470,6 +470,24 @@ impl Marks {
     }
 }
 
+/// The namespace of the first start tag in `head`, the leading bytes of a
+/// part, normalized from Strict to Transitional; markup past that tag is
+/// never read, so a head cut short anywhere after it still names it.
+pub(crate) fn root_namespace(head: &[u8]) -> Option<String> {
+    let (utf8, _) = to_utf8(head);
+    let mut reader = NsReader::from_reader(utf8.as_ref());
+    loop {
+        match reader.read_resolved_event().ok()? {
+            (ResolveResult::Bound(namespace), Event::Start(_) | Event::Empty(_)) => {
+                let uri: &str = namespace.as_ref();
+                return Some(normalize_ooxml_uri(uri).unwrap_or_else(|| uri.to_owned()));
+            }
+            (_, Event::Start(_) | Event::Empty(_) | Event::Eof) => return None,
+            _ => {}
+        }
+    }
+}
+
 /// A start tag whose name is empty or that holds a `<`: quick-xml reads a
 /// bare `<` in text, and the markup after it up to the next `>`, as one tag;
 /// the end-tag arm applies the same rule.

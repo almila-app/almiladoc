@@ -73,6 +73,9 @@ pub enum ConfigError {
     },
 }
 
+const fn assert_send_sync<T: Send + Sync>() {}
+const _: () = assert_send_sync::<ConfigError>();
+
 #[cfg(test)]
 mod tests {
     use super::*;

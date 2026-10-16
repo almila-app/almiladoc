@@ -23,6 +23,7 @@ pub(crate) fn parse(
     bytes: &[u8],
     format: Format,
 ) -> Result<Document, ConvertError> {
+    detect::check_label(parse_ctx, bytes, format)?;
     match format {
         Format::Excel => sheet::parse(parse_ctx, bytes),
         Format::Csv => csv::parse(parse_ctx, bytes),
@@ -31,8 +32,6 @@ pub(crate) fn parse(
         Format::Pptx => pptx::parse(parse_ctx, bytes),
         Format::Epub => epub::parse(parse_ctx, bytes),
         Format::Rtf => rtf::parse(parse_ctx, bytes),
-        // RTF files wearing a .doc extension are common in the wild.
-        Format::Doc if bytes.starts_with(b"{\\rtf") => rtf::parse(parse_ctx, bytes),
         Format::Doc => doc::parse(parse_ctx, bytes),
         Format::Ppt => ppt::parse(parse_ctx, bytes),
         #[cfg(feature = "pdf")]
@@ -41,5 +40,29 @@ pub(crate) fn parse(
         Format::Pdf => {
             Err(ConvertError::unsupported(UnsupportedKind::FeatureDisabled { feature: "pdf" }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::{Limit, Limits};
+
+    #[test]
+    fn the_label_checks_reads_count_against_the_parses_total_bytes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/docx/text.docx");
+        let bytes = std::fs::read(path).unwrap();
+        let alone = ParseCtx::default();
+        docx::parse(&alone, &bytes).unwrap();
+        let checked = ParseCtx::default();
+        parse(&checked, &bytes, Format::Docx).unwrap();
+        assert!(checked.archive_bytes() > alone.archive_bytes());
+
+        let limits = Limits { max_total_bytes: alone.archive_bytes(), ..Limits::DEFAULT };
+        docx::parse(&ParseCtx::new(&limits), &bytes).unwrap();
+        assert!(matches!(
+            parse(&ParseCtx::new(&limits), &bytes, Format::Docx),
+            Err(ConvertError::ResourceLimit { limit: Limit::TotalBytes, .. })
+        ));
     }
 }

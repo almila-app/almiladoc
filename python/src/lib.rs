@@ -21,7 +21,9 @@ create_exception!(
     almiladoc,
     UnsupportedError,
     ConvertError,
-    "The format is unknown, or cannot be converted at all."
+    "The format is unknown, or cannot be converted at all. `detected` names the \
+     format the content was recognized as when it is not the one named, to \
+     retry with, and is `None` otherwise."
 );
 
 create_exception!(
@@ -87,40 +89,32 @@ create_exception!(
      that raised it."
 );
 
-/// Format names, as the extension that identifies each format. Container
+/// Every format, named in Python by [`almiladoc::Format::as_str`]. Container
 /// variants that share a parser (`.docm`, `.xlsm`, `.ppsx`, ...) map onto
 /// these via `format_from_bytes` or `format_from_extension`.
-const FORMATS: [(&str, almiladoc::Format); 12] = [
-    ("doc", almiladoc::Format::Doc),
-    ("docx", almiladoc::Format::Docx),
-    ("odt", almiladoc::Format::Odt),
-    ("pdf", almiladoc::Format::Pdf),
-    ("ppt", almiladoc::Format::Ppt),
-    ("pptx", almiladoc::Format::Pptx),
-    ("rtf", almiladoc::Format::Rtf),
-    ("epub", almiladoc::Format::Epub),
-    ("xlsx", almiladoc::Format::Excel),
-    ("ods", almiladoc::Format::Ods),
-    ("odp", almiladoc::Format::Odp),
-    ("csv", almiladoc::Format::Csv),
+const FORMATS: [almiladoc::Format; 12] = [
+    almiladoc::Format::Doc,
+    almiladoc::Format::Docx,
+    almiladoc::Format::Odt,
+    almiladoc::Format::Pdf,
+    almiladoc::Format::Ppt,
+    almiladoc::Format::Pptx,
+    almiladoc::Format::Rtf,
+    almiladoc::Format::Epub,
+    almiladoc::Format::Excel,
+    almiladoc::Format::Ods,
+    almiladoc::Format::Odp,
+    almiladoc::Format::Csv,
 ];
 
 fn parse_format(name: &str) -> PyResult<almiladoc::Format> {
-    FORMATS.iter().find(|(n, _)| *n == name).map(|(_, format)| *format).ok_or_else(|| {
-        let names: Vec<&str> = FORMATS.iter().map(|(n, _)| *n).collect();
+    FORMATS.into_iter().find(|format| format.as_str() == name).ok_or_else(|| {
+        let names: Vec<&str> = FORMATS.map(almiladoc::Format::as_str).to_vec();
         PyValueError::new_err(format!(
             "unknown format {name:?}; expected one of {}",
             names.join(", ")
         ))
     })
-}
-
-fn format_name(format: almiladoc::Format) -> &'static str {
-    FORMATS
-        .iter()
-        .find(|(_, f)| *f == format)
-        .map(|(name, _)| *name)
-        .expect("every format is named")
 }
 
 /// Raise the subclass that names the failure, carrying the part or limit at
@@ -140,6 +134,9 @@ fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
     };
     let value = raised.value(py);
     let detail = match &error {
+        almiladoc::ConvertError::Unsupported { kind, .. } => {
+            value.setattr("detected", mismatched(*kind))
+        }
         almiladoc::ConvertError::NeedsOcr { pages, page_count, .. } => value
             .setattr("pages", pages.clone())
             .and_then(|()| value.setattr("page_count", *page_count)),
@@ -158,6 +155,13 @@ fn convert_error(py: Python<'_>, error: almiladoc::ConvertError) -> PyErr {
     detail.err().unwrap_or(raised)
 }
 
+fn mismatched(kind: almiladoc::UnsupportedKind) -> Option<&'static str> {
+    match kind {
+        almiladoc::UnsupportedKind::FormatMismatch { detected, .. } => Some(detected.as_str()),
+        _ => None,
+    }
+}
+
 type DiagnosticTuple = (&'static str, &'static str, &'static str, Option<u32>, u64);
 
 fn diagnostic_tuples(diagnostics: &almiladoc::Diagnostics) -> Vec<DiagnosticTuple> {
@@ -174,11 +178,10 @@ fn extension_format(path: &Path) -> Option<almiladoc::Format> {
     path.extension().and_then(|ext| ext.to_str()).and_then(almiladoc::Format::from_extension)
 }
 
-fn unknown_format() -> PyErr {
-    UnsupportedError::new_err(format!(
-        "unsupported input: {}",
-        almiladoc::UnsupportedKind::UnknownFormat
-    ))
+fn unknown_format(py: Python<'_>) -> PyErr {
+    let kind = almiladoc::UnsupportedKind::UnknownFormat;
+    let raised = UnsupportedError::new_err(format!("unsupported input: {kind}"));
+    raised.value(py).setattr("detected", mismatched(kind)).err().unwrap_or(raised)
 }
 
 fn converter() -> PyResult<almiladoc::Converter> {
@@ -192,19 +195,20 @@ fn converter() -> PyResult<almiladoc::Converter> {
 /// no signature and return `None`; so does anything unrecognized.
 #[pyfunction]
 fn format_from_bytes(data: Vec<u8>) -> Option<&'static str> {
-    almiladoc::Format::sniff(&data).map(format_name)
+    almiladoc::Format::sniff(&data).map(almiladoc::Format::as_str)
 }
 
 /// The format an extension names, with or without a leading dot.
 #[pyfunction]
 fn format_from_extension(extension: &str) -> Option<&'static str> {
-    almiladoc::Format::from_extension(extension.trim_start_matches('.')).map(format_name)
+    almiladoc::Format::from_extension(extension.trim_start_matches('.'))
+        .map(almiladoc::Format::as_str)
 }
 
 /// The format a path's extension names.
 #[pyfunction]
 fn format_from_path(path: PathBuf) -> Option<&'static str> {
-    extension_format(&path).map(format_name)
+    extension_format(&path).map(almiladoc::Format::as_str)
 }
 
 /// Convert a document file to Markdown. The format is detected from the file
@@ -220,7 +224,7 @@ fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
             converter.convert(almiladoc::Input::new(&data, format)).map(|c| c.into_markdown())
         }))
     })?;
-    converted.ok_or_else(unknown_format)?.map_err(|e| convert_error(py, e))
+    converted.ok_or_else(|| unknown_format(py))?.map_err(|e| convert_error(py, e))
 }
 
 /// Convert an in-memory document to Markdown. Without a format, it is
@@ -230,7 +234,7 @@ fn to_markdown(py: Python<'_>, path: PathBuf) -> PyResult<String> {
 #[pyo3(signature = (data, format=None))]
 fn to_markdown_bytes(py: Python<'_>, data: Vec<u8>, format: Option<&str>) -> PyResult<String> {
     let converter = converter()?;
-    let format = resolve_format(&data, format)?;
+    let format = resolve_format(py, &data, format)?;
     py.detach(|| converter.convert(almiladoc::Input::new(&data, format)))
         .map(almiladoc::Conversion::into_markdown)
         .map_err(|e| convert_error(py, e))
@@ -249,17 +253,21 @@ fn to_document(
     format: Option<&str>,
 ) -> PyResult<document::Document> {
     let converter = converter()?;
-    let format = resolve_format(&data, format)?;
+    let format = resolve_format(py, &data, format)?;
     let parsed = py
         .detach(|| converter.parse(almiladoc::Input::new(&data, format)))
         .map_err(|e| convert_error(py, e))?;
     document::document(py, parsed.into_document())
 }
 
-fn resolve_format(data: &[u8], format: Option<&str>) -> PyResult<almiladoc::Format> {
+fn resolve_format(
+    py: Python<'_>,
+    data: &[u8],
+    format: Option<&str>,
+) -> PyResult<almiladoc::Format> {
     match format {
         Some(name) => parse_format(name),
-        None => almiladoc::Format::sniff(data).ok_or_else(unknown_format),
+        None => almiladoc::Format::sniff(data).ok_or_else(|| unknown_format(py)),
     }
 }
 

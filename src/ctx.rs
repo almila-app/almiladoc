@@ -18,6 +18,7 @@ pub(crate) struct ParseCtx<'a> {
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
     unit: Cell<Option<NonZeroU32>>,
+    archive_bytes: Cell<u64>,
 }
 
 /// While alive, reports go to one unit or across the document; dropping it
@@ -40,6 +41,7 @@ impl<'a> ParseCtx<'a> {
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
             unit: Cell::default(),
+            archive_bytes: Cell::default(),
         }
     }
 
@@ -61,6 +63,16 @@ impl<'a> ParseCtx<'a> {
     /// [`Limits::max_work`].
     pub(crate) fn charge(&self, units: u64) -> Result<(), ConvertError> {
         self.ledger.charge(units)
+    }
+
+    /// Decompressed bytes this parse has read from its archive, by every
+    /// package opened over it, against [`Limits::max_total_bytes`].
+    pub(crate) fn archive_bytes(&self) -> u64 {
+        self.archive_bytes.get()
+    }
+
+    pub(crate) fn count_archive_bytes(&self, bytes: u64) {
+        self.archive_bytes.set(self.archive_bytes.get().saturating_add(bytes));
     }
 
     /// Report one occurrence of `code` in `region`, in the current unit.

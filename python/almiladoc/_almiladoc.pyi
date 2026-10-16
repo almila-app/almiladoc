@@ -46,6 +46,10 @@ class ConvertError(Exception):
 class UnsupportedError(ConvertError):
     """The format is unknown, or cannot be converted at all."""
 
+    detected: Format | None
+    """The format the content was recognized as when it is not the one
+    named, to retry with; `None` otherwise."""
+
 class NeedsOcrError(ConvertError):
     """Pages of a PDF are scanned or image-only and need OCR, which almiladoc
     does not do."""

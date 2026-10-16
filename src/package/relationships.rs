@@ -3,7 +3,7 @@
 use crate::diagnostics::Region;
 use crate::error::ConvertError;
 use crate::package::archive::{Package, Role};
-use crate::package::xml::{normalize_ooxml_uri, ns};
+use crate::package::xml::{Element, normalize_ooxml_uri, ns};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -42,6 +42,23 @@ pub struct Relationships {
 }
 
 impl Relationships {
+    pub(crate) fn from_root(root: &Element) -> Self {
+        let mut map = HashMap::new();
+        for rel in root.descendants(ns::PKG_RELS, "Relationship") {
+            let (Some(id), Some(target)) = (rel.attr_any("Id"), rel.attr_any("Target")) else {
+                continue;
+            };
+            let mode = match rel.attr_any("TargetMode") {
+                Some(m) if m.eq_ignore_ascii_case("external") => TargetMode::External,
+                _ => TargetMode::Internal,
+            };
+            let rel_type = rel.attr_any("Type").unwrap_or("");
+            let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
+            map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
+        }
+        Relationships { map, reported: false }
+    }
+
     pub fn get(&self, id: &str) -> Option<&Relationship> {
         self.map.get(id)
     }
@@ -83,20 +100,7 @@ pub fn read_rels(pkg: &Package, part: &str, role: Role) -> Result<Relationships,
             reported: role.unreadable().is_some() && pkg.has_part(part),
         });
     };
-    let mut map = HashMap::new();
-    for rel in root.descendants(ns::PKG_RELS, "Relationship") {
-        let (Some(id), Some(target)) = (rel.attr_any("Id"), rel.attr_any("Target")) else {
-            continue;
-        };
-        let mode = match rel.attr_any("TargetMode") {
-            Some(m) if m.eq_ignore_ascii_case("external") => TargetMode::External,
-            _ => TargetMode::Internal,
-        };
-        let rel_type = rel.attr_any("Type").unwrap_or("");
-        let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
-        map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
-    }
-    Ok(Relationships { map, reported: false })
+    Ok(Relationships::from_root(&root))
 }
 
 /// A loaded internal relationship target: its resolved part path and bytes.

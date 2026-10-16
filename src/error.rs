@@ -84,6 +84,9 @@ pub enum ConvertError {
     Internal,
 }
 
+const fn assert_send_sync<T: Send + Sync>() {}
+const _: () = assert_send_sync::<ConvertError>();
+
 /// Why an input cannot be converted at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -116,7 +119,7 @@ impl fmt::Display for UnsupportedKind {
                 write!(f, "this build leaves out the {feature} feature")
             }
             UnsupportedKind::FormatMismatch { detected } => {
-                write!(f, "the content is {detected:?}, not the format named")
+                write!(f, "the content is {detected}, not the format named")
             }
             UnsupportedKind::PdfDocumentModel => {
                 f.write_str("a PDF has no document model; convert it to Markdown")
@@ -372,7 +375,7 @@ mod tests {
                 ConvertError::unsupported(UnsupportedKind::FormatMismatch {
                     detected: Format::Rtf,
                 }),
-                "unsupported input: the content is Rtf, not the format named",
+                "unsupported input: the content is rtf, not the format named",
             ),
             (
                 ConvertError::unsupported(UnsupportedKind::PdfDocumentModel),
