@@ -30,18 +30,18 @@ include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.tom
 workspace = true
 
 [dev-dependencies]
-insta = "1"
+insta = "1.49.0"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 
 [dependencies]
 cfb = "0.15.0"
 csv = "1.4.0"
-flate2 = "1"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 encoding_rs = "0.8.35"
 pdf-inspector = { version = "1.25.2", optional = true }
 quick-xml = "0.42.0"
 rayon = "1.12.0"
-sha2 = "0.11"
+sha2 = "0.11.0"
 thiserror = "2.0.21"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 

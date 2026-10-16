@@ -9,7 +9,7 @@ license = "FSL-1.1-MIT AND MIT"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = "0.4.13"
 almiladoc = { path = ".." }
 cfb = "0.15.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
