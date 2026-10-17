@@ -563,7 +563,12 @@ fn read_sheet(
     if rec_type != BOF || get_u16(body, 2) != Some(WORKSHEET_SUBSTREAM) {
         return Ok(None);
     }
-    let mut out = SheetContent::on(BIFF8_GRID);
+    let parse_ctx = records.parse_ctx;
+    let mut out = SheetContent::on(
+        BIFF8_GRID,
+        parse_ctx.grid_slots_left(),
+        parse_ctx.limits().max_grid_slots,
+    );
     let mut depth = 1usize;
     // A FORMULA whose cached value is a string: its cell and ixfe waiting
     // for the STRING record that carries the text.
@@ -572,7 +577,6 @@ fn read_sheet(
     // its text in the TXO after it.
     let mut shape: Option<Shape> = None;
     let mut text_of: Option<TextOf> = None;
-    let parse_ctx = records.parse_ctx;
     while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
         pos = next;
         match rec_type {
@@ -625,7 +629,7 @@ fn read_sheet(
                     && let Some(isst) = get_u32(body, 6)
                 {
                     let text = globals.sst.get(isst as usize).cloned();
-                    put_string(&mut out, at, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text)?;
                 }
             }
             LABEL | RSTRING => {
@@ -635,14 +639,14 @@ fn read_sheet(
                     // RSTRING's trailing rich runs are formatting, not text.
                     let text = string_reader(&segs, 6)
                         .and_then(|mut r| globals.read_string(&mut r, false));
-                    put_string(&mut out, at, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text)?;
                 }
             }
             NUMBER => {
                 if let Some((at, ixfe)) = cell_ref(body)
                     && let Some(n) = get_f64(body, 6)
                 {
-                    put_number(&mut out, at, globals, ixfe, n);
+                    put_number(&mut out, at, globals, ixfe, n)?;
                 }
             }
             RK => {
@@ -650,7 +654,7 @@ fn read_sheet(
                     && let Some(rk) = get_u32(body, 6)
                 {
                     let n = rk_number(rk);
-                    put_number(&mut out, at, globals, ixfe, n);
+                    put_number(&mut out, at, globals, ixfe, n)?;
                 }
             }
             MULRK => {
@@ -665,7 +669,7 @@ fn read_sheet(
                         };
                         let col = u32::from(col_first) + i as u32;
                         let at = CellRef::new(u32::from(row), col);
-                        put_number(&mut out, at, globals, ixfe, rk_number(rk));
+                        put_number(&mut out, at, globals, ixfe, rk_number(rk))?;
                     }
                 }
             }
@@ -681,9 +685,9 @@ fn read_sheet(
                     };
                     match text {
                         Some(text) => {
-                            out.put(at, text.to_string());
+                            out.put(at, text.to_string())?;
                         }
-                        None => out.lose(at, DiagnosticCode::CellValueUnreadable),
+                        None => out.lose(at, DiagnosticCode::CellValueUnreadable)?,
                     }
                 }
             }
@@ -696,19 +700,19 @@ fn read_sheet(
                             0x00 => pending = Some((at, ixfe)),
                             0x01 => {
                                 let text = if value[2] == 0 { "FALSE" } else { "TRUE" };
-                                out.put(at, text.to_string());
+                                out.put(at, text.to_string())?;
                             }
                             0x02 => match error_literal(value[2]) {
                                 Some(text) => {
-                                    out.put(at, text.to_string());
+                                    out.put(at, text.to_string())?;
                                 }
-                                None => out.lose(at, DiagnosticCode::CellValueUnreadable),
+                                None => out.lose(at, DiagnosticCode::CellValueUnreadable)?,
                             },
                             // 0x03 is a blank string result.
                             _ => {}
                         }
                     } else if let Some(n) = get_f64(body, 6) {
-                        put_number(&mut out, at, globals, ixfe, n);
+                        put_number(&mut out, at, globals, ixfe, n)?;
                     }
                 }
             }
@@ -741,7 +745,7 @@ fn read_sheet(
                     },
                     Some(Obj::Checkbox(None)) => match shape {
                         Some(Shape { anchor, .. }) if anchor.col < BIFF8_COLS => {
-                            out.lose(anchor, DiagnosticCode::FormControlUnread)
+                            out.lose(anchor, DiagnosticCode::FormControlUnread)?;
                         }
                         _ => parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body),
                     },
@@ -768,7 +772,7 @@ fn read_sheet(
                         {
                             b.caption = clean_text(&caption);
                             if replaced {
-                                out.lose(at, DiagnosticCode::InvalidEncoding);
+                                out.lose(at, DiagnosticCode::InvalidEncoding)?;
                             }
                         }
                     }
@@ -786,7 +790,7 @@ fn read_sheet(
                 if let Some((at, ixfe)) = pending.take() {
                     let text = string_reader(&segs, 0)
                         .and_then(|mut r| globals.read_string(&mut r, false));
-                    put_string(&mut out, at, globals, ixfe, text);
+                    put_string(&mut out, at, globals, ixfe, text)?;
                 }
             }
             NOTE => parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
@@ -1064,9 +1068,15 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
     Some(decode_utf16(units))
 }
 
-fn put_number(out: &mut SheetContent, at: CellRef, globals: &Globals, ixfe: u16, n: f64) {
+fn put_number(
+    out: &mut SheetContent,
+    at: CellRef,
+    globals: &Globals,
+    ixfe: u16,
+    n: f64,
+) -> Result<(), ConvertError> {
     let rendered = render_number(&globals.format(ixfe), n, globals.dates);
-    put_rendered(out, at, globals, ixfe, rendered, false);
+    put_rendered(out, at, globals, ixfe, rendered, false)
 }
 
 fn put_string(
@@ -1075,11 +1085,11 @@ fn put_string(
     globals: &Globals,
     ixfe: u16,
     text: Option<(String, bool)>,
-) {
+) -> Result<(), ConvertError> {
     match text {
         Some((text, replaced)) => {
             let rendered = format_as_text(&globals.format(ixfe), &clean_text(&text));
-            put_rendered(out, at, globals, ixfe, rendered, replaced);
+            put_rendered(out, at, globals, ixfe, rendered, replaced)
         }
         None => out.lose(at, DiagnosticCode::CellValueUnreadable),
     }
@@ -1094,12 +1104,13 @@ fn put_rendered(
     ixfe: u16,
     (text, loss): (String, Option<DiagnosticCode>),
     replaced: bool,
-) {
+) -> Result<(), ConvertError> {
     let replaced = replaced || globals.xfs.replaced_in(usize::from(ixfe), &text);
-    out.put(at, text);
+    out.put(at, text)?;
     for code in loss.into_iter().chain(replaced.then_some(DiagnosticCode::InvalidEncoding)) {
-        out.lose(at, code);
+        out.lose(at, code)?;
     }
+    Ok(())
 }
 
 /// A reader over `segs` with the first segment's leading `skip` bytes (the
@@ -1525,6 +1536,32 @@ mod tests {
         body[..2].copy_from_slice(&row.to_le_bytes());
         body[12] = 0x20;
         rec(ROW, &body)
+    }
+
+    #[test]
+    fn cells_and_losses_held_as_the_sheet_streams_count_against_the_grid_slots_left() {
+        use crate::limits::{Limit, Limits};
+        let limits = Limits { max_grid_slots: 5, ..Limits::default() };
+        let placed = [label(0, 0, 0, "a"), label(0, 1, 0, "b")].concat();
+        let run = |records: Vec<u8>| {
+            let sheets = vec![("A", 0, placed.clone()), ("B", 0, records)];
+            parse(&ParseCtx::new(&limits), &Wb { xfs: vec![0], sheets, ..Wb::default() }.build())
+        };
+        let unread: fn(u16) -> Vec<u8> = |col| labelsst(0, col, 0, 9);
+        let hidden = |col: u16| [hidden_row(0), label(0, col, 0, "x")].concat();
+        let past = |col: u16| label(0, 256 + col, 0, "x");
+        for (case, cell) in [("lose", unread), ("put", hidden), ("put past the grid", past)] {
+            let records = |cells: u16| (0..cells).flat_map(cell).collect::<Vec<u8>>();
+            assert!(run(records(3)).is_ok(), "{case}");
+            let refused = run(records(4)).map(drop);
+            assert!(
+                matches!(
+                    refused,
+                    Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 })
+                ),
+                "{case}: {refused:?}"
+            );
+        }
     }
 
     #[test]

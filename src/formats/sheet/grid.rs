@@ -10,7 +10,9 @@ use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
-use crate::model::{Cell, GridBuilder, Inline, Table, TableKind, inlines_to_plain_text};
+use crate::model::{
+    Cell, GridBuilder, GridLedger, Inline, Table, TableKind, inlines_to_plain_text,
+};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::{label_is_absolute_url, label_shows_target};
 use crate::shared::text::clean_text;
@@ -139,10 +141,15 @@ pub(super) struct SheetContent {
     /// What each cell lost, reported only where the cell survives hidden
     /// filtering and no merge covers it.
     losses: Vec<(CellRef, DiagnosticCode)>,
+    held: u64,
+    slots_left: u64,
+    max_slots: u64,
 }
 
 impl SheetContent {
-    pub(super) fn on(grid: GridBounds) -> SheetContent {
+    /// A sheet on `grid` whose cells and losses, held as they stream, fail
+    /// past `slots_left` with the parse's `max_slots`.
+    pub(super) fn on(grid: GridBounds, slots_left: u64, max_slots: u64) -> SheetContent {
         SheetContent {
             grid,
             cells: HashMap::new(),
@@ -152,7 +159,24 @@ impl SheetContent {
             merges: Vec::new(),
             links: Vec::new(),
             losses: Vec::new(),
+            held: 0,
+            slots_left,
+            max_slots,
         }
+    }
+
+    fn hold(&mut self) -> Result<(), ConvertError> {
+        self.held = self.held.saturating_add(1);
+        if self.held > self.slots_left {
+            return Err(ConvertError::limit(Limit::GridSlots, self.max_slots));
+        }
+        Ok(())
+    }
+
+    fn hold_loss(&mut self, at: CellRef, code: DiagnosticCode) -> Result<(), ConvertError> {
+        self.hold()?;
+        self.losses.push((at, code));
+        Ok(())
     }
 
     /// Record a cell's text, and whether it adds a cell to the grid; a text
@@ -160,31 +184,43 @@ impl SheetContent {
     /// it never widens the grid. A cell past the grid is unreadable where
     /// its text shows something and its row and column do, and reports
     /// nothing else.
-    pub(super) fn put(&mut self, at: CellRef, text: String) -> bool {
+    pub(super) fn put(&mut self, at: CellRef, text: String) -> Result<bool, ConvertError> {
         if text.trim().is_empty() {
-            return false;
+            return Ok(false);
         }
         if !self.grid.holds(at) {
-            self.losses.push((at, DiagnosticCode::CellValueUnreadable));
-            return false;
+            self.hold_loss(at, DiagnosticCode::CellValueUnreadable)?;
+            return Ok(false);
         }
-        self.cells.insert(at, text).is_none()
+        let added = !self.cells.contains_key(&at);
+        if added {
+            self.hold()?;
+        }
+        self.cells.insert(at, text);
+        Ok(added)
     }
 
     /// Record a cell whose reference does not read, near `at`: unreadable
     /// where its text shows something or its value went `unread`.
-    pub(super) fn put_unplaced(&mut self, at: CellRef, text: &str, unread: bool) {
+    pub(super) fn put_unplaced(
+        &mut self,
+        at: CellRef,
+        text: &str,
+        unread: bool,
+    ) -> Result<(), ConvertError> {
         if unread || !text.trim().is_empty() {
-            self.losses.push((at, DiagnosticCode::CellValueUnreadable));
+            self.hold_loss(at, DiagnosticCode::CellValueUnreadable)?;
         }
+        Ok(())
     }
 
     /// Record what a cell lost, reported once the grid shows the cell; past
     /// the grid only a value that does not read is kept.
-    pub(super) fn lose(&mut self, at: CellRef, code: DiagnosticCode) {
+    pub(super) fn lose(&mut self, at: CellRef, code: DiagnosticCode) -> Result<(), ConvertError> {
         if self.grid.holds(at) || code == DiagnosticCode::CellValueUnreadable {
-            self.losses.push((at, code));
+            self.hold_loss(at, code)?;
         }
+        Ok(())
     }
 
     /// Hide `row`, past the grid too, so a cell there that the file hides
@@ -505,13 +541,14 @@ pub(super) fn build_table(
     }
     // Refused before materializing: the extent comes from cell coordinates,
     // so a handful of cells describes a whole sheet.
-    let limits = parse_ctx.limits();
     let positions = row_map.len() as u64 * col_map.len() as u64;
     if positions > parse_ctx.grid_slots_left() {
-        return Err(ConvertError::limit(Limit::GridSlots, limits.max_grid_slots));
+        return Err(ConvertError::limit(Limit::GridSlots, parse_ctx.limits().max_grid_slots));
     }
-    let layout = MergeLayout::on(limits, &sheet.merges, &row_map, &col_map)?;
-    assemble(parse_ctx, &row_map, &col_map, &layout, cells)
+    parse_ctx.admit_grid_positions(positions)?;
+    let layout = MergeLayout::on(parse_ctx.limits(), &sheet.merges, &row_map, &col_map)?;
+    let ledger = Admitted { parse_ctx, prepaid: positions };
+    assemble(ledger, &row_map, &col_map, &layout, cells)
 }
 
 /// The rows a sheet hides as a sorted list and the columns as sorted
@@ -776,16 +813,37 @@ impl MergeLayout {
     }
 }
 
+/// The parse's ledger with a sheet's visible positions already admitted, so
+/// placing them admits nothing again.
+struct Admitted<'a, 'c> {
+    parse_ctx: &'a ParseCtx<'c>,
+    prepaid: u64,
+}
+
+impl GridLedger for Admitted<'_, '_> {
+    type Error = ConvertError;
+
+    fn max_expansion(&self) -> u64 {
+        self.parse_ctx.limits().max_expansion
+    }
+
+    fn admit_positions(&mut self, count: u64) -> Result<(), ConvertError> {
+        let paid = count.min(self.prepaid);
+        self.prepaid -= paid;
+        self.parse_ctx.admit_grid_positions(count - paid)
+    }
+}
+
 /// Place every shown position into the table, merge origins with their
 /// spans.
 fn assemble(
-    parse_ctx: &ParseCtx,
+    ledger: Admitted,
     row_map: &[u32],
     col_map: &[u32],
     layout: &MergeLayout,
     mut cells: HashMap<CellRef, Vec<Inline>>,
 ) -> Result<Option<Table>, ConvertError> {
-    let mut builder = GridBuilder::new(parse_ctx);
+    let mut builder = GridBuilder::new(ledger);
     for (ri, &row) in row_map.iter().enumerate() {
         builder.next_row();
         for (ci, &col) in col_map.iter().enumerate() {
@@ -878,6 +936,10 @@ fn first_visible(hidden: &[u32], lo: u32, hi: u32) -> Option<u32> {
 mod tests {
     use super::*;
 
+    fn unbounded(grid: GridBounds) -> SheetContent {
+        SheetContent::on(grid, u64::MAX, u64::MAX)
+    }
+
     const DATE_ONLY: DateParts = DateParts { date: true, time: false, elapsed: false };
 
     #[test]
@@ -938,11 +1000,42 @@ mod tests {
                 (CellRef::new(0, 0), "a".to_string()),
                 (CellRef::new(1, 2), "b".to_string()),
             ]),
-            ..SheetContent::on(OOXML_GRID)
+            ..unbounded(OOXML_GRID)
         };
         let parse_ctx = ParseCtx::default();
         assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         assert_eq!(parse_ctx.fuel(), 6);
+    }
+
+    #[test]
+    fn a_merged_sheet_charges_each_position_once() {
+        let sheet = SheetContent {
+            cells: HashMap::from([
+                (CellRef::new(0, 0), "a".to_string()),
+                (CellRef::new(2, 3), "b".to_string()),
+            ]),
+            merges: vec![range(0, 0, 1, 1)],
+            ..unbounded(OOXML_GRID)
+        };
+        let parse_ctx = ParseCtx::default();
+        assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
+        let (covered_lookups, positions) = (1, 12);
+        assert_eq!(parse_ctx.fuel(), covered_lookups + positions);
+    }
+
+    #[test]
+    fn a_sheet_past_the_work_left_is_refused_before_its_merges_are_laid_out() {
+        let sheet = SheetContent {
+            cells: HashMap::from([
+                (CellRef::new(0, 0), "a".to_string()),
+                (CellRef::new(2, 3), "b".to_string()),
+            ]),
+            merges: vec![range(0, 0, 1, 1)],
+            ..unbounded(OOXML_GRID)
+        };
+        let limits = Limits { max_work: 12, max_expansion: 0, ..Default::default() };
+        let err = build_table(&ParseCtx::new(&limits), sheet).unwrap_err();
+        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
     }
 
     #[test]
@@ -952,7 +1045,7 @@ mod tests {
                 (CellRef::new(0, 0), "a".to_string()),
                 (CellRef::new(1, 2), "b".to_string()),
             ]),
-            ..SheetContent::on(OOXML_GRID)
+            ..unbounded(OOXML_GRID)
         };
         let limits = Limits { max_grid_slots: 11, ..Default::default() };
         let parse_ctx = ParseCtx::new(&limits);
@@ -974,7 +1067,7 @@ mod tests {
             links: (0..100)
                 .map(|c| SheetLink { range: cell(c), target: LinkTarget::Url(target.clone()) })
                 .collect(),
-            ..SheetContent::on(OOXML_GRID)
+            ..unbounded(OOXML_GRID)
         };
         let limits = Limits { max_work: 2_000_000, ..Default::default() };
         assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
@@ -993,7 +1086,7 @@ mod tests {
                     target: LinkTarget::Url("https://example.org/".into()),
                 })
                 .collect(),
-            ..SheetContent::on(OOXML_GRID)
+            ..unbounded(OOXML_GRID)
         };
         let limits = Limits { max_work: 20_000, ..Default::default() };
         assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
@@ -1008,7 +1101,7 @@ mod tests {
 
     fn merged(ranges: &[CellRange], grid: GridBounds) -> (Vec<CellRange>, u64) {
         let parse_ctx = ParseCtx::default();
-        let mut sheet = SheetContent::on(grid);
+        let mut sheet = unbounded(grid);
         for &r in ranges {
             sheet.merge(&parse_ctx, r);
         }
@@ -1044,10 +1137,10 @@ mod tests {
     #[test]
     fn the_extent_is_the_content_that_shows_and_a_merge_widens_nothing() {
         let built = |at: &[(u32, u32)], merge: CellRange, hidden_row: Option<u32>| {
-            let mut sheet = SheetContent::on(OOXML_GRID);
+            let mut sheet = unbounded(OOXML_GRID);
             let parse_ctx = ParseCtx::default();
             for &(row, col) in at {
-                sheet.put(CellRef::new(row, col), "v".to_string());
+                sheet.put(CellRef::new(row, col), "v".to_string()).unwrap();
             }
             sheet.merge(&parse_ctx, merge);
             hidden_row.into_iter().for_each(|row| sheet.hide_row(row));
@@ -1065,20 +1158,20 @@ mod tests {
 
     #[test]
     fn a_cell_past_the_grid_counts_only_where_its_text_and_row_show() {
-        let mut sheet = SheetContent::on(GridBounds { rows: 2, cols: 2 });
-        sheet.put(CellRef::new(0, 0), "a".to_string());
-        sheet.put(CellRef::new(2, 0), "b".to_string());
-        sheet.put(CellRef::new(0, 2), "c".to_string());
-        sheet.put(CellRef::new(1, 2), "hidden".to_string());
-        sheet.put(CellRef::new(0, 3), " ".to_string());
-        sheet.lose(CellRef::new(0, 4), DiagnosticCode::NumberFormatUnread);
-        sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable);
-        sheet.lose(CellRef::new(2, 5), DiagnosticCode::CellValueUnreadable);
-        sheet.put_unplaced(CellRef::new(0, 1), "d", false);
-        sheet.put_unplaced(CellRef::new(0, 1), "", true);
-        sheet.put_unplaced(CellRef::new(1, 1), "hidden", false);
-        sheet.put_unplaced(CellRef::new(1, 0), " ", false);
-        sheet.put_unplaced(CellRef::new(5, 5), "e", false);
+        let mut sheet = unbounded(GridBounds { rows: 2, cols: 2 });
+        sheet.put(CellRef::new(0, 0), "a".to_string()).unwrap();
+        sheet.put(CellRef::new(2, 0), "b".to_string()).unwrap();
+        sheet.put(CellRef::new(0, 2), "c".to_string()).unwrap();
+        sheet.put(CellRef::new(1, 2), "hidden".to_string()).unwrap();
+        sheet.put(CellRef::new(0, 3), " ".to_string()).unwrap();
+        sheet.lose(CellRef::new(0, 4), DiagnosticCode::NumberFormatUnread).unwrap();
+        sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable).unwrap();
+        sheet.lose(CellRef::new(2, 5), DiagnosticCode::CellValueUnreadable).unwrap();
+        sheet.put_unplaced(CellRef::new(0, 1), "d", false).unwrap();
+        sheet.put_unplaced(CellRef::new(0, 1), "", true).unwrap();
+        sheet.put_unplaced(CellRef::new(1, 1), "hidden", false).unwrap();
+        sheet.put_unplaced(CellRef::new(1, 0), " ", false).unwrap();
+        sheet.put_unplaced(CellRef::new(5, 5), "e", false).unwrap();
         sheet.hide_row(1);
         sheet.hide_row(2);
         let parse_ctx = ParseCtx::default();
@@ -1092,11 +1185,11 @@ mod tests {
 
     #[test]
     fn a_whitespace_cell_leaves_no_cell() {
-        let mut sheet = SheetContent::on(OOXML_GRID);
-        sheet.put(CellRef::new(0, 0), "a".to_string());
-        sheet.put(CellRef::new(0, 1), " \t\u{a0}".to_string());
-        sheet.put(CellRef::new(0, 2), String::new());
-        sheet.put(CellRef::new(0, 3), " b ".to_string());
+        let mut sheet = unbounded(OOXML_GRID);
+        sheet.put(CellRef::new(0, 0), "a".to_string()).unwrap();
+        sheet.put(CellRef::new(0, 1), " \t\u{a0}".to_string()).unwrap();
+        sheet.put(CellRef::new(0, 2), String::new()).unwrap();
+        sheet.put(CellRef::new(0, 3), " b ".to_string()).unwrap();
         let kept: HashMap<CellRef, String> =
             HashMap::from([(CellRef::new(0, 0), "a".into()), (CellRef::new(0, 3), " b ".into())]);
         assert_eq!(sheet.cells, kept);
@@ -1104,12 +1197,12 @@ mod tests {
 
     #[test]
     fn a_shown_cell_below_a_merge_keeps_its_loss() {
-        let mut sheet = SheetContent::on(OOXML_GRID);
+        let mut sheet = unbounded(OOXML_GRID);
         let parse_ctx = ParseCtx::default();
-        sheet.put(CellRef::new(0, 0), "a".to_string());
-        sheet.put(CellRef::new(5, 0), "b".to_string());
+        sheet.put(CellRef::new(0, 0), "a".to_string()).unwrap();
+        sheet.put(CellRef::new(5, 0), "b".to_string()).unwrap();
         sheet.merge(&parse_ctx, range(0, 0, 1, 1));
-        sheet.lose(CellRef::new(5, 0), DiagnosticCode::CellValueUnreadable);
+        sheet.lose(CellRef::new(5, 0), DiagnosticCode::CellValueUnreadable).unwrap();
         assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [DiagnosticCode::CellValueUnreadable]);
@@ -1117,12 +1210,12 @@ mod tests {
 
     #[test]
     fn a_shown_cell_beside_a_merge_keeps_its_loss() {
-        let mut sheet = SheetContent::on(OOXML_GRID);
+        let mut sheet = unbounded(OOXML_GRID);
         let parse_ctx = ParseCtx::default();
-        sheet.put(CellRef::new(0, 0), "a".to_string());
-        sheet.put(CellRef::new(0, 5), "b".to_string());
+        sheet.put(CellRef::new(0, 0), "a".to_string()).unwrap();
+        sheet.put(CellRef::new(0, 5), "b".to_string()).unwrap();
         sheet.merge(&parse_ctx, range(0, 0, 1, 1));
-        sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable);
+        sheet.lose(CellRef::new(0, 5), DiagnosticCode::CellValueUnreadable).unwrap();
         assert!(build_table(&parse_ctx, sheet).unwrap().is_some());
         let reported: Vec<_> = parse_ctx.diagnostics().iter().map(|d| d.code).collect();
         assert_eq!(reported, [DiagnosticCode::CellValueUnreadable]);

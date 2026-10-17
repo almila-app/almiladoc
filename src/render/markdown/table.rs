@@ -142,16 +142,15 @@ impl Join {
         out: &mut Text<'_>,
         render: impl FnOnce(&mut Text<'_>, usize) -> Result<bool, ConvertError>,
     ) -> Result<(), ConvertError> {
-        let mark = out.mark();
-        if self.any {
-            out.push_str(self.sep)?;
-        }
-        let start = out.len();
-        if render(out, start)? {
-            self.any = true;
-        } else {
-            out.truncate(mark);
-        }
+        let (any, sep) = (self.any, self.sep);
+        let kept = out.attempt(|out| {
+            if any {
+                out.push_str(sep)?;
+            }
+            let start = out.len();
+            render(out, start)
+        })?;
+        self.any |= kept;
         Ok(())
     }
 }

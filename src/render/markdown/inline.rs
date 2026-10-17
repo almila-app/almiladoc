@@ -224,14 +224,15 @@ fn render_link(
             None => return render_inlines_mode(content, ctx, false, rc, out),
         },
     };
-    let mark = out.mark();
-    out.push('[')?;
-    let label = out.len();
-    render_inlines_mode(content, ctx, true, rc, out)?;
-    // Emptiness is tested on the trimmed label, but the rendered label keeps
-    // its source-significant edge spaces.
-    if out.since(label).trim().is_empty() {
-        out.truncate(mark);
+    let labelled = out.attempt(|out| {
+        out.push('[')?;
+        let label = out.len();
+        render_inlines_mode(content, ctx, true, rc, out)?;
+        // Emptiness is tested on the trimmed label, but the rendered label
+        // keeps its source-significant edge spaces.
+        Ok(!out.since(label).trim().is_empty())
+    })?;
+    if !labelled {
         if matches!(target, LinkTarget::Anchor(_)) {
             return Ok(());
         }

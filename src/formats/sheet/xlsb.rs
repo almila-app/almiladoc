@@ -264,7 +264,11 @@ fn read_sheet(
     xfs: &CellXfs,
     dates: DateSystem,
 ) -> Result<(SheetContent, Option<String>), ConvertError> {
-    let mut out = SheetContent::on(OOXML_GRID);
+    let mut out = SheetContent::on(
+        OOXML_GRID,
+        parse_ctx.grid_slots_left(),
+        parse_ctx.limits().max_grid_slots,
+    );
     let mut drawing = None;
     let mut row: Option<u32> = None;
     let mut records = Records::new(parse_ctx, data);
@@ -306,12 +310,12 @@ fn read_sheet(
                 };
                 let at = CellRef::new(r, col);
                 if let Some(code) = loss {
-                    out.lose(at, code);
+                    out.lose(at, code)?;
                 }
                 if replaced || xfs.replaced_in(style, &text) {
-                    out.lose(at, DiagnosticCode::InvalidEncoding);
+                    out.lose(at, DiagnosticCode::InvalidEncoding)?;
                 }
-                out.put(at, text);
+                out.put(at, text)?;
             }
             BRT_HLINK => match hyperlink(&mut f) {
                 Ok(Some(link)) => out.links.push(link),
@@ -1285,6 +1289,35 @@ mod tests {
                 in_unit(DiagnosticCode::HiddenOmitted, 1, 1)
             ]
         );
+    }
+
+    #[test]
+    fn cells_and_losses_held_as_the_sheet_streams_count_against_the_grid_slots_left() {
+        use crate::limits::{Limit, Limits};
+        let limits = Limits { max_grid_slots: 5, ..Limits::default() };
+        let placed = [row_hdr(0, false), real_cell(0, 0, 1.0), real_cell(1, 0, 1.0)].concat();
+        let run = |body: Vec<u8>| {
+            let sheets = vec![("A", 0, placed.clone()), ("B", 0, body)];
+            super::super::parse(&ParseCtx::new(&limits), &Wb { sheets, ..Wb::default() }.build())
+                .map(drop)
+        };
+        let unread: fn(u32) -> Vec<u8> =
+            |col| rec(BRT_CELL_ISST, &[cell(col, 0), 7u32.to_le_bytes().to_vec()].concat());
+        let hidden = |col: u32| real_cell(col, 0, 1.0);
+        let past = |col: u32| real_cell(MAX_COLS + col, 0, 1.0);
+        let cases = [("lose", false, unread), ("put", true, hidden), ("past", false, past)];
+        for (case, row, cell) in cases {
+            let body = |cells: u32| [row_hdr(0, row), (0..cells).flat_map(cell).collect()].concat();
+            assert!(run(body(3)).is_ok(), "{case}");
+            let refused = run(body(4));
+            assert!(
+                matches!(
+                    refused,
+                    Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 })
+                ),
+                "{case}: {refused:?}"
+            );
+        }
     }
 
     #[test]

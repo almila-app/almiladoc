@@ -801,7 +801,9 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
 
     /// Textual extraction of a SmartArt data part via `shared::drawingml`.
     fn diagram_blocks(&self, rel_id: &str) -> Result<Vec<Block>, ConvertError> {
-        self.graphic_blocks(rel_id, ns::DGM, "dataModel", crate::shared::drawingml::diagram_blocks)
+        self.graphic_blocks(rel_id, ns::DGM, "dataModel", |root| {
+            Ok(crate::shared::drawingml::diagram_blocks(root))
+        })
     }
 
     /// The blocks `extract` makes of a chart or diagram part rooted at
@@ -812,14 +814,14 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         rel_id: &str,
         namespace: &str,
         root: &str,
-        extract: impl FnOnce(&Element) -> Vec<Block>,
+        extract: impl FnOnce(&Element) -> Result<Vec<Block>, ConvertError>,
     ) -> Result<Vec<Block>, ConvertError> {
         let Some(path) = rel_target_path(&self.ctx.rels, &self.ctx.base_part, rel_id) else {
             self.ctx.emit_related(DiagnosticCode::GraphicUnread);
             return Ok(Vec::new());
         };
         match self.ctx.pkg.related_xml_tree(&path, Role::Reported(self.ctx.region))? {
-            Some(tree) if tree.find(namespace, root).is_some() => Ok(extract(&tree)),
+            Some(tree) if tree.find(namespace, root).is_some() => extract(&tree),
             Some(_) | None => {
                 self.ctx.emit(DiagnosticCode::GraphicUnread);
                 Ok(Vec::new())

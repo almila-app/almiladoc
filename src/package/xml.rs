@@ -163,6 +163,30 @@ impl Element {
         self.descendant_elems().filter(move |e| e.is(ns, local))
     }
 
+    /// The descendants with the given name that no other such descendant
+    /// holds, in document order: a match's own subtree is never walked.
+    pub fn outermost<'a>(
+        &'a self,
+        ns: &'a str,
+        local: &'a str,
+    ) -> impl Iterator<Item = &'a Element> {
+        let mut stack: Vec<&Element> = self.child_elems().collect();
+        stack.reverse();
+        std::iter::from_fn(move || {
+            while let Some(elem) = stack.pop() {
+                if elem.is(ns, local) {
+                    return Some(elem);
+                }
+                let start = stack.len();
+                stack.extend(elem.child_elems());
+                if let Some(children) = stack.get_mut(start..) {
+                    children.reverse();
+                }
+            }
+            None
+        })
+    }
+
     /// All descendants matching a local name regardless of namespace, in
     /// document order. For vocabularies where the namespace varies across
     /// producers (EPUB container/OPF metadata).
@@ -1088,6 +1112,20 @@ mod tests {
         let root = parse_xml(&ParseCtx::default(), &xml, Role::Probe).unwrap();
         assert_eq!(root.text(), "leaf");
         assert_eq!(root.descendants("", "never").count(), 0);
+    }
+
+    #[test]
+    fn outermost_yields_the_unnested_matches_in_document_order() {
+        let ceiling = usize::try_from(Limits::MAX_NESTING_CEILING).unwrap();
+        let limits = Limits { max_nesting_depth: Limits::MAX_NESTING_CEILING, ..Limits::default() };
+        let chain = format!("{}{}", "<m>".repeat(ceiling - 3), "</m>".repeat(ceiling - 3));
+        let xml = format!(
+            "<r xmlns='urn:t'><o><m n='1'>{chain}</m></o><x><y><m n='2'/></y></x><m n='3'><x><m/></x></m></r>"
+        );
+        let root = parse_xml(&ParseCtx::new(&limits), xml.as_bytes(), Role::Probe).unwrap();
+        let found: Vec<_> = root.outermost("urn:t", "m").map(|m| m.attr_unqualified("n")).collect();
+        assert_eq!(found, [Some("1"), Some("2"), Some("3")]);
+        assert_eq!(root.outermost("urn:t", "never").count(), 0);
     }
 
     fn parsed(

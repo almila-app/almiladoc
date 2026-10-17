@@ -84,8 +84,10 @@ pub(crate) struct Text<'m> {
     line: Line,
     /// Whitespace a cell line held after what it showed and has not shown:
     /// the owed tail, moved into `buf` if the line goes on, and the tails it
-    /// dropped, kept for a take-back until the outermost cell closes.
+    /// dropped below `floor`, kept for a take-back.
     space: String,
+    /// The `space` an open [`Text::attempt`] may take back to.
+    floor: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -114,7 +116,7 @@ enum Debt {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Mark {
+struct Mark {
     len: usize,
     space: usize,
     line: Line,
@@ -122,7 +124,7 @@ pub(crate) struct Mark {
 
 impl<'m> Text<'m> {
     pub(crate) fn new(meter: &'m Meter<'m>) -> Self {
-        Text { buf: String::new(), meter, line: Line::default(), space: String::new() }
+        Text { buf: String::new(), meter, line: Line::default(), space: String::new(), floor: 0 }
     }
 
     pub(crate) fn push_str(&mut self, s: &str) -> Result<(), ConvertError> {
@@ -157,14 +159,28 @@ impl<'m> Text<'m> {
         self.buf.get(mark..).unwrap_or_default()
     }
 
-    pub(crate) fn mark(&self) -> Mark {
-        Mark { len: self.buf.len(), space: self.space.len(), line: self.line }
+    /// Push what `render` pushes, and take it back when `render` returns
+    /// `Ok(false)`.
+    pub(crate) fn attempt(
+        &mut self,
+        render: impl FnOnce(&mut Self) -> Result<bool, ConvertError>,
+    ) -> Result<bool, ConvertError> {
+        let mark = Mark { len: self.buf.len(), space: self.space.len(), line: self.line };
+        let floor = self.floor;
+        self.floor = floor.max(mark.space);
+        let kept = render(self);
+        self.floor = floor;
+        if let Ok(false) = kept {
+            self.truncate(mark);
+        }
+        self.drop_tails();
+        kept
     }
 
     /// Take back everything pushed since `mark`. Whitespace owed at `mark`
     /// and shown since is the first thing pushed after it, so it moves back
     /// from there; owed whitespace dropped since stays where it was held.
-    pub(crate) fn truncate(&mut self, mark: Mark) {
+    fn truncate(&mut self, mark: Mark) {
         let held = self.buf.len().saturating_add(self.space.len());
         if let Some(Owed { debt: Debt::Space(from), .. }) = mark.line.owed
             && self.since(mark.len).starts_with(char::is_whitespace)
@@ -192,10 +208,7 @@ impl<'m> Text<'m> {
         }
         line.depth = line.depth.saturating_sub(1);
         line.shown = line.shown.min(line.depth);
-        if line.depth == 0 {
-            self.meter.release(self.space.len());
-            self.space.clear();
-        }
+        self.drop_tails();
     }
 
     pub(crate) fn into_string(mut self) -> String {
@@ -259,6 +272,25 @@ impl<'m> Text<'m> {
         if line.shown == line.depth {
             line.owed = Some(Owed { by: line.depth, debt: Debt::Break });
             line.shown = line.depth.saturating_sub(1);
+        }
+        self.drop_tails();
+    }
+
+    /// Release the dropped whitespace past what an open attempt may take
+    /// back: everything held but the owed tail.
+    fn drop_tails(&mut self) {
+        let end = match self.line.owed {
+            Some(Owed { debt: Debt::Space(from), .. }) => from,
+            _ => self.space.len(),
+        };
+        let start = (self.floor..end).find(|&at| self.space.is_char_boundary(at)).unwrap_or(end);
+        if start == end {
+            return;
+        }
+        self.space.drain(start..end);
+        self.meter.release(end.saturating_sub(start));
+        if let Some(Owed { debt: Debt::Space(from), .. }) = &mut self.line.owed {
+            *from = start;
         }
     }
 }
@@ -483,6 +515,20 @@ fn emit_spaces(out: &mut String, meter: &Meter<'_>, count: usize) -> Result<(), 
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_kept_attempt_releases_the_tail_it_dropped_and_shows_the_one_it_owes() {
+        let ledger = Ledger::new(u64::MAX, None);
+        let meter = Meter::new(&ledger, u64::MAX);
+        let mut text = Text::new(&meter);
+        text.open_cell();
+        text.push_str("x ").unwrap();
+        assert!(text.attempt(|text| text.push_str("\nb ").map(|()| true)).unwrap());
+        assert_eq!(meter.held.get(), "x<br>b ".len() as u64);
+        text.push_str("c").unwrap();
+        text.close_cell();
+        assert_eq!(text.as_str(), "x<br>b c");
+    }
+
     fn marker<'m>(meter: &'m Meter<'m>, s: &str) -> Text<'m> {
         let mut text = Text::new(meter);
         text.push_str(s).unwrap();
@@ -587,16 +633,18 @@ mod tests {
         let mut sink = Sink::new(&meter);
         let mut held = Text::new(&meter);
         held.push_str("123").unwrap();
-        let mark = held.mark();
-        held.push_str("45").unwrap();
-        sink.write("1234").unwrap();
-        let refused = held.push_str("12");
-        assert!(matches!(
-            refused,
-            Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
-        ));
-        assert_eq!(held.as_str(), "12345");
-        held.truncate(mark);
+        let kept = held.attempt(|held| {
+            held.push_str("45")?;
+            sink.write("1234")?;
+            let refused = held.push_str("12");
+            assert!(matches!(
+                refused,
+                Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
+            ));
+            assert_eq!(held.as_str(), "12345");
+            Ok(false)
+        });
+        assert!(matches!(kept, Ok(false)));
         held.push_str("12").unwrap();
         assert!(sink.write("12").is_err());
         assert_eq!(sink.len(), 4);
@@ -677,14 +725,41 @@ mod tests {
         let mut text = Text::new(&meter);
         text.open_cell();
         text.push_str("a ").unwrap();
-        let mark = text.mark();
-        text.push_str("\nb").unwrap();
-        text.truncate(mark);
+        assert!(!text.attempt(|text| text.push_str("\nb").map(|()| false)).unwrap());
         text.open_cell();
         text.push_str(" \n ").unwrap();
         text.close_cell();
         text.push_str("c").unwrap();
         text.close_cell();
         assert_eq!(text.as_str(), "a c");
+    }
+
+    #[test]
+    fn whitespace_a_line_drops_inside_an_attempt_is_released_past_what_it_takes_back() {
+        let ledger = Ledger::new(u64::MAX, None);
+        let meter = Meter::new(&ledger, 32);
+        let mut text = Text::new(&meter);
+        text.open_cell();
+        let lines = text.attempt(|text| {
+            for _ in 0..4 {
+                text.push_str("x          \n")?;
+            }
+            Ok(true)
+        });
+        assert!(lines.unwrap());
+        assert_eq!((text.as_str(), meter.held.get()), ("x<br>x<br>x<br>x", 16));
+        drop(text);
+        let mut text = Text::new(&meter);
+        text.open_cell();
+        text.push_str("a ").unwrap();
+        let taken_back = text.attempt(|text| {
+            text.push_str("b\u{3000}\u{3000}\nc")?;
+            assert_eq!(text.space, "\u{3000}");
+            Ok(false)
+        });
+        assert!(!taken_back.unwrap());
+        text.push_str("d").unwrap();
+        text.close_cell();
+        assert_eq!((text.as_str(), meter.held.get()), ("a d", 3));
     }
 }

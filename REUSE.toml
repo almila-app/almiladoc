@@ -148,6 +148,7 @@ path = [
     "src/formats/pdf.rs",
     "src/formats/ppt/mod.rs",
     "src/formats/ppt/styletext.rs",
+    "src/formats/pptx/cascade.rs",
     "src/formats/rtf/lexer.rs",
     "src/formats/rtf/table.rs",
     "src/formats/rtf/tables.rs",

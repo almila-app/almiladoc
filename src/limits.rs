@@ -53,9 +53,6 @@ pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum ratio of an archive entry's decompressed to compressed size.
 pub const MAX_COMPRESSION_RATIO: u64 = 1000;
 
-/// Maximum units (pages, slides, sheets, spine items) in one document.
-pub const MAX_PAGES: u64 = 100_000;
-
 /// Maximum Markdown bytes one conversion writes: 256 MiB.
 pub const MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -96,11 +93,11 @@ pub struct Limits {
     /// and padding ones too, and the positions a span claims in rows its
     /// table never supplies: spans, merges and repeats address far more
     /// cells than the input holds. Every DOCX, PPTX, ODF, EPUB, RTF, DOC, XLSX,
-    /// XLSB and XLS table counts. A CSV's table and a DrawingML chart's do
-    /// not: the chart's holds a header row and a row per category, each with
-    /// a category cell and a cell per series, blank where the series has no
-    /// value. An xlsx worksheet's cells, hidden ones too, are judged against
-    /// the positions left as its rows are read.
+    /// XLSB and XLS table counts, and a DrawingML chart's: a header row and a
+    /// row per category, each with a category cell and a cell per series,
+    /// admitted before the table is built. A CSV's table does not. An xlsx,
+    /// xlsb or xls worksheet's cells and the losses they report, hidden ones
+    /// too, count against the positions left as its rows and records stream.
     pub max_grid_slots: u64,
     /// Content-bearing cells a span or repeat expansion produces per table.
     pub max_expansion: u64,
@@ -122,9 +119,6 @@ pub struct Limits {
     /// Ratio of an archive entry's decompressed to compressed size, checked on
     /// entries declaring at least 1 MiB: ordinary content compresses far less.
     pub max_compression_ratio: u64,
-    /// Units (pages, slides, sheets or spine items) in one document: each
-    /// costs work and output even when empty. Not yet enforced.
-    pub max_pages: u64,
     /// Markdown bytes one conversion writes, counting what rendering holds
     /// before writing it (a paragraph to trim, a table's cells): escaping and
     /// repeated references amplify the input. A PDF's Markdown is measured
@@ -168,12 +162,11 @@ impl Limits {
         max_records: MAX_RECORDS,
         max_input_bytes: MAX_INPUT_BYTES,
         max_compression_ratio: MAX_COMPRESSION_RATIO,
-        max_pages: MAX_PAGES,
         max_output_bytes: MAX_OUTPUT_BYTES,
         max_work: MAX_WORK,
     };
 
-    pub(crate) fn fields(&self) -> [(Limit, u64); 16] {
+    pub(crate) fn fields(&self) -> [(Limit, u64); 15] {
         [
             (Limit::EntryBytes, self.max_entry_bytes),
             (Limit::TotalBytes, self.max_total_bytes),
@@ -188,7 +181,6 @@ impl Limits {
             (Limit::Records, self.max_records),
             (Limit::InputBytes, self.max_input_bytes),
             (Limit::CompressionRatio, self.max_compression_ratio),
-            (Limit::Pages, self.max_pages),
             (Limit::OutputBytes, self.max_output_bytes),
             (Limit::Work, self.max_work),
         ]
@@ -238,8 +230,6 @@ pub enum Limit {
     InputBytes,
     /// Ratio of an archive entry's decompressed to compressed size.
     CompressionRatio,
-    /// Units in one document.
-    Pages,
     /// Markdown bytes one conversion writes.
     OutputBytes,
     /// Work units one conversion charges.
@@ -266,7 +256,6 @@ impl Limit {
             Limit::Records => "max_records",
             Limit::InputBytes => "max_input_bytes",
             Limit::CompressionRatio => "max_compression_ratio",
-            Limit::Pages => "max_pages",
             Limit::OutputBytes => "max_output_bytes",
             Limit::Work => "max_work",
             Limit::Allocation => "allocation",
@@ -308,7 +297,6 @@ mod tests {
             (Limit::Records, "max_records"),
             (Limit::InputBytes, "max_input_bytes"),
             (Limit::CompressionRatio, "max_compression_ratio"),
-            (Limit::Pages, "max_pages"),
             (Limit::OutputBytes, "max_output_bytes"),
             (Limit::Work, "max_work"),
             (Limit::Allocation, "allocation"),
@@ -338,7 +326,6 @@ mod tests {
                 (Limit::Records, 16_000_000),
                 (Limit::InputBytes, 256 * 1024 * 1024),
                 (Limit::CompressionRatio, 1000),
-                (Limit::Pages, 100_000),
                 (Limit::OutputBytes, 256 * 1024 * 1024),
                 (Limit::Work, 536_870_912),
             ]

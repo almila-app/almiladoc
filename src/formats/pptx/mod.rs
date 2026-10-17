@@ -314,14 +314,22 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
                 ..ctx
             };
             let mut notes_blocks = Vec::new();
-            for sp in notes_tree.descendants(ns::P, "sp") {
+            for sp in notes_tree.outermost(ns::P, "sp") {
                 // Keep note text bodies (real producers use a body
                 // placeholder; LibreOffice writes plain text boxes) but skip
                 // the slide-image and chrome placeholders.
                 match placeholder_type(sp) {
-                    Some("sldImg") => continue,
-                    Some(kind) if side_placeholder(parse_ctx, sp, kind) => continue,
-                    _ => {}
+                    Some(kind) if kind != "sldImg" && side_placeholder(parse_ctx, sp, kind) => {
+                        continue;
+                    }
+                    kind => {
+                        if sp.outermost(ns::P, "sp").any(|inner| !inner.text().trim().is_empty()) {
+                            parse_ctx.emit(DiagnosticCode::GraphicUnread, Region::Note);
+                        }
+                        if kind == Some("sldImg") {
+                            continue;
+                        }
+                    }
                 }
                 if let Some(tx) = sp.find(ns::P, "txBody") {
                     parse_text_body(tx, &notes_ctx, None, &mut notes_blocks)?;
@@ -475,7 +483,7 @@ fn side_placeholder(parse_ctx: &ParseCtx, sp: &Element, ph_type: &str) -> bool {
         "hdr" => (DiagnosticCode::HeaderOmitted, Region::Header),
         _ => return false,
     };
-    if sp.descendants(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
+    if sp.outermost(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
         parse_ctx.emit(code, region);
     }
     true
@@ -562,7 +570,7 @@ impl SlideCtx<'_, '_> {
         rel_id: Option<&str>,
         namespace: &str,
         root: &str,
-        extract: impl FnOnce(&Element) -> Vec<Block>,
+        extract: impl FnOnce(&Element) -> Result<Vec<Block>, ConvertError>,
     ) -> Result<Vec<Block>, ConvertError> {
         let Some(path) = rel_id.and_then(|id| rel_target_path(self.rels, self.base_part, id))
         else {
@@ -573,7 +581,7 @@ impl SlideCtx<'_, '_> {
             return Ok(Vec::new());
         };
         match self.pkg.related_xml_tree(&path, Role::Reported(self.region))? {
-            Some(tree) if tree.find(namespace, root).is_some() => Ok(extract(&tree)),
+            Some(tree) if tree.find(namespace, root).is_some() => extract(&tree),
             Some(_) | None => {
                 self.emit(DiagnosticCode::GraphicUnread);
                 Ok(Vec::new())
@@ -942,7 +950,7 @@ fn parse_graphic_frame(
             rel_ids.attr_qualified(ns::R, "dm"),
             ns::DGM,
             "dataModel",
-            crate::shared::drawingml::diagram_blocks,
+            |root| Ok(crate::shared::drawingml::diagram_blocks(root)),
         )?);
         return Ok(());
     }
@@ -1560,6 +1568,16 @@ mod tests {
                 vec![],
             ),
             (
+                "a notes shape nested in a notes shape",
+                notes(&shape("", &format!("{}{}", text("kept"), shape("", &text("nested"))))),
+                vec![(GraphicUnread, Note, Some(1), 1)],
+            ),
+            (
+                "an empty shape nested in a notes shape",
+                notes(&shape("", &format!("{}{}", text("kept"), shape("", "")))),
+                vec![],
+            ),
+            (
                 "notes rooted elsewhere",
                 notes_in("sld", &shape("", &text("kept"))),
                 vec![(PartUnreadable, Note, Some(1), 1)],
@@ -1679,6 +1697,19 @@ mod tests {
             expected.sort();
             assert_eq!(reported(&parts), expected, "{case}");
         }
+    }
+
+    #[test]
+    fn a_notes_shape_nested_in_a_notes_shape_is_not_shown() {
+        let tree = shape("", &format!("{}{}", text("kept"), shape("", &text("nested"))));
+        let parts = one(
+            "",
+            &[("rId7", "notesSlide", "../notesSlides/notesSlide1.xml")],
+            &[("ppt/notesSlides/notesSlide1.xml", part("notes", "", &tree, ""))],
+        );
+        let doc = parse(&ParseCtx::default(), &zipped(&parts)).unwrap();
+        let markdown = crate::render::markdown::document_to_markdown(&doc);
+        assert!(markdown.contains("kept") && !markdown.contains("nested"), "{markdown}");
     }
 
     #[test]

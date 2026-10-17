@@ -39,10 +39,10 @@ fn every_fixture_converts_identically_on_one_and_three_threads() {
 #[test]
 fn a_config_out_of_range_is_refused() {
     let mut config = Config::default();
-    config.limits.max_pages = 0;
+    config.limits.max_work = 0;
     assert!(matches!(
         Converter::new(config),
-        Err(ConfigError::ZeroLimit { limit: Limit::Pages, .. })
+        Err(ConfigError::ZeroLimit { limit: Limit::Work, .. })
     ));
 
     let mut config = Config::default();

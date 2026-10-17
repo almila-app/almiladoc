@@ -131,14 +131,14 @@ mod tests {
         );
         let mut config = Config::default();
         config.limits.max_work = u64::MAX;
-        config.limits.max_pages = u64::MAX;
+        config.limits.max_output_bytes = u64::MAX;
         assert_eq!(config.validate(), Ok(()));
     }
 
     #[test]
     fn messages_name_the_field() {
         let cases = [
-            (ConfigError::ZeroLimit { limit: Limit::Pages }, "max_pages must not be zero"),
+            (ConfigError::ZeroLimit { limit: Limit::Work }, "max_work must not be zero"),
             (
                 ConfigError::AboveCeiling { limit: Limit::NestingDepth, ceiling: 1024 },
                 "max_nesting_depth must not exceed 1024",
@@ -165,10 +165,9 @@ mod tests {
             10 => &mut limits.max_records,
             11 => &mut limits.max_input_bytes,
             12 => &mut limits.max_compression_ratio,
-            13 => &mut limits.max_pages,
-            14 => &mut limits.max_output_bytes,
-            15 => &mut limits.max_work,
-            _ => unreachable!("Limits has 16 fields"),
+            13 => &mut limits.max_output_bytes,
+            14 => &mut limits.max_work,
+            _ => unreachable!("Limits has 15 fields"),
         };
         *field = value;
     }

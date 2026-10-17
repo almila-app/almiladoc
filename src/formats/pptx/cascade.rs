@@ -150,7 +150,7 @@ pub struct Placeholder {
 
 pub fn collect_placeholders(sp_tree: &Element) -> Vec<Placeholder> {
     let mut out = Vec::new();
-    for sp in sp_tree.descendants(ns::P, "sp") {
+    for sp in sp_tree.outermost(ns::P, "sp") {
         let Some(ph) = sp.first_descendant(ns::P, "ph") else {
             continue;
         };

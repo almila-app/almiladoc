@@ -364,6 +364,75 @@ fn a_ragged_csv_writes_the_blank_cells_of_its_short_rows_against_max_output_byte
     assert!(refused_with(refusal, Limit::OutputBytes, max));
 }
 
+#[test]
+fn a_cell_holds_only_the_whitespace_its_line_owes_against_max_output_bytes() {
+    let tail: usize = 1_000;
+    let line =
+        format!(r#"<w:r><w:t xml:space="preserve">x{}</w:t><w:br/></w:r>"#, " ".repeat(tail));
+    let cell =
+        format!("<w:tbl><w:tr><w:tc><w:p>{}</w:p></w:tc></w:tr></w:tbl>", line.repeat(1_000));
+    let docx = docx(&cell);
+    let input = || Input::new(&docx, Format::Docx);
+    let markdown = limited(|_| {}).convert(input()).unwrap().into_markdown();
+    let len = markdown.len() as u64;
+    assert!(markdown.contains("x<br>x") && len < 6_000, "{len}");
+    let at = |max| limited(|limits| limits.max_output_bytes = max).convert(input());
+    assert_eq!(at(len + tail as u64).unwrap().markdown(), markdown);
+    assert!(refused_with(at(len), Limit::OutputBytes, len));
+}
+
+const CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+
+/// A chart of `categories` categories, its first series holding them and a
+/// value, each of its `series` - 1 others one value.
+fn chart(categories: usize, series: usize) -> String {
+    let point = |i: usize| format!(r#"<c:pt idx="{i}"><c:v>{i}</c:v></c:pt>"#);
+    let cats: String = (0..categories).map(point).collect();
+    let value = format!("<c:val><c:numCache>{}</c:numCache></c:val>", point(0));
+    let first = format!("<c:ser><c:cat><c:strCache>{cats}</c:strCache></c:cat>{value}</c:ser>");
+    let rest = format!("<c:ser>{value}</c:ser>").repeat(series - 1);
+    format!(
+        r#"<c:chartSpace xmlns:c="{CHART}"><c:chart><c:plotArea><c:barChart>{first}{rest}</c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    )
+}
+
+/// A docx and a pptx that each draw `part` as their one chart.
+fn charted(part: &str) -> [(Vec<u8>, Format); 2] {
+    let graphic = format!(
+        r#"<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData><c:chart xmlns:c="{CHART}" r:id="rId1"/></a:graphicData></a:graphic>"#
+    );
+    let rels = |target: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="{target}"/></Relationships>"#
+        )
+    };
+    let body = format!("<w:p><w:r><w:drawing>{graphic}</w:drawing></w:r></w:p>");
+    let docx = zip(&[
+        ("word/document.xml", &docx_document(&body)),
+        ("word/_rels/document.xml.rels", &rels("charts/chart1.xml")),
+        ("word/charts/chart1.xml", part),
+    ]);
+    let pptx = pptx_with(
+        &format!("<p:graphicFrame>{graphic}</p:graphicFrame>"),
+        &[
+            ("ppt/slides/_rels/slide1.xml.rels", &rels("../charts/chart1.xml")),
+            ("ppt/charts/chart1.xml", part),
+        ],
+    );
+    [(docx, Format::Docx), (pptx, Format::Pptx)]
+}
+
+#[test]
+fn a_chart_table_is_admitted_against_max_grid_slots_before_it_is_built() {
+    for (data, format) in charted(&chart(3, 3)) {
+        let at =
+            |max| limited(|limits| limits.max_grid_slots = max).convert(Input::new(&data, format));
+        let markdown = at(16).unwrap().into_markdown();
+        assert!(markdown.contains("| 0 | 0 | 0 | 0 |"), "{format:?}: {markdown}");
+        assert!(refused_with(at(15), Limit::GridSlots, 15), "{format:?}");
+    }
+}
+
 fn zip(parts: &[(&str, &str)]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, text) in parts {
@@ -554,16 +623,21 @@ fn pptx_groups(units: usize) -> Vec<u8> {
 }
 
 fn pptx(tree: &str) -> Vec<u8> {
+    pptx_with(tree, &[])
+}
+
+fn pptx_with(tree: &str, parts: &[(&str, &str)]) -> Vec<u8> {
     let presentation = format!(
         r#"<p:presentation {PML}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#
     );
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
     let slide = format!("<p:sld {PML}><p:cSld><p:spTree>{tree}</p:spTree></p:cSld></p:sld>");
-    zip(&[
-        ("ppt/presentation.xml", &presentation),
+    let deck = [
+        ("ppt/presentation.xml", presentation.as_str()),
         ("ppt/_rels/presentation.xml.rels", rels),
         ("ppt/slides/slide1.xml", &slide),
-    ])
+    ];
+    zip(&[&deck, parts].concat())
 }
 
 fn epub(body: &str) -> Vec<u8> {

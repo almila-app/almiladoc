@@ -14,7 +14,6 @@ use super::grid::{
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
-use crate::limits::Limit;
 use crate::model::{Block, Document, Inline};
 use crate::package::archive::Role;
 use crate::package::relationships::{Relationships, read_rels, rel_type, rels_part_for};
@@ -221,7 +220,7 @@ fn drawing_losses(parent: &Element, branch: Branch, out: &mut Vec<DiagnosticCode
             "pic" => out.push(DiagnosticCode::ImageUnplaced),
             "graphicFrame" => out.push(DiagnosticCode::GraphicUnread),
             "sp" => {
-                if child.descendants(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
+                if child.outermost(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
                     out.push(DiagnosticCode::GraphicUnread);
                 }
                 if child
@@ -362,9 +361,6 @@ struct SheetRows<'s> {
     dates: DateSystem,
     content: SheetContent,
     next_row: u32,
-    max_slots: u64,
-    slots_left: u64,
-    placed: u64,
 }
 
 impl<'s> SheetRows<'s> {
@@ -378,20 +374,13 @@ impl<'s> SheetRows<'s> {
             shared,
             styles,
             dates,
-            content: SheetContent::on(OOXML_GRID),
+            content: SheetContent::on(
+                OOXML_GRID,
+                parse_ctx.grid_slots_left(),
+                parse_ctx.limits().max_grid_slots,
+            ),
             next_row: 0,
-            max_slots: parse_ctx.limits().max_grid_slots,
-            slots_left: parse_ctx.grid_slots_left(),
-            placed: 0,
         }
-    }
-
-    fn count_placed(&mut self) -> Result<(), ConvertError> {
-        self.placed = self.placed.saturating_add(1);
-        if self.placed > self.slots_left {
-            return Err(ConvertError::limit(Limit::GridSlots, self.max_slots));
-        }
-        Ok(())
     }
 
     fn read_row(&mut self, row: &Element) -> Result<(), ConvertError> {
@@ -412,18 +401,16 @@ impl<'s> SheetRows<'s> {
             let at = match c.attr_unqualified("r").map(parse_coords) {
                 Some(Some(at)) => at,
                 Some(None) => {
-                    self.content.put_unplaced(CellRef::new(r, next_col), &text, loss.is_some());
+                    self.content.put_unplaced(CellRef::new(r, next_col), &text, loss.is_some())?;
                     continue;
                 }
                 None => CellRef::new(r, next_col),
             };
             next_col = at.col.saturating_add(1);
             if let Some(code) = loss {
-                self.content.lose(at, code);
+                self.content.lose(at, code)?;
             }
-            if self.content.put(at, text) {
-                self.count_placed()?;
-            }
+            self.content.put(at, text)?;
         }
         Ok(())
     }
@@ -574,6 +561,7 @@ fn bool_attr(v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::Limit;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
     use std::io::Write;
 
@@ -917,6 +905,14 @@ mod tests {
         assert!(past(run(vec![("A", "", &broken(r#" hidden="1""#, three))])));
         let one = broken("", r#"<c r="A1"><v>1</v></c>"#);
         assert!(past(run(vec![("A", "", fits), ("B", "", &one)])));
+        let unread = |at: &str| format!(r#"<c r="{at}" t="s"><v>9</v></c>"#);
+        let unplaced = |at: &str| format!(r#"<c r="1{at}"><v>1</v></c>"#);
+        for cell in [unread, unplaced] {
+            let held = |cols: &[&str]| cols.iter().map(|at| cell(at)).collect::<String>();
+            let two = format!("<sheetData><row r=\"1\">{}</row></sheetData>", held(&["A1", "B1"]));
+            assert_eq!(run(vec![("A", "", &two)]).unwrap(), 0);
+            assert!(past(run(vec![("A", "", &broken("", &held(&["A1", "B1", "C1"])))])));
+        }
     }
 
     #[test]
