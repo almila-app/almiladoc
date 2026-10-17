@@ -38,6 +38,7 @@ export PROPTEST_RNG_SEED := 20261015
 
 not_run = echo "NOT RUN $@: $(1)"; [ "$${CI:-}" != true ] || exit 1
 need_tool = if [ ! -x $(1) ]; then $(call not_run,no pinned $(notdir $(1)) binary for $$(uname -sm)); exit 0; fi
+refresh_index = $(CARGO) update --quiet --dry-run --manifest-path $(1)
 need_uv = if ! command -v $(firstword $(UV)) >/dev/null; then $(call not_run,uv is not installed); exit 0; fi
 policy_sync = UV_PROJECT_ENVIRONMENT=$(POLICY) $(UV) sync --locked --only-group policy --quiet
 # reuse ships only an sdist for these Pythons, so it builds against the group's locked poetry-core.
@@ -119,7 +120,9 @@ $(CARGO_FUZZ):
 
 policy: $(CARGO_DENY)
 	$(call need_tool,$(CARGO_DENY))
+	$(call refresh_index,Cargo.toml)
 	$(CARGO_DENY) --workspace --all-features --locked --config deny.toml check
+	$(call refresh_index,fuzz/Cargo.toml)
 	$(CARGO_DENY) --manifest-path fuzz/Cargo.toml --all-features --locked --config deny.toml check
 	$(CARGO_DENY) --locked --config deny-offline.toml check bans
 
