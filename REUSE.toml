@@ -12,6 +12,8 @@ path = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
+    "CLAUDE.md",
+    ".claude/**",
     ".github/ISSUE_TEMPLATE/**",
     ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/dependabot.yml",

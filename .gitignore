@@ -10,14 +10,15 @@ __pycache__/
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
-# Agent instructions, settings and memory, and editor state, stay local to each checkout.
-CLAUDE.md
+# Local only: personal agent settings, memory and worktrees, other assistants' files, editor state.
 CLAUDE.local.md
+.worktreeinclude
+.claude/settings.local.json
+.claude/worktrees
+.claude/agent-memory-local
 AGENTS.md
 GEMINI.md
-.claude
 .mcp.json
-.worktreeinclude
 .codex
 .gemini
 .cursor
