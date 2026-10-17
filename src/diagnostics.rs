@@ -109,7 +109,7 @@ diagnostic_codes! {
     UnitUnreadable = "unit_unreadable", Lost;
     /// A cell or record whose value cannot be decoded or was never cached.
     CellValueUnreadable = "cell_value_unreadable", Lost;
-    /// A binary record stream that ends mid-record.
+    /// A binary record stream that ends mid-record, or a substream that ends without its EOF.
     TruncatedRecords = "truncated_records", Lost;
     /// A block, row or paragraph group the reader does not walk.
     BlockUnread = "block_unread", Lost;

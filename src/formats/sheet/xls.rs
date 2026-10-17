@@ -19,7 +19,7 @@ use crate::model::{Block, Document, Inline};
 use crate::shared::binary::{decode_utf16, get_u16, get_u32, read_ole_stream, utf16le_units};
 use crate::shared::officeart;
 use crate::shared::text::clean_text;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 use std::rc::Rc;
 
@@ -153,6 +153,14 @@ struct RecordCount<'c> {
 impl<'c> RecordCount<'c> {
     fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
         RecordCount { parse_ctx, seen: 0, max: parse_ctx.limits().max_records, cut_at: None }
+    }
+
+    /// Reports a substream that stopped at `pos` without its EOF, unless
+    /// `next_record` already reported the cut it stopped at.
+    fn report_unended(&self, pos: usize) {
+        if self.cut_at != Some(pos) {
+            self.parse_ctx.emit(DiagnosticCode::TruncatedRecords, Region::Body);
+        }
     }
 }
 
@@ -384,6 +392,10 @@ struct Globals {
     /// The XF table in record order; a cell's ixfe indexes it directly.
     xfs: CellXfs,
     sheets: Vec<Listed>,
+    /// Where each BOUNDSHEET says its substream starts, hidden sheets and
+    /// VBA modules included: a substream without its EOF ends where another
+    /// starts.
+    starts: BTreeSet<usize>,
 }
 
 impl Globals {
@@ -417,12 +429,15 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
         sst: Vec::new(),
         xfs: CellXfs::new(Vec::new()),
         sheets: Vec::new(),
+        starts: BTreeSet::new(),
     };
     let mut formats: HashMap<u32, (String, bool)> = HashMap::new();
     let mut xf_ifmts: Vec<u16> = Vec::new();
     let mut depth = 1usize;
     let mut ended = false;
-    while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
+    while !globals.starts.contains(&pos)
+        && let Some((rec_type, body, next)) = next_record(data, pos, records)?
+    {
         pos = next;
         match rec_type {
             BOF => depth += 1,
@@ -442,6 +457,9 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
             }
             DATEMODE => globals.dates = DateSystem::from_date1904(get_u16(body, 0) == Some(1)),
             BOUNDSHEET => {
+                if let Some(start) = get_u32(body, 0) {
+                    globals.starts.insert(start as usize);
+                }
                 if let Some(sheet) = read_boundsheet(body, &globals) {
                     globals.sheets.push(sheet);
                 }
@@ -475,8 +493,8 @@ fn read_globals(data: &[u8], records: &mut RecordCount) -> Result<Globals, Conve
     if globals.sheets.is_empty() {
         return Err(ConvertError::malformed("the workbook lists no sheet"));
     }
-    if !ended && records.cut_at.is_none() {
-        records.parse_ctx.emit(DiagnosticCode::TruncatedRecords, Region::Body);
+    if !ended {
+        records.report_unended(pos);
     }
     // Resolved after the pass: FORMAT records are not ordered relative to
     // the XFs that reference them.
@@ -570,6 +588,7 @@ fn read_sheet(
         parse_ctx.limits().max_grid_slots,
     );
     let mut depth = 1usize;
+    let mut ended = false;
     // A FORMULA whose cached value is a string: its cell and ixfe waiting
     // for the STRING record that carries the text.
     let mut pending: Option<(CellRef, u16)> = None;
@@ -577,12 +596,15 @@ fn read_sheet(
     // its text in the TXO after it.
     let mut shape: Option<Shape> = None;
     let mut text_of: Option<TextOf> = None;
-    while let Some((rec_type, body, next)) = next_record(data, pos, records)? {
+    while !globals.starts.contains(&pos)
+        && let Some((rec_type, body, next)) = next_record(data, pos, records)?
+    {
         pos = next;
         match rec_type {
             BOF => depth += 1,
             EOF_REC => {
                 if depth == 1 {
+                    ended = true;
                     break;
                 }
                 depth -= 1;
@@ -819,6 +841,9 @@ fn read_sheet(
             },
             _ => {}
         }
+    }
+    if !ended {
+        records.report_unended(pos);
     }
     Ok(Some(out))
 }
@@ -1229,6 +1254,9 @@ mod tests {
         cut: usize,
         /// The globals substream has no EOF of its own.
         globals_unended: bool,
+        unended_sheets: Vec<usize>,
+        module_sheet: Option<usize>,
+        substreams_reversed: bool,
     }
 
     fn format_record(ifmt: u16, code: &str) -> Vec<u8> {
@@ -1237,8 +1265,28 @@ mod tests {
         rec(FORMAT, &body)
     }
 
+    fn records_in(stream: &[u8]) -> u64 {
+        let mut pos = 0;
+        let mut count = 0;
+        while let Some((_, _, next)) = record_at(stream, pos) {
+            count += 1;
+            pos = next;
+        }
+        count
+    }
+
+    fn parse_within(stream: &[u8], max_records: u64) -> Result<Document, ConvertError> {
+        let limits = crate::limits::Limits { max_records, ..crate::limits::Limits::default() };
+        parse(&ParseCtx::new(&limits), &ole_with("Workbook", stream))
+    }
+
     impl Wb {
         fn build(&self) -> Vec<u8> {
+            ole_with("Workbook", &self.stream().0)
+        }
+
+        /// The BIFF stream and the offset of each sheet substream in it.
+        fn stream(&self) -> (Vec<u8>, Vec<usize>) {
             let mut stream = bof(0x0005, 0x0600);
             if self.filepass {
                 stream.extend(rec(FILEPASS, &[0u8; 6]));
@@ -1261,7 +1309,7 @@ mod tests {
             for (i, (name, state, _)) in self.sheets.iter().enumerate() {
                 let mut body = vec![0u8; 4];
                 body.push(*state);
-                body.push(0);
+                body.push(if self.module_sheet == Some(i) { 0x06 } else { 0 });
                 if self.broken_name == Some(i) {
                     body.extend([name.len() as u8 + 1, 1]);
                     body.extend(name.encode_utf16().chain([0xD800]).flat_map(u16::to_le_bytes));
@@ -1275,15 +1323,24 @@ mod tests {
             if !self.globals_unended {
                 stream.extend(rec(EOF_REC, &[]));
             }
-            for (i, (_, _, records)) in self.sheets.iter().enumerate() {
+            let mut starts = vec![0; self.sheets.len()];
+            let mut order: Vec<usize> = (0..self.sheets.len()).collect();
+            if self.substreams_reversed {
+                order.reverse();
+            }
+            for i in order {
+                let (_, _, records) = &self.sheets[i];
+                starts[i] = stream.len();
                 let offset = (stream.len() as u32).to_le_bytes();
                 stream[patch_at[i]..patch_at[i] + 4].copy_from_slice(&offset);
                 stream.extend(bof(WORKSHEET_SUBSTREAM, 0x0600));
                 stream.extend_from_slice(records);
-                stream.extend(rec(EOF_REC, &[]));
+                if !self.unended_sheets.contains(&i) {
+                    stream.extend(rec(EOF_REC, &[]));
+                }
             }
             stream.truncate(stream.len() - self.cut);
-            ole_with("Workbook", &stream)
+            (stream, starts)
         }
     }
 
@@ -2231,8 +2288,149 @@ mod tests {
             [(DiagnosticCode::TruncatedRecords, Region::Body, None, 1)]
         );
         let cut = Wb { cut: 1, ..wb };
-        assert_eq!(diagnose(&cut), [(DiagnosticCode::TruncatedRecords, Region::Body, None, 1)]);
+        assert_eq!(
+            diagnose(&cut),
+            [
+                (DiagnosticCode::TruncatedRecords, Region::Body, None, 1),
+                in_unit(DiagnosticCode::TruncatedRecords, 1, 1),
+            ]
+        );
         assert_eq!(diagnose(&one_sheet(label(0, 0, 0, "a"))), []);
+    }
+
+    #[test]
+    fn globals_cut_mid_record_report_the_cut_once() {
+        let wb = |cut| Wb {
+            globals: rec(DATEMODE, &[0, 0]),
+            globals_unended: true,
+            cut,
+            ..one_sheet(label(0, 0, 0, "a"))
+        };
+        let (stream, starts) = wb(0).stream();
+        let dropped_sheet_and_a_byte = stream.len() - starts[0] + 1;
+        let parse_ctx = ParseCtx::default();
+        let error = parse(&parse_ctx, &wb(dropped_sheet_and_a_byte).build()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConvertError::Malformed { reason: "no sheet in the workbook could be read", .. }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            reported(parse_ctx),
+            [
+                in_unit(DiagnosticCode::UnitUnreadable, 1, 1),
+                (DiagnosticCode::TruncatedRecords, Region::Body, None, 1),
+            ]
+        );
+    }
+
+    fn cells(text: &str) -> Vec<u8> {
+        (0..3).flat_map(|col| label(0, col, 0, text)).collect()
+    }
+
+    fn tables_of(doc: &Document) -> Vec<Vec<Vec<String>>> {
+        doc.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table(t) => Some(texts(t)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn two_sheets(first: Vec<u8>, second_state: u8) -> Wb {
+        Wb {
+            xfs: vec![0],
+            sheets: vec![("A", 0, first), ("B", second_state, cells("b"))],
+            unended_sheets: vec![0],
+            ..Wb::default()
+        }
+    }
+
+    #[test]
+    fn globals_without_their_eof_charge_each_record_once() {
+        let unended = |globals: Vec<u8>| Wb {
+            globals,
+            globals_unended: true,
+            unended_sheets: Vec::new(),
+            ..two_sheets(cells("a"), 0)
+        };
+        for wb in [unended(Vec::new()), unended(bof(0x0020, 0x0600))] {
+            let (stream, _) = wb.stream();
+            let doc = parse_within(&stream, records_in(&stream)).unwrap();
+            assert_eq!(tables_of(&doc), [vec![vec!["a"; 3]], vec![vec!["b"; 3]]]);
+        }
+    }
+
+    #[test]
+    fn a_sheet_without_its_eof_reports_the_stream_truncated() {
+        let dropped = Wb { cut: 4, ..one_sheet(label(0, 0, 0, "a")) };
+        let parse_ctx = ParseCtx::default();
+        let doc = parse(&parse_ctx, &dropped.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), vec![vec!["a"]]);
+        assert_eq!(reported(parse_ctx), [in_unit(DiagnosticCode::TruncatedRecords, 1, 1)]);
+        let cut = Wb { cut: 1, ..one_sheet(label(0, 0, 0, "a")) };
+        assert_eq!(diagnose(&cut), [in_unit(DiagnosticCode::TruncatedRecords, 1, 1)]);
+    }
+
+    #[test]
+    fn a_sheet_without_its_eof_ends_where_the_next_sheet_starts() {
+        let wb = two_sheets(cells("a"), 0);
+        let (stream, _) = wb.stream();
+        let doc = parse_within(&stream, records_in(&stream)).unwrap();
+        assert_eq!(tables_of(&doc), [vec![vec!["a"; 3]], vec![vec!["b"; 3]]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TruncatedRecords, 1, 1)]);
+    }
+
+    #[test]
+    fn a_sheet_reports_its_own_end_after_another_sheet_hit_the_cut() {
+        let wb = Wb {
+            cut: 1,
+            substreams_reversed: true,
+            unended_sheets: vec![1],
+            ..two_sheets(cells("a"), 0)
+        };
+        assert_eq!(
+            diagnose(&wb),
+            [
+                in_unit(DiagnosticCode::TruncatedRecords, 1, 1),
+                in_unit(DiagnosticCode::TruncatedRecords, 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_substream_without_its_eof_ends_where_the_next_sheet_starts() {
+        let chart = [bof(0x0020, 0x0600), label(0, 0, 0, "chart")].concat();
+        let wb = two_sheets([cells("a"), chart].concat(), 0);
+        let (stream, _) = wb.stream();
+        let doc = parse_within(&stream, records_in(&stream)).unwrap();
+        assert_eq!(tables_of(&doc), [vec![vec!["a"; 3]], vec![vec!["b"; 3]]]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::TruncatedRecords, 1, 1)]);
+    }
+
+    #[test]
+    fn a_sheet_without_its_eof_stops_before_a_hidden_sheet_and_a_module() {
+        let hidden = two_sheets(cells("a"), 1);
+        let module = Wb { module_sheet: Some(1), ..two_sheets(cells("a"), 0) };
+        for wb in [hidden, module] {
+            let (stream, starts) = wb.stream();
+            let before_next = records_in(&stream[..starts[1]]);
+            let doc = parse_within(&stream, before_next).unwrap();
+            assert_eq!(tables_of(&doc), [vec![vec!["a"; 3]]]);
+        }
+    }
+
+    #[test]
+    fn a_workbook_whose_only_sheet_is_a_module_is_malformed() {
+        let wb = Wb { module_sheet: Some(0), ..one_sheet(cells("m")) };
+        let error = parse(&ParseCtx::default(), &wb.build()).unwrap_err();
+        assert!(
+            matches!(error, ConvertError::Malformed { reason: "the workbook lists no sheet", .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
