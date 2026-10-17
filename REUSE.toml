@@ -29,6 +29,7 @@ path = [
     "fuzz/fuzz_targets/odp.rs",
     "fuzz/fuzz_targets/ods.rs",
     "fuzz/fuzz_targets/pptx.rs",
+    "fuzz/recipients.txt",
     "fuzz/rust-toolchain.toml",
     "fuzz/regressions/**",
     "fuzz/seeds/pdf/handmade-arabic.pdf",

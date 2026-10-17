@@ -28,7 +28,7 @@ CRATE_FILES = "https://static.crates.io/crates/"
 SUPPORTED = {"bugfix", "security"}
 STABLE_TAG = re.compile(r"v?(\d+(?:\.\d+)*)")
 LABEL = re.compile(r"(ubuntu|macos|windows)-(\d+(?:\.\d+)?)(-[a-z0-9-]+)?")
-TOOL_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/releases/download/\$\((\w+)_VERSION\)/([^,\s]+)")
+TOOL_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/releases/download/(v?)\$\((\w+)_VERSION\)/([^,\s]+)")
 
 
 class Tool(NamedTuple):
@@ -38,6 +38,11 @@ class Tool(NamedTuple):
     sums: dict[str, str]
     asset: str
     musl: str
+    tag_prefix: str
+
+    @property
+    def tag(self) -> str:
+        return self.tag_prefix + self.version
 
     def asset_name(self, version: str, arch: str) -> str:
         return self.asset.replace(f"$({self.prefix}_VERSION)", version).replace("$(MUSL)", self.musl.replace("$(HOST_ARCH)", arch))
@@ -71,9 +76,9 @@ def runner_labels(root: Path) -> dict[str, list[str]]:
 def tools(root: Path) -> list[Tool]:
     text, values = makefile(root)
     found = []
-    for repository, prefix, asset in TOOL_URL.findall(text):
+    for repository, tag_prefix, prefix, asset in TOOL_URL.findall(text):
         sums = {key.removeprefix(f"{prefix}_SHA256_"): value for key, value in values.items() if key.startswith(f"{prefix}_SHA256_")}
-        found.append(Tool(prefix, repository, values[f"{prefix}_VERSION"], sums, asset, values["MUSL"]))
+        found.append(Tool(prefix, repository, values[f"{prefix}_VERSION"], sums, asset, values["MUSL"], tag_prefix))
     return found
 
 
@@ -172,8 +177,9 @@ def tool_findings(tool: Tool, releases: list[dict], pinned: dict, now: dt.dateti
         if digest != tool.sums[arch]
     ]
     if newest := newer(tool.version, releases, now):
-        sums = ", ".join(f"{arch} {digests(newest).get(tool.asset_name(newest['tag_name'], arch)) or 'no digest'}" for arch in sorted(tool.sums))
-        found.append(f"{tool.prefix}_VERSION {tool.version}: {newest['tag_name']} ({sums})")
+        release = STABLE_TAG.fullmatch(newest["tag_name"])[1]
+        sums = ", ".join(f"{arch} {digests(newest).get(tool.asset_name(release, arch)) or 'no digest'}" for arch in sorted(tool.sums))
+        found.append(f"{tool.prefix}_VERSION {tool.version}: {release} ({sums})")
     return found
 
 
@@ -240,7 +246,7 @@ def report(root: Path, now: dt.datetime) -> list[str]:
     readme = fetch(f"{GITHUB}repos/actions/runner-images/contents/README.md?ref={commit}", "application/vnd.github.raw+json").decode("utf-8")
     found += label_findings(runner_labels(root), ga_labels(readme))
     for tool in tools(root):
-        found += tool_findings(tool, github(f"repos/{tool.repository}/releases?per_page=100"), github(f"repos/{tool.repository}/releases/tags/{tool.version}"), now)
+        found += tool_findings(tool, github(f"repos/{tool.repository}/releases?per_page=100"), github(f"repos/{tool.repository}/releases/tags/{tool.tag}"), now)
     pinned_uv = makefile(root)[1]["UV_VERSION"]
     if uv := newer(pinned_uv, github(f"repos/{UV_REPOSITORY}/releases?per_page=100"), now):
         found.append(f"UV_VERSION {pinned_uv}: {uv['tag_name']}")
@@ -272,7 +278,7 @@ def self_test() -> int:
     for tool in found:
         expect(re.fullmatch(r"\d+(?:\.\d+)+", tool.version) is not None and "x86_64" in tool.sums, f"{tool.prefix} pin {tool}")
         expect(all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in tool.sums.values()), f"{tool.prefix} checksums {tool.sums}")
-        expect(tool.asset_name(tool.version, "x86_64").endswith(f"{tool.version}-x86_64-unknown-linux-musl.tar.gz"), f"{tool.prefix} asset {tool.asset}")
+        expect(tool.asset_name(tool.version, "x86_64").endswith((f"{tool.version}-x86_64-unknown-linux-musl.tar.gz", f"{tool.tag}-linux-amd64.tar.gz")), f"{tool.prefix} asset {tool.asset}")
     pins = uv_pins(ROOT)
     expect(len(pins) == 1 + workflows.count("astral-sh/setup-uv@") and all(map(STABLE_TAG.fullmatch, pins.values())), f"uv pins {pins}")
     listed, floor = pythons(ROOT)
@@ -313,9 +319,9 @@ def self_test() -> int:
 
     now = dt.datetime(2026, 10, 15, 12, tzinfo=dt.UTC)
 
-    def release(tag: str, days: float, prerelease: bool = False, draft: bool = False, digest: str = "a" * 64) -> dict:
+    def release(tag: str, days: float, prerelease: bool = False, draft: bool = False, digest: str = "a" * 64, name: str = "cargo-x-{tag}-x86_64-unknown-linux-musl.tar.gz") -> dict:
         published = (now - dt.timedelta(days=days)).isoformat().replace("+00:00", "Z")
-        asset = {"name": f"cargo-x-{tag}-x86_64-unknown-linux-musl.tar.gz", "digest": f"sha256:{digest}"}
+        asset = {"name": name.format(tag=tag), "digest": f"sha256:{digest}"}
         return {"tag_name": tag, "published_at": published, "prerelease": prerelease, "draft": draft, "assets": [asset]}
 
     releases = [release("1.5.0", 1), release("1.4.1-rc.1", 20), release("1.4.0", 10, prerelease=True), release("1.3.5", 9, draft=True), release("1.3.0", 7), release("1.2.9", 30)]
@@ -328,12 +334,25 @@ def self_test() -> int:
     expect([url for url, headers in sent.items() if ("Authorization", "Bearer t") in headers] == [GITHUB + "repos"], f"the token reaches {sent}")
     expect(all(("User-agent", USER_AGENT) in headers for headers in sent.values()), "the User-Agent")
     expect("Authorization" not in request(GITHUB, "application/json", "t").headers, "the token follows a redirect")
-    tool = Tool("CARGO_X", "o/cargo-x", "1.2.9", {"x86_64": "b" * 64}, "cargo-x-$(CARGO_X_VERSION)-$(MUSL).tar.gz", "$(HOST_ARCH)-unknown-linux-musl")
+    tool = Tool("CARGO_X", "o/cargo-x", "1.2.9", {"x86_64": "b" * 64}, "cargo-x-$(CARGO_X_VERSION)-$(MUSL).tar.gz", "$(HOST_ARCH)-unknown-linux-musl", "")
     expect(
         tool_findings(tool, releases, releases[-1], now) == ["CARGO_X_SHA256_x86_64 1.2.9: the release's sha256 is " + "a" * 64, "CARGO_X_VERSION 1.2.9: 1.3.0 (x86_64 " + "a" * 64 + ")"],
         "tool findings",
     )
     expect(tool_findings(tool._replace(version="1.3.0", sums={"x86_64": "a" * 64}), releases, releases[-2], now) == [], "a current tool")
+    with tempfile.TemporaryDirectory() as directory:
+        fake = Path(directory)
+        url = "https://github.com/o/age/releases/download/v$(AGE_VERSION)/age-v$(AGE_VERSION)-linux-amd64.tar.gz"
+        (fake / "Makefile").write_text(f"MUSL := $(HOST_ARCH)-unknown-linux-musl\nAGE_VERSION := 1.2.9\nAGE_SHA256_x86_64 := {'b' * 64}\nAGE_URL := {url}\n", encoding="utf-8")
+        tagged = tools(fake)
+    expect([(each.repository, each.tag, each.asset_name("1.3.0", "x86_64")) for each in tagged] == [("o/age", "v1.2.9", "age-v1.3.0-linux-amd64.tar.gz")], f"a v-tagged tool {tagged}")
+    v_releases = [release(tag, days, name="age-{tag}-linux-amd64.tar.gz") for tag, days in (("v1.3.1", 2), ("v1.3.0", 8), ("v1.2.9", 30))]
+    expect(
+        bool(tagged)
+        and tool_findings(tagged[0], v_releases, v_releases[-1], now)
+        == ["AGE_SHA256_x86_64 1.2.9: the release's sha256 is " + "a" * 64, "AGE_VERSION 1.2.9: 1.3.0 (x86_64 " + "a" * 64 + ")"],
+        "v-tagged tool findings",
+    )
 
     readme = "## Available Images\n| Image | A | Label | S |\n|--|--|--|--|\n"
     readme += "| Ubuntu 28.04 [![beta](https://img.shields.io/badge/beta-1)](x) | x64 | `ubuntu-28.04` | [u] |\n| Ubuntu 26.04 | x64 | `ubuntu-latest` or `ubuntu-26.04` | [u] |\n"

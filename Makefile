@@ -24,9 +24,14 @@ CARGO_ABOUT_SHA256_x86_64 := 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7
 CARGO_ABOUT_SHA256_aarch64 := af5169282fb6f84e13471493f405437e43ac517744c9ae12fbe2cdf0a6f0e5a8
 CARGO_FUZZ_VERSION := 0.13.2
 CARGO_FUZZ_SHA256_x86_64 := b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
+AGE_VERSION := 1.3.2
+AGE_SHA256_x86_64 := cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+AGE_URL := https://github.com/FiloSottile/age/releases/download/v$(AGE_VERSION)/age-v$(AGE_VERSION)-linux-amd64.tar.gz
 CARGO_DENY := $(TOOLS)/cargo-deny-$(CARGO_DENY_VERSION)/cargo-deny
 CARGO_ABOUT := $(TOOLS)/cargo-about-$(CARGO_ABOUT_VERSION)/cargo-about
 CARGO_FUZZ := $(TOOLS)/cargo-fuzz-$(CARGO_FUZZ_VERSION)/cargo-fuzz
+AGE := $(TOOLS)/age-$(AGE_VERSION)/age
+AGE_KEYGEN := $(TOOLS)/age-$(AGE_VERSION)/age-keygen
 MUSL := $(HOST_ARCH)-unknown-linux-musl
 
 export RUSTFLAGS := -D warnings
@@ -56,7 +61,7 @@ install -m 0755 $@.download/$(3) $@
 rm -rf $@.download
 endef
 
-.PHONY: ci fmt clippy test doc features python tools policy locks licences reuse hygiene actions dco provenance fuzz
+.PHONY: ci fmt clippy test doc features python tools policy locks licences reuse hygiene actions dco provenance fuzz fuzz-campaign
 
 ci: fmt clippy test doc features python policy locks licences reuse hygiene actions dco provenance fuzz
 
@@ -107,7 +112,7 @@ python:
 	  (cd $$venv && bin/python -I -B -m mypy.stubtest --allowlist $(CURDIR)/python/stubtest-allowlist.txt almiladoc)
 	done
 
-tools: $(CARGO_DENY) $(CARGO_ABOUT) $(CARGO_FUZZ)
+tools: $(CARGO_DENY) $(CARGO_ABOUT) $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
 
 $(CARGO_DENY):
 	$(call fetch,https://github.com/EmbarkStudios/cargo-deny/releases/download/$(CARGO_DENY_VERSION)/cargo-deny-$(CARGO_DENY_VERSION)-$(MUSL).tar.gz,$(CARGO_DENY_SHA256_$(HOST_ARCH)),cargo-deny-$(CARGO_DENY_VERSION)-$(MUSL)/cargo-deny)
@@ -117,6 +122,12 @@ $(CARGO_ABOUT):
 
 $(CARGO_FUZZ):
 	$(call fetch,https://github.com/rust-fuzz/cargo-fuzz/releases/download/$(CARGO_FUZZ_VERSION)/cargo-fuzz-$(CARGO_FUZZ_VERSION)-$(MUSL).tar.gz,$(CARGO_FUZZ_SHA256_$(HOST_ARCH)),cargo-fuzz)
+
+$(AGE):
+	$(call fetch,$(AGE_URL),$(AGE_SHA256_$(HOST_ARCH)),age/age)
+
+$(AGE_KEYGEN):
+	$(call fetch,$(AGE_URL),$(AGE_SHA256_$(HOST_ARCH)),age/age-keygen)
 
 policy: $(CARGO_DENY)
 	$(call need_tool,$(CARGO_DENY))
@@ -183,9 +194,12 @@ provenance:
 	$(POLICY_PYTHON) .github/scripts/provenance.py
 
 # cargo-fuzz's release binary is a musl build, which defaults --target to its own triple.
-fuzz: $(CARGO_FUZZ)
+fuzz: $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
 	$(call need_tool,$(CARGO_FUZZ))
-	export PATH="$(dir $(CARGO_FUZZ)):$$PATH"
+	$(call need_tool,$(AGE))
+	$(call need_tool,$(AGE_KEYGEN))
+	export PATH="$(dir $(CARGO_FUZZ)):$(dir $(AGE)):$$PATH"
+	python3 -I -B .github/scripts/fuzz_campaign.py --self-test
 	cd fuzz
 	cargo metadata --locked --format-version 1 >/dev/null
 	host=$$(rustc -vV | sed -n 's/^host: //p')
@@ -202,3 +216,10 @@ fuzz: $(CARGO_FUZZ)
 	  cargo fuzz run --target "$$host" $$target seeds/$$target regressions/$$target -- -runs=0
 	done
 	RUSTDOCFLAGS="$$RUSTDOCFLAGS --cfg docsrs" cargo doc --locked --manifest-path ../Cargo.toml --no-deps
+
+# FUZZ_MODE is empty for a campaign, or drill, cmin or proptest; FUZZ_TARGET names the fuzz target.
+fuzz-campaign: $(CARGO_FUZZ) $(AGE)
+	$(call need_tool,$(CARGO_FUZZ))
+	$(call need_tool,$(AGE))
+	export PATH="$(dir $(CARGO_FUZZ)):$(dir $(AGE)):$$PATH"
+	python3 -I -B .github/scripts/fuzz_campaign.py $${FUZZ_MODE:+"--$$FUZZ_MODE"} $${FUZZ_TARGET:+"$$FUZZ_TARGET"}
