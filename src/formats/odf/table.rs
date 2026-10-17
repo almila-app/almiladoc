@@ -14,7 +14,9 @@ use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
 use crate::formats::odf::text::{Ctx, parse_children, report_unplaced};
 use crate::limits::{Limit, Limits};
-use crate::model::{Block, Cell, GridBuilder, Inline, TableKind};
+use crate::model::{
+    Block, Cell, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem, TableKind,
+};
 use crate::package::xml::{Element, ns};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::text::clean_text;
@@ -164,44 +166,65 @@ enum RowCell {
     Cell { repeat: u64, col_span: u32, row_span: u32, blocks: Vec<Block>, held: Held },
 }
 
-/// Approximate retained text bytes of parsed cell content outside its
-/// tables.
+/// The text bytes a clone of parsed cell content carries, outside its tables.
 fn block_bytes(blocks: &[Block]) -> u64 {
-    fn inline_bytes(inlines: &[crate::model::Inline]) -> u64 {
-        use crate::model::Inline;
-        inlines
-            .iter()
-            .map(|i| match i {
-                Inline::Text { text, .. } => text.len() as u64,
-                Inline::Link { content, target } => {
-                    let target_len = match target {
-                        crate::model::LinkTarget::External(s)
-                        | crate::model::LinkTarget::Relative(s)
-                        | crate::model::LinkTarget::Anchor(s) => s.len() as u64,
-                    };
-                    inline_bytes(content) + target_len
-                }
-                Inline::Image { alt, .. } => alt.len() as u64,
-                Inline::Math(tex) => tex.len() as u64,
-                Inline::Anchor(id) | Inline::NoteRef(id) => id.len() as u64,
-                Inline::Checkbox(_) => 3,
-                Inline::LineBreak => 1,
-            })
-            .sum()
-    }
     blocks
         .iter()
-        .map(|b| match b {
-            Block::Paragraph(i) | Block::Heading { content: i, .. } => inline_bytes(i),
-            Block::Math(tex) => tex.len() as u64,
-            Block::List(list) => {
-                list.items.iter().map(|item| block_bytes(&item.blocks)).sum::<u64>()
+        .map(|block| match block {
+            Block::Paragraph(inlines) => inline_bytes(inlines),
+            Block::Heading { level: _, anchor, content } => {
+                optional_bytes(anchor.as_deref()) + inline_bytes(content)
             }
+            Block::List(List { marker: _, start: _, items }) => items
+                .iter()
+                .map(|ListItem { blocks, marker_label }| {
+                    optional_bytes(marker_label.as_deref()) + block_bytes(blocks)
+                })
+                .sum(),
             Block::BlockQuote(blocks) => block_bytes(blocks),
-            Block::CodeBlock { text, .. } => text.len() as u64,
+            Block::CodeBlock { lang, text } => optional_bytes(lang.as_deref()) + text_bytes(text),
+            Block::Math(tex) => text_bytes(tex),
             Block::Table(_) | Block::Rule => 0,
         })
         .sum()
+}
+
+fn inline_bytes(inlines: &[Inline]) -> u64 {
+    inlines
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text { text, style: _ } => text_bytes(text),
+            Inline::Link { content, target } => inline_bytes(content) + target_bytes(target),
+            Inline::Image { alt, source } => text_bytes(alt) + source_bytes(source),
+            Inline::Math(tex) => text_bytes(tex),
+            Inline::Anchor(id) | Inline::NoteRef(id) => text_bytes(id),
+            Inline::Checkbox(_) => 3,
+            Inline::LineBreak => 1,
+        })
+        .sum()
+}
+
+fn target_bytes(target: &LinkTarget) -> u64 {
+    match target {
+        LinkTarget::External(text) | LinkTarget::Relative(text) | LinkTarget::Anchor(text) => {
+            text_bytes(text)
+        }
+    }
+}
+
+fn source_bytes(source: &ImageSource) -> u64 {
+    match source {
+        ImageSource::External(url) => text_bytes(url),
+        ImageSource::Asset(_) | ImageSource::Unavailable => 0,
+    }
+}
+
+fn optional_bytes(text: Option<&str>) -> u64 {
+    text.map_or(0, text_bytes)
+}
+
+fn text_bytes(text: &str) -> u64 {
+    u64::try_from(text.len()).unwrap_or(u64::MAX)
 }
 
 fn walk_rows(
@@ -537,4 +560,77 @@ pub fn parse_spreadsheet(sheet: &Element, ctx: &Ctx) -> Result<Vec<Block>, Conve
         blocks.extend(content);
     }
     Ok(blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::MarkerKind;
+
+    #[test]
+    fn a_copy_of_an_image_holds_the_url_beside_its_alt_text() {
+        let image = |source| Inline::Image { alt: "ab".into(), source };
+        assert_eq!(inline_bytes(&[image(ImageSource::External("http://e/u".into()))]), 2 + 10);
+        assert_eq!(inline_bytes(&[image(ImageSource::Unavailable)]), 2);
+    }
+
+    #[test]
+    fn a_copy_of_a_heading_holds_its_anchor_beside_its_text() {
+        let heading = |anchor: Option<&str>| Block::Heading {
+            level: 1,
+            anchor: anchor.map(str::to_string),
+            content: vec![Inline::plain("text")],
+        };
+        assert_eq!(block_bytes(&[heading(Some("anchor"))]), 6 + 4);
+        assert_eq!(block_bytes(&[heading(None)]), 4);
+    }
+
+    #[test]
+    fn a_copy_of_a_code_block_holds_its_language_beside_its_text() {
+        let code = |lang: Option<&str>| Block::CodeBlock {
+            lang: lang.map(str::to_string),
+            text: "fn".into(),
+        };
+        assert_eq!(block_bytes(&[code(Some("rust"))]), 4 + 2);
+        assert_eq!(block_bytes(&[code(None)]), 2);
+    }
+
+    #[test]
+    fn a_copy_of_a_list_holds_each_items_marker_label_and_content() {
+        let item = |label: Option<&str>| ListItem {
+            blocks: vec![Block::Paragraph(vec![Inline::plain("abc")])],
+            marker_label: label.map(str::to_string),
+        };
+        let list = Block::List(List {
+            marker: MarkerKind::Decimal,
+            start: 1,
+            items: vec![item(Some("1-a)")), item(None)],
+        });
+        assert_eq!(block_bytes(&[list]), 4 + 3 + 3);
+    }
+
+    #[test]
+    fn a_copy_of_a_link_holds_its_target_of_any_kind_beside_its_text() {
+        let link = |target| Inline::Link { content: vec![Inline::plain("ab")], target };
+        for (target, len) in [
+            (LinkTarget::External("http://e".into()), 8),
+            (LinkTarget::Relative("../e/f".into()), 6),
+            (LinkTarget::Anchor("anchor".into()), 6),
+        ] {
+            assert_eq!(inline_bytes(&[link(target)]), 2 + len);
+        }
+    }
+
+    #[test]
+    fn a_copy_of_the_remaining_content_holds_its_text() {
+        let quoted = Block::BlockQuote(vec![Block::Paragraph(vec![
+            Inline::Math("x^2".into()),
+            Inline::Anchor("id".into()),
+            Inline::NoteRef("n1".into()),
+            Inline::Checkbox(true),
+            Inline::LineBreak,
+        ])]);
+        assert_eq!(block_bytes(&[quoted]), 3 + 2 + 2 + 3 + 1);
+        assert_eq!(block_bytes(&[Block::Math("ab".into()), Block::Rule]), 2);
+    }
 }

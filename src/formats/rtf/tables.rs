@@ -9,7 +9,7 @@ use crate::shared::blockstyle::{self, BlockStyle};
 use crate::shared::delta::StyleDelta;
 use crate::shared::list::MarkerKind;
 use crate::shared::numbering::{NumberPattern, NumberText};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::{BitOrAssign, Range};
 
 pub const LIST_LEVELS: usize = 9;
@@ -114,6 +114,27 @@ pub struct StyleDef {
     pub delta: StyleDelta,
     /// The block container the style's name designates.
     pub block: Option<BlockStyle>,
+}
+
+impl StyleDef {
+    fn over(self, base: StyleDef) -> StyleDef {
+        StyleDef {
+            outline: self.outline.or(base.outline),
+            delta: base.delta.merge(self.delta),
+            block: self.block.or(base.block),
+        }
+    }
+}
+
+/// Resolve the styles of a `sbasedon` cycle, given in walk order, each as
+/// found going once around from itself, and return the first's.
+fn resolve_cycle(ring: &[(i32, StyleDef)], resolved: &mut HashMap<i32, StyleDef>) -> StyleDef {
+    let mut base = ring.iter().rev().fold(StyleDef::default(), |base, &(_, def)| def.over(base));
+    for &(id, def) in ring.iter().rev() {
+        base = def.over(base);
+        resolved.insert(id, base);
+    }
+    base
 }
 
 /// A prelude table.
@@ -380,45 +401,50 @@ fn parse_stylesheet(
             _ => {}
         }
     }
-    let mut cycles: HashSet<i32> = HashSet::new();
-    let mut acyclic: HashSet<i32> = HashSet::new();
-    for &id in raw.keys() {
-        let mut chain: Vec<(i32, &StyleDef)> = Vec::new();
-        let mut seen: HashSet<i32> = HashSet::new();
-        let mut resolved = StyleDef::default();
-        let mut ends_acyclic = true;
+    let mut resolved: HashMap<i32, StyleDef> = HashMap::with_capacity(raw.len());
+    let mut ids: Vec<i32> = raw.keys().copied().collect();
+    ids.sort_unstable();
+    for id in ids {
+        if resolved.contains_key(&id) {
+            continue;
+        }
+        let mut walked: Vec<(i32, StyleDef)> = Vec::new();
+        let mut positions: HashMap<i32, usize> = HashMap::new();
+        let mut base = StyleDef::default();
+        let mut cycle_at = None;
         let mut cursor = Some(id);
         while let Some(cur) = cursor {
-            if acyclic.contains(&cur) {
-                resolved = styles.get(&cur).copied().unwrap_or_default();
+            if let Some(&known) = resolved.get(&cur) {
+                base = known;
                 break;
             }
-            if !seen.insert(cur) {
-                ends_acyclic = false;
-                let cycle = chain.iter().skip_while(|&&(link, _)| link != cur);
-                if cycle.map(|&(link, _)| link).min().is_some_and(|least| cycles.insert(least)) {
-                    parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
-                }
+            if let Some(&at) = positions.get(&cur) {
+                cycle_at = Some(at);
                 break;
             }
-            let Some((def, base)) = raw.get(&cur) else { break };
-            chain.push((cur, def));
-            if base.is_some() {
+            let Some(&(def, next)) = raw.get(&cur) else { break };
+            positions.insert(cur, walked.len());
+            walked.push((cur, def));
+            if next.is_some() {
                 parse_ctx.charge(1)?;
             }
-            cursor = *base;
+            cursor = next;
         }
-        for &(link, def) in chain.iter().rev() {
-            resolved.delta = resolved.delta.merge(def.delta);
-            resolved.outline = def.outline.or(resolved.outline);
-            resolved.block = def.block.or(resolved.block);
-            if ends_acyclic {
-                styles.insert(link, resolved);
-                acyclic.insert(link);
+        let tail = match cycle_at {
+            Some(at) => {
+                parse_ctx.emit(DiagnosticCode::StyleCycle, Region::Container);
+                let (tail, ring) = walked.split_at(at);
+                base = resolve_cycle(ring, &mut resolved);
+                tail
             }
+            None => &walked,
+        };
+        for &(link, def) in tail.iter().rev() {
+            base = def.over(base);
+            resolved.insert(link, base);
         }
-        styles.insert(id, resolved);
     }
+    styles.extend(resolved);
     Ok(())
 }
 
@@ -703,6 +729,42 @@ mod tests {
         let c = styles[&3].delta;
         assert_eq!((c.bold, c.italic), (Some(true), Some(true)));
         assert_eq!(styles[&2].delta.bold, Some(true));
-        assert_eq!(parse_ctx.fuel(), tokens(group) + 7);
+        assert_eq!(parse_ctx.fuel(), tokens(group) + 3);
+    }
+
+    fn cycles(parse_ctx: ParseCtx) -> u64 {
+        parse_ctx
+            .into_diagnostics()
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::StyleCycle)
+            .map(|d| d.count)
+            .sum()
+    }
+
+    #[test]
+    fn each_style_of_a_cycle_resolves_as_found_going_once_around_from_itself() {
+        let group = r"{\s1\sbasedon2\b A;}{\s2\sbasedon3\b0 B;}{\s3\sbasedon1 C;}{\s4\sbasedon2 D;}{\s5\sbasedon3 E;}";
+        let parse_ctx = ParseCtx::default();
+        let styles = stylesheet(&parse_ctx, group).unwrap();
+        let bold: Vec<_> = (1..=5).map(|id| styles[&id].delta.bold).collect();
+        assert_eq!(bold, [Some(true), Some(false), Some(true), Some(false), Some(true)]);
+        assert_eq!(cycles(parse_ctx), 1);
+    }
+
+    #[test]
+    fn styles_under_a_cycle_resolve_in_work_linear_in_their_count() {
+        let (leaves, chain, head) = (2000, 2000, 5000);
+        let below: String =
+            (1001..1001 + leaves).map(|i| format!(r"{{\s{i}\sbasedon{head} L{i};}}")).collect();
+        let links: String =
+            (head..head + chain).map(|i| format!(r"{{\s{i}\sbasedon{} C{i};}}", i + 1)).collect();
+        let (a, b) = (head + chain, head + chain + 1);
+        let group = format!(r"{below}{links}{{\s{a}\sbasedon{b} A;}}{{\s{b}\sbasedon{a} B;}}");
+        let parse_ctx = ParseCtx::default();
+        let styles = stylesheet(&parse_ctx, &group).unwrap();
+        let count = u64::try_from(leaves + chain).unwrap() + 2;
+        assert_eq!(u64::try_from(styles.len()).unwrap(), count);
+        assert_eq!(parse_ctx.fuel(), tokens(&group) + count);
+        assert_eq!(cycles(parse_ctx), 1);
     }
 }

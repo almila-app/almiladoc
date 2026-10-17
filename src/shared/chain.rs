@@ -14,6 +14,8 @@ pub struct StyleChains<'a, D> {
 
 pub type Memo<'a, T> = RefCell<HashMap<&'a str, T>>;
 
+type Link<'a, D> = (&'a str, &'a D, Option<&'a str>);
+
 impl<'a, D> Default for StyleChains<'a, D> {
     fn default() -> Self {
         StyleChains { raw: HashMap::new() }
@@ -29,7 +31,7 @@ impl<'a, D> StyleChains<'a, D> {
         self.raw.get(id).map(|(d, _)| *d)
     }
 
-    fn link(&self, id: &str) -> Option<(&'a str, &'a D, Option<&'a str>)> {
+    fn link(&self, id: &str) -> Option<Link<'a, D>> {
         self.raw.get_key_value(id).map(|(&id, &(def, parent))| (id, def, parent))
     }
 
@@ -73,28 +75,36 @@ impl<'a, D> StyleChains<'a, D> {
     }
 
     /// The first value `own` finds for an id along `id`'s chain, child
-    /// first, without a memo: each step is charged one unit, and a walk
-    /// longer than the definitions has met a cycle.
+    /// first, without a memo: each id the walk looks up is charged its length
+    /// in bytes (at least one), which is what hashing it costs, found or not,
+    /// and a walk longer than the definitions has met a cycle.
     pub fn find<T>(
         &self,
         parse_ctx: &ParseCtx,
         id: &str,
         own: impl Fn(&'a str) -> Option<T>,
     ) -> Result<Option<T>, ConvertError> {
-        let mut cursor = self.link(id);
+        let mut cursor = self.look_up(parse_ctx, id)?;
         let mut steps = 0;
         while let Some((current, _, parent)) = cursor {
             if steps == self.raw.len() {
                 return Err(cycle());
             }
             steps += 1;
-            parse_ctx.charge(1)?;
             if let Some(found) = own(current) {
                 return Ok(Some(found));
             }
-            cursor = parent.and_then(|parent| self.link(parent));
+            cursor = match parent {
+                Some(parent) => self.look_up(parse_ctx, parent)?,
+                None => None,
+            };
         }
         Ok(None)
+    }
+
+    fn look_up(&self, parse_ctx: &ParseCtx, id: &str) -> Result<Option<Link<'a, D>>, ConvertError> {
+        parse_ctx.charge(u64::try_from(id.len()).unwrap_or(u64::MAX).max(1))?;
+        Ok(self.link(id))
     }
 }
 
@@ -226,7 +236,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(chains.find(&parse_ctx, "s29", named).unwrap(), Some(3));
         }
-        assert_eq!(parse_ctx.fuel(), 40);
+        assert_eq!(parse_ctx.fuel(), 2 * 20 * 3);
         assert_eq!(chains.find(&parse_ctx, "s9", named).unwrap(), None);
         assert_eq!(chains.find(&parse_ctx, "ghost", named).unwrap(), None);
         let none = None;
@@ -238,7 +248,56 @@ mod tests {
         assert_eq!(cyclic.find(&ParseCtx::default(), "kid", kid).unwrap(), Some(()));
         let walked = ParseCtx::default();
         assert!(matches!(cyclic.find(&walked, "a", kid), Err(ConvertError::Malformed { .. })));
-        assert_eq!(walked.fuel(), 3);
+        assert_eq!(walked.fuel(), 4);
+    }
+
+    #[test]
+    fn finding_charges_a_missing_parent_its_length() {
+        let none: Option<bool> = None;
+        let fuel_at = |width: usize| {
+            let missing = "m".repeat(width);
+            let mut chains: StyleChains<Option<bool>> = StyleChains::default();
+            chains.insert("a", &none, Some(missing.as_str()));
+            let parse_ctx = ParseCtx::default();
+            assert_eq!(chains.find(&parse_ctx, "a", |_| None::<()>).unwrap(), None);
+            parse_ctx.fuel()
+        };
+        assert_eq!((fuel_at(1), fuel_at(4096)), (1 + 1, 1 + 4096));
+        let parse_ctx = ParseCtx::default();
+        let empty: StyleChains<Option<bool>> = StyleChains::default();
+        assert_eq!(empty.find(&parse_ctx, &"g".repeat(4096), |_| None::<()>).unwrap(), None);
+        assert_eq!(parse_ctx.fuel(), 4096);
+    }
+
+    #[test]
+    fn finding_charges_each_step_by_the_length_of_its_id() {
+        let depth: u64 = 30;
+        let fuel_at = |width: usize| {
+            let defs: Vec<(String, Option<bool>)> =
+                (0..depth).map(|i| (format!("{i:0>width$}"), None)).collect();
+            let chains = chain(&defs);
+            let parse_ctx = ParseCtx::default();
+            assert_eq!(chains.find(&parse_ctx, &defs[29].0, |_| None::<()>).unwrap(), None);
+            parse_ctx.fuel()
+        };
+        assert_eq!(fuel_at(8), depth * 8);
+        assert_eq!(fuel_at(4096), depth * 4096);
+        let defs: Vec<(String, Option<bool>)> =
+            (0..depth).map(|i| (format!("{i:0>4096}"), None)).collect();
+        let limits = Limits { max_work: depth * 4096 - 1, ..Limits::default() };
+        let refused = chain(&defs).find(&ParseCtx::new(&limits), &defs[29].0, |_| None::<()>);
+        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })));
+    }
+
+    #[test]
+    fn finding_charges_an_empty_id_one_unit() {
+        let none: Option<bool> = None;
+        let mut chains: StyleChains<Option<bool>> = StyleChains::default();
+        chains.insert("", &none, None);
+        chains.insert("kid", &none, Some(""));
+        let parse_ctx = ParseCtx::default();
+        assert_eq!(chains.find(&parse_ctx, "kid", |_| None::<()>).unwrap(), None);
+        assert_eq!(parse_ctx.fuel(), 3 + 1);
     }
 
     #[test]

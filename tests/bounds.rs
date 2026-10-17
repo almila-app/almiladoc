@@ -4,7 +4,9 @@
 //! nesting and optional streams stay within their limits; rendering stays
 //! within the output and work limits.
 
-use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit, Limits, OnLoss};
+use almiladoc::{
+    Config, ConvertError, Converter, DiagnosticCode, Format, Input, Limit, Limits, OnLoss,
+};
 
 const CEILING: u64 = Limits::MAX_NESTING_CEILING;
 
@@ -979,4 +981,190 @@ fn odf_style_resolution_charges_the_conversion_once_per_style() {
     assert_eq!(text("p0999", "t0000") - least, 3 * (depth - 1));
     assert_eq!(text("p0000", "t0999") - least, depth - 1);
     assert_eq!(sheet("b0999") - sheet("b0000"), depth - 1);
+}
+
+fn docx_style_chain(styles: usize, paragraphs: usize, id: impl Fn(usize) -> String) -> Vec<u8> {
+    let chain: String = (0..styles)
+        .map(|i| {
+            let parent = i
+                .checked_sub(1)
+                .map_or(String::new(), |parent| format!(r#"<w:basedOn w:val="{}"/>"#, id(parent)));
+            format!(r#"<w:style w:type="paragraph" w:styleId="{}">{parent}</w:style>"#, id(i))
+        })
+        .collect();
+    let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+    let paragraph = format!(
+        r#"<w:p><w:pPr><w:pStyle w:val="{}"/><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>{DOCX_TEXT}</w:p>"#,
+        id(styles - 1)
+    );
+    zip(&[
+        ("word/document.xml", &docx_document(&paragraph.repeat(paragraphs))),
+        ("word/styles.xml", &format!("<w:styles {W}>{chain}</w:styles>")),
+        ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),
+    ])
+}
+
+#[test]
+fn docx_numbering_levels_by_style_charge_each_step_by_the_length_of_its_id() {
+    let at = |width: usize| {
+        let docx = docx_style_chain(400, 400, |i| format!("{i:0>width$}"));
+        limited(|_| {}).convert(Input::new(&docx, Format::Docx))
+    };
+    assert!(at(8).is_ok(), "{:?}", at(8).err());
+    let refusal = at(4096);
+    assert!(refused_with(refusal, Limit::Work, Limits::default().max_work), "{:?}", at(4096).err());
+}
+
+#[test]
+fn docx_numbering_levels_by_style_charge_a_missing_parent_its_length_per_paragraph() {
+    let docx = |width: usize, paragraphs: usize| {
+        let style = format!(
+            r#"<w:style w:type="paragraph" w:styleId="a"><w:basedOn w:val="{}"/></w:style>"#,
+            "m".repeat(width)
+        );
+        let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+        let paragraph = format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="a"/><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>{DOCX_TEXT}</w:p>"#
+        );
+        zip(&[
+            ("word/document.xml", &docx_document(&paragraph.repeat(paragraphs))),
+            ("word/styles.xml", &format!("<w:styles {W}>{style}</w:styles>")),
+            ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),
+        ])
+    };
+    let least = |width, paragraphs| least_work_of(&docx(width, paragraphs), Format::Docx);
+    let per_paragraph = |width| least(width, 101) - least(width, 100);
+    assert_eq!(per_paragraph(4096) - per_paragraph(1), 4095);
+    let long = docx(4096, 100);
+    let least = least_work_of(&long, Format::Docx);
+    let at = |max_work| {
+        limited(|limits| limits.max_work = max_work).convert(Input::new(&long, Format::Docx))
+    };
+    assert!(at(least).is_ok(), "{:?}", at(least).err());
+    assert!(refused_with(at(least - 1), Limit::Work, least - 1), "{:?}", at(least - 1).err());
+}
+
+#[test]
+fn odf_repeated_cells_copy_the_urls_anchors_and_headings_they_hold() {
+    let at = |content: &str, bytes| {
+        let odt = odf(&format!(
+            r#"<office:text><table:table><table:table-row><table:table-cell table:number-columns-repeated="5">{content}</table:table-cell></table:table-row></table:table></office:text>"#
+        ));
+        limited(|limits| limits.max_expansion_text_bytes = bytes)
+            .convert(Input::new(&odt, Format::Odt))
+    };
+    let image =
+        r#"<text:p><draw:frame><draw:image xlink:href="http://e/u"/></draw:frame></text:p>"#;
+    let heading = r#"<text:h text:outline-level="1">abc</text:h>"#;
+    for (name, content, bytes) in [("image", image, 4 * 10), ("heading", heading, 4 * (3 + 3))] {
+        assert!(at(content, bytes).is_ok(), "{name}: {:?}", at(content, bytes).err());
+        let refusal = at(content, bytes - 1);
+        assert!(
+            refused_with(refusal, Limit::ExpansionTextBytes, bytes - 1),
+            "{name}: {:?}",
+            at(content, bytes - 1).err()
+        );
+    }
+}
+
+#[test]
+fn an_odf_cell_repeated_four_million_times_over_a_long_url_is_refused() {
+    let url = format!("https://example.org/{}", "a".repeat(250));
+    let odt = odf(&format!(
+        r#"<office:text><table:table><table:table-row><table:table-cell table:number-columns-repeated="4000000"><text:p><draw:frame><draw:image xlink:href="{url}"/></draw:frame></text:p></table:table-cell></table:table-row></table:table></office:text>"#
+    ));
+    let refusal = limited(|_| {}).convert(Input::new(&odt, Format::Odt));
+    let max = Limits::default().max_expansion_text_bytes;
+    assert!(
+        matches!(&refusal, Err(ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, max: m, .. }) if *m == max),
+        "{:?}",
+        refusal.err()
+    );
+}
+
+#[test]
+fn odf_tables_nested_two_deep_carry_their_copies_up_to_every_repeat() {
+    let cell = "<table:table-cell><text:p>x</text:p></table:table-cell>";
+    let row = format!("<table:table-row>{cell}{cell}</table:table-row>");
+    let odt = odf(&format!(
+        r#"<office:text><table:table><table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="3"><table:table><table:table-row><table:table-cell><table:table>{row}{row}</table:table></table:table-cell></table:table-row></table:table></table:table-cell></table:table-row></table:table></office:text>"#
+    ));
+    let at = |set: fn(&mut Limits, u64), max| {
+        limited(|limits| set(limits, max)).convert(Input::new(&odt, Format::Odt))
+    };
+    let slots: fn(&mut Limits, u64) = |limits, max| limits.max_grid_slots = max;
+    let bytes: fn(&mut Limits, u64) = |limits, max| limits.max_expansion_text_bytes = max;
+    assert!(at(slots, 36).is_ok(), "{:?}", at(slots, 36).err());
+    assert!(refused_with(at(slots, 35), Limit::GridSlots, 35), "{:?}", at(slots, 35).err());
+    assert!(at(bytes, 20).is_ok(), "{:?}", at(bytes, 20).err());
+    assert!(
+        refused_with(at(bytes, 19), Limit::ExpansionTextBytes, 19),
+        "{:?}",
+        at(bytes, 19).err()
+    );
+}
+
+#[test]
+fn rtf_styles_under_a_basedon_cycle_resolve_in_work_linear_in_their_count() {
+    let (leaves, chain, head) = (2000, 2000, 5000);
+    let below: String =
+        (1001..1001 + leaves).map(|id| format!(r"{{\s{id}\sbasedon{head} L{id};}}")).collect();
+    let links: String =
+        (head..head + chain).map(|id| format!(r"{{\s{id}\sbasedon{} C{id};}}", id + 1)).collect();
+    let (a, b) = (head + chain, head + chain + 1);
+    let cycle = format!(r"{{\s{a}\sbasedon{b} A;}}{{\s{b}\sbasedon{a} B;}}");
+    let rtf = rtf(&format!(r"{{\stylesheet{below}{links}{cycle}}}\pard\s1001 x"));
+    let converted =
+        limited(|limits| limits.max_work = 100_000).convert(Input::new(&rtf, Format::Rtf));
+    let converted = converted.unwrap_or_else(|error| panic!("{error:?}"));
+    let cycles: u64 = converted
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::StyleCycle)
+        .map(|d| d.count)
+        .sum();
+    assert_eq!(cycles, 1);
+}
+
+fn docx_numbering(numbering: &str, styles: &str, paragraphs: &[usize]) -> Vec<u8> {
+    let body: String = paragraphs
+        .iter()
+        .map(|num| {
+            format!(
+                r#"<w:p><w:pPr><w:numPr><w:numId w:val="{num}"/></w:numPr></w:pPr>{DOCX_TEXT}</w:p>"#
+            )
+        })
+        .collect();
+    zip(&[
+        ("word/document.xml", &docx_document(&body)),
+        ("word/styles.xml", &format!("<w:styles {W}>{styles}</w:styles>")),
+        ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),
+    ])
+}
+
+#[test]
+fn a_numbering_style_linked_from_many_abstracts_converts_in_work_linear_in_its_children() {
+    let (abstracts, children) = (10_000, 150_000);
+    let style = format!(
+        r#"<w:style w:type="numbering" w:styleId="S">{}<w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>"#,
+        "<w:q/>".repeat(children)
+    );
+    let linking: String = (2..abstracts + 2)
+        .map(|num| {
+            format!(
+                r#"<w:abstractNum w:abstractNumId="a{num}"><w:numStyleLink w:val="S"/></w:abstractNum><w:num w:numId="{num}"><w:abstractNumId w:val="a{num}"/></w:num>"#
+            )
+        })
+        .collect();
+    let numbering = format!(
+        r#"<w:abstractNum w:abstractNumId="t"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="t"/></w:num>{linking}"#
+    );
+    let docx = docx_numbering(&numbering, &style, &[2, abstracts + 1]);
+    let events = children as u64 + 6 * abstracts as u64;
+    let walk_to_num_id = children as u64 + 3;
+    let bound = events + walk_to_num_id + abstracts as u64 + 4096;
+    let converted =
+        limited(|limits| limits.max_work = bound).convert(Input::new(&docx, Format::Docx));
+    let converted = converted.unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(converted.markdown(), "1. x\n\n2. x\n");
 }

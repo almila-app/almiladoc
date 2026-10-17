@@ -402,7 +402,7 @@ fn resolve_numbering(
         }
         (None, None) => 0,
     };
-    let def = &instance.levels[ilvl.min(crate::formats::docx::numbering::LEVELS - 1)];
+    let def = instance.level(ilvl);
     // A numFmt of "none" is explicitly suppressed numbering.
     let Some(marker) = def.marker else {
         return Ok(None);

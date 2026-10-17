@@ -61,9 +61,9 @@ pub fn parse(parse_ctx: &ParseCtx, bytes: &[u8]) -> Result<Document, ConvertErro
     let (numbering_tree, numbering_reported) =
         numbering_part.read(parse_ctx, &pkg, Role::Content(Region::Body), "numbering")?;
     let numbering = match numbering_tree.as_ref().and_then(|t| t.find(ns::W, "numbering")) {
-        Some(root) => {
-            numbering::parse(parse_ctx, root, &|style_id| styles.direct_num_id(style_id))?
-        }
+        Some(root) => numbering::parse(parse_ctx, root, &|style_id| {
+            styles.direct_num_id(parse_ctx, style_id)
+        })?,
         None => Default::default(),
     };
 

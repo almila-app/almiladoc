@@ -9,7 +9,7 @@
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::Style;
-use crate::package::xml::{Element, ns};
+use crate::package::xml::{Element, Node, ns};
 use crate::shared::blockstyle::{self, BlockStyle};
 use crate::shared::chain::{Memo, StyleChains};
 use crate::shared::delta::StyleDelta;
@@ -207,17 +207,40 @@ impl<'a> Styles<'a> {
     }
 
     /// The `numId` referenced by a numbering style's own `numPr`
-    /// (`numStyleLink` contract), without inheritance.
-    pub fn direct_num_id(&self, id: &str) -> Option<u64> {
-        let style = self.chains.definition(id)?;
-        style
-            .find(ns::W, "pPr")?
-            .find(ns::W, "numPr")?
-            .find(ns::W, "numId")?
-            .attr(ns::W, "val")?
-            .parse()
-            .ok()
+    /// (`numStyleLink` contract), without inheritance, each child the walk
+    /// passes charged one unit.
+    pub fn direct_num_id(
+        &self,
+        parse_ctx: &ParseCtx,
+        id: &str,
+    ) -> Result<Option<u64>, ConvertError> {
+        let Some(mut element) = self.chains.definition(id) else {
+            return Ok(None);
+        };
+        for local in ["pPr", "numPr", "numId"] {
+            match charged_child(parse_ctx, element, local)? {
+                Some(child) => element = child,
+                None => return Ok(None),
+            }
+        }
+        Ok(element.attr(ns::W, "val").and_then(|val| val.parse().ok()))
     }
+}
+
+fn charged_child<'e>(
+    parse_ctx: &ParseCtx,
+    parent: &'e Element,
+    local: &str,
+) -> Result<Option<&'e Element>, ConvertError> {
+    for node in &parent.children {
+        parse_ctx.charge(1)?;
+        if let Node::Elem(child) = node
+            && child.is(ns::W, local)
+        {
+            return Ok(Some(child));
+        }
+    }
+    Ok(None)
 }
 
 /// A `w:rPr` element as a tri-state delta - used only for *direct* run
@@ -386,7 +409,7 @@ mod tests {
         let numbering = crate::formats::docx::numbering::parse(
             &ParseCtx::default(),
             numbering.find(ns::W, "numbering").unwrap(),
-            &|_| None,
+            &|_| Ok(None),
         )
         .unwrap();
         let styles = || Styles::parse(root.find(ns::W, "styles").unwrap());
@@ -397,15 +420,38 @@ mod tests {
         let resolved = styles();
         let parse_ctx = ParseCtx::default();
         assert_eq!(level(&resolved, &parse_ctx, 999).unwrap(), Some(3));
-        assert_eq!(parse_ctx.fuel(), 50);
+        assert_eq!(parse_ctx.fuel(), 50 * 4);
         for num_id in 1..=depth {
             assert_eq!(level(&resolved, &parse_ctx, num_id).unwrap(), None);
         }
-        assert_eq!(parse_ctx.fuel(), 50 + depth * depth);
+        let whole_chain: u64 = (0..depth).map(|i| format!("s{i}").len() as u64).sum();
+        assert_eq!(parse_ctx.fuel(), 50 * 4 + depth * whole_chain);
         assert_eq!(memo_entries(&resolved), 0);
         let lowered = Limits { max_work: depth - 1, ..Limits::default() };
         let refused = level(&styles(), &ParseCtx::new(&lowered), 1);
         assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, max })
             if max == depth - 1));
+    }
+
+    #[test]
+    fn a_numbering_styles_num_id_charges_every_child_its_walk_passes() {
+        let root = parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="numbering" w:styleId="S"><w:q/><w:q/><w:q/><w:q/><w:q/><w:pPr><w:ind/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr></w:pPr></w:style></w:styles>"#,
+        );
+        let styles = Styles::parse(root.find(ns::W, "styles").unwrap());
+        let walk = 6 + 2 + 2;
+        let parse_ctx = ParseCtx::default();
+        assert_eq!(styles.direct_num_id(&parse_ctx, "S").unwrap(), Some(7));
+        assert_eq!(parse_ctx.fuel(), walk);
+        assert_eq!(styles.direct_num_id(&parse_ctx, "Missing").unwrap(), None);
+        assert_eq!(parse_ctx.fuel(), walk);
+        let lowered = Limits { max_work: walk - 1, ..Limits::default() };
+        let refused = styles.direct_num_id(&ParseCtx::new(&lowered), "S");
+        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, max })
+            if max == walk - 1));
+        let token = crate::ledger::CancelToken::new();
+        token.cancel();
+        let cancelled = styles.direct_num_id(&ParseCtx::default().with_cancel(Some(&token)), "S");
+        assert!(matches!(cancelled, Err(ConvertError::Cancelled)));
     }
 }

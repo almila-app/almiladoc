@@ -130,8 +130,9 @@ pub struct Limits {
     /// input, and one more over each font, style and list table group), CSV
     /// field, PPT record or text unit a hyperlink range reads, DOC formatting
     /// run, DOCX or ODF style or DOCX numbering link a resolver first
-    /// resolves, style link a DOCX numbering level or an RTF chain follows,
-    /// CSS rule an element's tag or class names, grid position a table
+    /// resolves, style link an RTF chain follows, byte of each style id a DOCX
+    /// numbering level's walk looks up (at least one per id), CSS
+    /// rule an element's tag or class names, grid position a table
     /// counts against [`Limits::max_grid_slots`], and 64 bytes of Markdown
     /// written (not a PDF's). The default, two units per byte of
     /// [`Limits::max_input_bytes`], admits every input whose cost is linear
