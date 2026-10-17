@@ -6,26 +6,26 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 
 ## To take
 
-- #4 PR, EPUB metadata and figure-caption dedupe: document metadata enters the model (ADR 0001 decision 5) and duplicated figure captions are dropped; default YAML front matter is not taken, as it is not GitHub-Flavored Markdown.
-- #10 issue, worksheet identity and source coordinates: worksheets become units with milestones in the model (ADR 0001 decisions 4 and 5); cell coordinates wait for a consumer that needs them.
+- #4 PR, EPUB metadata and figure-caption dedupe: an image whose alt text equals its `figcaption` loses that alt, so the text shows once under every image policy and the caption is kept; document metadata waits for a consumer that needs it, and default YAML front matter is not taken, as it is not GitHub-Flavored Markdown.
+- #10 issue, worksheet identity and source coordinates: worksheets become units with milestones in the model, and the conversion reports each unit's Markdown span (ADR 0001 decisions 2 and 5); cell coordinates wait for a consumer that needs them.
 - #14 issue, nested tables flattened into one cell: a single-cell table that only wraps another table is unwrapped, as #17 proposes; raw HTML tables are not emitted.
 - #17 PR, unwrap single-cell tables that wrap a nested table: the fix for #14, rewritten as a model normalisation step without panicking paths.
-- #31 issue, slides concatenated without a boundary: slides become units with milestones in the model, so an untitled slide no longer merges into the one before it (ADR 0001 decisions 4 and 5).
+- #31 issue, slides concatenated without a boundary: slides become units with milestones in the model, so an untitled slide no longer merges into the one before it, and the conversion reports each unit's Markdown span (ADR 0001 decisions 2 and 5).
 - #32 PR, separate slides with a thematic break: its ODP coverage and tests carry over to slide milestones (ADR 0001 decision 5); a thematic break is not used, as it cannot be told apart from a horizontal rule.
 - #62 issue, PDF through `to_document` with per-page extraction: PDF is parsed into the model with page units (ADR 0001 decisions 4 and 6).
 - #63 issue, embedded image assets in the Markdown output: images render as `![alt](asset:N)` placeholders by default (ADR 0001 decisions 8 and 11).
 - #70 PR, `asset:N` destinations for embedded images: the placeholder form ADR 0001 decision 8 chooses, rewritten on the current serializer, as the branch predates several escaping fixes.
 - #88 PR, SUPPORT.md and known conversion limits: a per-format limits page is worth having, rewritten against current behaviour, which has since changed in parts it describes.
-- #91 PR, `to_markdown_pages` for per-page extraction: per-page results come from `inspect` and page units in the model (ADR 0001 decisions 4 and 6) rather than a separate PDF-only function.
-- #94 issue, slide boundaries for PPTX and PPT: covered by slide units and milestones (ADR 0001 decisions 4 and 5).
+- #91 PR, `to_markdown_pages` for per-page extraction: per-page results come from page units in the model and each unit's Markdown span (ADR 0001 decisions 2, 5 and 6) rather than a separate PDF-only function.
+- #94 issue, slide boundaries for PPTX and PPT: covered by slide units, their milestones and Markdown spans (ADR 0001 decisions 2 and 5).
 - #95 PR, slide boundary anchors: its design, ordinals that survive empty slides and PPT coverage, is taken as typed slide milestones in the model instead of string anchors (ADR 0001 decision 5).
 - #144 issue, one image-only page empties the whole PDF: a page that needs OCR becomes a gap in the model, so the readable pages keep their text under `on_loss = Report` or once OCR fills the gap (ADR 0001 decisions 5 and 10).
-- #146 issue, built-in local OCR: local CPU OCR is the PP-OCRv6 adapter on rten (ADR 0002 decision 8); standalone image input stays out, as ADR 0001 rejects an image format.
 - #153 PR, convert the readable pages when others need OCR: the same outcome through OCR gaps and `on_loss = Report` (ADR 0001 decisions 5 and 10) instead of page-by-page concatenation, which splits paragraphs across pages; its fixture is reused.
-- #157 issue, local OCR provider hook: a caller's own engine plugs in through the `OcrEngine` port (ADR 0002 decision 1), not a shell command.
+- #157 issue, local OCR provider hook: a caller's own engine fills each page or image gap with Markdown or lines (ADR 0002 decisions 2 and 11), not a shell command.
 - #162 issue, the OCR gate refuses born-digital PDFs: each page is classified on its own and a flagged page becomes a gap, so the readable pages convert under `on_loss = Report` or once OCR fills the gap, instead of the whole document failing (ADR 0001 decisions 4, 5 and 10).
 - #166 PR, keep a text-based document despite one page needing OCR: keeping the readable text is right, but the page left out must be reported, not only logged (ADR 0001 decision 10).
 - #171 PR, preserve link and image destinations: destinations are corrupted today; entity escaping is taken under ADR 0001 decision 8, and backslashes are escaped rather than percent-encoded.
+- #174 PR, omit deleted revision text in DOC: spec-correct, as revisions are accepted (ADR 0001 decision 11), so deleted text is omitted and reported `revision_omitted`.
 - #182 issue, PPTX images dropped in `mc:AlternateContent`: branch selection and OLE previews are read, and whatever stays unread is reported (ADR 0001 decisions 8 and 10).
 - #184 PR, keep bare numbered levels as ordered markers: a bare `%1` level renders as an ordered list marker, chosen by the serializer.
 
@@ -71,13 +71,12 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #102 issue, passwords for encrypted OOXML: sound, but no caller supplies passwords yet, and encrypted input fails with a typed `Encrypted` error.
 - #130 PR, decrypt OOXML with a supplied password: the candidate for #102 when it is needed; it also bundles an unrelated numbering fix.
 - #139 issue, XLSX embedded images missing from the assets: a real gap that no ADR decision covers, and spreadsheets are not among the primary consumer's formats; #151 is the candidate.
+- #146 issue, built-in local OCR: offline OCR is a separate crate wrapping oar-ocr or ocrs, built on demand (ADR 0002 decision 8); standalone image input stays out, as ADR 0001 rejects an image format.
 - #147 PR, standalone HTML: the best HTML candidate, deferred until HTML is an accepted format.
 - #149 PR, MHTML: stacked on #147; revisit after HTML.
 - #151 PR, retain embedded worksheet images: the candidate for #139 when it is needed; it lacks a cell-anchored placeholder.
 - #163 PR, preserve spreadsheet provenance: more complete than #69, but it adds spreadsheet-specific types to the format-neutral model; revisit with a consumer that needs cell provenance.
 - #173 issue, multi-column PDF tables collapse: table reconstruction lives in pdf-inspector, and needs evidence from academic documents first.
-- #174 PR, omit deleted revision text in DOC: spec-correct, deferred with legacy `.doc`; revisions become a content policy (ADR 0001 decision 11).
-- #176 PR, preserve DOC symbol checkbox states: deferred with legacy `.doc`; it emits glyph text rather than the model's checkbox inline.
 
 ## Moot
 
@@ -110,7 +109,7 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #41 issue, backslash between number and period in DOCX lists: the source has no list numbering there, so `1\.` is the correct CommonMark escape of literal text.
 - #48 PR, `.wps` and `.et` extensions: WPS files are already detected by content, and mapping `.wps` to DOC misroutes Microsoft Works files.
 - #53 PR, standalone HTML through the XML reader: parsing HTML as XML regresses EPUB XHTML; superseded by #147.
-- #61 PR, local OCR with ocrs: local OCR is PP-OCRv6 on rten (ADR 0002 decision 8).
+- #61 PR, local OCR with ocrs: this crate carries no OCR engine; offline OCR, if built, is a separate crate wrapping oar-ocr or ocrs (ADR 0002 decision 8).
 - #66 PR, reStructuredText reader: declined with #38.
 - #69 PR, worksheet name and origin on tables: built on code since removed; superseded by #163.
 - #74 issue, JVM bindings: the project ships the Rust crate and the Python binding only (ADR 0001 decision 1).
@@ -120,9 +119,10 @@ A taken item is rewritten test-first, signed off under DCO clause (b), with its 
 - #103 PR, passwords for encrypted OOXML: superseded by #130.
 - #126 PR, per-slide anchors in PPTX: superseded by #95.
 - #128 issue, `.eml` and `.msg` email: email messages are outside the document formats this library converts.
-- #161 PR, OCR scanned PDFs with a vision model via LiteLLM: whole-document OCR in Python erases page boundaries; a remote engine plugs in page by page through the HTTP adapter (ADR 0002 decision 7).
+- #161 PR, OCR scanned PDFs with a vision model via LiteLLM: whole-document OCR in Python erases page boundaries; a vision model's Markdown fills each page gap through the caller (ADR 0002 decisions 2 and 11).
 - #164 PR, RFC 5322 email reader: declined with #128.
 - #175 PR, pdf-inspector 1.20.0: superseded by #181, as a later release also fixes Arabic word boundaries.
+- #176 PR, preserve DOC symbol checkbox states: not taken, as it emits glyph text rather than the model's checkbox inline and ignores the symbol font a run inherits through its style chain.
 - #178 issue, MOBI through libmobi: a C library under LGPL-3.0 conflicts with the pure-Rust, unsafe-free core (ADR 0001 decision 16).
 - #185 PR, expand typographic ligatures: pdf-inspector already expands presentation-form ligatures, the rest arrives with the upgrade for #172, and the change would rewrite intended ligatures in other formats.
 - #186 PR, render and build documents outside the crate: ADR 0001 rejects a public Markdown renderer for caller-built models.
