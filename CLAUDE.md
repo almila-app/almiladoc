@@ -25,6 +25,11 @@ FSL-1.1-MIT.
   order of its decision 19; the invariants below describe the code as it stands.
 - `docs/upstream.md` records every upstream item's verdict and moves an item to taken in the
   commit that takes it (ADR 0004 decision 11).
+- `docs/roadmap.md` is the open work, in order; an item's section is deleted in the change that
+  lands it.
+- Every change lands as a candidate `land/owner/<slug>` (an accepted pull request as
+  `land/owner/pr-<n>`) that `main` fast-forwards to once its `ci / required` passes (ADR 0004);
+  `main` takes no merge commit.
 
 ## Invariants
 

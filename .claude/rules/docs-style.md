@@ -20,11 +20,11 @@ dates, ticket ids, incident history, session reports or status, which issues and
 | install, usage, API | README.md |
 | contribution terms | CONTRIBUTING.md |
 | decisions that bind every change; each upstream item's verdict | `docs/adr/`; `docs/upstream.md` |
+| open work, in order | `docs/roadmap.md` |
 | licence of each file | NOTICE, REUSE.toml |
 | invariants, commands and traps for agents | CLAUDE.md |
 | a file type's conventions | a rule in `.claude/rules/` scoped to it |
-| gate selection | `.claude/skills/verify/` |
-| a recurring procedure | its skill |
+| a recurring procedure; gate selection | its skill; `.claude/skills/verify/` |
 
 ## Budgets of the instruction files, which load into context
 

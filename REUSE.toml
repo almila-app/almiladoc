@@ -20,6 +20,7 @@ path = [
     ".github/provenance.toml",
     ".github/scripts/**",
     "docs/adr/**",
+    "docs/roadmap.md",
     "docs/upstream.md",
     ".github/workflows/**",
     "Makefile",
