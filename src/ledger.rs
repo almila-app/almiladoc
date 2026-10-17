@@ -73,6 +73,7 @@ impl<'a> Ledger<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn charges_add_up_to_the_maximum_and_fail_past_it() {
@@ -81,7 +82,7 @@ mod tests {
         assert!(ledger.charge(6).is_ok());
         assert_eq!(ledger.spent(), 10);
         let err = ledger.charge(1).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 10 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 10 });
         assert_eq!(ledger.spent(), 11);
     }
 
@@ -102,8 +103,8 @@ mod tests {
         assert!(ledger.charge(0).is_ok());
         token.clone().cancel();
         assert!(token.is_cancelled());
-        assert!(matches!(ledger.charge(0), Err(ConvertError::Cancelled)));
-        assert!(matches!(ledger.charge(1), Err(ConvertError::Cancelled)));
+        assert_matches!(ledger.charge(0), Err(ConvertError::Cancelled));
+        assert_matches!(ledger.charge(1), Err(ConvertError::Cancelled));
     }
 
     #[test]
@@ -111,17 +112,17 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let ledger = Ledger::new(1, Some(&token));
-        assert!(matches!(ledger.charge(2), Err(ConvertError::Cancelled)));
+        assert_matches!(ledger.charge(2), Err(ConvertError::Cancelled));
     }
 
     #[test]
     fn a_ledger_started_at_spent_fuel_fails_past_the_same_maximum() {
         let ledger = Ledger::new(10, None).starting_at(9);
         assert!(ledger.charge(1).is_ok());
-        assert!(matches!(
+        assert_matches!(
             ledger.charge(1),
             Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 10 })
-        ));
+        );
         assert_eq!(ledger.spent(), 11);
     }
 

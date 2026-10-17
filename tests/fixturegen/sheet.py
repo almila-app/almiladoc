@@ -4,7 +4,7 @@ from fixturegen.common import write_cfb, write_zip
 
 
 # ---------------------------------------------------------------------------
-# R17a: merged ranges in spreadsheets become spanning grid cells
+# Merged ranges in spreadsheets become spanning grid cells
 
 def write_one_sheet_xlsx(path, name, sheet):
     ct = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

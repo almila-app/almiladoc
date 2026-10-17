@@ -44,7 +44,7 @@ def blockstyle_rtf(out):
 
 
 # ---------------------------------------------------------------------------
-# R13: \sbasedon style chains; boundary-matched merges in nonuniform tables
+# \sbasedon style chains; boundary-matched merges in nonuniform tables
 
 def merge_rtf(out):
     parts = [
@@ -70,7 +70,7 @@ def merge_rtf(out):
 
 
 # ---------------------------------------------------------------------------
-# Handmade RTF: \bin payload, list table, nested table, per-font charset (H11, H12, M13)
+# Handmade RTF: \bin payload, list table, nested table, per-font charset
 
 def bin_rtf(out):
     payload = b"AB{C}D\\E}}{F.."  # 14 raw bytes full of grouping chars
@@ -82,7 +82,7 @@ def bin_rtf(out):
         rb"{\*\listtable{\list\listtemplateid1{\listlevel\levelnfc2\levelstartat4"
         rb"{\leveltext \'02\'00.;}{\levelnumbers \'01;}}\listid100}}",
         rb"{\*\listoverridetable{\listoverride\listid100\listoverridecount0\ls1}"
-        # S6: per-level override records - an overridden start, and an
+        # Per-level override records - an overridden start, and an
         # overriding format via an embedded \listlevel
         rb"{\listoverride\listid100\listoverridecount1"
         rb"{\lfolevel\listoverridestartat\levelstartat10}\ls2}"

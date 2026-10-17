@@ -4,9 +4,11 @@
 //! nesting and optional streams stay within their limits; rendering stays
 //! within the output and work limits.
 
+use crate::support::zip_package;
 use almiladoc::{
     Config, ConvertError, Converter, DiagnosticCode, Format, Input, Limit, Limits, OnLoss,
 };
+use std::assert_matches;
 
 const CEILING: u64 = Limits::MAX_NESTING_CEILING;
 
@@ -187,12 +189,9 @@ fn a_document_nested_past_the_limit_is_refused_before_rendering() {
     let converter = |max| converter(max).parse(Input::new(&rtf, Format::Rtf)).map(drop);
     assert!(converter(9).is_ok());
     let refusal = converter(8);
-    assert!(
-        matches!(
-            refusal,
-            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 8, .. })
-        ),
-        "{refusal:?}"
+    assert_matches!(
+        refusal,
+        Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 8, .. })
     );
 }
 
@@ -213,7 +212,7 @@ fn a_chain_of_notes_each_referencing_the_next_numbers_in_reference_order() {
     let footnotes = format!("<w:footnotes {W}>{footnotes}</w:footnotes>");
     let body = r#"<w:p><w:r><w:t>body</w:t></w:r><w:r><w:footnoteReference w:id="0"/></w:r></w:p>"#;
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>"#;
-    let bytes = zip(&[
+    let bytes = zip_package(&[
         ("word/document.xml", docx_document(body).as_str()),
         ("word/_rels/document.xml.rels", rels),
         ("word/footnotes.xml", footnotes.as_str()),
@@ -282,12 +281,9 @@ fn a_doc_data_stream_past_max_entry_bytes_is_a_limit() {
     };
     assert!(at(4096).is_ok());
     let refusal = at(4095);
-    assert!(
-        matches!(
-            refusal,
-            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095, .. })
-        ),
-        "{refusal:?}"
+    assert_matches!(
+        refusal,
+        Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095, .. })
     );
 }
 
@@ -320,8 +316,7 @@ fn convert_and_render_stop_at_max_output_bytes_and_a_parse_writes_none() {
 #[cfg(feature = "pdf")]
 #[test]
 fn a_pdf_stops_at_max_output_bytes() {
-    let pdf =
-        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/text.pdf")).unwrap();
+    let pdf = crate::support::fixture("pdf/text.pdf");
     let input = || Input::new(&pdf, Format::Pdf);
     let len = limited(|_| {}).convert(input()).unwrap().markdown().len() as u64;
     let at = |max| limited(|limits| limits.max_output_bytes = max).convert(input());
@@ -409,10 +404,10 @@ fn charted(part: &str) -> [(Vec<u8>, Format); 2] {
         )
     };
     let body = format!("<w:p><w:r><w:drawing>{graphic}</w:drawing></w:r></w:p>");
-    let docx = zip(&[
-        ("word/document.xml", &docx_document(&body)),
-        ("word/_rels/document.xml.rels", &rels("charts/chart1.xml")),
-        ("word/charts/chart1.xml", part),
+    let docx = zip_package(&[
+        ("word/document.xml", docx_document(&body)),
+        ("word/_rels/document.xml.rels", rels("charts/chart1.xml")),
+        ("word/charts/chart1.xml", part.to_owned()),
     ]);
     let pptx = pptx_with(
         &format!("<p:graphicFrame>{graphic}</p:graphicFrame>"),
@@ -435,15 +430,6 @@ fn a_chart_table_is_admitted_against_max_grid_slots_before_it_is_built() {
     }
 }
 
-fn zip(parts: &[(&str, &str)]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    for (name, text) in parts {
-        writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut writer, text.as_bytes()).unwrap();
-    }
-    writer.finish().unwrap().into_inner()
-}
-
 fn nest(open: &str, close: &str, units: usize, inner: &str) -> String {
     format!("{}{inner}{}", open.repeat(units), close.repeat(units))
 }
@@ -453,7 +439,7 @@ fn docx_document(body: &str) -> String {
 }
 
 fn docx(body: &str) -> Vec<u8> {
-    zip(&[("word/document.xml", &docx_document(body))])
+    zip_package(&[("word/document.xml", &docx_document(body))])
 }
 
 const DOCX_TEXT: &str = "<w:r><w:t>x</w:t></w:r>";
@@ -565,7 +551,7 @@ fn odf(body: &str) -> Vec<u8> {
     let content = format!(
         "<office:document-content {ODF}><office:body>{body}</office:body></office:document-content>"
     );
-    zip(&[("content.xml", &content)])
+    zip_package(&[("content.xml", &content)])
 }
 
 fn odt_lists(units: usize) -> Vec<u8> {
@@ -639,7 +625,7 @@ fn pptx_with(tree: &str, parts: &[(&str, &str)]) -> Vec<u8> {
         ("ppt/_rels/presentation.xml.rels", rels),
         ("ppt/slides/slide1.xml", &slide),
     ];
-    zip(&[&deck, parts].concat())
+    zip_package(&[&deck, parts].concat())
 }
 
 fn epub(body: &str) -> Vec<u8> {
@@ -647,7 +633,7 @@ fn epub(body: &str) -> Vec<u8> {
     let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>"#;
     let chapter =
         format!(r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>{body}</body></html>"#);
-    zip(&[
+    zip_package(&[
         ("mimetype", "application/epub+zip"),
         ("META-INF/container.xml", container),
         ("content.opf", opf),
@@ -805,7 +791,7 @@ fn every_table_counts_its_positions_against_max_grid_slots() {
 /// A DOCX of one table of `rows`, and the bytes of its document part.
 fn docx_declared_positions(rows: &str) -> (Vec<u8>, u64) {
     let part = docx_document(&format!("<w:tbl>{rows}</w:tbl>"));
-    (zip(&[("word/document.xml", &part)]), part.len() as u64)
+    (zip_package(&[("word/document.xml", &part)]), part.len() as u64)
 }
 
 #[test]
@@ -937,7 +923,7 @@ fn docx_numbering_charges_the_conversion_once_per_abstract_it_resolves() {
             .collect();
         let numbering = format!("<w:numbering {W}>{nums}</w:numbering>");
         let document = docx_document("<w:p/>");
-        zip(&[("word/document.xml", &document), ("word/numbering.xml", &numbering)])
+        zip_package(&[("word/document.xml", &document), ("word/numbering.xml", &numbering)])
     };
     let work = |abstract_of| least_work_of(&docx(abstract_of), Format::Docx);
     assert_eq!(work(|i| i) - work(|_| 0), nums - 1);
@@ -963,7 +949,7 @@ fn odf_style_resolution_charges_the_conversion_once_per_style() {
         let content = format!(
             r#"<office:document-content {ODF} xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"><office:automatic-styles>{styles}</office:automatic-styles><office:body>{body}</office:body></office:document-content>"#
         );
-        zip(&[("content.xml", &content)])
+        zip_package(&[("content.xml", &content)])
     };
     let text = |paragraph: &str, span: &str| {
         let odt = document(format!(
@@ -997,7 +983,7 @@ fn docx_style_chain(styles: usize, paragraphs: usize, id: impl Fn(usize) -> Stri
         r#"<w:p><w:pPr><w:pStyle w:val="{}"/><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>{DOCX_TEXT}</w:p>"#,
         id(styles - 1)
     );
-    zip(&[
+    zip_package(&[
         ("word/document.xml", &docx_document(&paragraph.repeat(paragraphs))),
         ("word/styles.xml", &format!("<w:styles {W}>{chain}</w:styles>")),
         ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),
@@ -1026,7 +1012,7 @@ fn docx_numbering_levels_by_style_charge_a_missing_parent_its_length_per_paragra
         let paragraph = format!(
             r#"<w:p><w:pPr><w:pStyle w:val="a"/><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>{DOCX_TEXT}</w:p>"#
         );
-        zip(&[
+        zip_package(&[
             ("word/document.xml", &docx_document(&paragraph.repeat(paragraphs))),
             ("word/styles.xml", &format!("<w:styles {W}>{style}</w:styles>")),
             ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),
@@ -1073,12 +1059,12 @@ fn an_odf_cell_repeated_four_million_times_over_a_long_url_is_refused() {
     let odt = odf(&format!(
         r#"<office:text><table:table><table:table-row><table:table-cell table:number-columns-repeated="4000000"><text:p><draw:frame><draw:image xlink:href="{url}"/></draw:frame></text:p></table:table-cell></table:table-row></table:table></office:text>"#
     ));
-    let refusal = limited(|_| {}).convert(Input::new(&odt, Format::Odt));
+    let refusal = limited(|_| {}).convert(Input::new(&odt, Format::Odt)).err();
     let max = Limits::default().max_expansion_text_bytes;
-    assert!(
-        matches!(&refusal, Err(ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, max: m, .. }) if *m == max),
-        "{:?}",
-        refusal.err()
+    assert_matches!(
+        refusal,
+        Some(ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, max: m, .. })
+            if m == max
     );
 }
 
@@ -1135,7 +1121,7 @@ fn docx_numbering(numbering: &str, styles: &str, paragraphs: &[usize]) -> Vec<u8
             )
         })
         .collect();
-    zip(&[
+    zip_package(&[
         ("word/document.xml", &docx_document(&body)),
         ("word/styles.xml", &format!("<w:styles {W}>{styles}</w:styles>")),
         ("word/numbering.xml", &format!("<w:numbering {W}>{numbering}</w:numbering>")),

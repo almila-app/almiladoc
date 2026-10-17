@@ -912,6 +912,7 @@ mod tests {
     use crate::model::{CellSlot, ImageSource, Style};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
+    use std::assert_matches;
 
     struct NullCtx;
 
@@ -956,15 +957,15 @@ mod tests {
         assert_eq!(props, [(10, bold), (10, bold), (1, italic)]);
         let limits = crate::limits::Limits { max_work: 3, ..crate::limits::Limits::default() };
         let refused = sheet.matching_rules(&ParseCtx::new(&limits), "p", &["c7", "c9"]);
-        assert!(matches!(
+        assert_matches!(
             refused,
             Err(ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max: 3 })
-        ));
+        );
         let token = crate::ledger::CancelToken::new();
         token.cancel();
         let cancelled = ParseCtx::default().with_cancel(Some(&token));
         let refused = sheet.matching_rules(&cancelled, "p", &["c7", "c9"]);
-        assert!(matches!(refused, Err(ConvertError::Cancelled)));
+        assert_matches!(refused, Err(ConvertError::Cancelled));
     }
 
     #[test]
@@ -975,10 +976,10 @@ mod tests {
         let mut limits =
             crate::limits::Limits { max_expansion: 1, ..crate::limits::Limits::default() };
         let err = to_blocks(&ParseCtx::new(&limits), body, &Stylesheet::default(), &NullCtx);
-        assert!(matches!(
+        assert_matches!(
             err,
             Err(ConvertError::ResourceLimit { limit: crate::limits::Limit::Expansion, max: 1 })
-        ));
+        );
         limits.max_expansion = 2;
         assert!(to_blocks(&ParseCtx::new(&limits), body, &Stylesheet::default(), &NullCtx).is_ok());
     }
@@ -1163,7 +1164,7 @@ mod tests {
 
     #[test]
     fn whitespace_collapses_across_inline_boundaries() {
-        // M7: a lone space inside a span must survive between words, and
+        // A lone space inside a span must survive between words, and
         // formatting splits must not double or drop spaces.
         let out = blocks("<body><p>foo<span> </span>bar</p></body>");
         assert_eq!(para_text(&out[0]), "foo bar");
@@ -1192,7 +1193,6 @@ mod tests {
 
     #[test]
     fn inline_style_overrides_the_tag_default() {
-        // M7: `<b style="font-weight: normal">` renders plain.
         let out = blocks(r#"<body><p><b style="font-weight: normal">x</b></p></body>"#);
         let Block::Paragraph(inlines) = &out[0] else { panic!() };
         assert!(!first_text_style(inlines).bold);
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[test]
     fn extreme_ordered_list_values_do_not_overflow() {
-        // H2: source-controlled `start`/`value` sit anywhere in i64.
+        // Source-controlled `start`/`value` sit anywhere in i64.
         let html = format!(
             "<body><ol start=\"{}\"><li>a</li><li>b</li><li value=\"{}\">c</li><li>d</li></ol></body>",
             i64::MAX,
@@ -1240,7 +1240,6 @@ mod tests {
 
     #[test]
     fn rowspan_zero_spans_to_the_end_of_the_row_group() {
-        // M8: rowspan="0" covers the remaining rows of its row group only.
         let html = r#"<body><table>
             <tbody>
                 <tr><td rowspan="0">tall</td><td>a</td></tr>
@@ -1250,8 +1249,8 @@ mod tests {
         </table></body>"#;
         let out = blocks(html);
         let Block::Table(t) = &out[0] else { panic!("{out:?}") };
-        assert!(matches!(&t.grid[0][0], CellSlot::Origin(c) if c.row_span == 2));
-        assert!(matches!(t.grid[1][0], CellSlot::Covered { origin_row: 0, origin_col: 0 }));
-        assert!(matches!(&t.grid[2][0], CellSlot::Origin(_)), "next group must not be covered");
+        assert_matches!(&t.grid[0][0], CellSlot::Origin(c) if c.row_span == 2);
+        assert_matches!(t.grid[1][0], CellSlot::Covered { origin_row: 0, origin_col: 0 });
+        assert_matches!(&t.grid[2][0], CellSlot::Origin(_), "next group must not be covered");
     }
 }

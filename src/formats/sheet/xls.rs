@@ -1151,6 +1151,7 @@ fn string_reader<'a>(segs: &'a [&'a [u8]], skip: usize) -> Option<SegReader<'a>>
 mod tests {
     use super::*;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
+    use std::assert_matches;
     use std::io::Write;
 
     fn rec(rec_type: u16, body: &[u8]) -> Vec<u8> {
@@ -1611,12 +1612,10 @@ mod tests {
             let records = |cells: u16| (0..cells).flat_map(cell).collect::<Vec<u8>>();
             assert!(run(records(3)).is_ok(), "{case}");
             let refused = run(records(4)).map(drop);
-            assert!(
-                matches!(
-                    refused,
-                    Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 })
-                ),
-                "{case}: {refused:?}"
+            assert_matches!(
+                refused,
+                Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 }),
+                "{case}"
             );
         }
     }
@@ -1705,7 +1704,7 @@ mod tests {
     #[test]
     fn filepass_means_encrypted() {
         let wb = Wb { filepass: true, ..one_sheet(label(0, 0, 0, "x")) };
-        assert!(matches!(parse(&ParseCtx::default(), &wb.build()), Err(ConvertError::Encrypted)));
+        assert_matches!(parse(&ParseCtx::default(), &wb.build()), Err(ConvertError::Encrypted));
     }
 
     #[test]
@@ -2274,7 +2273,7 @@ mod tests {
     fn a_workbook_listing_no_sheet_is_malformed() {
         let wb = Wb { xfs: vec![0], ..Wb::default() };
         let error = parse(&ParseCtx::default(), &wb.build()).unwrap_err();
-        assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
+        assert_matches!(error, ConvertError::Malformed { .. });
     }
 
     #[test]
@@ -2310,12 +2309,9 @@ mod tests {
         let dropped_sheet_and_a_byte = stream.len() - starts[0] + 1;
         let parse_ctx = ParseCtx::default();
         let error = parse(&parse_ctx, &wb(dropped_sheet_and_a_byte).build()).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ConvertError::Malformed { reason: "no sheet in the workbook could be read", .. }
-            ),
-            "{error:?}"
+        assert_matches!(
+            error,
+            ConvertError::Malformed { reason: "no sheet in the workbook could be read", .. }
         );
         assert_eq!(
             reported(parse_ctx),
@@ -2427,9 +2423,9 @@ mod tests {
     fn a_workbook_whose_only_sheet_is_a_module_is_malformed() {
         let wb = Wb { module_sheet: Some(0), ..one_sheet(cells("m")) };
         let error = parse(&ParseCtx::default(), &wb.build()).unwrap_err();
-        assert!(
-            matches!(error, ConvertError::Malformed { reason: "the workbook lists no sheet", .. }),
-            "{error:?}"
+        assert_matches!(
+            error,
+            ConvertError::Malformed { reason: "the workbook lists no sheet", .. }
         );
     }
 

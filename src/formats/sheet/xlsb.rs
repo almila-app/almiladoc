@@ -549,7 +549,8 @@ mod tests {
     use super::super::grid::{MAX_COLS, MAX_ROWS};
     use super::*;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
-    use std::io::Write;
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     const PKG_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
     const WS_REL: &str =
@@ -713,12 +714,8 @@ mod tests {
             let rels = format!(
                 r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}">{rels}</Relationships>"#
             );
-            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            let opts = zip::write::SimpleFileOptions::default();
-            let mut add = |name: &str, body: &[u8]| {
-                zip.start_file(name, opts).unwrap();
-                zip.write_all(body).unwrap();
-            };
+            let mut parts = Vec::new();
+            let mut add = |name: &str, body: &[u8]| parts.push((name.to_string(), body.to_vec()));
             add("xl/workbook.bin", &workbook);
             add("xl/_rels/workbook.bin.rels", rels.as_bytes());
             for (i, (_, _, body)) in self.sheets.iter().enumerate() {
@@ -733,7 +730,7 @@ mod tests {
             for (name, body) in &self.extra {
                 add(name, body);
             }
-            zip.finish().unwrap().into_inner()
+            zip_package(&parts)
         }
     }
 
@@ -794,7 +791,10 @@ mod tests {
         let mut stream = rec(BRT_CELL_RK, &[0u8; 10]);
         stream.truncate(stream.len() - 1);
         let mut records = Records::new(&ParseCtx::default(), &stream);
-        assert!(records.next().is_err(), "payload shorter than its declared size must error");
+        assert_matches!(
+            records.next(),
+            Err(ConvertError::Malformed { reason: "record payload runs past the part", .. })
+        );
     }
 
     #[test]
@@ -871,15 +871,15 @@ mod tests {
         let shared = Wb { shared: Some(shared_strings(&["a", "b", "c"])), ..one_sheet(Vec::new()) };
         assert!(parse_under(3, &shared).is_ok());
         let err = parse_under(2, &shared).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 });
         let sheet = one_sheet(three_cells());
         assert!(parse_under(4, &sheet).is_ok());
         let err = parse_under(3, &sheet).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 3 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 3 });
         let styled = Wb { styles: Some(styles(&[], &[0; 5])), ..one_sheet(Vec::new()) };
         assert!(parse_under(8, &styled).is_ok());
         let err = parse_under(7, &styled).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 7 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 7 });
     }
 
     #[test]
@@ -1310,12 +1310,10 @@ mod tests {
             let body = |cells: u32| [row_hdr(0, row), (0..cells).flat_map(cell).collect()].concat();
             assert!(run(body(3)).is_ok(), "{case}");
             let refused = run(body(4));
-            assert!(
-                matches!(
-                    refused,
-                    Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 })
-                ),
-                "{case}: {refused:?}"
+            assert_matches!(
+                refused,
+                Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 }),
+                "{case}"
             );
         }
     }
@@ -1332,7 +1330,7 @@ mod tests {
             [one_value(), short_row].concat(),
         ] {
             let alone = parse(&one_sheet(body.clone()).build());
-            assert!(matches!(alone, Err(ConvertError::Malformed { .. })), "{alone:?}");
+            assert_matches!(alone, Err(ConvertError::Malformed { .. }));
             let beside =
                 Wb { sheets: vec![("A", 0, one_value()), ("B", 0, body)], ..Wb::default() };
             assert_eq!(diagnose(&beside), [in_unit(DiagnosticCode::UnitUnreadable, 2, 1)]);

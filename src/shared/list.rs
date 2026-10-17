@@ -123,6 +123,7 @@ fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
 mod tests {
     use super::*;
     use crate::model::Inline;
+    use std::assert_matches;
 
     fn entry(
         level: usize,
@@ -212,7 +213,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         let Block::List(l) = &out[0] else { panic!() };
         assert_eq!(l.items.len(), 2);
-        assert!(matches!(l.items[0].blocks.last(), Some(Block::List(sub)) if sub.ordered()));
+        assert_matches!(l.items[0].blocks.last(), Some(Block::List(sub)) if sub.ordered());
     }
 
     #[test]

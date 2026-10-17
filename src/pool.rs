@@ -70,6 +70,7 @@ fn run_in<T: Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn threads(threads: usize) -> Config {
         Config { threads, ..Config::default() }
@@ -107,7 +108,7 @@ mod tests {
     fn results_and_errors_pass_through() {
         assert_eq!(run_on_pool(&threads(1), || Ok(7)).ok(), Some(7));
         let refused = run_on_pool(&threads(1), || Err::<(), _>(ConvertError::Encrypted));
-        assert!(matches!(refused, Err(ConvertError::Encrypted)));
+        assert_matches!(refused, Err(ConvertError::Encrypted));
     }
 
     #[test]
@@ -115,7 +116,7 @@ mod tests {
         let result = run_on_pool(&threads(2), || -> Result<(), ConvertError> {
             panic!("a defect");
         });
-        assert!(matches!(result, Err(ConvertError::Internal)), "{result:?}");
+        assert_matches!(result, Err(ConvertError::Internal));
     }
 
     #[test]
@@ -124,7 +125,7 @@ mod tests {
             rayon::join(|| (), || panic!("a defect"));
             Ok(())
         });
-        assert!(matches!(result, Err(ConvertError::Internal)), "{result:?}");
+        assert_matches!(result, Err(ConvertError::Internal));
     }
 
     #[test]
@@ -133,8 +134,8 @@ mod tests {
             .num_threads(1)
             .spawn_handler(|_| Err(std::io::Error::other("no threads")))
             .build();
-        assert!(pool.is_err());
+        assert_matches!(pool, Err(_));
         let result = run_in(pool, || Ok(()));
-        assert!(matches!(result, Err(ConvertError::Internal)), "{result:?}");
+        assert_matches!(result, Err(ConvertError::Internal));
     }
 }

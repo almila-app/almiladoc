@@ -2,10 +2,9 @@
 //! named `<limit>--<shape>--errors.<ext>`, or an input over 1 MiB built here.
 //! An ordinary input as large as `max_input_bytes` converts.
 
-mod common;
-
+use crate::support::{converter, fixture_root, format_of, walk};
 use almiladoc::{ConvertError, Format, Input, Limit, Limits};
-use common::{converter, fixture_root, format_of, walk};
+use std::assert_matches;
 
 fn default_max(name: &str) -> u64 {
     let limits = Limits::default();
@@ -37,10 +36,11 @@ fn every_abuse_fixture_trips_the_limit_its_name_gives() {
         let bytes = std::fs::read(&path).unwrap();
         let format = format_of(&path, &bytes).unwrap();
         let error = converter.convert(Input::new(&bytes, format)).unwrap_err();
-        assert!(
-            matches!(&error, ConvertError::ResourceLimit { limit: l, max, .. }
-                if l.as_str() == limit && *max == default_max(limit)),
-            "{name}: {error:?}"
+        assert_matches!(
+            &error,
+            ConvertError::ResourceLimit { limit: l, max, .. }
+                if l.as_str() == limit && *max == default_max(limit),
+            "{name}"
         );
     }
 }
@@ -53,14 +53,14 @@ fn an_input_past_max_input_bytes_is_refused_before_any_parse() {
     let parsed = converter.parse(Input::new(&over, Format::Docx)).unwrap_err();
     let converted = converter.convert(Input::new(&over, Format::Docx)).unwrap_err();
     for error in [parsed, converted] {
-        assert!(
-            matches!(error, ConvertError::ResourceLimit { limit: Limit::InputBytes, max: m, .. } if m == max),
-            "{error:?}"
+        assert_matches!(
+            error,
+            ConvertError::ResourceLimit { limit: Limit::InputBytes, max: m, .. } if m == max
         );
     }
     let at_max = &over[..over.len() - 1];
     let error = converter.convert(Input::new(at_max, Format::Docx)).unwrap_err();
-    assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
+    assert_matches!(error, ConvertError::Malformed { .. });
 }
 
 /// An RTF of one picture in Word's hex form, 128 digits a line, filling
@@ -115,9 +115,9 @@ fn ppt_links_each_over_one_long_text_trip_max_work() {
     let deck = ppt(&[text, link.repeat(links)].concat());
     assert!(deck.len() < 10 << 20);
     let error = converter(1).convert(Input::new(&deck, Format::Ppt)).unwrap_err();
-    assert!(
-        matches!(error, ConvertError::ResourceLimit { limit: Limit::Work, max: m, .. } if m == max),
-        "{error:?}"
+    assert_matches!(
+        error,
+        ConvertError::ResourceLimit { limit: Limit::Work, max: m, .. } if m == max
     );
 }
 
@@ -126,9 +126,9 @@ fn a_ppt_stream_of_max_records_empty_atoms_trips_max_records() {
     let max = Limits::default().max_records;
     let deck = ppt(&atom(0, &[]).repeat(usize::try_from(max + 1).unwrap()));
     let error = converter(1).convert(Input::new(&deck, Format::Ppt)).unwrap_err();
-    assert!(
-        matches!(error, ConvertError::ResourceLimit { limit: Limit::Records, max: m, .. } if m == max),
-        "{error:?}"
+    assert_matches!(
+        error,
+        ConvertError::ResourceLimit { limit: Limit::Records, max: m, .. } if m == max
     );
 }
 
@@ -139,8 +139,8 @@ fn a_csv_cell_escaped_past_max_output_bytes_trips_it() {
     let csv = b"&#".repeat(usize::try_from(max / 6 + 1).unwrap());
     assert!((csv.len() as u64) < Limits::default().max_input_bytes);
     let error = converter(1).convert(Input::new(&csv, Format::Csv)).unwrap_err();
-    assert!(
-        matches!(error, ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: m, .. } if m == max),
-        "{error:?}"
+    assert_matches!(
+        error,
+        ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: m, .. } if m == max
     );
 }

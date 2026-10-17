@@ -269,20 +269,13 @@ fn opc_format_by_path(part: &str) -> Option<Format> {
 mod tests {
     use super::*;
     use crate::ledger::CancelToken;
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
     use std::io::Write;
 
     const RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
     const OFFICE_DOCUMENT: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
-
-    fn zip_of(parts: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, bytes) in parts {
-            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(bytes).unwrap();
-        }
-        w.finish().unwrap().into_inner()
-    }
 
     fn ole_of(streams: &[&str]) -> Vec<u8> {
         let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
@@ -306,7 +299,8 @@ mod tests {
 
     #[test]
     fn container_signature_wins_over_an_early_embedded_pdf() {
-        let pkg = zip_of(&[("embedded.pdf", b"%PDF-1.7\n"), ("word/document.xml", b"<document/>")]);
+        let pkg =
+            zip_package(&[("embedded.pdf", "%PDF-1.7\n"), ("word/document.xml", "<document/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Docx));
     }
 
@@ -329,25 +323,25 @@ mod tests {
             ("application/vnd.oasis.opendocument.presentation", Format::Odp),
             ("application/epub+zip", Format::Epub),
         ] {
-            assert_eq!(from_bytes(&zip_of(&[("mimetype", mime.as_bytes())])), Some(format));
+            assert_eq!(from_bytes(&zip_package(&[("mimetype", mime.as_bytes())])), Some(format));
         }
-        assert_eq!(from_bytes(&zip_of(&[("mimetype", b"application/zip")])), None);
+        assert_eq!(from_bytes(&zip_package(&[("mimetype", "application/zip")])), None);
     }
 
     #[test]
     fn opc_main_part_content_type_wins_over_its_path() {
         // Main part at a nonconventional path; only the content type says
         // this is a presentation.
-        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
             <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="/custom/main.xml"/>
         </Relationships>"#;
-        let types = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
             <Override PartName="/custom/main.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
         </Types>"#;
-        let pkg = zip_of(&[
+        let pkg = zip_package(&[
             ("_rels/.rels", rels),
             ("[Content_Types].xml", types),
-            ("custom/main.xml", b"<p/>"),
+            ("custom/main.xml", "<p/>"),
         ]);
         assert_eq!(from_bytes(&pkg), Some(Format::Pptx));
     }
@@ -356,15 +350,15 @@ mod tests {
     fn opc_stale_content_types_defer_to_the_root_element() {
         // The Override names a part that does not exist; the real main part
         // only gets the generic Default. Its w:document root decides.
-        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
             <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="content/main.xml"/>
         </Relationships>"#;
-        let types = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
             <Default Extension="xml" ContentType="application/xml"/>
             <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
         </Types>"#;
-        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
-        let pkg = zip_of(&[
+        let main = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
+        let pkg = zip_package(&[
             ("_rels/.rels", rels),
             ("[Content_Types].xml", types),
             ("content/main.xml", main),
@@ -375,30 +369,30 @@ mod tests {
     #[test]
     fn opc_falls_back_to_conventional_paths() {
         // No content types: the main-part path decides.
-        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
             <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
         </Relationships>"#;
-        let pkg = zip_of(&[("_rels/.rels", rels), ("word/document.xml", b"<d/>")]);
+        let pkg = zip_package(&[("_rels/.rels", rels), ("word/document.xml", "<d/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Docx));
 
         // No rels at all: conventional part existence decides.
-        let pkg = zip_of(&[("xl/workbook.bin", b"\0")]);
+        let pkg = zip_package(&[("xl/workbook.bin", "\0")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Excel));
     }
 
     #[test]
     fn broken_odf_and_epub_fall_back_to_manifest_and_container() {
-        let manifest = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+        let manifest = r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
             <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>
         </manifest:manifest>"#;
-        let pkg = zip_of(&[("META-INF/manifest.xml", manifest), ("content.xml", b"<c/>")]);
+        let pkg = zip_package(&[("META-INF/manifest.xml", manifest), ("content.xml", "<c/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Ods));
 
-        let pkg = zip_of(&[("META-INF/container.xml", b"<container/>")]);
+        let pkg = zip_package(&[("META-INF/container.xml", "<container/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Epub));
 
         // A plain zip is not a document.
-        assert_eq!(from_bytes(&zip_of(&[("readme.txt", b"hi")])), None);
+        assert_eq!(from_bytes(&zip_package(&[("readme.txt", "hi")])), None);
     }
 
     fn types_naming(content_type: &str) -> String {
@@ -420,7 +414,7 @@ mod tests {
         if let Some(types) = types {
             parts.push(("[Content_Types].xml", types.as_bytes()));
         }
-        zip_of(&parts)
+        zip_package(&parts)
     }
 
     #[test]
@@ -493,8 +487,9 @@ mod tests {
         let padded = format!("{types}{}", " ".repeat(METADATA_BYTES as usize));
         assert_eq!(from_bytes(&main_part_package(b"<main/>", Some(&padded))), None);
 
-        let docx =
-            |mimetype: &[u8]| zip_of(&[("mimetype", mimetype), ("word/document.xml", b"<d/>")]);
+        let docx = |mimetype: &[u8]| {
+            zip_package(&[("mimetype", mimetype), ("word/document.xml", b"<d/>".as_slice())])
+        };
         assert_eq!(from_bytes(&docx(b"application/zip")), None);
         let oversized = [b' '; MIMETYPE_BYTES as usize + 1];
         assert_eq!(from_bytes(&docx(&oversized)), Some(Format::Docx));
@@ -513,7 +508,7 @@ mod tests {
         let rtf = b"{\\rtf1\\ansi hi}";
         assert_eq!(mismatch(Format::Doc, rtf), Some(Format::Rtf));
         assert_eq!(mismatch(Format::Rtf, rtf), None);
-        let ods = zip_of(&[("mimetype", b"application/vnd.oasis.opendocument.spreadsheet")]);
+        let ods = zip_package(&[("mimetype", "application/vnd.oasis.opendocument.spreadsheet")]);
         assert_eq!(mismatch(Format::Odt, &ods), Some(Format::Ods));
         assert_eq!(mismatch(Format::Ods, &ods), None);
         assert_eq!(mismatch(Format::Excel, &ole_of(&["WordDocument"])), Some(Format::Doc));
@@ -532,20 +527,17 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let cancelled = ParseCtx::default().with_cancel(Some(&token));
-        assert!(matches!(
-            check_label(&cancelled, &docx, Format::Docx),
-            Err(ConvertError::Cancelled)
-        ));
+        assert_matches!(check_label(&cancelled, &docx, Format::Docx), Err(ConvertError::Cancelled));
 
         for (limits, limit) in [
             (Limits { max_entry_count: 1, ..Limits::DEFAULT }, crate::Limit::EntryCount),
             (Limits { max_xml_nodes: 1, ..Limits::DEFAULT }, crate::Limit::XmlNodes),
         ] {
             let lowered = ParseCtx::new(&limits);
-            assert!(matches!(
+            assert_matches!(
                 check_label(&lowered, &docx, Format::Docx),
                 Err(ConvertError::ResourceLimit { limit: crossed, max: 1 }) if crossed == limit
-            ));
+            );
         }
         assert_eq!(from_bytes(&docx), Some(Format::Docx));
 
@@ -559,9 +551,9 @@ mod tests {
             }
         };
         let no_work = Limits { max_work: 0, ..Limits::DEFAULT };
-        let mimetype = zip_of(&[("mimetype", b"application/vnd.oasis.opendocument.text")]);
+        let mimetype = zip_package(&[("mimetype", "application/vnd.oasis.opendocument.text")]);
         fails(&no_work, &mimetype, Format::Odt, crate::Limit::Work);
-        let manifest = zip_of(&[("META-INF/manifest.xml", b"<manifest/>")]);
+        let manifest = zip_package(&[("META-INF/manifest.xml", "<manifest/>")]);
         fails(&no_work, &manifest, Format::Odt, crate::Limit::Work);
 
         let types = types_naming("application/xml");
@@ -628,35 +620,35 @@ mod tests {
 
     #[test]
     fn odf_identity_is_read_before_opc_folds_part_names() {
-        let ods = zip_of(&[
-            ("mimetype", b"application/vnd.oasis.opendocument.spreadsheet"),
-            ("Pictures/A.png", b"a"),
-            ("Pictures/a.png", b"b"),
+        let ods = zip_package(&[
+            ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+            ("Pictures/A.png", "a"),
+            ("Pictures/a.png", "b"),
         ]);
         assert_eq!(from_bytes(&ods), Some(Format::Ods));
-        assert!(matches!(
+        assert_matches!(
             check_label(&ParseCtx::default(), &ods, Format::Odt),
             Err(ConvertError::Unsupported {
                 kind: UnsupportedKind::FormatMismatch { detected: Format::Ods }
             })
-        ));
-        let manifest = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
-        let odt = zip_of(&[("META-INF/manifest.xml", manifest), ("A", b"a"), ("a", b"b")]);
+        );
+        let manifest = r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
+        let odt = zip_package(&[("META-INF/manifest.xml", manifest), ("A", "a"), ("a", "b")]);
         assert_eq!(from_bytes(&odt), Some(Format::Odt));
     }
 
     #[test]
     fn odf_and_epub_fallbacks_match_part_names_exactly_after_opc_finds_nothing() {
         let types = types_naming("application/xml");
-        let manifest = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
-        let odt = zip_of(&[
-            ("[Content_Types].xml", types.as_bytes()),
+        let manifest = r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
+        let odt = zip_package(&[
+            ("[Content_Types].xml", types.as_str()),
             ("meta-inf/manifest.xml", manifest),
         ]);
         assert_eq!(from_bytes(&odt), None);
-        let epub = zip_of(&[
-            ("[Content_Types].xml", types.as_bytes()),
-            ("META-INF/CONTAINER.XML", b"<container/>"),
+        let epub = zip_package(&[
+            ("[Content_Types].xml", types.as_str()),
+            ("META-INF/CONTAINER.XML", "<container/>"),
         ]);
         assert_eq!(from_bytes(&epub), None);
     }
@@ -682,9 +674,11 @@ mod tests {
         assert_eq!(detected(&Limits { max_total_bytes: types + 1, ..fits }), None);
 
         let rels_part = rels_naming("custom/main.xml");
-        let manifest = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
-        let pkg =
-            zip_of(&[("_rels/.rels", rels_part.as_bytes()), ("META-INF/manifest.xml", manifest)]);
+        let manifest = r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/></manifest:manifest>"#;
+        let pkg = zip_package(&[
+            ("_rels/.rels", rels_part.as_str()),
+            ("META-INF/manifest.xml", manifest),
+        ]);
         let both = rels + u64::try_from(manifest.len()).unwrap();
         let total = |max_total_bytes| Limits { max_total_bytes, ..Limits::DEFAULT };
         assert_eq!(detect(&ParseCtx::new(&total(both)), &pkg).unwrap(), Some(Format::Odt));

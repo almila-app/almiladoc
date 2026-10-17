@@ -3,10 +3,8 @@
 //! with typed errors; they must never panic, hang, or exhaust memory.
 //! (The cargo-fuzz targets under `fuzz/` run the same surfaces much harder.)
 
-mod common;
-
+use crate::support::{converter, corpus, fixture_root, format_of};
 use almiladoc::{ConvertError, Input};
-use common::{converter, fixture_root, format_of, walk};
 
 struct Rng(u64);
 
@@ -25,15 +23,10 @@ impl Rng {
 #[test]
 fn mutated_fixtures_never_panic() {
     let root = fixture_root();
-    let mut files = Vec::new();
-    walk(&root, &mut files);
     let converter = converter(1);
     let mut rng = Rng(0x5EED_1234_5678_9ABC);
-    for path in files {
+    for path in corpus() {
         let rel = path.strip_prefix(&root).unwrap();
-        if rel.starts_with("abuse") {
-            continue; // abuse shapes are asserted separately; mutating them is slow
-        }
         let original = std::fs::read(&path).unwrap();
         let Some(format) = format_of(&path, &original) else {
             continue;

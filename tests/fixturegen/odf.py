@@ -2,7 +2,7 @@ from fixturegen.common import write_zip
 
 
 # ---------------------------------------------------------------------------
-# R5: internal ODF gaps keep their coordinates; only trailing filler elided
+# Internal ODF gaps keep their coordinates; only trailing filler elided
 
 def gaps_ods(out):
     content = """<?xml version="1.0"?>
@@ -74,7 +74,7 @@ def math_odt(out):
 
 
 # ---------------------------------------------------------------------------
-# R16: ODF style:default-style beneath named chains; full ISO durations
+# ODF style:default-style beneath named chains; full ISO durations
 
 def defaults_odf(out):
     styles_xml = """<?xml version="1.0"?>
@@ -128,7 +128,7 @@ def defaults_odf(out):
               [("content.xml", durations)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
 
-    # S7: list headers render without markers, start-value restarts split
+    # List headers render without markers, start-value restarts split
     # the run, and continue-list resolves by the target's xml:id.
     lists_xml = """<?xml version="1.0"?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -157,7 +157,7 @@ def defaults_odf(out):
               [("content.xml", lists_xml)],
               mimetype_first="application/vnd.oasis.opendocument.text")
 
-    # S18: encryption is detected from the actual manifest:encryption-data
+    # Encryption is detected from the actual manifest:encryption-data
     # element - a comment mentioning it must not classify the document as
     # encrypted, while a real element must.
     plain_content = """<?xml version="1.0"?>
@@ -239,7 +239,7 @@ def abuse(out):
     write_zip(a / "max_expansion--hugerepeat--errors.ods",
               [("content.xml", repeat_ods)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
-    # S1: a single cell whose declared span area is astronomically large; the
+    # A single cell whose declared span area is astronomically large; the
     # complete area must be charged against the expansion budget *before* any
     # per-position work happens.
     span_ods = """<?xml version="1.0"?>
@@ -254,9 +254,7 @@ def abuse(out):
     write_zip(a / "max_expansion--hugespan--errors.ods",
               [("content.xml", span_ods)],
               mimetype_first="application/vnd.oasis.opendocument.spreadsheet")
-    # S1: a repeated row whose cells are structurally present but empty used
-    # to bypass the budget entirely (nothing content-bearing was ever
-    # charged) while still looping over the repeat count.
+    # A repeated row of present but empty cells is charged against the expansion budget for every repeat.
     emptyrepeat_ods = """<?xml version="1.0"?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
  xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"

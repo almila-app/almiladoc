@@ -98,6 +98,7 @@ pub fn media_type_for(part: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn repeated_origin_parts_share_one_asset() {
@@ -111,8 +112,8 @@ mod tests {
 
     #[test]
     fn repeated_references_cannot_trip_the_cap() {
-        // Preload the counter to just under the cap (avoids large real
-        // allocations, which would feed the R22 memory test's counter).
+        // Preload the counter to just under the cap instead of allocating
+        // large assets.
         let mut sink = AssetSink::new(&ParseCtx::default());
         sink.total = sink.max_total - 10;
         for _ in 0..8 {
@@ -125,7 +126,7 @@ mod tests {
         let mut sink = AssetSink::new(&ParseCtx::default());
         sink.total = sink.max_total - 10;
         let err = sink.add("image/png".into(), "media/big.png".into(), &[0; 11]).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, .. }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, .. });
     }
 
     #[test]
@@ -135,9 +136,9 @@ mod tests {
         let mut sink = AssetSink::new(&ParseCtx::new(&limits));
         assert!(sink.add("image/png".into(), "media/a.png".into(), &[0; 10]).is_ok());
         let err = sink.add("image/png".into(), "media/b.png".into(), &[0; 1]).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 10 }
-        ));
+        );
     }
 }

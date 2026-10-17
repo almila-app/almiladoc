@@ -125,6 +125,7 @@ impl<'a> Lexer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn bin_payload_consumed_raw() {
@@ -184,9 +185,9 @@ mod tests {
         assert!(lexer.next_token().unwrap().is_some());
         assert!(lexer.next_token().unwrap().is_some());
         let err = lexer.next_token().err().unwrap();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max: 2 }
-        ));
+        );
     }
 }

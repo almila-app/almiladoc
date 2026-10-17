@@ -292,6 +292,8 @@ impl Conversion {
 mod tests {
     use super::*;
     use crate::diagnostics::{DiagnosticCode, Region};
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     const CSV: &[u8] = b"a,b\n1,2\n";
 
@@ -322,26 +324,17 @@ mod tests {
 
     const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
 
-    fn zip_of(parts: &[(&str, &str)]) -> Vec<u8> {
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for (name, text) in parts {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
-        }
-        zip.finish().unwrap().into_inner()
-    }
-
     fn recovered_docx() -> Vec<u8> {
         let document = format!(
             "<w:document {W}><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:body></w:document>"
         );
         let notes = format!("<w:footnotes {W}><w:footnote w:id=\"2\">");
-        zip_of(&[("word/document.xml", &document), ("word/footnotes.xml", &notes)])
+        zip_package(&[("word/document.xml", &document), ("word/footnotes.xml", &notes)])
     }
 
     fn docx(body: &str, parts: &[(&str, &str)]) -> Vec<u8> {
         let document = format!("<w:document {W}><w:body>{body}</w:body></w:document>");
-        zip_of(&[&[("word/document.xml", document.as_str())], parts].concat())
+        zip_package(&[&[("word/document.xml", document.as_str())], parts].concat())
     }
 
     #[test]
@@ -459,12 +452,9 @@ mod tests {
         let mut config = Config::default();
         config.limits.max_nesting_depth = 8;
         let error = Converter::new(config).unwrap().parse(Input::new(&bytes, Format::Docx));
-        assert!(
-            matches!(
-                error,
-                Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 8 })
-            ),
-            "{error:?}"
+        assert_matches!(
+            error,
+            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 8 })
         );
         assert!(converter(1).parse(Input::new(&bytes, Format::Docx)).is_ok());
     }
@@ -489,12 +479,9 @@ mod tests {
         };
         assert!(parsed(5).render().is_ok());
         let error = parsed(4).render();
-        assert!(
-            matches!(
-                error,
-                Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 4 })
-            ),
-            "{error:?}"
+        assert_matches!(
+            error,
+            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 4 })
         );
     }
 
@@ -547,9 +534,9 @@ mod tests {
     #[test]
     fn errors_pass_through() {
         let error = converter(1).convert(Input::new(b"not a package", Format::Docx)).unwrap_err();
-        assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
+        assert_matches!(error, ConvertError::Malformed { .. });
         let error = converter(1).parse(Input::new(b"not a package", Format::Docx)).unwrap_err();
-        assert!(matches!(error, ConvertError::Malformed { .. }), "{error:?}");
+        assert_matches!(error, ConvertError::Malformed { .. });
     }
 
     fn on_a_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
@@ -564,10 +551,7 @@ mod tests {
         let close = "<w:p/></w:tc></w:tr></w:tbl>".repeat(depth);
         let w = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
         let document = format!("<w:document {w}><w:body>{open}<w:p/>{close}</w:body></w:document>");
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut zip, document.as_bytes()).unwrap();
-        zip.finish().unwrap().into_inner()
+        zip_package(&[("word/document.xml", document)])
     }
 
     #[test]
@@ -648,7 +632,7 @@ mod tests {
         let parse_ctx = converter.parse_ctx(&input);
         assert!(parse_ctx.charge(1).is_ok());
         token.cancel();
-        assert!(matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled)));
+        assert_matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled));
     }
 
     #[test]
@@ -664,7 +648,7 @@ mod tests {
             token.cancel();
             running.join().unwrap()
         });
-        assert!(matches!(result, Err(ConvertError::Cancelled)), "{result:?}");
+        assert_matches!(result, Err(ConvertError::Cancelled));
     }
 
     #[test]
@@ -675,6 +659,6 @@ mod tests {
         config.limits.max_input_bytes = 1;
         let converter = Converter::new(config).unwrap();
         let input = Input::new(CSV, Format::Csv).with_cancel(token);
-        assert!(matches!(converter.convert(input), Err(ConvertError::Cancelled)));
+        assert_matches!(converter.convert(input), Err(ConvertError::Cancelled));
     }
 }

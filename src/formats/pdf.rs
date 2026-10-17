@@ -66,6 +66,7 @@ fn map_error(e: PdfError) -> ConvertError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::assert_matches;
 
     const HELVETICA: &str =
         "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
@@ -186,36 +187,30 @@ pub(crate) mod tests {
     #[test]
     fn a_textless_pdf_needs_ocr_on_every_page() {
         let err = to_markdown(&ParseCtx::default(), &pdf(2, "", b"0 0 m 100 100 l S")).unwrap_err();
-        assert!(
-            matches!(&err, ConvertError::NeedsOcr { pages, page_count: 2 } if pages == &[1, 2]),
-            "{err:?}"
-        );
+        assert_matches!(&err, ConvertError::NeedsOcr { pages, page_count: 2 } if pages == &[1, 2]);
     }
 
     #[test]
     fn a_textless_result_names_every_page() {
         let err = textless(3);
-        assert!(
-            matches!(&err, ConvertError::NeedsOcr { pages, page_count: 3 } if pages == &[1, 2, 3]),
-            "{err:?}"
+        assert_matches!(
+            &err,
+            ConvertError::NeedsOcr { pages, page_count: 3 } if pages == &[1, 2, 3]
         );
     }
 
     #[test]
     fn a_pdf_without_pages_is_malformed() {
         let err = to_markdown(&ParseCtx::default(), &pdf(0, "", b"")).unwrap_err();
-        assert!(matches!(err, ConvertError::Malformed { part: None, .. }), "{err:?}");
+        assert_matches!(err, ConvertError::Malformed { part: None, .. });
         let err = textless(0);
-        assert!(
-            matches!(err, ConvertError::Malformed { part: None, reason: "PDF has no pages" }),
-            "{err:?}"
-        );
+        assert_matches!(err, ConvertError::Malformed { part: None, reason: "PDF has no pages" });
     }
 
     #[test]
     fn engine_errors_carry_no_engine_text() {
         let oom = map_error(PdfError::Io(ErrorKind::OutOfMemory.into()));
-        assert!(matches!(oom, ConvertError::ResourceLimit { limit: Limit::Allocation, max: 0 }));
+        assert_matches!(oom, ConvertError::ResourceLimit { limit: Limit::Allocation, max: 0 });
         for e in [
             PdfError::Io(ErrorKind::InvalidData.into()),
             PdfError::NotAPdf("\u{1b}[2J secret".into()),
@@ -223,9 +218,9 @@ pub(crate) mod tests {
             PdfError::InvalidStructure,
         ] {
             let mapped = map_error(e);
-            assert!(matches!(mapped, ConvertError::Malformed { part: None, .. }), "{mapped:?}");
+            assert_matches!(mapped, ConvertError::Malformed { part: None, .. });
             assert!(!mapped.to_string().contains("secret"));
         }
-        assert!(matches!(map_error(PdfError::Encrypted), ConvertError::Encrypted));
+        assert_matches!(map_error(PdfError::Encrypted), ConvertError::Encrypted);
     }
 }

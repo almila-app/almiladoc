@@ -4,19 +4,17 @@
 //! `OnLoss::Report`: the Markdown output, or the terminal error. A fixture
 //! with diagnostics has a second snapshot, `<name>.diagnostics`, of each
 //! diagnostic and the verdict under `OnLoss::Fail`. Logs are never
-//! snapshotted. Fixtures under
+//! snapshotted. A reader that panics fails the sweep. Fixtures under
 //! `abuse/` are resource-abuse shapes, each asserted against its limit in
-//! `tests/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
+//! `tests/it/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
 //! expected outcome as `name--<outcome>.ext` where outcome is one of
 //! `recovers`, `skips`, `ignores`, `errors`.
 
-mod common;
-
+use crate::support::{self, converter, fixture_root, format_of, walk};
 use almiladoc::{
     Config, Conversion, ConvertError, Converter, Diagnostics, Format, Input, OnLoss,
     model::Document,
 };
-use common::{converter, fixture_root, format_of, walk};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,15 +32,21 @@ fn document(path: &Path, format: Format) -> Document {
     converter(1).parse(Input::new(&bytes, format)).unwrap().into_document()
 }
 
-/// Convert one file, capturing panics so a bad parser records a baseline
-/// instead of aborting the whole harness.
-fn convert(path: &Path) -> (String, Diagnostics) {
-    let result = std::panic::catch_unwind(|| convert_file(path));
+/// The Markdown and diagnostics of a conversion, or the error it ended in;
+/// the pool reports a panic in a reader as `Internal`, which fails the sweep.
+fn outcome(name: &str, result: Result<Conversion, ConvertError>) -> (String, Diagnostics) {
     match result {
-        Ok(Ok(conversion)) => (conversion.markdown().to_string(), conversion.diagnostics().clone()),
-        Ok(Err(e)) => (format!("ERROR: {e:#}"), Diagnostics::default()),
-        Err(_) => ("PANIC".to_string(), Diagnostics::default()),
+        Ok(conversion) => (conversion.markdown().to_string(), conversion.diagnostics().clone()),
+        Err(ConvertError::Internal) => panic!("{name}: a reader panicked"),
+        Err(e) => (format!("ERROR: {e:#}"), Diagnostics::default()),
     }
+}
+
+fn assert_snapshot(name: &str, value: &str) {
+    let mut settings = insta::Settings::clone_current();
+    settings.set_snapshot_path("../snapshots");
+    settings.set_prepend_module_to_snapshot(false);
+    settings.bind(|| insta::assert_snapshot!(format!("snapshots__{name}"), value));
 }
 
 /// Each diagnostic on a line, then what `OnLoss::Fail` makes of them.
@@ -78,17 +82,12 @@ fn expected_outcome(path: &Path) -> Option<&'static str> {
 
 fn corpus_cases() -> Vec<(PathBuf, String)> {
     let root = fixture_root();
-    let mut files = Vec::new();
-    walk(&root, &mut files);
-    files
+    support::corpus()
         .into_iter()
-        .filter_map(|path| {
-            let rel = path.strip_prefix(&root).unwrap();
-            if rel.starts_with("abuse") {
-                return None;
-            }
-            let name = rel.to_string_lossy().replace(['\\', '/'], "__");
-            Some((path, name))
+        .map(|path| {
+            let name =
+                path.strip_prefix(&root).unwrap().to_string_lossy().replace(['\\', '/'], "__");
+            (path, name)
         })
         .collect()
 }
@@ -102,34 +101,31 @@ fn sweep(pdf: bool) {
         corpus_cases().into_iter().filter(|(path, _)| is_pdf(path) == pdf).collect();
     assert!(!cases.is_empty(), "no fixtures in this sweep");
     for (path, name) in cases {
-        let (output, diagnostics) = convert(&path);
-        // Once the unified recovery policy exists (P1), annotated malformed
-        // fixtures must match their single expected outcome.
-        if let Some(outcome) = expected_outcome(&path) {
-            let is_err = output.starts_with("ERROR: ") || output == "PANIC";
-            match outcome {
+        let (output, diagnostics) = outcome(&name, convert_file(&path));
+        if let Some(expected) = expected_outcome(&path) {
+            let is_err = output.starts_with("ERROR: ");
+            match expected {
                 "errors" => {
                     assert!(is_err, "{name}: annotated `errors` but converted successfully")
                 }
-                // recovers/skips/ignores fixtures must produce usable output
-                // post-refactor; during the baseline phase current behavior is
-                // recorded as-is, so this stays a snapshot-only expectation
-                // until P1 flips `STRICT_ANNOTATIONS` on.
-                _ if STRICT_ANNOTATIONS => {
-                    assert!(!is_err, "{name}: annotated `{outcome}` but failed: {output}")
-                }
-                _ => {}
+                _ => assert!(!is_err, "{name}: annotated `{expected}` but failed: {output}"),
             }
         }
-        insta::assert_snapshot!(name.as_str(), output);
+        assert_snapshot(&name, &output);
         let diagnostics_name = format!("{name}.diagnostics");
         if diagnostics.is_empty() {
             let stale = snapshot_dir().join(format!("snapshots__{diagnostics_name}.snap"));
             assert!(!stale.exists(), "{name} reports nothing, yet {} exists", stale.display());
         } else {
-            insta::assert_snapshot!(diagnostics_name, diagnostics_snapshot(&diagnostics));
+            assert_snapshot(&diagnostics_name, &diagnostics_snapshot(&diagnostics));
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "a reader panicked")]
+fn an_internal_error_fails_the_sweep() {
+    outcome("fixture.docx", Err(ConvertError::Internal));
 }
 
 /// Non-PDF output is byte-identical on every tested target.
@@ -169,11 +165,6 @@ fn snapshots_match_the_corpus() {
         assert!(name.is_some_and(|name| corpus.contains(name)), "{file} belongs to no fixture");
     }
 }
-
-/// Annotated malformed fixtures must produce their single expected outcome:
-/// `recovers`/`skips`/`ignores` convert successfully, `errors` return a typed
-/// error. (Baseline recording ran with this off; it is enforced from P1 on.)
-const STRICT_ANNOTATIONS: bool = true;
 
 /// Every well-formed corpus fixture must be identified from its bytes
 /// alone. Only the signature-less text formats (csv) legitimately need the
@@ -250,7 +241,7 @@ fn docx_ole_payload_wins_over_its_preview_image() {
 }
 
 /// Repeated references to one part must neither re-decompress against the
-/// archive budget nor duplicate the retained asset (S12).
+/// archive budget nor duplicate the retained asset.
 #[test]
 fn repeated_part_references_convert_and_dedupe() {
     let doc = document(&fixture_root().join("docx").join("handmade-manyrefs.docx"), Format::Docx);
@@ -282,26 +273,21 @@ fn rtf_inline_picture_is_retained() {
 /// Local-only sweep over the ~100 real-world files in `samples/` (gitignored).
 /// Snapshots a compact digest (length + hash + head) per file so drift is
 /// detected without committing megabytes of output. Run with:
-/// `cargo test --test snapshots -- --ignored`
+/// `cargo test --test it samples_sweep -- --ignored`
 #[test]
 #[ignore = "requires the local gitignored samples/ directory"]
 fn samples_sweep() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
-    if !root.is_dir() {
-        eprintln!("samples/ not present; skipping sweep");
-        return;
-    }
+    assert!(root.is_dir(), "samples/ is absent");
     let mut files = Vec::new();
     walk(&root, &mut files);
     for path in files {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("pdf") {
-            continue; // pdf is an output target, not an input format
+        if is_pdf(&path) && !cfg!(feature = "pdf") {
+            continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let (output, _) = convert(&path);
-        let digest = digest(&output);
-        insta::assert_snapshot!(format!("sample__{name}"), digest);
+        let (output, _) = outcome(&name, convert_file(&path));
+        assert_snapshot(&format!("sample__{name}"), &digest(&output));
     }
 }
 

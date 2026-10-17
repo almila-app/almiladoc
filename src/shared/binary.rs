@@ -100,6 +100,7 @@ fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<OptionalStream, C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::{Cursor, Write};
 
     #[test]
@@ -138,7 +139,7 @@ mod tests {
         assert!(read_ole_stream(&ParseCtx::new(&limits), &mut ole, "Data").is_ok());
         limits.max_entry_bytes = 999;
         let err = optional_ole_stream(&ParseCtx::new(&limits), &mut ole, "Data").unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 999 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 999 });
     }
 
     #[test]
@@ -147,23 +148,22 @@ mod tests {
         ole.create_storage("Pictures").unwrap();
         let ctx = ParseCtx::default();
         let read = |ole: &mut cfb::CompoundFile<_>, name| optional_ole_stream(&ctx, ole, name);
-        assert!(matches!(read(&mut ole, "Data"), Ok(OptionalStream::Read(b)) if b == b"abc"));
-        assert!(matches!(read(&mut ole, "Current User"), Ok(OptionalStream::Absent)));
-        assert!(matches!(read(&mut ole, "Pictures"), Ok(OptionalStream::Unreadable)));
+        assert_matches!(read(&mut ole, "Data"), Ok(OptionalStream::Read(b)) if b == b"abc");
+        assert_matches!(read(&mut ole, "Current User"), Ok(OptionalStream::Absent));
+        assert_matches!(read(&mut ole, "Pictures"), Ok(OptionalStream::Unreadable));
     }
 
     #[test]
     fn optional_streams_propagate_only_fatal_errors() {
-        for fatal in [
-            ConvertError::limit(Limit::Allocation, 64),
-            ConvertError::Cancelled,
-            ConvertError::Internal,
-        ] {
-            assert!(unless_fatal(Err(fatal)).is_err());
-        }
+        assert_matches!(
+            unless_fatal(Err(ConvertError::limit(Limit::Allocation, 64))),
+            Err(ConvertError::ResourceLimit { limit: Limit::Allocation, max: 64 })
+        );
+        assert_matches!(unless_fatal(Err(ConvertError::Cancelled)), Err(ConvertError::Cancelled));
+        assert_matches!(unless_fatal(Err(ConvertError::Internal)), Err(ConvertError::Internal));
         let absent = unless_fatal(Err(ConvertError::missing_part("Data")));
-        assert!(matches!(absent, Ok(OptionalStream::Absent)));
+        assert_matches!(absent, Ok(OptionalStream::Absent));
         let corrupt = unless_fatal(Err(ConvertError::malformed_part("Data", "corrupt")));
-        assert!(matches!(corrupt, Ok(OptionalStream::Unreadable)));
+        assert_matches!(corrupt, Ok(OptionalStream::Unreadable));
     }
 }

@@ -4,7 +4,7 @@ from fixturegen.common import write_cfb
 
 
 # ---------------------------------------------------------------------------
-# R14: binary PPT per-slide master selection with tri-state level defaults
+# Binary PPT per-slide master selection with tri-state level defaults
 
 def ppt_rec(ver_inst, rec_type, body):
     return struct.pack("<HHI", ver_inst, rec_type, len(body)) + body
@@ -60,7 +60,7 @@ def multimaster_ppt(out):
 
 
 # ---------------------------------------------------------------------------
-# S20: notes pages pair to slides via NotesAtom.slideIdRef, not list order -
+# Notes pages pair to slides via NotesAtom.slideIdRef, not list order -
 # this deck has notes only on the SECOND slide, which order-based zipping
 # would misattribute to the first.
 
@@ -121,7 +121,7 @@ def malformed(out):
 def abuse(out):
     a = out / "abuse"
     a.mkdir(parents=True, exist_ok=True)
-    # R6: pathologically nested binary PPT containers; the bounded record
+    # Pathologically nested binary PPT containers; the bounded record
     # walk must fail with ResourceLimit instead of exhausting the stack.
     nested = struct.pack("<HHI", 0x0000, 0x0FA8, 4) + b"deep"
     for _ in range(200):

@@ -533,14 +533,9 @@ pub fn probe_ole(bytes: &[u8]) -> Option<ConvertError> {
 mod tests {
     use super::*;
     use crate::limits::Limits;
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
     use std::io::Write;
-
-    fn one_part_zip(name: &str, bytes: &[u8]) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        w.write_all(bytes).unwrap();
-        w.finish().unwrap().into_inner()
-    }
 
     struct FailingReader(ErrorKind);
 
@@ -559,10 +554,7 @@ mod tests {
         for prefix in [b"".as_slice(), b"partial content".as_slice()] {
             let reader = failing_after(prefix, ErrorKind::OutOfMemory);
             let err = read_capped(reader, 4, 64, "word/document.xml", "corrupt").unwrap_err();
-            assert!(
-                matches!(err, ConvertError::ResourceLimit { limit: Limit::Allocation, max: 65 }),
-                "{err:?}"
-            );
+            assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Allocation, max: 65 });
         }
     }
 
@@ -570,9 +562,9 @@ mod tests {
     fn a_refused_reservation_is_a_resource_limit() {
         let huge = u64::try_from(isize::MAX).unwrap() + 1;
         let err = read_capped(Cursor::new(b"x"), huge, huge, "a.bin", "corrupt").unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::Allocation, max } if max == huge),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::Allocation, max } if max == huge
         );
     }
 
@@ -581,17 +573,17 @@ mod tests {
         for prefix in [b"".as_slice(), b"partial content".as_slice()] {
             let reader = failing_after(prefix, ErrorKind::InvalidData);
             let err = read_capped(reader, 4, 64, "word/document.xml", "corrupt").unwrap_err();
-            assert!(
-                matches!(&err, ConvertError::Malformed { part: Some(part), reason: "corrupt" }
-                    if part.as_str() == "word/document.xml"),
-                "{err:?}"
+            assert_matches!(
+                &err,
+                ConvertError::Malformed { part: Some(part), reason: "corrupt" }
+                    if part.as_str() == "word/document.xml"
             );
         }
     }
 
     #[test]
     fn an_entry_read_reserves_its_declared_size() {
-        let bytes = one_part_zip("a.bin", &[7u8; 1000]);
+        let bytes = zip_package(&[("a.bin", &[7u8; 1000])]);
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
         let mut file = zip.by_name("a.bin").unwrap();
         let read = read_entry(&ParseCtx::default(), &mut file, 4096, "a.bin").unwrap();
@@ -615,28 +607,24 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let role = Role::Content(Region::Note);
         let refused = || Err::<Option<()>, _>(ConvertError::limit(Limit::Allocation, 64));
-        assert!(matches!(
+        assert_matches!(
             skip_unreadable(&parse_ctx, role, refused()),
             Err(ConvertError::ResourceLimit { limit: Limit::Allocation, max: 64 })
-        ));
-        for fatal in [ConvertError::Cancelled, ConvertError::Internal] {
-            assert!(skip_unreadable::<()>(&parse_ctx, role, Err(fatal)).is_err());
-        }
-        assert!(matches!(skip_unreadable(&parse_ctx, role, Ok(Some(1))), Ok(Some(1))));
-        assert!(matches!(skip_unreadable::<()>(&parse_ctx, role, Ok(None)), Ok(None)));
+        );
+        assert_matches!(
+            skip_unreadable::<()>(&parse_ctx, role, Err(ConvertError::Cancelled)),
+            Err(ConvertError::Cancelled)
+        );
+        assert_matches!(
+            skip_unreadable::<()>(&parse_ctx, role, Err(ConvertError::Internal)),
+            Err(ConvertError::Internal)
+        );
+        assert_matches!(skip_unreadable(&parse_ctx, role, Ok(Some(1))), Ok(Some(1)));
+        assert_matches!(skip_unreadable::<()>(&parse_ctx, role, Ok(None)), Ok(None));
         assert_eq!(reported(&parse_ctx), []);
         let corrupt = Err(ConvertError::malformed_part("a.xml", "corrupt"));
-        assert!(matches!(skip_unreadable::<()>(&parse_ctx, role, corrupt), Ok(None)));
+        assert_matches!(skip_unreadable::<()>(&parse_ctx, role, corrupt), Ok(None));
         assert_eq!(reported(&parse_ctx), [(DiagnosticCode::PartUnreadable, Region::Note, 1)]);
-    }
-
-    fn package_of(parts: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, bytes) in parts {
-            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(bytes).unwrap();
-        }
-        w.finish().unwrap().into_inner()
     }
 
     fn corrupt_entry(name: &str) -> Vec<u8> {
@@ -667,7 +655,7 @@ mod tests {
     #[test]
     fn an_unreadable_part_reports_by_its_role_once_per_read() {
         let corrupt = corrupt_entry("word/a.xml");
-        let unparseable = package_of(&[("word/a.xml", b"<a></b></a></c>")]);
+        let unparseable = zip_package(&[("word/a.xml", b"<a></b></a></c>")]);
         for (role, expected) in ROLES {
             let expected: Vec<_> =
                 expected.map(|(code, region)| (code, region, 1)).into_iter().collect();
@@ -688,7 +676,7 @@ mod tests {
 
     #[test]
     fn an_absent_part_is_a_loss_only_when_a_reference_names_it() {
-        let data = package_of(&[("word/document.xml", b"<document/>")]);
+        let data = zip_package(&[("word/document.xml", b"<document/>")]);
         for (role, expected) in ROLES {
             let parse_ctx = ParseCtx::default();
             let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
@@ -708,7 +696,7 @@ mod tests {
 
     #[test]
     fn a_recovered_part_reports_by_the_reading_role_and_fails_where_required() {
-        let data = package_of(&[("word/a.xml", b"<a><b>text</a>")]);
+        let data = zip_package(&[("word/a.xml", b"<a><b>text</a>")]);
         let cases = [
             (Role::Content(Region::Note), vec![(DiagnosticCode::RecoveredXml, Region::Note, 1)]),
             (Role::Reported(Region::Body), vec![(DiagnosticCode::RecoveredXml, Region::Body, 1)]),
@@ -723,10 +711,11 @@ mod tests {
             let parse_ctx = ParseCtx::default();
             let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
             let err = pkg.required_xml_part("word/a.xml", role).unwrap_err();
-            assert!(
-                matches!(&err, ConvertError::Malformed { part: Some(part), reason: "ill-formed xml" }
-                    if part.as_str() == "word/a.xml"),
-                "{role:?}: {err:?}"
+            assert_matches!(
+                &err,
+                ConvertError::Malformed { part: Some(part), reason: "ill-formed xml" }
+                    if part.as_str() == "word/a.xml",
+                "{role:?}"
             );
             assert_eq!(reported(&parse_ctx), [], "{role:?} required");
         }
@@ -738,7 +727,7 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("word/document.xml").unwrap_err();
-        assert!(matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. }));
+        assert_matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. });
         assert!(pkg.cache.borrow().is_empty());
         assert_eq!(parse_ctx.archive_bytes(), 0);
         assert!(pkg.optional_part("word/document.xml", Role::Probe).unwrap().is_none());
@@ -748,7 +737,7 @@ mod tests {
 
     #[test]
     fn repeated_reads_are_cached_and_charged_once() {
-        let data = one_part_zip("media/a.bin", &[7u8; 4096]);
+        let data = zip_package(&[("media/a.bin", &[7u8; 4096])]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         for _ in 0..5 {
@@ -759,26 +748,18 @@ mod tests {
 
     #[test]
     fn total_budget_exhaustion_reports_max_total_bytes() {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for name in ["a.bin", "b.bin"] {
-            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(&[7u8; 4096]).unwrap();
-        }
-        let data = w.finish().unwrap().into_inner();
+        let data = zip_package(&[("a.bin", [7u8; 4096]), ("b.bin", [7u8; 4096])]);
         let limits = Limits { max_total_bytes: 4096 + 100, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("a.bin").unwrap().is_some());
         let err = pkg.part("b.bin").unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 4196 }),
-            "expected max_total_bytes, got: {err}"
-        );
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 4196 });
     }
 
     #[test]
     fn entry_count_and_size_limits_are_the_contexts() {
-        let data = one_part_zip("a.bin", &[7u8; 4096]);
+        let data = zip_package(&[("a.bin", &[7u8; 4096])]);
         let mut limits = Limits { max_entry_bytes: 4096, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
         assert!(Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap().part("a.bin").is_ok());
@@ -786,22 +767,18 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         let err =
             Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap().part("a.bin").unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 });
 
         let limits = Limits { max_entry_count: 1, ..Limits::default() };
         assert!(Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).is_ok());
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for name in ["a.bin", "b.bin"] {
-            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-        }
-        let two = w.finish().unwrap().into_inner();
+        let two = zip_package(&[("a.bin", ""), ("b.bin", "")]);
         let err = Package::open(&ParseCtx::new(&limits), &two, PackageKind::Opc).err().unwrap();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryCount, max: 1 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryCount, max: 1 });
     }
 
     #[test]
     fn an_entry_past_its_declared_size_is_malformed() {
-        let mut data = one_part_zip("a.bin", &[7u8; 4096]);
+        let mut data = zip_package(&[("a.bin", &[7u8; 4096])]);
         let understate =
             |at: usize, data: &mut [u8]| data[at..at + 4].copy_from_slice(&16u32.to_le_bytes());
         let local = data.windows(4).position(|w| w == b"PK\x03\x04").unwrap();
@@ -812,21 +789,20 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("a.bin").unwrap_err();
-        assert!(
-            matches!(&err, ConvertError::Malformed { part: Some(part), reason: "corrupt archive entry" }
-                if part.as_str() == "a.bin"),
-            "{err:?}"
+        assert_matches!(
+            &err,
+            ConvertError::Malformed { part: Some(part), reason: "corrupt archive entry" }
+                if part.as_str() == "a.bin"
         );
     }
 
     #[test]
     fn a_read_charges_one_unit_per_started_kib_and_a_cached_read_none() {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, len) in [("a.bin", 1024), ("b.bin", 1025), ("c.bin", 0)] {
-            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(&vec![7u8; len]).unwrap();
-        }
-        let data = w.finish().unwrap().into_inner();
+        let data = zip_package(&[
+            ("a.bin", vec![7u8; 1024]),
+            ("b.bin", vec![7u8; 1025]),
+            ("c.bin", vec![]),
+        ]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let mut spent = Vec::new();
@@ -839,7 +815,7 @@ mod tests {
 
     #[test]
     fn an_entry_failing_its_checksum_is_charged_for_what_it_inflated() {
-        let mut data = one_part_zip("word/comments.xml", &[b'x'; 4096]);
+        let mut data = zip_package(&[("word/comments.xml", &[b'x'; 4096])]);
         let crc = zip::ZipArchive::new(Cursor::new(data.as_slice()))
             .unwrap()
             .by_index(0)
@@ -861,15 +837,12 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let read = pkg.optional_part("word/comments.xml", Role::Content(Region::Comment));
-        assert!(
-            matches!(read, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3 })),
-            "{read:?}"
-        );
+        assert_matches!(read, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3 }));
     }
 
     #[test]
     fn optional_reads_propagate_a_cancellation() {
-        let data = one_part_zip("word/comments.xml", b"<comments/>");
+        let data = zip_package(&[("word/comments.xml", b"<comments/>")]);
         let token = crate::ledger::CancelToken::new();
         let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
@@ -877,16 +850,16 @@ mod tests {
         token.cancel();
         let role = Role::Content(Region::Comment);
         let read = pkg.optional_xml_part("word/comments.xml", role);
-        assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
+        assert_matches!(read, Err(ConvertError::Cancelled));
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let read = pkg.related_part("word/comments.xml", role);
-        assert!(matches!(read, Err(ConvertError::Cancelled)), "{read:?}");
+        assert_matches!(read, Err(ConvertError::Cancelled));
         assert_eq!(reported(&parse_ctx), []);
     }
 
     #[test]
     fn leading_slash_part_names_normalize() {
-        let data = one_part_zip("word/document.xml", b"<x/>");
+        let data = zip_package(&[("word/document.xml", b"<x/>")]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.part("/word/document.xml").unwrap().is_some());
@@ -896,7 +869,7 @@ mod tests {
 
     #[test]
     fn exact_duplicate_names_are_malformed_in_every_kind() {
-        let mut data = package_of(&[("a.xml", b"<first/>"), ("b.xml", b"<second/>")]);
+        let mut data = zip_package(&[("a.xml", "<first/>"), ("b.xml", "<second/>")]);
         for at in data
             .windows(5)
             .enumerate()
@@ -908,23 +881,21 @@ mod tests {
         }
         for kind in KINDS {
             let err = Package::open(&ParseCtx::default(), &data, kind).err().unwrap();
-            assert!(
-                matches!(err, ConvertError::Malformed { reason: "duplicate entry names", .. }),
-                "{kind:?}: {err:?}"
+            assert_matches!(
+                err,
+                ConvertError::Malformed { reason: "duplicate entry names", .. },
+                "{kind:?}"
             );
         }
     }
 
     #[test]
     fn names_equal_after_ascii_case_folding_are_duplicates_in_opc_only() {
-        let data = package_of(&[("word/a.xml", b"<lower/>"), ("word/A.xml", b"<upper/>")]);
+        let data = zip_package(&[("word/a.xml", b"<lower/>"), ("word/A.xml", b"<upper/>")]);
         let err = Package::open(&ParseCtx::default(), &data, PackageKind::Opc).err().unwrap();
-        assert!(
-            matches!(
-                err,
-                ConvertError::Malformed { reason: "entry names equal after case folding", .. }
-            ),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::Malformed { reason: "entry names equal after case folding", .. }
         );
         for kind in [PackageKind::Odf, PackageKind::Epub] {
             let parse_ctx = ParseCtx::default();
@@ -936,7 +907,7 @@ mod tests {
 
     #[test]
     fn opc_names_resolve_after_ascii_case_folding_and_are_cached_once() {
-        let data = one_part_zip("word/document.xml", &[7u8; 2048]);
+        let data = zip_package(&[("word/document.xml", &[7u8; 2048])]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.has_part("/Word/Document.XML"));
@@ -958,7 +929,7 @@ mod tests {
 
     #[test]
     fn facts_are_the_central_directorys() {
-        let data = package_of(&[("a.xml", &[b'a'; 3000]), ("b.xml", b"<b/>")]);
+        let data = zip_package(&[("a.xml", "a".repeat(3000)), ("b.xml", "<b/>".to_string())]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Odf).unwrap();
         let zip = zip::ZipArchive::new(Cursor::new(data.as_slice())).unwrap();
@@ -971,7 +942,7 @@ mod tests {
 
     #[test]
     fn duplicates_behind_a_refused_end_record_are_malformed() {
-        let mut data = package_of(&[("a.xml", b"<first/>"), ("b.xml", b"<second/>")]);
+        let mut data = zip_package(&[("a.xml", "<first/>"), ("b.xml", "<second/>")]);
         let at: Vec<usize> =
             data.windows(5).enumerate().filter(|(_, w)| w == b"b.xml").map(|(i, _)| i).collect();
         for i in at {
@@ -986,37 +957,32 @@ mod tests {
         let zip = zip::ZipArchive::new(Cursor::new(data.as_slice())).unwrap();
         assert_eq!(zip.len(), 1);
         let err = Package::open(&ParseCtx::default(), &data, PackageKind::Odf).err().unwrap();
-        assert!(
-            matches!(err, ConvertError::Malformed { reason: "duplicate entry names", .. }),
-            "{err:?}"
-        );
+        assert_matches!(err, ConvertError::Malformed { reason: "duplicate entry names", .. });
     }
 
     #[test]
     fn compressed_sizes_past_the_directory_are_malformed() {
-        let mut data = one_part_zip("word/document.xml", &[0; 4 << 20]);
+        let mut data = zip_package(&[("word/document.xml", &[0; 4 << 20])]);
         let limits = Limits { max_compression_ratio: 2, ..Limits::default() };
         let err = Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).err().unwrap();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::CompressionRatio, max: 2 }),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::CompressionRatio, max: 2 }
         );
         let central = data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
         data[central + 20..central + 24].copy_from_slice(&(4u32 << 20).to_le_bytes());
         assert!(zip::ZipArchive::new(Cursor::new(data.as_slice())).is_ok());
         let err = Package::open(&ParseCtx::new(&limits), &data, PackageKind::Opc).err().unwrap();
-        assert!(
-            matches!(
-                err,
-                ConvertError::Malformed { reason: "compressed sizes exceed the archive", .. }
-            ),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::Malformed { reason: "compressed sizes exceed the archive", .. }
         );
     }
 
     #[test]
     fn a_package_after_prepended_bytes_opens_where_zip_finds_it() {
-        let data = [b"prefix!!".as_slice(), &one_part_zip("word/document.xml", b"<d/>")].concat();
+        let data =
+            [b"prefix!!".as_slice(), &zip_package(&[("word/document.xml", b"<d/>")])].concat();
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert_eq!(&*pkg.part("word/document.xml").unwrap().unwrap(), b"<d/>");
@@ -1025,14 +991,14 @@ mod tests {
 
     #[test]
     fn a_part_that_does_not_parse_is_malformed_by_name_where_required() {
-        let data = package_of(&[("word/a.xml", b"<a>A < B</a>")]);
+        let data = zip_package(&[("word/a.xml", b"<a>A < B</a>")]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.required_xml_part("word/a.xml", Role::Content(Region::Body)).unwrap_err();
-        assert!(
-            matches!(&err, ConvertError::Malformed { part: Some(part), reason: "bare `<` in markup" }
-                if part.as_str() == "word/a.xml"),
-            "{err:?}"
+        assert_matches!(
+            &err,
+            ConvertError::Malformed { part: Some(part), reason: "bare `<` in markup" }
+                if part.as_str() == "word/a.xml"
         );
         assert!(
             pkg.optional_xml_part("word/a.xml", Role::Content(Region::Body)).unwrap().is_none()
@@ -1042,10 +1008,10 @@ mod tests {
 
     #[test]
     fn each_reuse_of_a_shared_tree_charges_its_nodes_and_reports_its_marks() {
-        let data = package_of(&[
-            ("c/a.xml", b"<a><b/>t</a>"),
-            ("c/r.xml", b"<a><b>t</a>"),
-            ("c/bad.xml", b"<a>A < B</a>"),
+        let data = zip_package(&[
+            ("c/a.xml", "<a><b/>t</a>"),
+            ("c/r.xml", "<a><b>t</a>"),
+            ("c/bad.xml", "<a>A < B</a>"),
         ]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
@@ -1084,7 +1050,7 @@ mod tests {
         let names: Vec<String> = (0..10).map(|i| format!("c/{i}.xml")).collect();
         let parts: Vec<(&str, &[u8])> =
             names.iter().map(|name| (name.as_str(), b"<a><b/>t</a>".as_slice())).collect();
-        let data = package_of(&parts);
+        let data = zip_package(&parts);
         let limits = Limits { max_xml_nodes: 10, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
@@ -1103,7 +1069,7 @@ mod tests {
 
     #[test]
     fn only_epub_reads_html_named_references() {
-        let data = package_of(&[("a.xml", b"<a t=\"&eacute;\">&nbsp;</a>")]);
+        let data = zip_package(&[("a.xml", b"<a t=\"&eacute;\">&nbsp;</a>")]);
         for (kind, text, unresolved) in [
             (PackageKind::Opc, "&nbsp;", 1),
             (PackageKind::Odf, "&nbsp;", 1),

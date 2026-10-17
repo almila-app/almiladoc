@@ -324,6 +324,7 @@ mod tests {
     use crate::limits::{Limit, Limits};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
+    use std::assert_matches;
 
     fn tree(styles: &str) -> Element {
         let xml = format!(
@@ -400,13 +401,13 @@ mod tests {
             ]
         };
         for refused in resolve(&lowered, "s3999") {
-            assert!(matches!(
+            assert_matches!(
                 refused,
                 Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 3999 })
-            ));
+            );
         }
         for refused in resolve(&cancelled, "s0") {
-            assert!(matches!(refused, Err(ConvertError::Cancelled)));
+            assert_matches!(refused, Err(ConvertError::Cancelled));
         }
     }
 
@@ -422,7 +423,7 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         assert!(styles.delta(&parse_ctx, "paragraph", "c").is_ok());
         let cyclic = styles.delta(&parse_ctx, "paragraph", "a");
-        assert!(matches!(cyclic, Err(ConvertError::Malformed { .. })));
+        assert_matches!(cyclic, Err(ConvertError::Malformed { .. }));
         assert_eq!(styles.block_style(&parse_ctx, "a").unwrap(), None);
     }
 }

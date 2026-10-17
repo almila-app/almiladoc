@@ -386,7 +386,8 @@ fn push_title_heading(inner: Vec<Block>, blocks: &mut Vec<Block>, ctx: &Ctx) {
 mod tests {
     use super::*;
     use crate::limits::{Limit, Limits};
-    use std::io::{Cursor, Write};
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     const CONTENT: &[u8] = br#"<office:document-content
         xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -395,13 +396,7 @@ mod tests {
         </office:document-content>"#;
 
     fn odt(manifest: &[u8]) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default();
-        w.start_file("META-INF/manifest.xml", opts).unwrap();
-        w.write_all(manifest).unwrap();
-        w.start_file("content.xml", opts).unwrap();
-        w.write_all(CONTENT).unwrap();
-        w.finish().unwrap().into_inner()
+        zip_package(&[("META-INF/manifest.xml", manifest), ("content.xml", CONTENT)])
     }
 
     #[test]
@@ -411,10 +406,7 @@ mod tests {
     }
 
     fn odt_with_content(content: &str) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        w.start_file("content.xml", zip::write::SimpleFileOptions::default()).unwrap();
-        w.write_all(content.as_bytes()).unwrap();
-        w.finish().unwrap().into_inner()
+        zip_package(&[("content.xml", content)])
     }
 
     fn table_doc(rows: &str) -> String {
@@ -430,7 +422,7 @@ mod tests {
 
     #[test]
     fn repeated_rows_cannot_amplify_text_beyond_the_byte_budget() {
-        // H3: the slot budget alone would admit 1000 copies of a 100 KB
+        // The slot budget alone would admit 1000 copies of a 100 KB
         // cell (~100 MB); the duplicated-bytes budget rejects it up front.
         let fat = "x".repeat(100_000);
         let rows = format!(
@@ -439,8 +431,9 @@ mod tests {
             </table:table-row>"#
         );
         let err = parse(&ParseCtx::default(), &odt_with_content(&table_doc(&rows))).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, .. }),
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::ExpansionTextBytes, .. },
             "expected the text-byte budget, got: {err}"
         );
     }
@@ -499,8 +492,9 @@ mod tests {
             manifest.extend_from_slice(b"<d>");
         }
         let err = parse(&ParseCtx::default(), &odt(&manifest)).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. }),
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. },
             "encryption probing must not swallow fatal errors, got: {err}"
         );
     }
@@ -564,23 +558,15 @@ mod tests {
                 head = self.head,
                 body = self.body
             );
-            let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-            let opts = zip::write::SimpleFileOptions::default();
-            w.start_file("content.xml", opts).unwrap();
-            w.write_all(content.as_bytes()).unwrap();
-            if !self.styles.is_empty() {
-                let styles = format!(
-                    "<office:document-styles {NS}>{}</office:document-styles>",
-                    self.styles
-                );
-                w.start_file("styles.xml", opts).unwrap();
-                w.write_all(styles.as_bytes()).unwrap();
+            let styles = (!self.styles.is_empty()).then(|| {
+                format!("<office:document-styles {NS}>{}</office:document-styles>", self.styles)
+            });
+            let mut parts = vec![("content.xml", content.as_str())];
+            if let Some(styles) = &styles {
+                parts.push(("styles.xml", styles));
             }
-            for (name, bytes) in self.parts {
-                w.start_file(*name, opts).unwrap();
-                w.write_all(bytes.as_bytes()).unwrap();
-            }
-            w.finish().unwrap().into_inner()
+            parts.extend_from_slice(self.parts);
+            zip_package(&parts)
         }
     }
 
@@ -974,7 +960,7 @@ mod tests {
         let [Block::Paragraph(note)] = &doc.notes[0].blocks[..] else {
             panic!("unexpected note: {:?}", doc.notes)
         };
-        assert!(matches!(&note[..], [Inline::Math(tex)] if tex == "x"), "{note:?}");
+        assert_matches!(&note[..], [Inline::Math(tex)] if tex == "x");
         let (_, reported) = convert(&Odf { parts: &parts, ..text(&body) });
         assert_eq!(reported, [(RecoveredXml, Region::Note, None, 1)]);
     }
@@ -1001,8 +987,9 @@ mod tests {
         for (name, mut odf) in cases {
             odf.parts = &parts;
             let err = parse(&ParseCtx::new(&limits), &odf.build()).unwrap_err();
-            assert!(
-                matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 10 }),
+            assert_matches!(
+                err,
+                ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 10 },
                 "{name}: {err}"
             );
         }
@@ -1038,7 +1025,7 @@ mod tests {
             panic!("unexpected inlines: {inlines:?}")
         };
         assert_eq!(*target, crate::model::LinkTarget::External("https://example.org/t".into()));
-        assert!(matches!(content[..], [Inline::Image { .. }]), "{content:?}");
+        assert_matches!(content[..], [Inline::Image { .. }]);
     }
 
     #[test]

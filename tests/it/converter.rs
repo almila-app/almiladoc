@@ -1,19 +1,15 @@
-mod common;
-
+use crate::support::{converter, corpus, fixture, format_of, zip_package};
 use almiladoc::{
     CancelToken, Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits,
     OnLoss, UnsupportedKind,
 };
-use common::{converter, fixture_root, format_of, walk};
+use std::assert_matches;
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = assert_send_sync::<Converter>();
 
 #[test]
 fn every_fixture_converts_identically_on_one_and_three_threads() {
-    let root = fixture_root();
-    let mut files = Vec::new();
-    walk(&root, &mut files);
     let reporting = |threads| {
         let mut config = Config::default();
         config.threads = threads;
@@ -22,10 +18,7 @@ fn every_fixture_converts_identically_on_one_and_three_threads() {
     };
     let (one, three) = (reporting(1), reporting(3));
     let mut pdfs = 0;
-    for path in files {
-        if path.strip_prefix(&root).unwrap().starts_with("abuse") {
-            continue;
-        }
+    for path in corpus() {
         let bytes = std::fs::read(&path).unwrap();
         let format = format_of(&path, &bytes).unwrap();
         pdfs += usize::from(format == Format::Pdf);
@@ -40,27 +33,24 @@ fn every_fixture_converts_identically_on_one_and_three_threads() {
 fn a_config_out_of_range_is_refused() {
     let mut config = Config::default();
     config.limits.max_work = 0;
-    assert!(matches!(
-        Converter::new(config),
-        Err(ConfigError::ZeroLimit { limit: Limit::Work, .. })
-    ));
+    assert_matches!(Converter::new(config), Err(ConfigError::ZeroLimit { limit: Limit::Work, .. }));
 
     let mut config = Config::default();
     config.limits.max_nesting_depth = Limits::MAX_NESTING_CEILING + 1;
-    assert!(matches!(
+    assert_matches!(
         Converter::new(config),
         Err(ConfigError::AboveCeiling { limit: Limit::NestingDepth, ceiling: 1024, .. })
-    ));
+    );
 
     for threads in [0, Config::MAX_THREADS + 1] {
         let mut config = Config::default();
         config.threads = threads;
-        assert!(matches!(Converter::new(config), Err(ConfigError::Threads { max: 64, .. })));
+        assert_matches!(Converter::new(config), Err(ConfigError::Threads { max: 64, .. }));
     }
 }
 
 fn pdf() -> Vec<u8> {
-    std::fs::read(fixture_root().join("pdf").join("text.pdf")).unwrap()
+    fixture("pdf/text.pdf")
 }
 
 #[cfg(feature = "pdf")]
@@ -70,9 +60,9 @@ fn a_pdf_converts_but_has_no_document_model() {
     let converter = converter(1);
     assert!(!converter.convert(Input::new(&bytes, Format::Pdf)).unwrap().markdown().is_empty());
     let error = converter.parse(Input::new(&bytes, Format::Pdf)).unwrap_err();
-    assert!(
-        matches!(error, ConvertError::Unsupported { kind: UnsupportedKind::PdfDocumentModel, .. }),
-        "{error:?}"
+    assert_matches!(
+        error,
+        ConvertError::Unsupported { kind: UnsupportedKind::PdfDocumentModel, .. }
     );
 }
 
@@ -86,15 +76,12 @@ fn a_build_without_pdf_refuses_every_pdf() {
         converter.parse(Input::new(&bytes, Format::Pdf)).unwrap_err(),
     ];
     for error in errors {
-        assert!(
-            matches!(
-                error,
-                ConvertError::Unsupported {
-                    kind: UnsupportedKind::FeatureDisabled { feature: "pdf", .. },
-                    ..
-                }
-            ),
-            "{error:?}"
+        assert_matches!(
+            error,
+            ConvertError::Unsupported {
+                kind: UnsupportedKind::FeatureDisabled { feature: "pdf", .. },
+                ..
+            }
         );
     }
     assert_eq!(Format::sniff(&bytes), Some(Format::Pdf));
@@ -125,15 +112,6 @@ fn convert_with(bytes: &[u8], format: Format, limit: Limit, max: u64) -> Result<
     Converter::new(config).unwrap().convert(Input::new(bytes, format)).map(drop)
 }
 
-fn zip(parts: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    for (name, bytes) in parts {
-        writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut writer, bytes).unwrap();
-    }
-    writer.finish().unwrap().into_inner()
-}
-
 fn ods_with_repeated_text() -> Vec<u8> {
     let content = r#"<office:document-content
         xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -144,7 +122,7 @@ fn ods_with_repeated_text() -> Vec<u8> {
         <table:table-cell><text:p>abcd</text:p></table:table-cell>
         </table:table-row>
         </table:table></office:spreadsheet></office:body></office:document-content>"#;
-    zip(&[("content.xml", content.as_bytes())])
+    zip_package(&[("content.xml", content.as_bytes())])
 }
 
 fn pptx(sp_tree: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
@@ -163,7 +141,7 @@ fn pptx(sp_tree: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
         ("ppt/slides/slide1.xml", slide.as_bytes()),
     ];
     parts.extend_from_slice(extra);
-    zip(&parts)
+    zip_package(&parts)
 }
 
 fn pptx_with_spanning_cell() -> Vec<u8> {
@@ -197,11 +175,11 @@ fn epub_with_spanning_cell() -> Vec<u8> {
     let container = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
     let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>"#;
     let chapter = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><table><tr><td colspan="3">wide</td></tr></table></body></html>"#;
-    zip(&[
-        ("mimetype", b"application/epub+zip"),
-        ("META-INF/container.xml", container.as_bytes()),
-        ("content.opf", opf.as_bytes()),
-        ("c.xhtml", chapter.as_bytes()),
+    zip_package(&[
+        ("mimetype", "application/epub+zip"),
+        ("META-INF/container.xml", container),
+        ("content.opf", opf),
+        ("c.xhtml", chapter),
     ])
 }
 
@@ -210,7 +188,7 @@ fn docx_nested(depth: usize) -> Vec<u8> {
     let body = "<w:body><w:p><w:r><w:t>deep</w:t></w:r></w:p></w:body>";
     let nest = format!("{}{}", "<x>".repeat(depth), "</x>".repeat(depth));
     let document = format!("<w:document {w}>{body}{nest}</w:document>");
-    zip(&[("word/document.xml", document.as_bytes())])
+    zip_package(&[("word/document.xml", document.as_bytes())])
 }
 
 fn odt_with_spanning_cell() -> Vec<u8> {
@@ -221,7 +199,7 @@ fn odt_with_spanning_cell() -> Vec<u8> {
         <office:body><office:text><table:table table:name="T"><table:table-row>
         <table:table-cell table:number-rows-spanned="3"><text:p>tall</text:p></table:table-cell>
         </table:table-row></table:table></office:text></office:body></office:document-content>"#;
-    zip(&[("content.xml", content.as_bytes())])
+    zip_package(&[("content.xml", content.as_bytes())])
 }
 
 struct Graphic {
@@ -267,7 +245,7 @@ fn docx_with_deep(graphic: &Graphic, depth: usize) -> Vec<u8> {
         graphic.reference
     );
     let part = format!("word/{}", graphic.part);
-    zip(&[
+    zip_package(&[
         ("word/document.xml", document.as_bytes()),
         ("word/_rels/document.xml.rels", graphic.rels("").as_bytes()),
         (&part, graphic.deep_part(depth).as_bytes()),
@@ -290,7 +268,6 @@ fn pptx_with_deep(graphic: &Graphic, depth: usize) -> Vec<u8> {
 
 #[test]
 fn every_enforced_limit_is_read_from_the_config() {
-    let fixture = |path: &str| std::fs::read(fixture_root().join(path)).unwrap();
     let cases = [
         (fixture("docx/text.docx"), Format::Docx, Limit::EntryBytes, 64),
         (fixture("doc/text.doc"), Format::Doc, Limit::EntryBytes, 64),
@@ -343,9 +320,10 @@ fn every_enforced_limit_is_read_from_the_config() {
         let case = format!("{format:?} {limit} {max}");
         assert!(defaults.convert(Input::new(&bytes, format)).is_ok(), "{case}");
         let error = convert_with(&bytes, format, limit, max).expect_err(&case);
-        assert!(
-            matches!(error, ConvertError::ResourceLimit { limit: l, max: m, .. } if l == limit && m == max),
-            "{case}: {error:?}"
+        assert_matches!(
+            error,
+            ConvertError::ResourceLimit { limit: l, max: m, .. } if l == limit && m == max,
+            "{case}"
         );
     }
 }
@@ -354,9 +332,9 @@ fn every_enforced_limit_is_read_from_the_config() {
 fn a_raised_nesting_depth_admits_deeper_input() {
     let bytes = docx_nested(300);
     let error = converter(1).convert(Input::new(&bytes, Format::Docx)).unwrap_err();
-    assert!(
-        matches!(error, ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 256, .. }),
-        "{error:?}"
+    assert_matches!(
+        error,
+        ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 256, .. }
     );
     convert_with(&bytes, Format::Docx, Limit::NestingDepth, Limits::MAX_NESTING_CEILING).unwrap();
 }
@@ -369,24 +347,25 @@ fn with_limit(limit: Limit, max: u64) -> Converter {
 
 #[test]
 fn max_input_bytes_is_checked_before_parse_and_convert_of_every_format() {
-    let docx = std::fs::read(fixture_root().join("docx/text.docx")).unwrap();
+    let docx = fixture("docx/text.docx");
     let converter = with_limit(Limit::InputBytes, 64);
     for (bytes, format) in [(docx, Format::Docx), (pdf(), Format::Pdf)] {
         let parsed = converter.parse(Input::new(&bytes, format)).map(drop);
         let converted = converter.convert(Input::new(&bytes, format)).map(drop);
         for error in [parsed.unwrap_err(), converted.unwrap_err()] {
-            assert!(
-                matches!(
-                    error,
-                    ConvertError::ResourceLimit { limit: Limit::InputBytes, max: 64, .. }
-                ),
-                "{format:?}: {error:?}"
+            assert_matches!(
+                error,
+                ConvertError::ResourceLimit { limit: Limit::InputBytes, max: 64, .. },
+                "{format:?}"
             );
         }
     }
     let exact = with_limit(Limit::InputBytes, 7);
     assert!(exact.convert(Input::new(b"a,b\n1,2", Format::Csv)).is_ok());
-    assert!(exact.convert(Input::new(b"a,b\n1,2\n", Format::Csv)).is_err());
+    assert_matches!(
+        exact.convert(Input::new(b"a,b\n1,2\n", Format::Csv)),
+        Err(ConvertError::ResourceLimit { limit: Limit::InputBytes, max: 7, .. })
+    );
 }
 
 #[test]
@@ -394,23 +373,21 @@ fn a_pre_cancelled_token_cancels_every_format() {
     let token = CancelToken::new();
     token.cancel();
     let converter = converter(1);
-    let mut files = Vec::new();
-    walk(&fixture_root(), &mut files);
-    for path in files.iter().filter(|path| !path.to_string_lossy().contains("abuse")) {
-        let bytes = std::fs::read(path).unwrap();
-        let format = format_of(path, &bytes).unwrap();
+    for path in corpus() {
+        let bytes = std::fs::read(&path).unwrap();
+        let format = format_of(&path, &bytes).unwrap();
         let input = Input::new(&bytes, format).with_cancel(token.clone());
         let parsed = converter.parse(input.clone()).map(drop);
         let converted = converter.convert(input).map(drop);
         for result in [parsed, converted] {
-            assert!(matches!(result, Err(ConvertError::Cancelled)), "{}", path.display());
+            assert_matches!(result, Err(ConvertError::Cancelled), "{}", path.display());
         }
     }
 }
 
 #[test]
 fn an_uncancelled_token_changes_nothing() {
-    let bytes = std::fs::read(fixture_root().join("docx/text.docx")).unwrap();
+    let bytes = fixture("docx/text.docx");
     let converter = converter(1);
     let plain = converter.convert(Input::new(&bytes, Format::Docx)).unwrap();
     let held = Input::new(&bytes, Format::Docx).with_cancel(CancelToken::new());

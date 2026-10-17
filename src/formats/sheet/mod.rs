@@ -142,6 +142,8 @@ pub(super) fn error_literal(code: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
     use std::io::Cursor;
 
     #[test]
@@ -187,13 +189,11 @@ mod tests {
         ole.create_stream("EncryptedPackage").unwrap();
         let bytes = ole.into_inner().into_inner();
 
-        assert!(matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Encrypted)));
+        assert_matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Encrypted));
     }
 
     #[test]
     fn a_package_that_is_not_a_workbook_does_not_convert_as_one() {
-        use std::io::Write as _;
-
         // Resolving the root relationship reaches any OOXML main part, so
         // without a workbook check a document would convert to nothing.
         const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -202,14 +202,8 @@ mod tests {
         );
         let doc = r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
 
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default();
-        for (name, body) in [("_rels/.rels", rels.as_str()), ("word/document.xml", doc)] {
-            zip.start_file(name, opts).unwrap();
-            zip.write_all(body.as_bytes()).unwrap();
-        }
-        let bytes = zip.finish().unwrap().into_inner();
+        let bytes = zip_package(&[("_rels/.rels", rels.as_str()), ("word/document.xml", doc)]);
 
-        assert!(matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Malformed { .. })));
+        assert_matches!(parse(&ParseCtx::default(), &bytes), Err(ConvertError::Malformed { .. }));
     }
 }

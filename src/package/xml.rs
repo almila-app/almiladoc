@@ -765,6 +765,7 @@ mod tests {
     use super::*;
     use crate::diagnostics::{DiagnosticCode, LossClass, Region};
     use crate::limits::Limits;
+    use std::assert_matches;
 
     /// Takes every node directly under a top-level `list`, keeping the text
     /// of each element it takes.
@@ -825,10 +826,10 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         assert!(parse_xml(&parse_ctx, &nested(3), Role::Probe).is_ok());
         let err = parse_xml(&parse_ctx, &nested(4), Role::Probe).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 3 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 3 });
         assert!(parse_xml(&parse_ctx, b"<a><b/>t<c/></a>", Role::Probe).is_ok());
         let err = parse_xml(&parse_ctx, b"<a><b/>t<c/><e/></a>", Role::Probe).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 4 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 4 });
     }
 
     #[test]
@@ -839,9 +840,10 @@ mod tests {
         for second in ["<b></b>", "<b/>", "t", "&amp;", "<![CDATA[t]]>"] {
             let xml = format!("<a>{second}</a>");
             let err = parse_xml(&parse_ctx, xml.as_bytes(), Role::Probe).unwrap_err();
-            assert!(
-                matches!(err, ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 1 }),
-                "{second}: {err:?}"
+            assert_matches!(
+                err,
+                ConvertError::ResourceLimit { limit: Limit::XmlNodes, max: 1 },
+                "{second}"
             );
         }
     }
@@ -856,7 +858,7 @@ mod tests {
         let err =
             parse_xml(&parse_ctx, b"<?xml version=\"1.0\"?><a><b/>t<!--c--></a>", Role::Probe)
                 .unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 6 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 6 });
     }
 
     #[test]
@@ -925,7 +927,7 @@ mod tests {
 
     #[test]
     fn requires_prefixes_resolve_in_their_lexical_scope() {
-        // M4: the same prefix rebound locally must resolve per element, not
+        // The same prefix rebound locally must resolve per element, not
         // through a document-wide first-declaration-wins map.
         let xml = br#"<mc:AlternateContent
             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
@@ -1022,7 +1024,7 @@ mod tests {
             b"<r\xE9/>",
         ] {
             let err = parse_xml(&ParseCtx::default(), xml, Role::Probe).unwrap_err();
-            assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
+            assert_matches!(err, ConvertError::Malformed { .. });
         }
     }
 
@@ -1059,7 +1061,7 @@ mod tests {
         };
         let xml = format!("<a{}><b{}/></a>", decls(0, 65), decls(65, 130));
         let err = parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap_err();
-        assert!(matches!(err, ConvertError::Malformed { .. }), "{err:?}");
+        assert_matches!(err, ConvertError::Malformed { .. });
     }
 
     #[test]
@@ -1094,7 +1096,7 @@ mod tests {
             xml.extend_from_slice(b"<d>");
         }
         let err = parse_xml(&ParseCtx::default(), &xml, Role::Probe).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::NestingDepth, .. });
     }
 
     #[test]
@@ -1180,9 +1182,10 @@ mod tests {
         ] {
             for dialect in DIALECTS {
                 let err = parsed(xml, dialect).unwrap_err();
-                assert!(
-                    matches!(err, ConvertError::Malformed { part: None, reason: r } if r == reason),
-                    "{xml}: {err:?}"
+                assert_matches!(
+                    err,
+                    ConvertError::Malformed { part: None, reason: r } if r == reason,
+                    "{xml}"
                 );
             }
         }
@@ -1322,12 +1325,9 @@ mod tests {
     fn an_internal_subset_is_malformed_in_xml_and_ignored_in_xhtml() {
         let subset = "<!DOCTYPE r [<!ENTITY e \"expanded\">]><r>&e;&eacute;</r>";
         let err = parsed(subset, Dialect::Xml).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ConvertError::Malformed { reason: "document type with an internal subset", .. }
-            ),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::Malformed { reason: "document type with an internal subset", .. }
         );
         assert_eq!(
             parsed(subset, Dialect::Xhtml).unwrap(),

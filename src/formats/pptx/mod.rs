@@ -1004,7 +1004,8 @@ fn parse_table(tbl: &Element, ctx: &SlideCtx, blocks: &mut Vec<Block>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     const NS: &str = concat!(
         r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" "#,
@@ -1020,18 +1021,9 @@ mod tests {
     type Reported = (DiagnosticCode, Region, Option<u32>, u64);
     type Parts = Vec<(String, String)>;
 
-    fn zipped(parts: &Parts) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, body) in parts {
-            w.start_file(name.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(body.as_bytes()).unwrap();
-        }
-        w.finish().unwrap().into_inner()
-    }
-
     fn reported(parts: &Parts) -> Vec<Reported> {
         let parse_ctx = ParseCtx::default();
-        parse(&parse_ctx, &zipped(parts)).unwrap();
+        parse(&parse_ctx, &zip_package(parts)).unwrap();
         let mut reported: Vec<Reported> = parse_ctx
             .diagnostics()
             .iter()
@@ -1707,7 +1699,7 @@ mod tests {
             &[("rId7", "notesSlide", "../notesSlides/notesSlide1.xml")],
             &[("ppt/notesSlides/notesSlide1.xml", part("notes", "", &tree, ""))],
         );
-        let doc = parse(&ParseCtx::default(), &zipped(&parts)).unwrap();
+        let doc = parse(&ParseCtx::default(), &zip_package(&parts)).unwrap();
         let markdown = crate::render::markdown::document_to_markdown(&doc);
         assert!(markdown.contains("kept") && !markdown.contains("nested"), "{markdown}");
     }
@@ -1717,7 +1709,10 @@ mod tests {
         let mut parts = deck(&[slide_xml("", "", "")], &[]);
         parts[1].1 = UNPARSEABLE.into();
         let parse_ctx = ParseCtx::default();
-        assert!(parse(&parse_ctx, &zipped(&parts)).is_err());
+        assert_matches!(
+            parse(&parse_ctx, &zip_package(&parts)),
+            Err(ConvertError::Malformed { reason: "presentation has no slide list", .. })
+        );
         let reported: Vec<(DiagnosticCode, Region)> =
             parse_ctx.diagnostics().iter().map(|d| (d.code, d.region)).collect();
         assert_eq!(reported, [(DiagnosticCode::PartUnreadable, Region::Body)]);
@@ -1736,7 +1731,7 @@ mod tests {
             "ppt/slides/_rels/slide3.xml.rels".into(),
             relationships(&[("rId2", "slide", "slide2.xml")]),
         ));
-        let doc = parse(&ParseCtx::default(), &zipped(&parts)).unwrap();
+        let doc = parse(&ParseCtx::default(), &zip_package(&parts)).unwrap();
         let anchors: Vec<&str> = doc
             .blocks
             .iter()

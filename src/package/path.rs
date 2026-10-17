@@ -97,6 +97,7 @@ pub(crate) fn decode_fragment(fragment: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn path(base: &str, r: &str) -> String {
         resolve(base, r).unwrap().path
@@ -145,14 +146,28 @@ mod tests {
 
     #[test]
     fn encoded_separators_rejected() {
-        assert!(resolve("a/b.xml", "x%2Fy.xml").is_err());
-        assert!(resolve("a/b.xml", "x%5Cy.xml").is_err());
+        for reference in ["x%2Fy.xml", "x%5Cy.xml"] {
+            assert_matches!(
+                resolve("a/b.xml", reference),
+                Err(ConvertError::Malformed {
+                    reason: "percent-encoded separator in a package reference",
+                    ..
+                })
+            );
+        }
     }
 
     #[test]
     fn encoded_traversal_rejected() {
-        assert!(resolve("a/b.xml", "%2E%2E/secret.xml").is_err());
-        assert!(resolve("a/b.xml", "%2e%2e/secret.xml").is_err());
+        for reference in ["%2E%2E/secret.xml", "%2e%2e/secret.xml"] {
+            assert_matches!(
+                resolve("a/b.xml", reference),
+                Err(ConvertError::Malformed {
+                    reason: "percent-encoded traversal in a package reference",
+                    ..
+                })
+            );
+        }
     }
 
     #[test]

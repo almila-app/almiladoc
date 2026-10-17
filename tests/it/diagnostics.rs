@@ -1,9 +1,10 @@
+use crate::support::{fixture, zip_package};
 use almiladoc::{
     Config, Conversion, ConvertError, Converter, Diagnostic, DiagnosticCode, Format, Input,
     LossClass, OnLoss, Region,
 };
+use std::assert_matches;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
 
 #[derive(Clone, Copy)]
 enum Edit {
@@ -60,10 +61,6 @@ fn repack(bytes: &[u8], edits: &[(&str, Edit)]) -> Vec<u8> {
         }
     }
     data
-}
-
-fn fixture(path: &str) -> Vec<u8> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(path)).unwrap()
 }
 
 fn converter(on_loss: OnLoss) -> Converter {
@@ -145,16 +142,7 @@ fn graphic_pptx() -> Vec<u8> {
             r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>"#.to_string(),
         ),
     ];
-    zipped(&parts)
-}
-
-fn zipped(parts: &[(&str, String)]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, content) in parts {
-        writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-        writer.write_all(content.as_bytes()).unwrap();
-    }
-    writer.finish().unwrap().into_inner()
+    zip_package(&parts)
 }
 
 /// A DOCX whose body draws one chart and one diagram, both empty, so that
@@ -177,7 +165,7 @@ fn graphic_docx() -> Vec<u8> {
     let rels = format!(
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId8" Type="{RELS}/chart" Target="charts/chart1.xml"/><Relationship Id="rId9" Type="{RELS}/diagramData" Target="diagrams/data1.xml"/></Relationships>"#
     );
-    zipped(&[
+    zip_package(&[
         ("word/document.xml", document),
         ("word/_rels/document.xml.rels", rels),
         ("word/charts/chart1.xml", CHART.to_string()),
@@ -687,10 +675,10 @@ fn parse_reports_and_render_decides() {
 }
 
 #[test]
-fn incomplete_has_its_own_code_and_names_what_was_lost() {
+fn an_incomplete_conversion_names_what_was_lost() {
     let bytes = repack(&fixture("docx/text.docx"), &[("word/footnotes.xml", Corrupt)]);
     let error = converter(OnLoss::Fail).convert(Input::new(&bytes, Format::Docx)).unwrap_err();
-    assert_eq!(error.code(), "incomplete");
+    assert_matches!(error, ConvertError::Incomplete { .. });
     assert_eq!(error.to_string(), "incomplete conversion, content lost: part_unreadable");
 }
 

@@ -36,7 +36,7 @@ def numpara(text, num_id, ilvl=0, pstyle=None):
 
 
 # ---------------------------------------------------------------------------
-# Handmade DOCX: complete numbering matrix + style inheritance (P7.4a-f, H6, M1)
+# Handmade DOCX: complete numbering matrix + style inheritance
 
 def numbering_docx(out):
     styles = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -134,7 +134,7 @@ def numbering_docx(out):
         numpara("Suppressed numbering paragraph", 0, 0, pstyle="NumberedPara"),
         # style-provided numbering only (no direct numPr)
         para("Style-numbered paragraph", '<w:pPr><w:pStyle w:val="NumberedPara"/></w:pPr>'),
-        # S3: style-based numbering resolves its level through the abstract
+        # Style-based numbering resolves its level through the abstract
         # levels' pStyle bindings; the ilvl inside the styles' numPr (5 and
         # 0 above - both wrong on purpose) must be ignored.
         para("pStyle-bound level one", '<w:pPr><w:pStyle w:val="ListLevelOne"/></w:pPr>'),
@@ -185,7 +185,7 @@ def numbering_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# Handmade DOCX: chart + SmartArt + image rel (P7.5, P7.10, M4)
+# Handmade DOCX: chart + SmartArt + image rel
 
 def rich_docx(out):
     chart = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -295,7 +295,7 @@ def rich_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# R1: ISO 29500 Strict namespaces and rels-driven part discovery
+# ISO 29500 Strict namespaces and rels-driven part discovery
 
 STRICT_W = 'xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main"'
 
@@ -399,7 +399,7 @@ def math_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# R15: DOCX gridBefore/gridAfter, legacy hMerge, ST_OnOff tblHeader
+# DOCX gridBefore/gridAfter, legacy hMerge, ST_OnOff tblHeader
 
 def tables_docx(out):
     def tc(text, extra=""):
@@ -431,7 +431,7 @@ def tables_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# S12: a valid document referencing one part many times must convert with a
+# A valid document referencing one part many times must convert with a
 # single retained asset; the part is cached and the asset deduplicated. (The
 # budget re-charging itself is covered by unit tests - a fixture big enough
 # to cross the 512 MiB budget would slow the mutation harness down.)
@@ -461,7 +461,7 @@ def manyrefs_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# S5: standard Word OLE markup - a VML preview image next to the
+# Standard Word OLE markup - a VML preview image next to the
 # o:OLEObject; the object's identity and payload must win over the preview.
 
 def ole_docx(out):
@@ -500,7 +500,7 @@ def ole_docx(out):
 
 
 # ---------------------------------------------------------------------------
-# S2: outline level is a tri-state property; direct paragraph properties
+# Outline level is a tri-state property; direct paragraph properties
 # override the style chain, and outlineLvl 9 is the explicit off state.
 
 def outline_docx(out):
@@ -698,7 +698,7 @@ def abuse(out):
         ("_rels/.rels", ROOT_RELS),
         ("word/document.xml", bomb_doc),
     ])
-    # R2: the bomb lives in an *optional* part (an image behind a
+    # The bomb lives in an *optional* part (an image behind a
     # relationship). Resource limits must propagate out of recovery paths
     # instead of being skipped like an ordinary broken image.
     image_doc = (f'<?xml version="1.0"?><w:document {W} {R}><w:body>'

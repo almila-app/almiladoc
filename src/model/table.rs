@@ -304,6 +304,7 @@ impl<L: GridLedger> GridBuilder<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const BUDGET: u64 = 4_000_000;
 
@@ -348,7 +349,7 @@ mod tests {
         b.place(text_cell("end")).unwrap();
         let t = b.finish(TableKind::Data).unwrap();
         assert_eq!(widths(&t), vec![3]);
-        assert!(matches!(t.grid[0][1], CellSlot::Covered { origin_row: 0, origin_col: 0 }));
+        assert_matches!(t.grid[0][1], CellSlot::Covered { origin_row: 0, origin_col: 0 });
     }
 
     #[test]
@@ -361,8 +362,8 @@ mod tests {
         b.place(text_cell("b2")).unwrap();
         let t = b.finish(TableKind::Data).unwrap();
         assert_eq!(widths(&t), vec![2, 2]);
-        assert!(matches!(t.grid[1][0], CellSlot::Covered { origin_row: 0, origin_col: 0 }));
-        assert!(matches!(&t.grid[1][1], CellSlot::Origin(c) if !c.is_empty()));
+        assert_matches!(t.grid[1][0], CellSlot::Covered { origin_row: 0, origin_col: 0 });
+        assert_matches!(&t.grid[1][1], CellSlot::Origin(c) if !c.is_empty());
     }
 
     #[test]
@@ -386,8 +387,8 @@ mod tests {
         b.place(text_cell("end")).unwrap();
         let t = b.finish(TableKind::Data).unwrap();
         assert_eq!(widths(&t), vec![3]);
-        assert!(matches!(t.grid[0][1], CellSlot::Covered { .. }));
-        assert!(matches!(&t.grid[0][2], CellSlot::Origin(c) if !c.is_empty()));
+        assert_matches!(t.grid[0][1], CellSlot::Covered { .. });
+        assert_matches!(&t.grid[0][2], CellSlot::Origin(c) if !c.is_empty());
     }
 
     #[test]
@@ -429,10 +430,10 @@ mod tests {
                                 continue;
                             }
                             let covered = t.grid.get(r + dr).and_then(|row| row.get(c + dc));
-                            assert!(
-                                matches!(covered,
-                                    Some(CellSlot::Covered { origin_row, origin_col })
-                                        if *origin_row == r && *origin_col == c),
+                            assert_matches!(
+                                covered,
+                                Some(CellSlot::Covered { origin_row, origin_col })
+                                    if *origin_row == r && *origin_col == c,
                                 "span of origin ({r},{c}) not backed at ({},{})",
                                 r + dr,
                                 c + dc
@@ -470,9 +471,9 @@ mod tests {
         b.next_row();
         b.place(spanning_text("late", 2, 1)).unwrap();
         let t = b.finish(TableKind::Data).unwrap();
-        assert!(matches!(t.grid[1][0], CellSlot::Covered { .. }));
-        assert!(matches!(t.grid[1][1], CellSlot::Covered { .. }));
-        assert!(matches!(&t.grid[1][2], CellSlot::Origin(c) if c.col_span == 2));
+        assert_matches!(t.grid[1][0], CellSlot::Covered { .. });
+        assert_matches!(t.grid[1][1], CellSlot::Covered { .. });
+        assert_matches!(&t.grid[1][2], CellSlot::Origin(c) if c.col_span == 2);
         assert_spans_backed(&t);
     }
 
@@ -487,7 +488,7 @@ mod tests {
         b.next_row();
         let t = b.finish(TableKind::Data).unwrap();
         assert_eq!(t.grid.len(), 1);
-        assert!(matches!(&t.grid[0][0], CellSlot::Origin(c) if c.row_span == 1));
+        assert_matches!(&t.grid[0][0], CellSlot::Origin(c) if c.row_span == 1);
         assert_spans_backed(&t);
     }
 
@@ -510,8 +511,7 @@ mod tests {
 
     #[test]
     fn accumulated_spans_hit_the_expansion_budget() {
-        // Preload the counter instead of allocating millions of real pending
-        // entries (the global allocation counter feeds the R22 memory test).
+        // Preload the counter instead of allocating millions of real pending entries.
         let mut b = GridBuilder::new(ledger(BUDGET, BUDGET));
         b.expansion = BUDGET - 10;
         b.next_row();
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn covered_tail_behind_short_row_gap_materializes() {
-        // M5: a row-span at a late column must stay backed even when the
+        // A row-span at a late column must stay backed even when the
         // next row stops short of it — the gap fills with empty cells.
         let mut b = GridBuilder::new(ledger(BUDGET, BUDGET));
         b.next_row();
@@ -534,8 +534,8 @@ mod tests {
         b.place(text_cell("only")).unwrap();
         let t = b.finish(TableKind::Data).unwrap();
         assert_eq!(t.grid[1].len(), 6);
-        assert!(matches!(t.grid[1][5], CellSlot::Covered { origin_row: 0, origin_col: 5 }));
-        assert!(matches!(&t.grid[0][5], CellSlot::Origin(c) if c.row_span == 2));
+        assert_matches!(t.grid[1][5], CellSlot::Covered { origin_row: 0, origin_col: 5 });
+        assert_matches!(&t.grid[0][5], CellSlot::Origin(c) if c.row_span == 2);
         assert_spans_backed(&t);
     }
 

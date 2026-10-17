@@ -272,6 +272,7 @@ mod tests {
     use crate::limits::{Limit, Limits};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
+    use std::assert_matches;
 
     // parse_xml returns a synthetic root wrapping the document element.
     fn parse(doc: &str) -> Element {
@@ -332,11 +333,8 @@ mod tests {
         let parse_ctx = crate::ctx::ParseCtx::default();
         assert_eq!(styles.heading_level(&parse_ctx, "C").unwrap(), Some(Some(2)));
         assert_eq!(styles.run_toggles(&parse_ctx, "D").unwrap(), Toggles::default());
-        assert!(matches!(
-            styles.heading_level(&parse_ctx, "A"),
-            Err(ConvertError::Malformed { .. })
-        ));
-        assert!(matches!(styles.run_toggles(&parse_ctx, "C"), Err(ConvertError::Malformed { .. })));
+        assert_matches!(styles.heading_level(&parse_ctx, "A"), Err(ConvertError::Malformed { .. }));
+        assert_matches!(styles.run_toggles(&parse_ctx, "C"), Err(ConvertError::Malformed { .. }));
     }
 
     #[test]
@@ -429,8 +427,10 @@ mod tests {
         assert_eq!(memo_entries(&resolved), 0);
         let lowered = Limits { max_work: depth - 1, ..Limits::default() };
         let refused = level(&styles(), &ParseCtx::new(&lowered), 1);
-        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, max })
-            if max == depth - 1));
+        assert_matches!(
+            refused,
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == depth - 1
+        );
     }
 
     #[test]
@@ -447,11 +447,13 @@ mod tests {
         assert_eq!(parse_ctx.fuel(), walk);
         let lowered = Limits { max_work: walk - 1, ..Limits::default() };
         let refused = styles.direct_num_id(&ParseCtx::new(&lowered), "S");
-        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, max })
-            if max == walk - 1));
+        assert_matches!(
+            refused,
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == walk - 1
+        );
         let token = crate::ledger::CancelToken::new();
         token.cancel();
         let cancelled = styles.direct_num_id(&ParseCtx::default().with_cancel(Some(&token)), "S");
-        assert!(matches!(cancelled, Err(ConvertError::Cancelled)));
+        assert_matches!(cancelled, Err(ConvertError::Cancelled));
     }
 }

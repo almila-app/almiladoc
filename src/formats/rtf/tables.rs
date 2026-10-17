@@ -676,6 +676,7 @@ pub fn codepage_encoding(cp: u32) -> Option<&'static encoding_rs::Encoding> {
 mod tests {
     use super::*;
     use crate::limits::{Limit, Limits};
+    use std::assert_matches;
 
     fn stylesheet(
         parse_ctx: &ParseCtx,
@@ -716,8 +717,9 @@ mod tests {
         let max_work = parse_ctx.fuel() - 1;
         let limits = Limits { max_work, ..Limits::default() };
         let err = stylesheet(&ParseCtx::new(&limits), &group).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max } if max == max_work)
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::Work, max } if max == max_work
         );
     }
 

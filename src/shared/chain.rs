@@ -116,6 +116,7 @@ fn cycle() -> ConvertError {
 mod tests {
     use super::*;
     use crate::limits::{Limit, Limits};
+    use std::assert_matches;
 
     #[test]
     fn deep_chain_walks_to_root() {
@@ -147,7 +148,10 @@ mod tests {
         let mut chains: StyleChains<Option<bool>> = StyleChains::default();
         chains.insert("a", &none, Some("b"));
         chains.insert("b", &none, Some("a"));
-        assert!(first(&ParseCtx::default(), &chains, &Memo::default(), "a").is_err());
+        assert_matches!(
+            first(&ParseCtx::default(), &chains, &Memo::default(), "a"),
+            Err(ConvertError::Malformed { reason: "style inheritance cycle", .. })
+        );
     }
 
     #[test]
@@ -202,7 +206,7 @@ mod tests {
         assert_eq!(parse_ctx.fuel(), 4000);
         let limits = Limits { max_work: 3999, ..Limits::default() };
         let err = first(&ParseCtx::new(&limits), &chains, &Memo::default(), "s3999").unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 3999 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 3999 });
     }
 
     #[test]
@@ -223,7 +227,10 @@ mod tests {
         let memo = Memo::default();
         let parse_ctx = ParseCtx::default();
         assert_eq!(first(&parse_ctx, &chains, &memo, "kid").unwrap(), Some(true));
-        assert!(first(&parse_ctx, &chains, &memo, "a").is_err());
+        assert_matches!(
+            first(&parse_ctx, &chains, &memo, "a"),
+            Err(ConvertError::Malformed { reason: "style inheritance cycle", .. })
+        );
         assert_eq!(memo.borrow().len(), 1);
     }
 
@@ -247,7 +254,7 @@ mod tests {
         let kid = |id: &str| (id == "kid").then_some(());
         assert_eq!(cyclic.find(&ParseCtx::default(), "kid", kid).unwrap(), Some(()));
         let walked = ParseCtx::default();
-        assert!(matches!(cyclic.find(&walked, "a", kid), Err(ConvertError::Malformed { .. })));
+        assert_matches!(cyclic.find(&walked, "a", kid), Err(ConvertError::Malformed { .. }));
         assert_eq!(walked.fuel(), 4);
     }
 
@@ -286,7 +293,7 @@ mod tests {
             (0..depth).map(|i| (format!("{i:0>4096}"), None)).collect();
         let limits = Limits { max_work: depth * 4096 - 1, ..Limits::default() };
         let refused = chain(&defs).find(&ParseCtx::new(&limits), &defs[29].0, |_| None::<()>);
-        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })));
+        assert_matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. }));
     }
 
     #[test]

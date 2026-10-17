@@ -1461,6 +1461,7 @@ mod tests {
     use super::*;
     use crate::shared::numbering::NumberText;
     use lists::LevelDef;
+    use std::assert_matches;
 
     fn list(lsid: u32) -> ListDef {
         let mut levels: [LevelDef; LEVELS] = std::array::from_fn(|_| LevelDef::default());
@@ -2303,7 +2304,10 @@ mod tests {
         assert_eq!(kinds, HashMap::from([(1, ShapeKind::Graphic), (2, ShapeKind::Picture)]));
         assert_eq!(parse_ctx.fuel(), 7);
         let limits = crate::limits::Limits { max_work: 6, ..Default::default() };
-        assert!(shape_kinds(&ParseCtx::new(&limits), &run).is_err());
+        assert_matches!(
+            shape_kinds(&ParseCtx::new(&limits), &run),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 6 })
+        );
     }
 
     fn inline_picture_bytes(
@@ -2327,10 +2331,10 @@ mod tests {
         assert_eq!(inline_picture_bytes(&limits, 4096).unwrap(), 4096);
         let limits = crate::limits::Limits { max_entry_bytes: 4095, ..Default::default() };
         let err = inline_picture_bytes(&limits, 4096).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: crate::limits::Limit::EntryBytes, max: 4095 }
-        ));
+        );
     }
 
     #[test]
@@ -2341,10 +2345,10 @@ mod tests {
         assert_eq!(doc.assets[0].bytes.len(), 4096);
         let limits = crate::limits::Limits { max_asset_total_bytes: 4095, ..Default::default() };
         let err = parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: crate::limits::Limit::AssetTotalBytes, max: 4095 }
-        ));
+        );
     }
 
     fn flush_spanning_table(max_expansion: u64) -> Result<Vec<Block>, ConvertError> {
@@ -2371,10 +2375,10 @@ mod tests {
     fn a_table_cell_spanning_past_the_contexts_expansion_is_a_limit() {
         assert_eq!(flush_spanning_table(2).unwrap().len(), 1);
         let err = flush_spanning_table(1).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: crate::limits::Limit::Expansion, max: 1 }
-        ));
+        );
     }
 
     /// The runs and fuel of a CHPX bin table naming `pns`, over two FKP pages
@@ -2417,9 +2421,9 @@ mod tests {
         let storage = ole.into_inner().into_inner();
         let absent = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
         let absent = absent.into_inner().into_inner();
-        let code = |bytes: &[u8]| parse(&ParseCtx::default(), bytes).unwrap_err().code();
-        assert_eq!(code(&storage), "malformed");
-        assert_eq!(code(&absent), "missingPart");
+        let error = |bytes: &[u8]| parse(&ParseCtx::default(), bytes).unwrap_err();
+        assert_matches!(error(&storage), ConvertError::Malformed { .. });
+        assert_matches!(error(&absent), ConvertError::MissingPart { .. });
     }
 
     fn ole_stream(ole: &mut cfb::CompoundFile<std::io::Cursor<&[u8]>>, name: &str) -> Vec<u8> {
@@ -2446,10 +2450,9 @@ mod tests {
         assert!(fuel(0x102, FkpKind::Papx) > 0);
         let limits = crate::limits::Limits { max_work: chpx, ..crate::limits::Limits::default() };
         let err = parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max }
-                if max == chpx),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max } if max == chpx
         );
     }
 
@@ -2482,8 +2485,9 @@ mod tests {
         let fib = |len: usize| [&[0xEC, 0xA5][..], &vec![0; len - 2]].concat();
         for word_doc in [vec![0xEC, 0xA5, 0, 0], fib(0x381)] {
             let refused = doc(&word_doc);
-            assert!(
-                matches!(refused, Err(ConvertError::Malformed { .. })),
+            assert_matches!(
+                refused,
+                Err(ConvertError::Malformed { .. }),
                 "{}: {refused:?}",
                 word_doc.len()
             );

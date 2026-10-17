@@ -219,20 +219,11 @@ mod tests {
     use super::*;
     use crate::diagnostics::DiagnosticCode;
     use crate::model::{Block, ImageSource, Inline};
-    use std::io::{Cursor, Write};
-
-    fn docx_parts(parts: &[(&str, &str)]) -> Vec<u8> {
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default();
-        for (name, body) in parts {
-            w.start_file(*name, opts).unwrap();
-            w.write_all(body.as_bytes()).unwrap();
-        }
-        w.finish().unwrap().into_inner()
-    }
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     fn docx(document: &str, rels: &str) -> Vec<u8> {
-        docx_parts(&[("word/document.xml", document), ("word/_rels/document.xml.rels", rels)])
+        zip_package(&[("word/document.xml", document), ("word/_rels/document.xml.rels", rels)])
     }
 
     const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
@@ -246,7 +237,7 @@ mod tests {
 
     #[test]
     fn linked_image_relationship_becomes_an_external_source() {
-        // M9: `r:link` with an external-mode relationship must carry the URL
+        // `r:link` with an external-mode relationship must carry the URL
         // instead of failing the internal-part loader.
         let document = r#"<w:document
             xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -287,10 +278,10 @@ mod tests {
 
     #[test]
     fn huge_numbering_start_values_cannot_overflow() {
-        // H2: w:start is ST_DecimalNumber (xsd:int); out-of-range values are
+        // w:start is ST_DecimalNumber (xsd:int); out-of-range values are
         // clamped so document-order increments can never overflow.
         for start in ["18446744073709551615", "-5", "2147483647"] {
-            let bytes = docx_parts(&[
+            let bytes = zip_package(&[
                 ("word/document.xml", &numbered_paragraphs()),
                 ("word/numbering.xml", &numbering_with_start(start)),
             ]);
@@ -301,7 +292,7 @@ mod tests {
 
     #[test]
     fn partial_num_pr_inherits_property_by_property() {
-        // M1: a direct numPr carrying only ilvl merges with the style's
+        // A direct numPr carrying only ilvl merges with the style's
         // numId instead of suppressing numbering.
         let document = format!(
             r#"<w:document {W}><w:body>
@@ -325,7 +316,7 @@ mod tests {
             <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
             </w:numbering>"#
         );
-        let bytes = docx_parts(&[
+        let bytes = zip_package(&[
             ("word/document.xml", &document),
             ("word/styles.xml", &styles),
             ("word/numbering.xml", &numbering),
@@ -353,7 +344,7 @@ mod tests {
             </w:p></w:body></w:document>"#
         );
         let doc =
-            parse(&ParseCtx::default(), &docx_parts(&[("word/document.xml", &document)])).unwrap();
+            parse(&ParseCtx::default(), &zip_package(&[("word/document.xml", &document)])).unwrap();
         let Some(Block::Paragraph(inlines)) = doc.blocks.first() else { panic!() };
         assert_eq!(crate::model::inlines_to_plain_text(inlines), "This by-law grants");
     }
@@ -376,7 +367,7 @@ mod tests {
         ];
         for (body, expected) in cases {
             let document = format!(r#"<w:document {W}><w:body>{body}</w:body></w:document>"#);
-            let bytes = docx_parts(&[("word/document.xml", &document)]);
+            let bytes = zip_package(&[("word/document.xml", &document)]);
             let markdown = crate::render::markdown::document_to_markdown(
                 &parse(&ParseCtx::default(), &bytes).unwrap(),
             );
@@ -444,7 +435,7 @@ mod tests {
 
     fn reported(parts: &[(&str, &str)]) -> Vec<Reported> {
         let parse_ctx = ParseCtx::default();
-        parse(&parse_ctx, &docx_parts(parts)).unwrap();
+        parse(&parse_ctx, &zip_package(parts)).unwrap();
         let mut reported: Vec<Reported> =
             parse_ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
         reported.sort();
@@ -915,10 +906,11 @@ mod tests {
 
     #[test]
     fn an_imported_part_alone_fails_the_conversion() {
-        let bytes = docx_parts(&[("word/document.xml", &document(r#"<w:altChunk r:id="rId1"/>"#))]);
+        let bytes =
+            zip_package(&[("word/document.xml", &document(r#"<w:altChunk r:id="rId1"/>"#))]);
         let converter = crate::Converter::new(crate::Config::default()).unwrap();
         let result = converter.convert(crate::Input::new(&bytes, crate::Format::Docx));
-        assert!(matches!(result, Err(ConvertError::Incomplete { .. })), "{result:?}");
+        assert_matches!(result, Err(ConvertError::Incomplete { .. }));
     }
 
     #[test]
@@ -952,7 +944,7 @@ mod tests {
             ),
         ];
         for (body, expected) in cases {
-            let bytes = docx_parts(&[
+            let bytes = zip_package(&[
                 ("word/document.xml", &document(&body)),
                 ("word/numbering.xml", &numbering),
             ]);
@@ -965,7 +957,7 @@ mod tests {
 
     #[test]
     fn numbered_heading_keeps_its_number() {
-        // H1: a heading style with numbering shows its label and advances
+        // A heading style with numbering shows its label and advances
         // the sequence.
         let document = format!(
             r#"<w:document {W}><w:body>
@@ -988,7 +980,7 @@ mod tests {
             <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
             </w:numbering>"#
         );
-        let bytes = docx_parts(&[
+        let bytes = zip_package(&[
             ("word/document.xml", &document),
             ("word/styles.xml", &styles),
             ("word/numbering.xml", &numbering),

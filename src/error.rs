@@ -276,6 +276,7 @@ fn page_ranges(pages: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn every_variant() -> Vec<ConvertError> {
         vec![
@@ -397,7 +398,7 @@ mod tests {
     #[test]
     fn limit_exceeded_keeps_its_limit_and_max() {
         let error = ConvertError::from(LimitExceeded { limit: Limit::Expansion, max: 7 });
-        assert!(matches!(error, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 7 }));
+        assert_matches!(error, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 7 });
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::model::{
     AnchorId, Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, List, ListItem,
     MarkerKind, Note, NoteKind, Style, Table, TableKind,
 };
+use std::assert_matches;
 
 fn doc(blocks: Vec<Block>) -> String {
     document_to_markdown(&Document { blocks, notes: Vec::new(), assets: Vec::new() })
@@ -321,7 +322,7 @@ fn sourceless_image_renders_alt_text() {
 
 #[test]
 fn composite_marker_labels_are_escaped() {
-    // M15: source-derived labels must not alter Markdown structure.
+    // Source-derived labels must not alter Markdown structure.
     let list = crate::model::List {
         marker: crate::model::MarkerKind::Decimal,
         start: 1,
@@ -598,10 +599,10 @@ fn whitespace_a_cell_shows_counts_once_against_the_maximum() {
     let ledger = crate::ledger::Ledger::new(u64::MAX, None);
     let len = md.len() as u64;
     assert_eq!(super::render(&document, &super::Meter::new(&ledger, len)).unwrap(), md);
-    assert!(matches!(
+    assert_matches!(
         super::render(&document, &super::Meter::new(&ledger, len - 1)),
         Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. })
-    ));
+    );
 }
 
 fn refused_on_what_it_holds(blocks: Vec<Block>, notes: Vec<Note>) {
@@ -609,9 +610,10 @@ fn refused_on_what_it_holds(blocks: Vec<Block>, notes: Vec<Note>) {
     let len = super::document_to_markdown(&document).len() as u64;
     let ledger = crate::ledger::Ledger::new(u64::MAX, None);
     let rendered = super::render(&document, &super::Meter::new(&ledger, len));
-    assert!(
-        matches!(rendered, Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. })),
-        "{len}: {rendered:?}"
+    assert_matches!(
+        rendered,
+        Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. }),
+        "{len}"
     );
 }
 
@@ -978,7 +980,7 @@ fn code_block_keeps_its_language_hint() {
 
 #[test]
 fn cell_edge_whitespace_is_trimmed() {
-    // S10: cell padding from spreadsheets and CSV is layout, and the table's
+    // Cell padding from spreadsheets and CSV is layout, and the table's
     // own padding would swallow it anyway.
     let md = doc(vec![table_from(
         vec![vec![

@@ -383,6 +383,7 @@ mod tests {
     use crate::limits::{Limit, Limits};
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
+    use std::assert_matches;
 
     const ABSTRACT: &str = r#"<w:abstractNum w:abstractNumId="7">
         <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/></w:lvl>
@@ -671,12 +672,12 @@ mod tests {
         assert_eq!((lookups.get(), parse_ctx.fuel()), (depth - 1, depth));
         let limits = Limits { max_work: depth - 1, ..Limits::default() };
         let refused = numbers_in(&ParseCtx::new(&limits), &nums, &link, &[]);
-        assert!(matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })));
+        assert_matches!(refused, Err(ConvertError::ResourceLimit { limit: Limit::Work, .. }));
         let token = CancelToken::new();
         token.cancel();
         let cancelled =
             numbers_in(&ParseCtx::default().with_cancel(Some(&token)), &nums, &link, &[]);
-        assert!(matches!(cancelled, Err(ConvertError::Cancelled)));
+        assert_matches!(cancelled, Err(ConvertError::Cancelled));
         Ok(())
     }
 
@@ -702,10 +703,10 @@ mod tests {
             (refused, parse_ctx.fuel())
         };
         let (short, fuel) = verdict(terminals);
-        assert!(matches!(short, ConvertError::ResourceLimit { limit: Limit::Work, .. }));
+        assert_matches!(short, ConvertError::ResourceLimit { limit: Limit::Work, .. });
         assert_eq!(fuel, cyclic);
         let (enough, fuel) = verdict(cyclic);
-        assert!(matches!(enough, ConvertError::Malformed { .. }));
+        assert_matches!(enough, ConvertError::Malformed { .. });
         assert_eq!(fuel, cyclic);
     }
 
@@ -721,6 +722,6 @@ mod tests {
             "B" => Some(2),
             _ => None,
         };
-        assert!(matches!(numbers(nums, &link, &[]), Err(ConvertError::Malformed { .. })));
+        assert_matches!(numbers(nums, &link, &[]), Err(ConvertError::Malformed { .. }));
     }
 }

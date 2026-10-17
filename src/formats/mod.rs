@@ -47,6 +47,7 @@ pub(crate) fn parse(
 mod tests {
     use super::*;
     use crate::limits::{Limit, Limits};
+    use std::assert_matches;
 
     #[test]
     fn the_label_checks_reads_count_against_the_parses_total_bytes() {
@@ -60,9 +61,9 @@ mod tests {
 
         let limits = Limits { max_total_bytes: alone.archive_bytes(), ..Limits::DEFAULT };
         docx::parse(&ParseCtx::new(&limits), &bytes).unwrap();
-        assert!(matches!(
+        assert_matches!(
             parse(&ParseCtx::new(&limits), &bytes, Format::Docx),
             Err(ConvertError::ResourceLimit { limit: Limit::TotalBytes, .. })
-        ));
+        );
     }
 }

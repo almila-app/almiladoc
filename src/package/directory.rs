@@ -141,6 +141,7 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
@@ -191,15 +192,15 @@ mod tests {
 
     fn limit_err(result: Result<impl std::fmt::Debug, ConvertError>, limit: Limit, max: u64) {
         let err = result.err().unwrap();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: l, max: m } if l == limit && m == max),
-            "{err:?}"
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: l, max: m } if l == limit && m == max
         );
     }
 
     fn malformed(result: Result<impl std::fmt::Debug, ConvertError>, reason: &str) {
         let err = result.err().unwrap();
-        assert!(matches!(err, ConvertError::Malformed { reason: r, .. } if r == reason), "{err:?}");
+        assert_matches!(err, ConvertError::Malformed { reason: r, .. } if r == reason);
     }
 
     #[test]
@@ -392,7 +393,7 @@ mod tests {
             for flag in [ENCRYPTED, STRONG_ENCRYPTION] {
                 let mut patched = data.clone();
                 put_u16(&mut patched, header + 8, flag);
-                assert!(matches!(facts(&patched, &Limits::DEFAULT), Err(ConvertError::Encrypted)));
+                assert_matches!(facts(&patched, &Limits::DEFAULT), Err(ConvertError::Encrypted));
             }
         }
     }

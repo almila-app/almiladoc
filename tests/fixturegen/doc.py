@@ -4,7 +4,7 @@ from fixturegen.common import write_cfb
 
 
 # ---------------------------------------------------------------------------
-# R7: compressed .doc text decodes via the FIB language id's code page
+# Compressed .doc text decodes via the FIB language id's code page
 
 def word_doc_stream(lid, text_bytes, far_east=False):
     """A minimal WordDocument stream: FIB base + legacy single-piece text

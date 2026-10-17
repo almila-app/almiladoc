@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn connector_punctuation_is_kept() {
-        // S15: category Pc joins words, like the underscore.
+        // Category Pc (connector punctuation) joins words, like the underscore.
         assert_eq!(gfm_slug("a‿b undertie"), "a‿b-undertie");
         assert_eq!(gfm_slug("a⁀b tie"), "a⁀b-tie");
         assert_eq!(gfm_slug("a＿b fullwidth"), "a＿b-fullwidth");

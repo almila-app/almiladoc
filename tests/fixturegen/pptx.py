@@ -9,7 +9,7 @@ from fixturegen.common import (
 
 
 # ---------------------------------------------------------------------------
-# Handmade PPTX: placeholder inheritance through layout and master (H7)
+# Handmade PPTX: placeholder inheritance through layout and master
 
 PPTX_NS = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
@@ -105,7 +105,7 @@ def inherit_pptx(out):
 
 
 # ---------------------------------------------------------------------------
-# R8: titles keep their shape-order position; p:oleObj payloads extracted
+# Titles keep their shape-order position; p:oleObj payloads extracted
 
 def order_pptx(out):
     presentation = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -281,7 +281,7 @@ def math_pptx(out):
 
 
 # ---------------------------------------------------------------------------
-# S9: links to another slide resolve to the target slide's start anchor
+# Links to another slide resolve to the target slide's start anchor
 # instead of a dead relative reference to slides/slideN.xml.
 
 def links_pptx(out):
@@ -345,7 +345,7 @@ def links_pptx(out):
 def abuse(out):
     a = out / "abuse"
     a.mkdir(parents=True, exist_ok=True)
-    # S1: a DrawingML table cell with an astronomically large span area.
+    # A DrawingML table cell with an astronomically large span area.
     span_pres = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation {PPTX_NS}>
 <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>

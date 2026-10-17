@@ -2,7 +2,7 @@ from fixturegen.common import DOT_PNG, write_zip
 
 
 # ---------------------------------------------------------------------------
-# Handmade EPUB: rowspan, ol attrs, CSS display:none, non-heading anchors (M7, H13)
+# Handmade EPUB: rowspan, ol attrs, CSS display:none, non-heading anchors
 
 def features_epub(out):
     css = "p.hidden { display: none; }\n.crossed { text-decoration: line-through; }\n"
@@ -94,7 +94,7 @@ def math_epub(out):
 
 
 # ---------------------------------------------------------------------------
-# R10/R11: per-chapter CSS cascades and spine-only anchor classification
+# Per-chapter CSS cascades and spine-only anchor classification
 
 def css_links_epub(out):
     css_a = ".mark { font-weight: bold; }\n"

@@ -1,21 +1,18 @@
+use crate::support::zip_package;
 use almiladoc::{Config, Converter, Format, Input, OnLoss};
 use std::error::Error;
-use std::io::{Cursor, Write};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
 
-fn docx(body: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+fn docx(body: &str) -> Vec<u8> {
     let document = format!(r#"<w:document {W}><w:body>{body}</w:body></w:document>"#);
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    zip.start_file("word/document.xml", zip::write::SimpleFileOptions::default())?;
-    zip.write_all(document.as_bytes())?;
-    Ok(zip.finish()?.into_inner())
+    zip_package(&[("word/document.xml", document)])
 }
 
 fn body_markdown(body: &str) -> Result<String, Box<dyn Error>> {
-    let bytes = docx(body)?;
+    let bytes = docx(body);
     let mut config = Config::default();
     config.on_loss = OnLoss::Report;
     let converter = Converter::new(config)?;

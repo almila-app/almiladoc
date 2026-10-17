@@ -5,11 +5,12 @@
 //! read one at a time, so `max_xml_nodes` bounds a row and the structure
 //! around the rows, never the row count.
 
+use crate::support::{fixture, zip_package};
 use almiladoc::model::Block;
 use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit, Parsed};
+use std::assert_matches;
 use std::error::Error;
 use std::io::{Cursor, Write};
-use std::path::Path;
 
 const XLSB_ROWS: u32 = 1 << 20;
 const XLS_ROWS: u32 = 1 << 16;
@@ -33,9 +34,10 @@ fn tables(parsed: &Parsed) -> Vec<String> {
 
 fn assert_exceeds_xml_nodes(name: &str, parsed: Result<Parsed, ConvertError>) {
     let err = parsed.err();
-    assert!(
-        matches!(err, Some(ConvertError::ResourceLimit { limit: Limit::XmlNodes, .. })),
-        "{name}: {err:?}"
+    assert_matches!(
+        err,
+        Some(ConvertError::ResourceLimit { limit: Limit::XmlNodes, .. }),
+        "{name}"
     );
 }
 
@@ -55,9 +57,10 @@ fn assert_content_table(name: &str, parsed: &Parsed) {
 
 fn assert_exceeds_grid_slots(name: &str, parsed: Result<Parsed, ConvertError>) {
     let err = parsed.err();
-    assert!(
-        matches!(err, Some(ConvertError::ResourceLimit { limit: Limit::GridSlots, .. })),
-        "{name}: {err:?}"
+    assert_matches!(
+        err,
+        Some(ConvertError::ResourceLimit { limit: Limit::GridSlots, .. }),
+        "{name}"
     );
 }
 
@@ -82,8 +85,7 @@ fn corners(last_row: u32, last_col: u16) -> impl Fn(u32) -> Vec<(u16, String)> {
 fn a_whitespace_cell_at_the_last_row_leaves_the_table_its_content() {
     let converter = Converter::new(Config::default()).unwrap();
     for name in ["xlsx", "xlsb", "xls"].map(|ext| format!("{ext}/handmade-trailing-space.{ext}")) {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(&name);
-        let parsed = parse(&converter, &std::fs::read(&path).unwrap());
+        let parsed = parse(&converter, &fixture(&name));
         assert_content_table(&name, &parsed.unwrap_or_else(|e| panic!("{name}: {e:?}")));
     }
 }
@@ -196,12 +198,12 @@ fn xlsb(rows: u32, cells: impl Fn(u32) -> Vec<(u16, String)>) -> Built<Vec<u8>> 
     let mut workbook = Vec::new();
     xlsb_rec(&mut workbook, 153, &file_version)?;
     xlsb_rec(&mut workbook, 156, &bundle_sheet)?;
-    package(&[
+    Ok(zip_package(&[
         ("_rels/.rels", rels(&[("officeDocument", "xl/workbook.bin")])),
         ("xl/workbook.bin", workbook),
         ("xl/_rels/workbook.bin.rels", rels(&[("worksheet", "worksheets/sheet1.bin")])),
         ("xl/worksheets/sheet1.bin", sheet),
-    ])
+    ]))
 }
 
 fn rels(targets: &[(&str, &str)]) -> Vec<u8> {
@@ -219,17 +221,6 @@ fn rels(targets: &[(&str, &str)]) -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>"#
     )
     .into_bytes()
-}
-
-fn package(parts: &[(&str, Vec<u8>)]) -> Built<Vec<u8>> {
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    for (name, data) in parts {
-        zip.start_file(*name, options)?;
-        zip.write_all(data)?;
-    }
-    Ok(zip.finish()?.into_inner())
 }
 
 /// The column letters of a zero-based column.
@@ -287,7 +278,7 @@ fn xlsx(body: &str, shared: Option<&str>) -> Built<Vec<u8>> {
         parts.push(("xl/sharedStrings.xml", sst.into_bytes()));
     }
     parts.push(("xl/_rels/workbook.xml.rels", rels(&workbook_rels)));
-    package(&parts)
+    Ok(zip_package(&parts))
 }
 
 fn biff(out: &mut Vec<u8>, kind: u16, body: &[u8]) -> Built<()> {

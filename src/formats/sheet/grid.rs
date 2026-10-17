@@ -935,6 +935,7 @@ fn first_visible(hidden: &[u32], lo: u32, hi: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn unbounded(grid: GridBounds) -> SheetContent {
         SheetContent::on(grid, u64::MAX, u64::MAX)
@@ -1035,7 +1036,7 @@ mod tests {
         };
         let limits = Limits { max_work: 12, max_expansion: 0, ..Default::default() };
         let err = build_table(&ParseCtx::new(&limits), sheet).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. });
     }
 
     #[test]
@@ -1051,7 +1052,7 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         assert!(build_table(&parse_ctx, sheet()).unwrap().is_some());
         let err = build_table(&parse_ctx, sheet()).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 11 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 11 });
         assert_eq!((parse_ctx.grid_slots_left(), parse_ctx.fuel()), (5, 6));
     }
 
@@ -1073,7 +1074,7 @@ mod tests {
         assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
         let limits = Limits { max_work: 500_000, ..Default::default() };
         let err = build_table(&ParseCtx::new(&limits), sheet()).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. });
     }
 
     #[test]
@@ -1092,7 +1093,7 @@ mod tests {
         assert!(build_table(&ParseCtx::new(&limits), sheet()).is_ok());
         let limits = Limits { max_work: 5_000, ..Default::default() };
         let err = build_table(&ParseCtx::new(&limits), sheet()).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }), "{err:?}");
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. });
     }
 
     fn range(r1: u32, c1: u32, r2: u32, c2: u32) -> CellRange {

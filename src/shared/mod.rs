@@ -19,5 +19,7 @@ pub mod math;
 pub mod mc;
 pub mod numbering;
 pub mod officeart;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod text;
 pub mod uri;

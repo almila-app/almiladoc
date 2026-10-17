@@ -1248,6 +1248,7 @@ impl<'c> Extractor<'c> {
 mod tests {
     use super::*;
     use crate::limits::Limits;
+    use std::assert_matches;
     use std::io::Write;
 
     fn deflated_metafile_picture(inflated: usize) -> Vec<u8> {
@@ -1266,7 +1267,7 @@ mod tests {
         assert_eq!(assets[0].bytes.len(), 4096);
         let limits = Limits { max_entry_bytes: 4095, ..Limits::default() };
         let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 });
     }
 
     #[test]
@@ -1281,10 +1282,10 @@ mod tests {
         assert_eq!(parse_ctx.fuel(), 3);
         let limits = Limits { max_records: 2, ..Limits::default() };
         let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Records, max: 2 });
         let limits = Limits { max_work: 2, ..Limits::default() };
         let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 2 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 2 });
     }
 
     #[test]
@@ -1296,10 +1297,10 @@ mod tests {
         assert_eq!(assets[0].bytes.len(), 4096);
         let limits = Limits { max_asset_total_bytes: 4095, ..Limits::default() };
         let err = collect_pictures(&ParseCtx::new(&limits), &mut ole).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             err,
             ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 4095 }
-        ));
+        );
     }
 
     fn record(ver_inst: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
@@ -2085,7 +2086,10 @@ mod tests {
         report(&parse_ctx).unwrap();
         assert_eq!(parse_ctx.fuel(), 3);
         let limits = Limits { max_work: 2, ..Limits::default() };
-        assert!(report(&ParseCtx::new(&limits)).is_err());
+        assert_matches!(
+            report(&ParseCtx::new(&limits)),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 2 })
+        );
     }
 
     #[test]
@@ -2121,7 +2125,10 @@ mod tests {
             assert_eq!(parse_ctx.fuel(), records);
             let limits = Limits { max_work: records - 1, ..Limits::default() };
             let parse_ctx = ParseCtx::new(&limits);
-            assert!(read(&mut Extractor::new(&parse_ctx), data).is_err());
+            assert_matches!(
+                read(&mut Extractor::new(&parse_ctx), data),
+                Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == records - 1
+            );
         }
     }
 
@@ -2133,7 +2140,10 @@ mod tests {
         let fuel = parse_ctx.fuel();
         assert_eq!(fuel, 4 + 1 + 7);
         let limits = Limits { max_work: fuel - 1, ..Limits::default() };
-        assert!(parse(&ParseCtx::new(&limits), &bytes).is_err());
+        assert_matches!(
+            parse(&ParseCtx::new(&limits), &bytes),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == fuel - 1
+        );
     }
 
     #[test]
@@ -2150,7 +2160,11 @@ mod tests {
         walk(&parse_ctx).unwrap();
         let records = 2 + 3 * 3;
         assert_eq!(parse_ctx.fuel(), records + 3 * (8 + 8 + 21));
-        let limits = Limits { max_work: parse_ctx.fuel() - 1, ..Limits::default() };
-        assert!(walk(&ParseCtx::new(&limits)).is_err());
+        let max = parse_ctx.fuel() - 1;
+        let limits = Limits { max_work: max, ..Limits::default() };
+        assert_matches!(
+            walk(&ParseCtx::new(&limits)),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: m }) if m == max
+        );
     }
 }

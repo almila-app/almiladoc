@@ -241,7 +241,7 @@ fn scoped(chapter_path: &str, fragment: Option<&str>) -> AnchorId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
+    use crate::shared::test_support::zip_package;
 
     type Reported = (DiagnosticCode, Region, Option<u32>, u64);
 
@@ -262,14 +262,9 @@ mod tests {
             r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/>
             <manifest>{items}</manifest><spine>{refs}</spine></package>"#
         );
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let fixed: [(&str, &[u8]); 2] =
             [("META-INF/container.xml", container.as_bytes()), ("c.opf", opf.as_bytes())];
-        for (name, body) in fixed.iter().chain(parts) {
-            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(body).unwrap();
-        }
-        w.finish().unwrap().into_inner()
+        zip_package(&[&fixed, parts].concat())
     }
 
     fn chapter(head: &str, body: &str) -> Vec<u8> {
@@ -389,13 +384,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for (name, body) in &parts {
-            w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            w.write_all(body.as_bytes()).unwrap();
-        }
-
-        let doc = parse(&ParseCtx::default(), &w.finish().unwrap().into_inner()).unwrap();
+        let doc = parse(&ParseCtx::default(), &zip_package(&parts)).unwrap();
         let text = doc
             .blocks
             .iter()

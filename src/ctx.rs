@@ -172,6 +172,7 @@ impl Default for ParseCtx<'static> {
 mod tests {
     use super::*;
     use crate::model::{Cell as TableCell, GridBuilder, TableKind};
+    use std::assert_matches;
 
     #[test]
     fn charges_run_against_the_contexts_max_work() {
@@ -179,7 +180,7 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         assert!(parse_ctx.charge(3).is_ok());
         let err = parse_ctx.charge(1).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 3 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 3 });
         assert_eq!(parse_ctx.fuel(), 4);
     }
 
@@ -233,7 +234,7 @@ mod tests {
         let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
         assert!(parse_ctx.charge(1).is_ok());
         token.cancel();
-        assert!(matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled)));
+        assert_matches!(parse_ctx.charge(1), Err(ConvertError::Cancelled));
         assert!(ParseCtx::default().with_cancel(None).charge(1).is_ok());
     }
 
@@ -253,7 +254,7 @@ mod tests {
         assert!(parse_ctx.admit_grid_positions(2).is_ok());
         assert_eq!((parse_ctx.grid_slots_left(), parse_ctx.fuel()), (2, 3));
         let refused = table(3).unwrap_err();
-        assert!(matches!(refused, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 }));
+        assert_matches!(refused, ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 5 });
     }
 
     #[test]
@@ -263,6 +264,6 @@ mod tests {
         token.cancel();
         let mut builder = GridBuilder::new(&parse_ctx);
         builder.next_row();
-        assert!(matches!(builder.place(TableCell::default()), Err(ConvertError::Cancelled)));
+        assert_matches!(builder.place(TableCell::default()), Err(ConvertError::Cancelled));
     }
 }

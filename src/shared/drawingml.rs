@@ -168,6 +168,7 @@ mod tests {
     use crate::limits::Limit;
     use crate::package::archive::Role;
     use crate::package::xml::parse_xml;
+    use std::assert_matches;
 
     fn chart(parse_ctx: &ParseCtx, content: &str) -> Element {
         let xml = format!(
@@ -322,12 +323,9 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let root = chart(&parse_ctx, &format!("{first}{rest}"));
         let refused = chart_blocks(&parse_ctx, &root, Region::Body);
-        assert!(
-            matches!(
-                refused,
-                Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 4_000_000 })
-            ),
-            "{refused:?}"
+        assert_matches!(
+            refused,
+            Err(ConvertError::ResourceLimit { limit: Limit::GridSlots, max: 4_000_000 })
         );
         let positions = u64::try_from((size + 1) * (size + 1)).unwrap();
         assert!(parse_ctx.fuel() < positions, "{}", parse_ctx.fuel());

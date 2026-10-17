@@ -563,7 +563,8 @@ mod tests {
     use super::*;
     use crate::limits::Limit;
     use crate::model::{CellSlot, Table, inlines_to_plain_text};
-    use std::io::Write;
+    use crate::shared::test_support::zip_package;
+    use std::assert_matches;
 
     const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -631,12 +632,8 @@ mod tests {
                 r#"<?xml version="1.0"?><Relationships xmlns="{PKG_RELS}">{rels}{}</Relationships>"#,
                 self.workbook_rels
             );
-            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            let opts = zip::write::SimpleFileOptions::default();
-            let mut add = |name: &str, body: &str| {
-                zip.start_file(name, opts).unwrap();
-                zip.write_all(body.as_bytes()).unwrap();
-            };
+            let mut parts = Vec::new();
+            let mut add = |name: &str, body: &str| parts.push((name.to_string(), body.to_string()));
             add("xl/workbook.xml", &workbook);
             add("xl/_rels/workbook.xml.rels", &rels);
             for (i, (_, _, body)) in self.sheets.iter().enumerate() {
@@ -670,7 +667,7 @@ mod tests {
             for (name, body) in &self.extra {
                 add(name, body);
             }
-            zip.finish().unwrap().into_inner()
+            zip_package(&parts)
         }
     }
 
@@ -1068,19 +1065,13 @@ mod tests {
             r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>b</t></is></c></row></sheetData>"#,
         );
         let err = parse(&wb.build()).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. }),
-            "got {err:?}"
-        );
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. });
 
         // Sheets accumulate, so a pile of them cannot each sit under the cap.
         let half = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row><row r="150000"><c r="P150000" t="inlineStr"><is><t>b</t></is></c></row></sheetData>"#;
         let wb = Wb { sheets: vec![("A", "", half), ("B", "", half)], ..Wb::default() };
         let err = parse(&wb.build()).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. }),
-            "got {err:?}"
-        );
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::GridSlots, .. });
     }
 
     const VML_REL: &str =
@@ -1139,7 +1130,7 @@ mod tests {
         assert!(super::super::parse(&ParseCtx::new(&limits), &bytes).is_ok());
         let limits = crate::limits::Limits { max_expansion: 5, ..Default::default() };
         let err = super::super::parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
-        assert!(matches!(err, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 5 }));
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Expansion, max: 5 });
     }
 
     type Reported = (DiagnosticCode, Region, Option<u32>, u64);

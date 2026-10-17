@@ -1228,6 +1228,7 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx, cells: &mut Vec<TcInfo<
 mod tests {
     use super::*;
     use crate::model::MarkerKind;
+    use std::assert_matches;
 
     fn text(value: &str) -> Piece {
         Piece::Inlines(vec![Inline::plain(value)])
@@ -1290,7 +1291,7 @@ mod tests {
             &mut Runs::default(),
         );
         let [Block::Paragraph(inlines)] = &blocks[..] else { panic!("{blocks:?}") };
-        assert!(matches!(inlines[..], [Inline::Anchor(_)]), "{inlines:?}");
+        assert_matches!(inlines[..], [Inline::Anchor(_)]);
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! names none fails. Content its label contradicts fails, naming the format
 //! detected.
 
+use std::assert_matches;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
 
 use almiladoc::{
     Config, Conversion, ConvertError, Converter, DiagnosticCode, Format, Input, Limit, OnLoss,
@@ -17,17 +17,10 @@ use almiladoc::{
 };
 use zip::write::SimpleFileOptions;
 
+use crate::support::{fixture, zip_package};
+
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-
-fn archive(parts: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, bytes) in parts {
-        writer.start_file(*name, SimpleFileOptions::default()).unwrap();
-        writer.write_all(bytes).unwrap();
-    }
-    writer.finish().unwrap().into_inner()
-}
 
 fn root_rels(target: &str) -> String {
     format!(
@@ -47,7 +40,7 @@ fn docx(rels_target: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
     let mut parts: Vec<(&str, &[u8])> =
         vec![("_rels/.rels", rels.as_bytes()), ("word/document.xml", body.as_bytes())];
     parts.extend_from_slice(extra);
-    archive(&parts)
+    zip_package(&parts)
 }
 
 fn odt(content_name: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
@@ -57,7 +50,7 @@ fn odt(content_name: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
         (content_name, content.as_bytes()),
     ];
     parts.extend_from_slice(extra);
-    archive(&parts)
+    zip_package(&parts)
 }
 
 fn rename_every(data: &mut [u8], from: &[u8], to: &[u8]) {
@@ -94,7 +87,7 @@ fn convert(bytes: &[u8], format: Format) -> Result<String, ConvertError> {
 
 fn malformed(result: Result<String, ConvertError>, reason: &str) {
     let err = result.unwrap_err();
-    assert!(matches!(&err, ConvertError::Malformed { reason: r, .. } if *r == reason), "{err:?}");
+    assert_matches!(&err, ConvertError::Malformed { reason: r, .. } if *r == reason);
 }
 
 #[test]
@@ -122,7 +115,7 @@ fn opc_part_names_compare_after_ascii_case_folding() {
     assert!(convert(&data, Format::Docx).unwrap().contains("main text"));
     let data = odt("Content.xml", &[]);
     let err = convert(&data, Format::Odt).unwrap_err();
-    assert!(matches!(err, ConvertError::MissingPart { .. }), "{err:?}");
+    assert_matches!(err, ConvertError::MissingPart { .. });
 }
 
 #[test]
@@ -143,7 +136,7 @@ fn an_encryption_flag_on_any_entry_is_encrypted() {
             let mut patched = data.clone();
             set_flags(&mut patched, name, flag);
             let err = convert(&patched, Format::Docx).unwrap_err();
-            assert!(matches!(err, ConvertError::Encrypted), "{name} {flag}: {err:?}");
+            assert_matches!(err, ConvertError::Encrypted, "{name} {flag}");
         }
     }
 }
@@ -156,9 +149,10 @@ fn a_limit_tripped_after_an_ole_prefix_is_not_taken_for_an_ole_file() {
     let data = [OLE_MAGIC.as_slice(), &docx("word/document.xml", &[("a.xml", b"<a/>")])].concat();
     for format in [Format::Docx, Format::Pptx] {
         let err = converter.convert(Input::new(&data, format)).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryCount, max: 2, .. }),
-            "{format:?}: {err:?}"
+        assert_matches!(
+            err,
+            ConvertError::ResourceLimit { limit: Limit::EntryCount, max: 2, .. },
+            "{format:?}"
         );
     }
 }
@@ -173,7 +167,7 @@ fn an_encrypted_ooxml_compound_file_is_encrypted() {
     let data = file.into_inner().into_inner();
     for format in [Format::Docx, Format::Pptx] {
         let err = convert(&data, format).unwrap_err();
-        assert!(matches!(err, ConvertError::Encrypted), "{format:?}: {err:?}");
+        assert_matches!(err, ConvertError::Encrypted, "{format:?}");
     }
 }
 
@@ -230,7 +224,7 @@ fn presentation(slides: &[&str], shapes: &str, parts: &[(&str, &[u8])]) -> Vec<u
         ("ppt/_rels/presentation.xml.rels", rels.as_bytes()),
     ]);
     all.extend_from_slice(parts);
-    archive(&all)
+    zip_package(&all)
 }
 
 fn book(manifest: &str, spine: &str, chapters: &[(&str, &str)]) -> Vec<u8> {
@@ -247,7 +241,7 @@ fn book(manifest: &str, spine: &str, chapters: &[(&str, &str)]) -> Vec<u8> {
     parts.extend(
         names.iter().zip(chapters).map(|(name, (_, body))| (name.as_str(), body.as_bytes())),
     );
-    archive(&parts)
+    zip_package(&parts)
 }
 
 const CHAPTER_ITEM: &str = r#"<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>"#;
@@ -270,34 +264,28 @@ fn reporting(bytes: &[u8], format: Format) -> (String, Vec<(DiagnosticCode, Regi
 
 fn malformed_part(result: Result<String, ConvertError>, part: &str, reason: &str) {
     let err = result.unwrap_err();
-    assert!(
-        matches!(&err, ConvertError::Malformed { part: Some(p), reason: r, .. }
-            if p.as_str() == part && *r == reason),
-        "{err:?}"
+    assert_matches!(
+        &err,
+        ConvertError::Malformed { part: Some(p), reason: r, .. }
+            if p.as_str() == part && *r == reason
     );
 }
 
 #[test]
 fn a_bare_less_than_never_converts_short() {
-    let data = archive(&[("word/document.xml", document("Pump A < pump B").as_bytes())]);
+    let data = zip_package(&[("word/document.xml", document("Pump A < pump B").as_bytes())]);
     malformed_part(convert(&data, Format::Docx), "word/document.xml", "bare `<` in markup");
     let data = pptx(1, "Pump A < pump B");
     let err = convert(&data, Format::Pptx).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ConvertError::Malformed { reason: "no slide in the presentation could be read", .. }
-        ),
-        "{err:?}"
+    assert_matches!(
+        err,
+        ConvertError::Malformed { reason: "no slide in the presentation could be read", .. }
     );
     let data = epub(&xhtml("", "<p>Pump A < pump B</p>"));
     let err = convert(&data, Format::Epub).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ConvertError::Malformed { reason: "no chapter in the book could be read", .. }
-        ),
-        "{err:?}"
+    assert_matches!(
+        err,
+        ConvertError::Malformed { reason: "no chapter in the book could be read", .. }
     );
 }
 
@@ -320,7 +308,7 @@ fn with_part_appended(bytes: &[u8], name: &str, tail: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_required_part_that_needs_repair_is_malformed() {
-    for (fixture, format, part) in [
+    for (path, format, part) in [
         ("docx/text.docx", Format::Docx, "word/document.xml"),
         ("pptx/pres.pptx", Format::Pptx, "ppt/presentation.xml"),
         ("odt/text.odt", Format::Odt, "content.xml"),
@@ -328,9 +316,8 @@ fn a_required_part_that_needs_repair_is_malformed() {
         ("epub/book.epub", Format::Epub, "EPUB/content.opf"),
         ("xlsx/sheet.xlsx", Format::Excel, "xl/workbook.xml"),
     ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture);
-        let original = std::fs::read(path).unwrap();
-        assert!(convert(&original, format).is_ok(), "{fixture}");
+        let original = fixture(path);
+        assert!(convert(&original, format).is_ok(), "{path}");
         let data = with_part_appended(&original, part, b"<unclosed>");
         malformed_part(convert(&data, format), part, "ill-formed xml");
     }
@@ -341,14 +328,15 @@ fn an_end_tag_that_does_not_repeat_its_start_tag_fails_a_required_part() {
     let body = format!(
         r#"<w:document xmlns:w="{W}" xmlns:x="{W}"><w:body><w:p><w:r><w:t>a</x:t></w:r></w:p></w:body></w:document>"#
     );
-    let data = archive(&[("word/document.xml", body.as_bytes())]);
+    let data = zip_package(&[("word/document.xml", body.as_bytes())]);
     malformed_part(convert(&data, Format::Docx), "word/document.xml", "ill-formed xml");
 }
 
 #[test]
 fn named_references_resolve_only_where_the_format_declares_them() {
-    let data = archive(&[("word/document.xml", document("a&nbsp;b &amp; Tom & Jerry").as_bytes())]);
-    assert!(matches!(convert(&data, Format::Docx), Err(ConvertError::Incomplete { .. })));
+    let data =
+        zip_package(&[("word/document.xml", document("a&nbsp;b &amp; Tom & Jerry").as_bytes())]);
+    assert_matches!(convert(&data, Format::Docx), Err(ConvertError::Incomplete { .. }));
     let (markdown, reported) = reporting(&data, Format::Docx);
     assert!(markdown.contains("nbsp;b & Tom & Jerry"), "{markdown}");
     assert_eq!(reported, [(DiagnosticCode::UnresolvedEntity, Region::Body)]);
@@ -360,7 +348,7 @@ fn named_references_resolve_only_where_the_format_declares_them() {
 fn an_internal_subset_fails_ooxml_and_is_ignored_in_epub() {
     let subset = r#"<!DOCTYPE d [<!ENTITY e "expanded">]>"#;
     let main = format!("{subset}{}", document("&e;"));
-    let data = archive(&[("word/document.xml", main.as_bytes())]);
+    let data = zip_package(&[("word/document.xml", main.as_bytes())]);
     malformed_part(
         convert(&data, Format::Docx),
         "word/document.xml",
@@ -404,8 +392,9 @@ fn every_spine_item_naming_no_chapter_is_reported_outside_any_unit() {
             &format!(r#"{itemref}<itemref idref="c1"/>"#),
             &chapters,
         );
-        assert!(
-            matches!(convert(&data, Format::Epub), Err(ConvertError::Incomplete { .. })),
+        assert_matches!(
+            convert(&data, Format::Epub),
+            Err(ConvertError::Incomplete { .. }),
             "{name}"
         );
         let converted = reporting_converter().convert(Input::new(&data, Format::Epub)).unwrap();
@@ -418,12 +407,9 @@ fn every_spine_item_naming_no_chapter_is_reported_outside_any_unit() {
     }
     let data = book(&format!("{CHAPTER_ITEM}{every_item}"), &every_ref, &chapters);
     let err = reporting_converter().convert(Input::new(&data, Format::Epub)).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ConvertError::Malformed { reason: "no chapter in the book could be read", .. }
-        ),
-        "{err:?}"
+    assert_matches!(
+        err,
+        ConvertError::Malformed { reason: "no chapter in the book could be read", .. }
     );
     let data = book(CHAPTER_ITEM, "", &chapters);
     assert_eq!(convert(&data, Format::Epub).unwrap(), "");
@@ -488,7 +474,7 @@ fn charts_drawn(part: &str, drawn: usize) -> [(Vec<u8>, Format); 2] {
         ("rId1", "chart", "charts/chart1.xml"),
         ("rId2", "chart", "Charts/Chart1.xml"),
     ]);
-    let docx = archive(&[
+    let docx = zip_package(&[
         ("word/document.xml", main.as_bytes()),
         ("word/_rels/document.xml.rels", rels.as_bytes()),
         ("word/charts/chart1.xml", part.as_bytes()),
@@ -547,10 +533,7 @@ fn each_drawing_of_a_read_chart_charges_its_nodes() {
     let converter = chart_converter(1_000_000);
     for (data, format) in charts_drawn(&lossy_chart(1_000), 2_000) {
         let err = converter.convert(Input::new(&data, format)).unwrap_err();
-        assert!(
-            matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }),
-            "{format:?}: {err:?}"
-        );
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. }, "{format:?}");
     }
 }
 
@@ -645,14 +628,13 @@ fn detected(result: Result<impl std::fmt::Debug, ConvertError>) -> Format {
 #[test]
 fn content_its_label_contradicts_fails_naming_the_format_detected() {
     let converter = Converter::new(Config::default()).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
     let cases = [
         ("rtf/text.rtf", Format::Doc, Format::Rtf),
         ("ods/sheet.ods", Format::Odt, Format::Ods),
         ("docx/text.docx", Format::Pdf, Format::Docx),
     ];
     for (path, label, format) in cases {
-        let bytes = std::fs::read(fixtures.join(path)).unwrap();
+        let bytes = fixture(path);
         assert_eq!(detected(converter.convert(Input::new(&bytes, label))), format, "{path}");
         assert_eq!(detected(converter.parse(Input::new(&bytes, label))), format, "{path}");
         assert!(converter.convert(Input::new(&bytes, format)).is_ok(), "{path}");

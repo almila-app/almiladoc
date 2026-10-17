@@ -514,6 +514,7 @@ fn emit_spaces(out: &mut String, meter: &Meter<'_>, count: usize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn a_kept_attempt_releases_the_tail_it_dropped_and_shows_the_one_it_owes() {
@@ -637,20 +638,26 @@ mod tests {
             held.push_str("45")?;
             sink.write("1234")?;
             let refused = held.push_str("12");
-            assert!(matches!(
+            assert_matches!(
                 refused,
                 Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
-            ));
+            );
             assert_eq!(held.as_str(), "12345");
             Ok(false)
         });
-        assert!(matches!(kept, Ok(false)));
+        assert_matches!(kept, Ok(false));
         held.push_str("12").unwrap();
-        assert!(sink.write("12").is_err());
+        assert_matches!(
+            sink.write("12"),
+            Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
+        );
         assert_eq!(sink.len(), 4);
         drop(held);
         sink.write("123456").unwrap();
-        assert!(sink.write("1").is_err());
+        assert_matches!(
+            sink.write("1"),
+            Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 10 })
+        );
         assert_eq!(sink.len(), 10);
     }
 
@@ -665,10 +672,10 @@ mod tests {
         };
         let len = "- x\n  y".len();
         assert_eq!(item(len).unwrap(), len);
-        assert!(matches!(
+        assert_matches!(
             item(len - 1),
             Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, .. })
-        ));
+        );
     }
 
     #[test]
@@ -690,7 +697,7 @@ mod tests {
         let mut sink = Sink::new(&meter);
         sink.write(&"z".repeat(5 * 64 - 1)).unwrap();
         let tripped = sink.write("z");
-        assert!(matches!(tripped, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 4 })));
+        assert_matches!(tripped, Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 4 }));
     }
 
     #[test]
@@ -702,7 +709,7 @@ mod tests {
         sink.write(&"x".repeat(64)).unwrap();
         token.cancel();
         sink.write(&"x".repeat(63)).unwrap();
-        assert!(matches!(sink.write("x"), Err(ConvertError::Cancelled)));
+        assert_matches!(sink.write("x"), Err(ConvertError::Cancelled));
     }
 
     #[test]
@@ -715,7 +722,10 @@ mod tests {
         text.close_cell();
         assert_eq!(text.as_str(), "ab<br>c d");
         text.push_str("123").unwrap();
-        assert!(text.push_str("x").is_err());
+        assert_matches!(
+            text.push_str("x"),
+            Err(ConvertError::ResourceLimit { limit: Limit::OutputBytes, max: 12 })
+        );
     }
 
     #[test]

@@ -320,6 +320,7 @@ mod tests {
     use crate::model::{Cell, Document, ListItem, MarkerKind, Note, NoteKind, Table, TableKind};
     use crate::render::markdown::render_block;
     use crate::render::markdown::table::render_cell;
+    use std::assert_matches;
 
     /// Hold every fact read from the model against the rendering of each
     /// block and table cell of `doc`, nested ones included.
@@ -509,7 +510,7 @@ mod tests {
         let unshown = Block::Paragraph(vec![Inline::NoteRef("missing".into())]);
         covered.place(Cell { col_span: 2, ..Cell::new(vec![unshown]) }).unwrap();
         let covered = Block::Table(covered.finish(TableKind::Data).unwrap());
-        assert!(matches!(&covered, Block::Table(table) if !table.grid.is_empty()));
+        assert_matches!(&covered, Block::Table(table) if !table.grid.is_empty());
         containers.push(list(vec![item(vec![list(vec![item(vec![covered.clone(), text("x")])])])]));
         containers.push(covered);
         for leaf in &leaves {
