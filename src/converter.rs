@@ -31,6 +31,19 @@ impl Converter {
     /// # Errors
     ///
     /// [`ConfigError`] when a limit or the thread count is out of range.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, ConfigError, Converter};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    ///
+    /// let mut config = Config::default();
+    /// config.threads = 0;
+    /// assert!(matches!(Converter::new(config), Err(ConfigError::Threads { .. })));
+    /// # Ok::<(), ConfigError>(())
+    /// ```
     pub fn new(config: Config) -> Result<Self, ConfigError> {
         config.validate()?;
         let identity = Arc::new(EngineIdentity::of(&config));
@@ -55,6 +68,30 @@ impl Converter {
     /// [`UnsupportedKind::PdfDocumentModel`](crate::UnsupportedKind::PdfDocumentModel),
     /// or [`UnsupportedKind::FeatureDisabled`](crate::UnsupportedKind::FeatureDisabled)
     /// in a build without the `pdf` feature.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::model::Block;
+    /// use almiladoc::{Config, ConvertError, Converter, Format, Input, UnsupportedKind};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    /// let rtf = br"{\rtf1 Hello}";
+    ///
+    /// let parsed = converter.parse(Input::new(rtf, Format::Rtf))?;
+    /// assert!(matches!(parsed.document().blocks.as_slice(), [Block::Paragraph(_)]));
+    /// assert!(parsed.diagnostics().is_empty());
+    ///
+    /// let mislabelled = converter.parse(Input::new(rtf, Format::Docx));
+    /// assert!(matches!(
+    ///     mislabelled,
+    ///     Err(ConvertError::Unsupported {
+    ///         kind: UnsupportedKind::FormatMismatch { detected: Format::Rtf, .. },
+    ///         ..
+    ///     })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
         self.admit(&input)?;
         let (document, diagnostics, fuel) = self.on_pool(|| {
@@ -75,6 +112,24 @@ impl Converter {
     /// [`ConvertError`] when no complete conversion was possible, and
     /// [`ConvertError::Incomplete`] when content was lost under
     /// [`OnLoss::Fail`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, ConvertError, Converter, Format, Input};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    ///
+    /// let csv = b"name,year\nAda,1843\n";
+    /// let conversion = converter.convert(Input::new(csv, Format::Csv))?;
+    /// assert_eq!(conversion.markdown(), "| name | year |\n| --- | --- |\n| Ada | 1843 |\n");
+    /// assert!(conversion.is_complete());
+    ///
+    /// let truncated = br"{\rtf1 a";
+    /// let lossy = converter.convert(Input::new(truncated, Format::Rtf));
+    /// assert!(matches!(lossy, Err(ConvertError::Incomplete { .. })));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn convert(&self, input: Input<'_>) -> Result<Conversion, ConvertError> {
         self.admit(&input)?;
         let limits = &self.config.limits;
@@ -146,6 +201,26 @@ impl<'a> Input<'a> {
 
     /// This input, its conversion failing [`ConvertError::Cancelled`] once
     /// `token` is cancelled; a PDF is checked only before extraction starts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{CancelToken, Config, ConvertError, Converter, Format, Input};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    /// let token = CancelToken::new();
+    /// let csv = b"name,year\nAda,1843\n";
+    ///
+    /// let input = Input::new(csv, Format::Csv).with_cancel(token.clone());
+    /// assert!(converter.convert(input).is_ok());
+    ///
+    /// token.cancel();
+    /// let input = Input::new(csv, Format::Csv).with_cancel(token);
+    /// let error = converter.convert(input).unwrap_err();
+    /// assert!(matches!(error, ConvertError::Cancelled));
+    /// assert_eq!(error.code(), "cancelled");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn with_cancel(self, token: CancelToken) -> Self {
         Input { cancel: Some(token), ..self }
@@ -205,6 +280,24 @@ impl Parsed {
     /// [`Limits::max_work`](crate::Limits::max_work);
     /// [`ConvertError::Internal`] when the pool cannot start or rendering
     /// panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, ConvertError, Converter, Format, Input};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    ///
+    /// let csv = b"name,year\nAda,1843\n";
+    /// let parsed = converter.parse(Input::new(csv, Format::Csv))?;
+    /// assert_eq!(parsed.render()?.markdown(), "| name | year |\n| --- | --- |\n| Ada | 1843 |\n");
+    ///
+    /// let truncated = br"{\rtf1 a";
+    /// let parsed = converter.parse(Input::new(truncated, Format::Rtf))?;
+    /// assert!(parsed.diagnostics().has_loss());
+    /// assert!(matches!(parsed.render(), Err(ConvertError::Incomplete { .. })));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn render(&self) -> Result<Conversion, ConvertError> {
         let limits = &self.config.limits;
         self.on_pool(|| {

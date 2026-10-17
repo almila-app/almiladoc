@@ -59,7 +59,7 @@ a Python service that depends on the wheel.
 
 | Wave | Items | Placement |
 |---|---|---|
-| W1 | shared-helpers ∥ (fuzz-parts then deps-refresh, from 2026-10-21) ∥ api-examples | fuzz-parts and deps-refresh both write `fuzz/Cargo.*`, so they are serial; deps-refresh lands before lints |
+| W1 | shared-helpers ∥ (fuzz-parts then deps-refresh, from 2026-10-21) | fuzz-parts and deps-refresh both write `fuzz/Cargo.*`, so they are serial; deps-refresh lands before lints |
 | W2 | lints, then setup-gate | alone: `src/**`, `python/src/**`, the Makefile; both items edit the Makefile |
 | W3 | serde ∥ binary-cursor ∥ symbols | serde before py-api |
 | W4 | py-api ∥ level-counters ∥ links | py-api leaves `doc/mod.rs` to level-counters; py-api keeps `unsafe_link`, which links emits before the release |
@@ -172,36 +172,6 @@ units-meta → images → blocks → pdf-inspector release → pdf-model → ocr
 - **Credit:** none. **Depends on:** fuzz-parts (both write `fuzz/Cargo.*`). **Size:** about 3 lines;
   lock and licence text are generated. **Tier:** T2.
 
-#### api-examples: compile an example on each public entry point and doctest the README
-- **Goal:** Rust users get a compiled, `?`-based example on each entry point and a README Rust block
-  that fails the build when the API drifts.
-- **Scope:**
-  - `# Examples` on `Converter::new`, `parse` and `convert`, `Parsed::render`, and `Input::with_cancel`
-    with `CancelToken`: a token cancelled before a CSV conversion fails `Cancelled`, whose
-    `ConvertError::code()` is `"cancelled"`, which the snake_case move leaves unchanged.
-  - `Config`: mutate after `Config::default()` (`threads = 4`; `limits.max_input_bytes = 4` refuses a CSV
-    with `ResourceLimit { limit: Limit::InputBytes, .. }`); a `compile_fail,E0639` block shows the
-    struct literal refused.
-  - `OnLoss::Report`: `{\rtf1 a` (unclosed group, Lost) fails `Incomplete` by default; under Report,
-    `is_complete()` is false and `diagnostics().iter()` yields `DiagnosticCode::UnclosedStructure`.
-  - `Format::sniff` and `from_extension`.
-  - No example uses PDF or `max_pages`, so each passes without default features and survives the
-    limit's removal.
-  - `#[cfg(doctest)] #[doc = include_str!("../README.md")] struct ReadmeDoctests;` in `src/lib.rs`
-    compiles the README's Rust block; rustdoc skips its sh and python blocks.
-  - No `with_*` setters, no further per-item examples, no behaviour change.
-  - Setup edits: the change-core-api skill gains "a new public entry point lands with its compiled
-    example"; the `install, usage, API` row of the owner table in `.claude/rules/docs-style.md` reads
-    "rustdoc: API reference and examples; README: install and overview, its Rust blocks doctested".
-- **Files:** `src/{converter,config,ledger,lib,error,diagnostics}.rs`, `README.md` (doc lines only;
-  `REUSE.toml` already declares each), `.claude/skills/change-core-api/SKILL.md`,
-  `.claude/rules/docs-style.md`.
-- **Tests:** `cargo test --locked --doc`, through `make test` and, without default features,
-  `make features`, runs every new doctest and `ReadmeDoctests`; a README block calling a renamed item
-  fails `make test`.
-- **Credit:** none; no `docs/upstream.md` item. **Depends on:** none open. **Size:** about 130 lines.
-  **Tier:** T1.
-
 ### W2
 
 #### lints: deny panicking, lossy and ambient operations, every site fixed
@@ -247,7 +217,7 @@ units-meta → images → blocks → pdf-inspector release → pdf-model → ocr
   `static` outside the pool and the OCR adapters; no inner `#![expect]` or `#![allow]` under `src` and
   `python/src`; release `overflow-checks` is set (fails before). A self-test feeds each rule a
   violation.
-- **Credit:** none. **Depends on:** deps-refresh, shared-helpers, fuzz-parts, api-examples; runs alone.
+- **Credit:** none. **Depends on:** deps-refresh, shared-helpers, fuzz-parts; runs alone.
   **Size:** about 1000 lines plus machine fixes. **Tier:** T3.
 
 #### setup-gate: CI checks the tracked agent setup

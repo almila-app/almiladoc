@@ -5,6 +5,35 @@ use crate::limits::{Limit, Limits};
 
 /// The configuration of one [`Converter`](crate::Converter), checked by
 /// [`Converter::new`](crate::Converter::new).
+///
+/// # Examples
+///
+/// Set fields on the default.
+///
+/// ```
+/// use almiladoc::{Config, ConvertError, Converter, Format, Input, Limit};
+///
+/// let mut config = Config::default();
+/// config.threads = 4;
+/// config.limits.max_input_bytes = 4;
+/// let converter = Converter::new(config)?;
+///
+/// let csv = b"name,year\nAda,1843\n";
+/// let refused = converter.convert(Input::new(csv, Format::Csv));
+/// assert!(matches!(
+///     refused,
+///     Err(ConvertError::ResourceLimit { limit: Limit::InputBytes, .. })
+/// ));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// A struct literal is refused outside the crate:
+///
+/// ```compile_fail,E0639
+/// use almiladoc::Config;
+///
+/// let config = Config { threads: 4, ..Config::default() };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Config {

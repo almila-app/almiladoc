@@ -319,6 +319,33 @@ impl Diagnostics {
 }
 
 /// What a conversion does once some content was [`LossClass::Lost`].
+///
+/// # Examples
+///
+/// ```
+/// use almiladoc::{Config, ConvertError, Converter, DiagnosticCode, Format, Input};
+/// use almiladoc::{LossClass, OnLoss};
+///
+/// let truncated = br"{\rtf1 a";
+///
+/// let strict = Converter::new(Config::default())?;
+/// let failed = strict.convert(Input::new(truncated, Format::Rtf));
+/// assert!(matches!(failed, Err(ConvertError::Incomplete { .. })));
+///
+/// let mut config = Config::default();
+/// config.on_loss = OnLoss::Report;
+/// let lenient = Converter::new(config)?;
+/// let conversion = lenient.convert(Input::new(truncated, Format::Rtf))?;
+/// assert!(!conversion.is_complete());
+/// let lost: Vec<DiagnosticCode> = conversion
+///     .diagnostics()
+///     .iter()
+///     .filter(|diagnostic| diagnostic.class == LossClass::Lost)
+///     .map(|diagnostic| diagnostic.code)
+///     .collect();
+/// assert_eq!(lost, [DiagnosticCode::UnclosedStructure]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum OnLoss {

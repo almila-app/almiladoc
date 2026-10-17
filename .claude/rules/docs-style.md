@@ -17,7 +17,7 @@ dates, ticket ids, incident history, session reports or status, which issues and
 
 | Fact | Owner |
 |---|---|
-| install, usage, API | README.md |
+| install, usage, API | rustdoc: API reference and examples; README: install and overview, its Rust blocks doctested |
 | contribution terms | CONTRIBUTING.md |
 | decisions that bind every change; each upstream item's verdict | `docs/adr/`; `docs/upstream.md` |
 | open work, in order | `docs/roadmap.md` |

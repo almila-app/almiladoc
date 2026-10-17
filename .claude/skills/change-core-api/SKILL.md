@@ -13,7 +13,8 @@ wildcard arm and raises `InternalError`; a new model field is missed, since the 
 its own classes from the core's fields by name; a `Format` absent from `FORMATS` in
 `python/src/lib.rs` makes its name a `ValueError`; and nothing compiles the stub against the core.
 
-1. Change the core and its tests. A new error variant gets its `code()` arm and an assertion in
+1. Change the core and its tests. A new public entry point lands with its compiled rustdoc
+   example, run by `cargo test --doc`. A new error variant gets its `code()` arm and an assertion in
    `codes_name_every_variant`, which lists codes by hand. Codes ship in snake_case and, once
    released, are never renamed. A variant's fields reach Python as exception attributes (`pages`,
    `page_count` for `NeedsOcr`). A new `Style` flag changes Markdown output: the renderer merges

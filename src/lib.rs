@@ -42,6 +42,10 @@ pub use identity::EngineIdentity;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 /// Input format. Selects the parser; container variants that share a parser
 /// (docm, xlsm, ...) map onto these via [`Format::sniff`] or
 /// [`Format::from_extension`].
@@ -117,6 +121,23 @@ impl Format {
     /// on the input and fail [`UnsupportedKind::FormatMismatch`], naming the
     /// detected format, when it is not the format named; a PDF header past
     /// the first byte does not contradict a CSV label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, Converter, Format, Input};
+    ///
+    /// let rtf = br"{\rtf1 Hello}";
+    /// let format = Format::sniff(rtf).ok_or("unrecognized format")?;
+    /// assert_eq!(format, Format::Rtf);
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    /// let markdown = converter.convert(Input::new(rtf, format))?.into_markdown();
+    /// assert_eq!(markdown, "Hello\n");
+    ///
+    /// assert_eq!(Format::sniff(b"name,year\nAda,1843\n"), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn sniff(bytes: &[u8]) -> Option<Format> {
         formats::detect::from_bytes(bytes)
@@ -144,6 +165,23 @@ impl Format {
 
     /// The format a bare extension names (no leading dot), matched
     /// case-insensitively. `None` for anything unrecognized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// use almiladoc::Format;
+    ///
+    /// let format = Path::new("thesis.DOCM")
+    ///     .extension()
+    ///     .and_then(|extension| extension.to_str())
+    ///     .and_then(Format::from_extension);
+    /// assert_eq!(format, Some(Format::Docx));
+    ///
+    /// assert_eq!(Format::from_extension("xlsb"), Some(Format::Excel));
+    /// assert_eq!(Format::from_extension("txt"), None);
+    /// ```
     #[must_use]
     pub fn from_extension(ext: &str) -> Option<Format> {
         Some(match ext.to_ascii_lowercase().as_str() {
