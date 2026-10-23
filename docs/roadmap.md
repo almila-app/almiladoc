@@ -1,6 +1,6 @@
 # Roadmap
 
-The open work, in order. Decisions bind from [`docs/adr/`](adr/). The change that lands an item
+The open work, in order. Decisions are in [`docs/adr/`](adr/). The change that lands an item
 deletes its section and its place in the Waves table; a part that lands narrows the section to what
 remains; a change that finds an item or wave wrong corrects it in the same commit. Item ids and wave
 names stay in this file: rustdoc, README, commit messages and test names carry none. "The consumer"

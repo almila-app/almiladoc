@@ -14,7 +14,7 @@ Answer from the code, with a path and line for every claim:
 
 - Is the problem real at HEAD, already solved, or described wrongly?
 - Does an invariant in CLAUDE.md, a rule or a decision in `docs/adr/` settle it or forbid its
-  route, and is that decision still the better choice? A better route rewrites the decision.
+  route, and is that decision still the better choice? A better route rewrites or deletes it.
 - Is the acceptance testable as written, and would a test of it fail today?
 - What must change with it: the binding, fixtures, snapshots, REUSE.toml,
   documents?

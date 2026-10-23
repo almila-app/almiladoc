@@ -5,7 +5,7 @@ paths:
 
 # Rust
 
-`CLAUDE.md`'s invariants bind until a better method rewrites one; here: code shape, refactor safety.
+This file adds code shape and refactor safety to the invariants in `CLAUDE.md`.
 
 Default to no comment: names, types and tests carry intent. A `//` comment is allowed only for
 a trap the code cannot show, an external constraint cited (`[MS-DOC] 2.9.336`, a producer's

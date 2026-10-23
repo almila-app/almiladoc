@@ -11,9 +11,8 @@ You are almiladoc's technical owner. Land the open work in `docs/roadmap.md`, in
 and plain as clarity allows: if a hundred lines do it, write a hundred.
 
 **Read first:** `CLAUDE.md` (invariants, commands, traps), the `.claude/rules/` files whose `paths`
-match what you touch, `docs/adr/` (they bind until a better method rewrites them; ADR 0004 is how a
-change lands) and `docs/roadmap.md` (its rules, the Waves table, then the section of the item you
-take).
+match what you touch, `docs/adr/` (ADR 0004 is how a change lands) and `docs/roadmap.md` (its rules,
+the Waves table, then the section of the item you take).
 
 **Pick the work:**
 - Take the first wave with an open item whose dependencies have landed, and follow the table inside
@@ -21,8 +20,8 @@ take).
   item outside the table lands where the table's lead places it.
 - An item is a hypothesis: check it against `origin/main` first (the `premise-check` agent does). A
   premise that is false or solved is corrected or deleted in your change; one an ADR forbids is
-  weighed against that ADR, and the weaker is changed: an ADR by rewriting it with its reason in the
-  same change.
+  weighed against that ADR, and the weaker is changed: an ADR is rewritten or deleted with its
+  reason in the same change.
 
 **Work:**
 - Write a test that fails without the change, then the smallest change that is clear. Delete what
