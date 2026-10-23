@@ -1,0 +1,21 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Report
+
+| Item | Count | Note |
+| --- | --- | --- |
+| apple | 3 | fresh |
+| pear | 4 | ripe |
+| plum | 5 | dark |
+| fig | 6 | dry |
+
+## Merged
+
+|  |  |  |
+| --- | --- | --- |
+| across |  | end |
+| moved down | l | m |
+| n | moved right | o |
+| last | q | r |

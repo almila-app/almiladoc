@@ -1,0 +1,7 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+hidden_omitted omitted body count=6
+hidden_omitted omitted note count=1
+under fail: complete

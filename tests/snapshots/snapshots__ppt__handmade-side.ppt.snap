@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Quarterly results
+
+First slide text
+
+> Notes for the first slide
+
+---
+
+## Outlook
+
+Second slide text

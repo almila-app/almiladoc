@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+part_unreadable lost note count=1
+under fail: incomplete

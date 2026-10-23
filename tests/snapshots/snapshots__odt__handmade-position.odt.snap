@@ -1,0 +1,9 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Direct: 10<sup>-3</sup> M and H<sub>2</sub>O.
+
+Through a style: x<sup>2</sup> and CO<sub>2</sub>.
+
+Baseline over a superscript style: level.

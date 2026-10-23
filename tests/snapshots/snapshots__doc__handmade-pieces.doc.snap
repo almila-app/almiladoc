@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+“x”à
+
+こんにちは世界。
+
+日本語の段落です。
+
+Привет, мир!
+
+Второй абзац по-русски.
+
+déjà vu

@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Split list levels
+
+1. First point
+
+   - 1.1 Detail under the first point
+
+2. Second point
+
+- 1.1 Detail with no point before it
+
+1. Point after the detail

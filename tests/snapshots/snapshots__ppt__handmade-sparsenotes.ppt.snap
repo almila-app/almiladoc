@@ -1,0 +1,11 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+First slide text
+
+---
+
+Second slide text
+
+> Notes for the second slide

@@ -1,0 +1,7 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+<sup>**Note _key term_ here.**</sup>
+
+Plain _reset_ **_added_**.

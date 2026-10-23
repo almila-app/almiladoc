@@ -1,0 +1,25 @@
+//! Python bindings for almiladoc.
+
+mod config;
+mod converter;
+mod diagnostics;
+mod errors;
+mod input;
+
+use pyo3::prelude::*;
+
+/// Convert documents to GitHub-Flavored Markdown.
+#[pymodule]
+mod _almiladoc {
+    #[pymodule_export]
+    use crate::config::{Config, ImagePolicy, Limits, OnLoss};
+    #[pymodule_export]
+    use crate::converter::{CancelToken, Conversion, Converter, Identity, Parsed, sniff};
+    #[pymodule_export]
+    use crate::diagnostics::Diagnostic;
+    #[pymodule_export]
+    use crate::errors::exceptions::{
+        CancelledError, ConfigError, ConvertError, EncryptedError, IncompleteError, InternalError,
+        MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError, UnsupportedError,
+    };
+}

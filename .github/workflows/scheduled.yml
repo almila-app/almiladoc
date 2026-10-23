@@ -1,0 +1,114 @@
+name: scheduled
+
+on:
+  schedule:
+    - cron: "41 1 * * *"
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: Fuzz target whose first seed is sealed as if it had crashed, instead of the campaigns
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  staleness:
+    name: staleness
+    if: github.event.schedule == '41 1 * * *' || github.event_name == 'workflow_dispatch' && inputs.drill == ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -I -B .github/scripts/staleness.py --self-test
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .github/scripts/staleness.py
+
+  targets:
+    name: targets
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        env:
+          DRILL: ${{ inputs.drill }}
+        run: |
+          targets=$(python3 -I -B .github/scripts/fuzz_campaign.py --targets ${DRILL:+"$DRILL"})
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # checkout
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
+    env:
+      FUZZ_TARGET: ${{ matrix.target }}
+      FUZZ_MODE: ${{ github.event.schedule == '23 5 * * 1' && 'cmin' || inputs.drill != '' && 'drill' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+        working-directory: fuzz
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - run: make fuzz-campaign
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - if: failure() || inputs.drill != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sealed-${{ matrix.target }}
+          path: fuzz/artifacts/sealed/**/*.age
+          if-no-files-found: error
+
+  proptest:
+    name: proptest
+    if: github.event.schedule != '23 5 * * 1' && inputs.drill == ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # checkout
+    env:
+      FUZZ_MODE: proptest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: make fuzz-campaign
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sealed-proptest
+          path: fuzz/artifacts/sealed/**/*.age
+          if-no-files-found: error

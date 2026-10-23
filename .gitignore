@@ -1,0 +1,38 @@
+/target
+/samples
+# Digests of the local `samples/` corpus: they quote converted content, so they
+# stay local like the corpus itself. Regenerate with `cargo test -- --ignored`.
+/tests/snapshots/snapshots__sample__*
+*.snap.new
+__pycache__/
+.venv/
+# cargo-fuzz working dirs: seeds live in fuzz/seeds/ and are checked in
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+# Local only: personal agent settings, memory and worktrees, other assistants' files, editor state.
+CLAUDE.local.md
+.worktreeinclude
+.claude/settings.local.json
+.claude/worktrees
+.claude/agent-memory-local
+AGENTS.md
+GEMINI.md
+.mcp.json
+.codex
+.gemini
+.cursor
+.cursorrules
+.windsurfrules
+.github/copilot-instructions.md
+.github/instructions
+.github/agents
+.github/prompts
+.github/chatmodes
+.agents
+.junie
+.roo
+.kiro
+.clinerules
+.aider*
+.idea/

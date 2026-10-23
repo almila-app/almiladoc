@@ -1,0 +1,44 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+# Fixture Book
+
+# Fixture Book
+
+almiladoc tests
+
+<a id="epub-text-ch001-xhtml-chapter-one"></a>
+
+# Chapter One
+
+Opening paragraph with **bold**, _italic_, and `code` runs.
+
+A list of things:
+
+1. first
+
+2. second
+
+   - nested bullet
+
+3. third
+
+See [Chapter Two](#epub-text-ch002-xhtml-chapter-two) for the table, or jump straight to [the marked paragraph](#epub-text-ch002-xhtml-markpoint).
+
+![tiny dot](asset:0) tiny dot
+
+<a id="epub-text-ch002-xhtml-chapter-two"></a>
+
+# Chapter Two
+
+| Name | Qty |
+| --- | --- |
+| Bolts | 12 |
+| Nuts | 30 |
+
+<a id="epub-text-ch002-xhtml-markpoint"></a>This paragraph carries an inline anchor and is not a heading.
+
+Back to [Chapter One](#epub-text-ch001-xhtml-chapter-one).
+
+External reference: [example site](https://example.com/ref).

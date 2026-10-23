@@ -1,0 +1,38 @@
+//! Formula conversion to LaTeX, the form [`Inline::Math`]
+//! and [`Block::Math`](crate::model::Block::Math) carry.
+
+mod mathml;
+mod omml;
+mod tex;
+
+pub(crate) use mathml::{MathTex, mathml_is_display, mathml_to_tex};
+pub(crate) use omml::{omath_para_to_tex, omath_to_tex};
+
+use crate::model::Inline;
+
+/// Marks a character read in a guessed code page, placed before it in a
+/// formula's text by a reader.
+pub(crate) const GUESSED: char = '\u{fdd0}';
+
+/// Marks a character that did not decode, placed before its U+FFFD, or
+/// where it was dropped, in a formula's text by a reader.
+pub(crate) const DROPPED: char = '\u{fdd1}';
+
+/// The equations of a paragraph that holds nothing else, for formats whose
+/// math paragraphs arrive as inline content: such a paragraph is displayed
+/// math, one block per equation.
+pub(crate) fn math_lines(inlines: &[Inline]) -> Option<Vec<String>> {
+    let lines: Vec<String> = inlines
+        .iter()
+        .filter_map(|i| match i {
+            Inline::Math(tex) => Some(Some(tex.clone())),
+            Inline::LineBreak => None,
+            Inline::Text { text, .. } if text.trim().is_empty() => None,
+            _ => Some(None),
+        })
+        .collect::<Option<Vec<String>>>()?;
+    (!lines.is_empty()).then_some(lines)
+}
+
+#[cfg(test)]
+mod tests;

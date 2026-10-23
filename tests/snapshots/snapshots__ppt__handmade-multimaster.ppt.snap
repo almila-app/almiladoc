@@ -1,0 +1,9 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+- **Alpha master body text**
+
+---
+
+_Beta master body text_

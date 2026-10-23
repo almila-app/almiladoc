@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+unmapped_symbol lost body count=1
+under fail: incomplete

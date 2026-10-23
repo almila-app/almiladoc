@@ -1,0 +1,14 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+1. First numbered paragraph.
+2. Second numbered paragraph.
+
+Interruption paragraph.
+
+9. Ninth numbered paragraph.
+10. Tenth numbered paragraph.
+
+1) First with a parenthesis.
+2) Second with a parenthesis.

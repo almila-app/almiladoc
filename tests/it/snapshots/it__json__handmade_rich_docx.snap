@@ -1,0 +1,43 @@
+---
+source: tests/it/json.rs
+expression: lines(&redacted(&json))
+---
+{"schema_version":4,"identity":{"version":"[version]","config_fingerprint":"64793a7a830129ecbef0c5e222bb22b493b88b9dde158117a8a41b78855b62e5"},"document":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Rich objects follow.","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]},
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Quarterly Widgets","style":{"bold":true,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]},
+{"kind":"table","value":{"grid":[[
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Quarter","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}},
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Widgets","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}}],[
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Q1","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}},
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"10","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}}],[
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Q2","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}},
+{"kind":"origin","value":{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"14","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"col_span":1,"row_span":1}}]],"header_rows":1}},
+{"kind":"list","value":{"marker":"bullet","start":1,"items":[{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Plan","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"marker_label":null},{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Build","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"marker_label":null},{"blocks":[
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"Ship","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"marker_label":null}]}},
+{"kind":"paragraph","value":[
+{"kind":"image","value":{"alt":"tiny dot image","source":
+{"kind":"asset","value":0},"origin":{"region":"body","unit":null}}}]},
+{"kind":"paragraph","value":[
+{"kind":"text","value":{"text":"After the objects.","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"notes":[],"assets":[{"id":0,"media_type":"image/png","origin_part":"word/media/dot.png","byte_len":70},{"id":1,"media_type":"application/vnd.ms-ole-object","origin_part":"word/embeddings/oleObject1.bin","byte_len":80}]},"diagnostics":[
+{"code":"image_placeholder","class":"deferred","region":"body","unit":null,"count":1},
+{"code":"embedded_object","class":"lost","region":"body","unit":null,"count":1},
+{"code":"graphic_unread","class":"lost","region":"body","unit":null,"count":1}]}

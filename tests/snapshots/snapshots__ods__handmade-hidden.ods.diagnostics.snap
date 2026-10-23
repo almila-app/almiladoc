@@ -1,0 +1,8 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+hidden_omitted omitted body unit=1 count=8
+hidden_omitted omitted body unit=2 count=1
+hidden_omitted omitted body unit=3 count=4
+under fail: complete

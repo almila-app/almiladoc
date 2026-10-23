@@ -1,0 +1,51 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "almiladoc"
+description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown"
+readme = "README.md"
+license = "FSL-1.1-MIT AND MIT"
+license-files = ["LICENSE", "LICENSES/*.txt", "NOTICE", "REUSE.toml", "THIRD-PARTY-LICENSES"]
+requires-python = ">=3.11"
+keywords = ["markdown", "docx", "pdf", "pptx", "xlsx", "epub", "converter", "document"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/almila-app/almiladoc#readme"
+Repository = "https://github.com/almila-app/almiladoc"
+Issues = "https://github.com/almila-app/almiladoc/issues"
+
+[dependency-groups]
+build = ["maturin==1.15.0"]
+policy = ["poetry-core==2.5.0", "pyyaml==6.0.3", "reuse==6.2.0", "ruff==0.17.1", "zizmor==1.31.1"]
+test = ["mypy==2.4.0", "pytest==9.1.1"]
+zig = ["ziglang==0.17.0"]
+
+[tool.maturin]
+manifest-path = "python/Cargo.toml"
+python-source = "python"
+module-name = "almiladoc._almiladoc"
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PTH", "C4", "RET", "PERF", "FURB", "ANN"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["RUF001", "RUF003"]
+"**/test_*.py" = ["ANN"]
+"python/tests/**" = ["ANN"]

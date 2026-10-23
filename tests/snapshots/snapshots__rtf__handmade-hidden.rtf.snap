@@ -1,0 +1,21 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+# Visible heading
+
+Shown text continues.
+
+A hidden mark joins this paragraph to the next one.
+
+A hidden note reference and a shown one[^1].
+
+A hidden picture and check box drop; web-hidden text shows.
+
+|  |  |
+| --- | --- |
+| Cell one joined | Cell two |
+
+After the table.
+
+[^1]: A shown note.

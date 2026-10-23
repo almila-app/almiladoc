@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Scripts and symbols
+
+Area: 5 m<sup>2</sup>
+
+H<sub>2</sub>O
+
+Size: 10 μm
+
+Gap: 3 μs
+
+Checked ✓ end

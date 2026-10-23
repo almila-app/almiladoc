@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Before the objects
+
+![Embedded sheet](asset:1)
+
+![Linked sheet](asset:2)
+
+![Image](asset:3)
+
+![Movie poster](asset:4)
+
+After the objects

@@ -1,0 +1,42 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }
+
+[pdf-inspector.clarify]
+license = "MIT AND BSD-3-Clause"
+
+[[pdf-inspector.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "c0689c6b1f93155007b113acbb55a3a9b8bf1c7bdae4b14aa4175b04b37207de"
+
+[[pdf-inspector.clarify.files]]
+path = "external/bcmaps/LICENSE"
+license = "BSD-3-Clause"
+checksum = "aa92ab5a472974865a96fd4a4e9c13bb41bf6fe1b309cb6b8da48bc9e19839a2"
+
+[almiladoc]
+accepted = ["FSL-1.1-MIT"]

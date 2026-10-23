@@ -1,0 +1,8 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+comment_omitted omitted comment count=2
+revision_omitted omitted body count=2
+hidden_omitted omitted body count=5
+under fail: complete

@@ -1,0 +1,7 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Before the object
+
+![Image](asset:1)

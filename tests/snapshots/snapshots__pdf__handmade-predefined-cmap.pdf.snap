@@ -1,0 +1,5 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## 이 문서는 한국어 글꼴의 문자 코드를 유니코드로 읽는 시험입니다.

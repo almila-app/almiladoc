@@ -1,0 +1,20 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Rich objects follow.
+
+**Quarterly Widgets**
+
+| Quarter | Widgets |
+| --- | --- |
+| Q1 | 10 |
+| Q2 | 14 |
+
+- Plan
+- Build
+- Ship
+
+![tiny dot image](asset:0)
+
+After the objects.

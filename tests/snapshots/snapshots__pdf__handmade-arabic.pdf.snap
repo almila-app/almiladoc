@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: output
+---
+يقرأ الطالب الكتاب (الفصل 12) في المكتبة كل يوم

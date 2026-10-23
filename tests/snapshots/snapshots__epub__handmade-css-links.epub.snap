@@ -1,0 +1,47 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+# Cascade Book
+
+# Sheet A Chapter
+
+**Bold via sheet A.**
+
+See [the picture](pic.png), [the download](data.bin), [the non-linear appendix](#spine-item-5), or [chapter two](#spine-item-2).
+
+<a id="spine-item-2"></a>
+
+# Sheet B Chapter
+
+_Italic via sheet B only._
+
+~~Struck via the chapter style block.~~
+
+# Cascade Chapter
+
+_Sheet B wins the conflict._
+
+# Specificity Chapter
+
+after the span
+
+Restored: the class rule outweighs the hiding tag rule.
+
+**Bold: tag.class beats the later class rule.**
+
+<a id="spine-item-5"></a>
+
+Non-linear content, not converted.
+
+# At-rule Chapter
+
+Shown: its rule sits in a print group.
+
+Shown: its query holds on some screens only.
+
+Shown: its condition is not settled.
+
+Shown: its sheet is for print.
+
+Shown: its style block is for print.

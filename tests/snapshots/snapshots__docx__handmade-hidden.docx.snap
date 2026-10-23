@@ -1,0 +1,36 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+# Hidden text and tracked changes
+
+Shown, and shown again.
+
+A character style hides and a style based on it flips back.
+
+all but this, which joins the next paragraph.
+
+A hidden mark joins this paragraph.
+
+A style separator joins as well.
+
+A note shows[^1] and a hidden one does not.
+
+Web-only hiding still shows.
+
+Accepted revisions drop and keep insertions.
+
+It moved below, which counts.
+
+A moved sentence.
+
+Two comments each count.
+
+1. First item
+2. Second item, its mark deleted before a table
+
+|  |
+| --- |
+| Cell text |
+
+[^1]: A note whose reference shows.

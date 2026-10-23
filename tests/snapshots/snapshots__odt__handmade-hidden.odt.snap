@@ -1,0 +1,16 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Visible text continues.
+
+but this span shows
+
+Hidden text here; shown text stays.
+
+A hidden note reference and a shown one[^1].
+
+1. First item
+2. Second item
+
+[^1]: Shown note.

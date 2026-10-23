@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+expression: diagnostics_snapshot(&diagnostics)
+---
+header_omitted omitted header unit=1 count=1
+header_omitted omitted header unit=2 count=1
+footer_omitted omitted footer unit=1 count=1
+footer_omitted omitted footer unit=2 count=1
+under fail: complete

@@ -1,0 +1,9 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+10 μm ± 2
+
+αβγ and ≤≥
+
+mμ

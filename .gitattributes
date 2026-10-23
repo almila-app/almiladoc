@@ -1,0 +1,5 @@
+# Fixture bytes are snapshot ground truth: never EOL-convert them.
+tests/fixtures/** -text
+THIRD-PARTY-LICENSES linguist-generated
+fuzz/seeds/** -text
+fuzz/regressions/** -text

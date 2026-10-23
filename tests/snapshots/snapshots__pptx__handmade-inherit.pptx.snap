@@ -1,0 +1,13 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Inherited Title Slide
+
+- iii. **Roman three bold via master**
+
+- iv. **Roman four** with bold turned off
+
+      - _Dash bullet italic via master level two_
+
+**Plain closing line**

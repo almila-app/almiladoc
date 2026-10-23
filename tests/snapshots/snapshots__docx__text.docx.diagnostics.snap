@@ -1,0 +1,6 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+image_placeholder deferred body count=1
+under fail: complete

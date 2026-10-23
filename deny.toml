@@ -1,0 +1,55 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained and reached through pdf-inspector, whose latest release still depends on it" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+exceptions = [
+    { crate = "almiladoc", allow = ["FSL-1.1-MIT"] },
+    { crate = "almiladoc-python", allow = ["FSL-1.1-MIT"] },
+    { crate = "almiladoc-fuzz", allow = ["FSL-1.1-MIT"] },
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "openssl-sys", reason = "TLS comes from rustls, never a system OpenSSL" },
+    { crate = "ort-sys", reason = "no ONNX Runtime binary" },
+    { crate = "aws-lc-sys", reason = "no C crypto build in the wheels" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,606 @@
+version = 1
+
+[[annotations]]
+path = "**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Sideguide Technologies Inc."
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = [
+    "NOTICE",
+    "REUSE.toml",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "CLAUDE.md",
+    ".claude/**",
+    ".github/ISSUE_TEMPLATE/**",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/dependabot.yml",
+    ".github/scripts/**",
+    "docs/adr/**",
+    "docs/release-dates.tsv",
+    "docs/roadmap.md",
+    "docs/support.md",
+    ".github/workflows/**",
+    ".github/zizmor.yml",
+    "Makefile",
+    "THIRD-PARTY-LICENSES",
+    "about.hbs",
+    "about.toml",
+    "clippy.toml",
+    "deny-offline.toml",
+    "deny.toml",
+    "fuzz/dicts/**",
+    "fuzz/fuzz_targets/docx_body.rs",
+    "fuzz/fuzz_targets/odf_content.rs",
+    "fuzz/fuzz_targets/odp.rs",
+    "fuzz/fuzz_targets/ods.rs",
+    "fuzz/fuzz_targets/pptx.rs",
+    "fuzz/fuzz_targets/pptx_slide.rs",
+    "fuzz/fuzz_targets/xlsx_sheet.rs",
+    "fuzz/recipients.txt",
+    "fuzz/rust-toolchain.toml",
+    "fuzz/regressions/**",
+    "fuzz/seeds/pdf/handmade-arabic.pdf",
+    "fuzz/seeds/pdf/handmade-ligatures.pdf",
+    "fuzz/seeds/rtf/handmade-scientific.rtf",
+    "fuzz/src/lib.rs",
+    "python/src/config.rs",
+    "python/src/converter.rs",
+    "python/src/diagnostics.rs",
+    "python/src/errors.rs",
+    "python/src/input.rs",
+    "python/stubtest-allowlist.txt",
+    "rust-toolchain.toml",
+    "scripts/check_dist.py",
+    "src/config.rs",
+    "src/converter.rs",
+    "src/ctx.rs",
+    "src/diagnostics.rs",
+    "src/formats/doc/fonts.rs",
+    "src/formats/odf/datastyle.rs",
+    "src/formats/ppt/fonts.rs",
+    "src/formats/ppt/records.rs",
+    "src/formats/ppt/side.rs",
+    "src/formats/ppt/tests/page_side.rs",
+    "src/formats/ppt/tests/page_side_reads.rs",
+    "src/identity.rs",
+    "src/json.rs",
+    "src/ledger.rs",
+    "src/model/unit.rs",
+    "src/package/directory.rs",
+    "src/pool.rs",
+    "src/shared/symbol.rs",
+    "src/shared/typeface.rs",
+    "src/shared/dingbats.rs",
+    "src/shared/dingbats/*.tsv",
+    "src/render/markdown/shape.rs",
+    "src/render/markdown/image.rs",
+    "src/render/markdown/marks.rs",
+    "src/render/markdown/tests/images.rs",
+    "src/render/markdown/tests/marks.rs",
+    "src/render/markdown/tests/selection.rs",
+    "tests/it/emphasis.rs",
+    "tests/snapshots/snapshots__docx__handmade-manyrefs.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__text.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__epub__book.epub.diagnostics.snap",
+    "tests/snapshots/snapshots__odt__text.odt.diagnostics.snap",
+    "src/render/markdown/sink.rs",
+    "src/shared/codepage.rs",
+    "src/shared/css.rs",
+    "src/shared/hidden_runs.rs",
+    "src/shared/link_label.rs",
+    "src/shared/lossy.rs",
+    "src/shared/tag_scan.rs",
+    "src/shared/test_support.rs",
+    "tests/common/word97.rs",
+    "tests/fixturegen/__init__.py",
+    "tests/fixtures/abuse/max_compression_ratio--bomb--errors.docx",
+    "tests/fixtures/abuse/max_entry_count--eocd--errors.docx",
+    "tests/fixtures/abuse/max_expansion_text_bytes--longrepeat--errors.ods",
+    "tests/fixtures/abuse/max_grid_slots--corners--errors.xlsx",
+    "tests/fixtures/abuse/max_nesting_depth--fieldnest--errors.doc",
+    "tests/fixtures/abuse/max_nesting_depth--fieldnest--errors.rtf",
+    "tests/fixtures/abuse/max_pages--pageflood--errors.odp",
+    "tests/fixtures/abuse/max_total_bytes--paddedparts--errors.docx",
+    "tests/fixtures/abuse/max_xml_nodes--flatflood--errors.docx",
+    "tests/fixtures/docx/handmade-hidden.docx",
+    "tests/fixtures/docx/handmade-ole-iso.docx",
+    "tests/fixtures/docx/handmade-position.docx",
+    "tests/fixtures/docx/handmade-run-marks.docx",
+    "tests/fixtures/docx/handmade-symbols.docx",
+    "tests/fixtures/epub/handmade-position.epub",
+    "tests/fixtures/malformed/unclosed-notes--skips.docx",
+    "tests/fixtures/ods/handmade-hidden.ods",
+    "tests/fixtures/odp/handmade-splitlist.odp",
+    "tests/fixtures/odt/handmade-hidden.odt",
+    "tests/fixtures/odt/handmade-position.odt",
+    "tests/fixtures/pdf/handmade-arabic.pdf",
+    "tests/fixtures/pdf/handmade-ligatures.pdf",
+    "tests/fixtures/pdf/handmade-predefined-cmap.pdf",
+    "tests/fixtures/rtf/handmade-hidden.rtf",
+    "tests/fixtures/rtf/handmade-mac.rtf",
+    "tests/fixtures/rtf/handmade-scientific.rtf",
+    "tests/fixtures/xlsb/handmade-trailing-space.xlsb",
+    "tests/fixtures/xlsx/handmade-trailing-space.xlsx",
+    "tests/heap.rs",
+    "tests/it/architecture.rs",
+    "tests/it/bounds.rs",
+    "tests/it/build.rs",
+    "tests/it/container.rs",
+    "tests/it/converter.rs",
+    "tests/it/diagnostics.rs",
+    "tests/it/fixes.rs",
+    "tests/it/image_regressions.rs",
+    "tests/it/image_ppt.rs",
+    "tests/it/image_ooxml.rs",
+    "tests/it/image_heading.rs",
+    "tests/it/json.rs",
+    "tests/it/limits.rs",
+    "tests/it/main.rs",
+    "tests/it/sheet_bounds.rs",
+    "tests/it/spreadsheets.rs",
+    "tests/it/style.rs",
+    "tests/it/units.rs",
+    "tests/it/snapshots/it__json__handmade_rich_docx.snap",
+    "tests/snapshots/snapshots__doc__handmade-charstyle.doc.snap",
+    "tests/snapshots/snapshots__doc__handmade-scientific.doc.diagnostics.snap",
+    "tests/snapshots/snapshots__doc__handmade-scientific.doc.snap",
+    "tests/snapshots/snapshots__doc__text.doc.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-hidden.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-hidden.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-ole-iso.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-ole-iso.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-ole.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-position.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-rich.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-run-marks.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__docx__handmade-run-marks.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-symbols.docx.snap",
+    "tests/snapshots/snapshots__epub__handmade-css-links.epub.diagnostics.snap",
+    "tests/snapshots/snapshots__epub__handmade-features.epub.diagnostics.snap",
+    "tests/snapshots/snapshots__epub__handmade-position.epub.snap",
+    "tests/snapshots/snapshots__malformed__brokenpersist--recovers.ppt.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__mismatched--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__nosheet--errors.xls.snap",
+    "tests/snapshots/snapshots__malformed__unbalanced--recovers.rtf.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__unclosed--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__unclosed-notes--skips.docx.diagnostics.snap",
+    "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.diagnostics.snap",
+    "tests/snapshots/snapshots__odp__handmade-splitlist.odp.snap",
+    "tests/snapshots/snapshots__ods__handmade-hidden.ods.diagnostics.snap",
+    "tests/snapshots/snapshots__ods__handmade-hidden.ods.snap",
+    "tests/snapshots/snapshots__ods__sheet.ods.diagnostics.snap",
+    "tests/snapshots/snapshots__odt__handmade-hidden.odt.diagnostics.snap",
+    "tests/snapshots/snapshots__odt__handmade-hidden.odt.snap",
+    "tests/snapshots/snapshots__odt__handmade-position.odt.snap",
+    "tests/snapshots/snapshots__pdf__handmade-arabic.pdf.snap",
+    "tests/snapshots/snapshots__pdf__handmade-predefined-cmap.pdf.snap",
+    "tests/snapshots/snapshots__ppt__handmade-scripts.ppt.diagnostics.snap",
+    "tests/snapshots/snapshots__ppt__handmade-scripts.ppt.snap",
+    "tests/snapshots/snapshots__ppt__handmade-side.ppt.diagnostics.snap",
+    "tests/snapshots/snapshots__ppt__handmade-side.ppt.snap",
+    "tests/snapshots/snapshots__pptx__handmade-order.pptx.diagnostics.snap",
+    "tests/snapshots/snapshots__pptx__handmade-scripts.pptx.diagnostics.snap",
+    "tests/snapshots/snapshots__pptx__handmade-scripts.pptx.snap",
+    "tests/snapshots/snapshots__rtf__handmade-hidden.rtf.diagnostics.snap",
+    "tests/snapshots/snapshots__rtf__handmade-hidden.rtf.snap",
+    "tests/snapshots/snapshots__rtf__handmade-mac.rtf.snap",
+    "tests/snapshots/snapshots__rtf__handmade-scientific.rtf.diagnostics.snap",
+    "tests/snapshots/snapshots__rtf__handmade-scientific.rtf.snap",
+    "tests/snapshots/snapshots__rtf__text.rtf.diagnostics.snap",
+    "tests/snapshots/snapshots__xls__handmade-trailing-space.xls.snap",
+    "tests/snapshots/snapshots__xls__sheet.xls.diagnostics.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-sheet.xlsb.diagnostics.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-trailing-space.xlsb.snap",
+    "tests/snapshots/snapshots__xlsx__handmade-trailing-space.xlsx.snap",
+    "tests/snapshots/snapshots__xlsx__sheet.xlsx.diagnostics.snap",
+    "uv.lock",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Harun Erkurt"
+SPDX-License-Identifier = "FSL-1.1-MIT"
+
+[[annotations]]
+path = [
+    ".gitattributes",
+    ".gitignore",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "fuzz/.gitignore",
+    "fuzz/Cargo.lock",
+    "fuzz/Cargo.toml",
+    "fuzz/README.md",
+    "fuzz/fuzz_targets/csv.rs",
+    "fuzz/fuzz_targets/doc.rs",
+    "fuzz/fuzz_targets/docx.rs",
+    "fuzz/fuzz_targets/epub.rs",
+    "fuzz/seeds/epub/book.epub",
+    "fuzz/fuzz_targets/numfmt.rs",
+    "fuzz/fuzz_targets/odf.rs",
+    "fuzz/fuzz_targets/pdf.rs",
+    "fuzz/fuzz_targets/ppt.rs",
+    "fuzz/fuzz_targets/rtf.rs",
+    "fuzz/fuzz_targets/xls.rs",
+    "fuzz/fuzz_targets/xlsb.rs",
+    "fuzz/fuzz_targets/xlsx.rs",
+    "fuzz/regressions/pdf/handmade-inline-image-no-colorspace.pdf",
+    "fuzz/seeds/doc/handmade-blockstyle.doc",
+    "fuzz/seeds/doc/handmade-pieces.doc",
+    "fuzz/seeds/doc/handmade-scientific.doc",
+    "fuzz/seeds/docx_body/**",
+    "fuzz/seeds/odf_content/**",
+    "fuzz/seeds/pptx/handmade-order.pptx",
+    "fuzz/seeds/pptx/handmade-strict.pptx",
+    "fuzz/seeds/pptx_slide/**",
+    "fuzz/seeds/xlsx_sheet/**",
+    "pyproject.toml",
+    "python/Cargo.toml",
+    "python/almiladoc/__init__.py",
+    "python/almiladoc/_almiladoc.pyi",
+    "python/src/lib.rs",
+    "python/tests/test_almiladoc.py",
+    "src/error.rs",
+    "src/formats/detect.rs",
+    "src/formats/doc/lists.rs",
+    "src/formats/doc/stsh.rs",
+    "src/formats/docx/mod.rs",
+    "src/formats/docx/styles.rs",
+    "src/formats/mod.rs",
+    "src/formats/odf/axes.rs",
+    "src/formats/odf/styles.rs",
+    "src/formats/odf/table.rs",
+    "src/formats/odf/text.rs",
+    "src/formats/pdf.rs",
+    "src/formats/ppt/styletext.rs",
+    "src/formats/pptx/cascade.rs",
+    "src/formats/rtf/lexer.rs",
+    "src/formats/rtf/table.rs",
+    "src/formats/rtf/tables.rs",
+    "src/formats/sheet/controls.rs",
+    "src/formats/sheet/grid.rs",
+    "src/formats/sheet/mod.rs",
+    "src/formats/sheet/test_support.rs",
+    "src/formats/sheet/xls.rs",
+    "src/formats/sheet/xlsb.rs",
+    "src/formats/sheet/xlsx.rs",
+    "src/limits.rs",
+    "src/model/asset.rs",
+    "src/model/block.rs",
+    "src/model/inline.rs",
+    "src/model/link.rs",
+    "src/model/list.rs",
+    "src/model/mod.rs",
+    "src/model/style.rs",
+    "src/model/table.rs",
+    "src/package/mod.rs",
+    "src/package/path.rs",
+    "src/package/relationships.rs",
+    "src/render/markdown/inline.rs",
+    "src/render/markdown/mod.rs",
+    "src/render/markdown/table.rs",
+    "src/render/markdown/tests/mod.rs",
+    "src/render/mod.rs",
+    "src/shared/assets.rs",
+    "src/shared/binary.rs",
+    "src/shared/blockstyle.rs",
+    "src/shared/chain.rs",
+    "src/shared/delta.rs",
+    "src/shared/drawingml.rs",
+    "src/shared/fields.rs",
+    "src/shared/grid.rs",
+    "src/shared/header.rs",
+    "src/shared/html.rs",
+    "src/shared/list.rs",
+    "src/shared/math/mathml.rs",
+    "src/shared/math/mod.rs",
+    "src/shared/math/omml.rs",
+    "src/shared/math/tests.rs",
+    "src/shared/math/tex.rs",
+    "src/shared/mc.rs",
+    "src/shared/mod.rs",
+    "src/shared/numbering.rs",
+    "src/shared/officeart.rs",
+    "src/shared/text.rs",
+    "src/shared/uri.rs",
+    "tests/fixturegen/common.py",
+    "tests/fixturegen/csv.py",
+    "tests/fixturegen/doc.py",
+    "tests/fixturegen/docx.py",
+    "tests/fixturegen/epub.py",
+    "tests/fixturegen/odf.py",
+    "tests/fixturegen/pdf.py",
+    "tests/fixturegen/ppt.py",
+    "tests/fixturegen/pptx.py",
+    "tests/fixturegen/rtf.py",
+    "tests/fixturegen/sheet.py",
+    "tests/fixtures/abuse/max_asset_total_bytes--twoimages--errors.docx",
+    "tests/fixtures/abuse/max_entry_bytes--imagebomb--errors.docx",
+    "tests/fixtures/abuse/max_entry_bytes--zipbomb--errors.docx",
+    "tests/fixtures/doc/handmade-blockstyle.doc",
+    "tests/fixtures/doc/handmade-charstyle.doc",
+    "tests/fixtures/doc/handmade-pieces.doc",
+    "tests/fixtures/doc/handmade-scientific.doc",
+    "tests/fixtures/docx/handmade-altpath.docx",
+    "tests/fixtures/docx/handmade-numbering.docx",
+    "tests/fixtures/epub/handmade-css-links.epub",
+    "tests/fixtures/malformed/mismatched--errors.docx",
+    "tests/fixtures/malformed/nosheet--errors.xls",
+    "tests/fixtures/malformed/unclosed--errors.docx",
+    "tests/fixtures/malformed/unended-globals--recovers.xls",
+    "tests/fixtures/pdf/handmade-inline-image-no-colorspace.pdf",
+    "tests/fixtures/ppt/handmade-scripts.ppt",
+    "tests/fixtures/ppt/handmade-side.ppt",
+    "tests/fixtures/pptx/handmade-altpath.pptx",
+    "tests/fixtures/pptx/handmade-order.pptx",
+    "tests/fixtures/pptx/handmade-scripts.pptx",
+    "tests/fixtures/pptx/handmade-strict.pptx",
+    "tests/fixture-src/book.md",
+    "tests/fixtures/epub/book.epub",
+    "tests/fixtures/rtf/text.rtf",
+    "tests/fixtures/xls/handmade-trailing-space.xls",
+    "tests/gen_fixtures.py",
+    "tests/it/robustness.rs",
+    "tests/it/snapshots.rs",
+    "tests/it/support.rs",
+    "tests/snapshots/snapshots__doc__text.doc.snap",
+    "tests/snapshots/snapshots__docx__handmade-manyrefs.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-ole.docx.snap",
+    "tests/snapshots/snapshots__docx__handmade-rich.docx.snap",
+    "tests/snapshots/snapshots__epub__book.epub.snap",
+    "tests/snapshots/snapshots__odt__text.odt.snap",
+    "tests/snapshots/snapshots__pptx__handmade-order.pptx.snap",
+    "tests/snapshots/snapshots__docx__handmade-numbering.docx.snap",
+    "tests/snapshots/snapshots__docx__text.docx.snap",
+    "tests/snapshots/snapshots__malformed__unbalanced--recovers.rtf.snap",
+    "tests/snapshots/snapshots__odt__handmade-lists.odt.snap",
+    "tests/snapshots/snapshots__rtf__handmade-bin.rtf.snap",
+    "tests/snapshots/snapshots__malformed__corrupt-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__empty--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__missing-styles--skips.docx.snap",
+    "tests/snapshots/snapshots__malformed__unended-globals--recovers.xls.snap",
+    "tests/snapshots/snapshots__malformed__truncated--errors.doc.snap",
+    "tests/snapshots/snapshots__malformed__truncated--errors.docx.snap",
+    "tests/snapshots/snapshots__malformed__unclosed-notes--skips.docx.snap",
+    "tests/snapshots/snapshots__odp__pres.odp.snap",
+    "tests/snapshots/snapshots__epub__handmade-css-links.epub.snap",
+    "tests/snapshots/snapshots__doc__handmade-pieces.doc.snap",
+    "tests/snapshots/snapshots__epub__handmade-features.epub.snap",
+    "tests/snapshots/snapshots__malformed__brokenpersist--recovers.ppt.snap",
+    "tests/snapshots/snapshots__ppt__handmade-multimaster.ppt.snap",
+    "tests/snapshots/snapshots__ppt__handmade-sparsenotes.ppt.snap",
+    "tests/snapshots/snapshots__ppt__pres.ppt.snap",
+    "tests/snapshots/snapshots__pptx__handmade-links.pptx.snap",
+    "tests/snapshots/snapshots__pptx__handmade-inherit.pptx.snap",
+    "tests/snapshots/snapshots__pptx__pres.pptx.snap",
+    "tests/snapshots/snapshots__pdf__handmade-inline-image-no-colorspace.pdf.snap",
+    "tests/snapshots/snapshots__pdf__handmade-ligatures.pdf.snap",
+    "tests/snapshots/snapshots__pdf__text.pdf.snap",
+    "tests/snapshots/snapshots__rtf__text.rtf.snap",
+    "tests/snapshots/snapshots__xlsb__handmade-sheet.xlsb.snap",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/sheet/numfmt.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Thai Son Dinh <87920408+sondt99@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/docx/numbering.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 hari <64578610+Mr-Neutr0n@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/render/markdown/escape.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/docx/content.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 HanZephyr <50990263+HanZephyr@users.noreply.github.com>",
+    "2026 breken <312387581+breken-ai@users.noreply.github.com>",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = [
+    "src/formats/doc/assemble.rs",
+    "src/formats/doc/fkp.rs",
+    "src/formats/doc/mod.rs",
+    "src/formats/doc/pieces.rs",
+    "src/formats/doc/sprm.rs",
+    "src/formats/doc/text.rs",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 HanZephyr <50990263+HanZephyr@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/pptx/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/render/markdown/anchors.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 breken <312387581+breken-ai@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/rtf/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Jack <272938095+jackoconner45@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/lib.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Marcell Manfrin Barbacena <20461967+marcellmanfrin@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/package/archive.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/package/xml.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
+    "2026 Vaibhav Dabas <145040528+vaibhavdabas16@users.noreply.github.com>",
+    "2026 XuJian <265865031+xujiantop-crypto@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/csv.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 APZN <129354802+jsk1004ha@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/epub/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Ray Tien <29456968+Ray0907@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/ppt/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Mark Xian <53885024+xianjianlf2@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/formats/odf/mod.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 tutu <10495375+Ready22Race@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = "src/render/markdown/inline.rs"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Alexis Kowalski <312066465+alexiskowalski@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = [
+    "src/render/markdown/mod.rs",
+    "src/render/markdown/tests/mod.rs",
+    "tests/fixturegen/docx.py",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Shubham Mathur <16467235+mathurshubham@users.noreply.github.com>",
+    "2026 Chriscoveries <212684707+chriscoveries@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = [
+    "tests/fixtures/docx/handmade-bare-number.docx",
+    "tests/snapshots/snapshots__docx__handmade-bare-number.docx.snap",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Chriscoveries <212684707+chriscoveries@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+
+[[annotations]]
+path = [
+    "tests/fixtures/docx/handmade-nested.docx",
+    "tests/snapshots/snapshots__docx__handmade-nested.docx.snap",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Sideguide Technologies Inc.",
+    "2026 Harun Erkurt",
+    "2026 Shubham Mathur <16467235+mathurshubham@users.noreply.github.com>",
+]
+SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"

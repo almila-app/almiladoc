@@ -1,0 +1,11 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Particles of 10 μm ± 2 μm settle at a rate ∝ β.
+
+A field pasted as Unicode keeps the last symbol font: 5μm.
+
+[x] Calibrated [ ] Replicated ✓ Reviewed
+
+Step ➀ precedes step ➁.

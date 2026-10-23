@@ -1,0 +1,109 @@
+[workspace]
+members = ["python"]
+# cargo-fuzz keeps its own lockfile and nightly-only dependencies.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0-rc.1"
+edition = "2024"
+rust-version = "1.99"
+license = "FSL-1.1-MIT AND MIT"
+repository = "https://github.com/almila-app/almiladoc"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+redundant_imports = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+items_after_statements = "allow"
+many_single_char_names = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+struct_field_names = "allow"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+assertions_on_result_states = "warn"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+clone_on_ref_ptr = "warn"
+dbg_macro = "deny"
+excessive_nesting = "warn"
+exit = "deny"
+expect_used = "deny"
+get_unwrap = "deny"
+iter_over_hash_type = "deny"
+let_underscore_untyped = "warn"
+needless_raw_strings = "warn"
+panic = "deny"
+precedence_bits = "warn"
+print_stderr = "deny"
+print_stdout = "deny"
+redundant_clone = "warn"
+self_named_module_files = "warn"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_used = "deny"
+use_self = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[package]
+name = "almiladoc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown"
+readme = "README.md"
+keywords = ["markdown", "docx", "pdf", "converter", "document"]
+categories = ["parser-implementations", "text-processing"]
+include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.toml", "/THIRD-PARTY-LICENSES"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+dhat = "0.3.3"
+insta = "1.49.0"
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+pulldown-cmark = { version = "0.13.5", default-features = false }
+unicode-normalization = "0.1.26"
+
+[dependencies]
+cfb = "0.15.0"
+csv = "1.4.0"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+encoding_rs = "0.8.42"
+pdf-inspector = { version = "1.25.2", optional = true }
+quick-xml = { version = "0.42.0", features = ["escape-html"] }
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[features]
+default = ["pdf"]
+pdf = ["dep:pdf-inspector"]
+serde = ["dep:serde", "dep:serde_json"]
+
+[profile.release]
+lto = "thin"
+overflow-checks = true
+panic = "unwind"
+strip = "symbols"
+
+[profile.test]
+opt-level = 1

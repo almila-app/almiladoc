@@ -1,0 +1,36 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Before
+
+| Metric | Value |
+| --- | --- |
+| Height | 120 |
+| Weight | 34 |
+
+Twice framed
+
+|  |  |
+| --- | --- |
+| deep | cell |
+
+Spanned frame
+
+|  |  |
+| --- | --- |
+| left | right |
+
+Frame with text
+
+|  |
+| --- |
+| Section A<br>a / b<br>End of section |
+
+Wider grid
+
+|  |  |
+| --- | --- |
+| a / b | right |
+
+After
