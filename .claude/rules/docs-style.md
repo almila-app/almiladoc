@@ -19,7 +19,7 @@ dates, ticket ids, incident history, session reports or status, which issues and
 |---|---|
 | install, usage, API | rustdoc: API reference and examples; README: install and overview, its Rust blocks doctested |
 | contribution terms | CONTRIBUTING.md |
-| decisions that bind every change | `docs/adr/` |
+| decisions that bind a change until rewritten | `docs/adr/` |
 | open work, in order; what each reader leaves out, per format | `docs/roadmap.md`; `docs/support.md` |
 | licence of each file | NOTICE, REUSE.toml |
 | invariants, commands and traps for agents | CLAUDE.md |

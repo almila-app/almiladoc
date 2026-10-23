@@ -21,10 +21,11 @@ repository's own work is FSL-1.1-MIT.
 
 ## Decisions
 
-- The decisions in `docs/adr/` bind every change. ADR 0001 is the target design, reached in the
-  order of its decision 19; the invariants below describe the code as it stands.
-- `docs/roadmap.md` is the open work, in order, and says how the change that lands an item updates
-  it.
+- `docs/adr/`, the invariants below and the rules bind every change until a better method replaces
+  one, rewritten by the change that departs from it with its reason; legal duties and the owner's
+  decisions stay. ADR 0001 is the target design, reached in the order of its decision 19; the
+  invariants describe the code as it stands.
+- `docs/roadmap.md` is the open work, in order, and says how the change landing an item updates it.
 - Every change lands as a candidate `land/owner/<slug>` (an accepted pull request as
   `land/owner/pr-<n>`) that `main` fast-forwards to once its `ci / required` passes (ADR 0004);
   `main` takes no merge commit.

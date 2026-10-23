@@ -16,10 +16,11 @@ writer meant. You may run `verify.py --dry-run`, the `check_setup.py`, `mirror_d
 `fixtures.py check` scripts, and the make gates of what the diff touches but `make licences`, which
 rewrites a stale `THIRD-PARTY-LICENSES`: that one is the writer's.
 
-Try to refute the change. Is the design the best available, and within the decisions in
-`docs/adr/`? Is it correct under hostile input, edge cases and the error policy? Does each new
-test fail without the change? Was a gate weakened, a check skipped, or a snapshot accepted that
-bakes in a bug? Is behaviour changed beyond the task?
+Try to refute the change. Is the design the best available? Where it departs from a decision in
+`docs/adr/`, does it rewrite that decision with its reason, and where it follows one, is that
+decision still the better choice? Is it correct under hostile input, edge cases and the error
+policy? Does each new test fail without the change? Was a gate weakened, a check skipped, or a
+snapshot accepted that bakes in a bug? Is behaviour changed beyond the task?
 
 A finding is a **must-fix** only in one of these classes:
 
