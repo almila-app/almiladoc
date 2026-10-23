@@ -53,10 +53,11 @@ table lands on its own, before the first wave whose files it shares.
 
 | Wave | Items | Placement |
 |---|---|---|
-| W7 | pdf-model (after the unpdf release carrying almiladoc's PDF pull requests) | |
+| W7 | pdf-model (on `almila-unpdf` 0.48.0) | |
 | W8 | ocr-channel | |
 
-Prove the native PDF API and its real-consumer integration together before publication.
+Prove the native PDF API and its real-consumer integration together before publication. The first
+release follows W8, so it carries pdf-model and ocr-channel.
 
 ## Items
 
@@ -96,13 +97,15 @@ Prove the native PDF API and its real-consumer integration together before publi
     the new variant `ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page, page_count })`
     (ADR 0001 decision 9), code `invalid_config`: one variant for every caller-configuration error,
     reusing `Converter::new`'s `ConfigError`, mirrored through change-core-api.
+  - The staleness check gains upstream unpdf releases and advisories while `almila-unpdf` is in use
+    (ADR 0003 decision 4).
   - Binding via `/change-core-api`. Above 1500 lines, `ocr_pages` splits out.
 - **Files:** `src/formats/{pdf,mod}.rs`, `src/model/gap.rs` (new), `src/model/{block,mod}.rs`,
   `src/render/markdown/mod.rs`, `src/inspect.rs` (new), `src/{converter,error,lib,identity}.rs`,
   `Cargo.{toml,lock}`, `deny.toml`, `about.toml`, `THIRD-PARTY-LICENSES`, `NOTICE`, `REUSE.toml`,
   `README.md`, `docs/support.md`, `CLAUDE.md`'s PDF invariants,
   `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `tests/it/pdf.rs` (new),
-  `tests/it/{snapshots,converter}.rs`,
+  `tests/it/{snapshots,converter}.rs`, `.github/scripts/staleness.py`,
   `python/{src/lib.rs,almiladoc/_almiladoc.pyi,tests/test_almiladoc.py}`.
 - **Tests:** five pages TEXT/IMAGE/TEXT/TEXT/IMAGE: `Fail` gives `NeedsOcr { [2, 5], 5 }` despite a
   `Lost`; `Report` keeps pages 1, 3 and 4. Pinned verdicts: blank, header-only, image-only,
@@ -120,7 +123,7 @@ Prove the native PDF API and its real-consumer integration together before publi
     pdf-inspector 1.25.2 cannot convert and unpdf's bundled CMaps can, joins the fixtures;
     `handmade-predefined-cmap.pdf`'s snapshot is pdf-model's to change.
 - **Credit:** none.
-- **Depends on:** the unpdf release carrying almiladoc's PDF pull requests (External tracks).
+- **Depends on:** `almila-unpdf` 0.48.0, published (External tracks).
   **Size:** about 1400 lines. **Tier:** T3.
 
 ### W8
@@ -268,30 +271,29 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
 
 ## External tracks
 
-Upstream first, then wait a week for the maintainers, then decide: merged, take the release; silent or
-declined, fall back as ADR 0001 decision 6 and ADR 0002 say. unpdf's pull requests are checked
-at the start of each wave until pdf-model lands, and hayro's and rten's when the deferred item they gate
-is next. Check a pull request with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
+For hayro and rten: upstream first, then wait a week for the maintainers, then decide: merged, take
+the release; silent or declined, fall back as ADR 0002 says. unpdf's pull requests are checked at the
+start of each wave, so that the dependency moves back to unpdf once a release carries all of them but
+#15, and hayro's and rten's when the deferred item they gate is next. Check a pull request with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
 
-- **unpdf release** gates pdf-model (ADR 0001 decision 6): iyulab/unpdf #11-#17 below, one concern
-  each with its test, opened 2026-10-23, so the week ends 2026-10-30. The gate waits for all of
-  #11-#17 but #15, a list fix it does not need; #13's page facts are what the verdict rule needs to
-  tell a page that must go to OCR from one that reads. Issue #18 asks for the notice of the bundled
-  Adobe CMap data. A pull request declined, or left a week without review, falls back to a published fork of
-  unpdf.
+- **unpdf** (ADR 0001 decision 6): iyulab/unpdf #11-#17 below, one concern each with its test,
+  opened 2026-10-23. pdf-model reads PDF through `almila-unpdf` 0.48.0, which carries them, without
+  waiting for their review. Once an unpdf release carries all of them but #15, a list fix pdf-model
+  does not need, the dependency moves back to unpdf. Issue #18 asks for the notice of the bundled
+  Adobe CMap data, which `almila-unpdf`'s THIRD-PARTY-NOTICES already carries.
 - **hayro** (dormant; gates only the deferred rasterizer and local OCR). `LAB.icc`'s licence is stated
   upstream (#1497), so `NOTICE` cites it from the first hayro release that carries it. Font-loss
   warnings arrive with the first hayro release that carries #1498. Open: undecodable page content has
   no upstream warning, since upstream declined #1499 until it reworks warnings.
 - **rten** (dormant; gates only the deferred local OCR). rten's AI policy bars agent-authored pull
   requests, so the maintainer opens and answers them. If they stay unmerged, an rten fork is
-  published as ADR 0001 decision 6's unpdf fallback would be.
+  published as ADR 0001 decision 6's unpdf fork was.
 - **Consumer proof** (a change in the primary consumer's own repository). Trigger: the `almiladoc`
-  candidate wheel on TestPyPI (release, W4) or on PyPI. It proves the consumer depends on that wheel
+  candidate wheel on TestPyPI (after W8) or on PyPI. It proves the consumer depends on that wheel
   instead of the converter it replaces, a test asserts `importlib.metadata.version("almiladoc")`
   equals the candidate and that no import of that converter remains, and its suite is green. The
-  first run certifies the non-PDF formats and today's PDF path only; each
-  0.x minor carrying pdf-model or ocr-channel reruns it, and 1.0 needs it green on the 1.0 candidate.
+  first run certifies every format, PDF through the model and gap fills included; each later 0.x
+  minor reruns it, and 1.0 needs it green on the 1.0 candidate.
 
 | Repository | Pull request | Serves | State |
 |---|---|---|---|
@@ -316,7 +318,6 @@ Asked only when the item that needs them is next.
 
 | Step | Needed by | When |
 |---|---|---|
-| Publish the unpdf fork's first version, only if unpdf declines a pull request, or leaves one a week without review (External tracks; a scoped crates.io token, ADR 0003 decision 9) | pdf-model | before pdf-model starts |
-| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | now, then as each tag is due |
+| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | after W8, then as each tag is due |
 | Agree with the consumer the PDF-path scope and how it maps `Incomplete` and `Internal` | consumer proof | when the proof starts |
 | A scan corpus with paragraph ground truth and headings marked (the consumer's) | grouping revisit, ocr-local-pipeline | when either is next |

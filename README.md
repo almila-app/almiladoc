@@ -6,7 +6,7 @@ almiladoc is Fair Source (source-available) software, not open source: see [Lice
 
 ## Status
 
-Release candidate 0.1.0rc1 is on TestPyPI; PyPI and crates.io receive the first final release. The API below will change before it.
+No release yet. The first release candidate goes to TestPyPI once PDF reads through the document model and OCR fills its gaps; PyPI and crates.io receive the first final release. The API below will change before it.
 
 ## Formats
 
@@ -25,8 +25,10 @@ The format is detected from the content; CSV carries no signature, so in-memory 
 
 ## Install
 
+Until the first release, build the wheel from source, which needs a Rust toolchain:
+
 ```sh
-pip install -i https://test.pypi.org/simple/ almiladoc==0.1.0rc1
+pip install git+https://github.com/almila-app/almiladoc
 ```
 
 ## Python
@@ -106,7 +108,7 @@ PDF support is the default `pdf` feature; without it, a PDF is `Unsupported`. Li
 
 ### Identity
 
-`Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures. Identity does not hold while pdf-inspector's `PI_NO_MERGE` or `PDF_INSPECTOR_BCMAPS_DIR` environment variable is set, until a pinned release reads neither.
+`Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures. Identity does not hold while pdf-inspector's `PI_NO_MERGE` or `PDF_INSPECTOR_BCMAPS_DIR` environment variable is set, until PDF goes through unpdf.
 
 ## Development
 

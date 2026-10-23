@@ -32,8 +32,8 @@ Date: 2026-10-14
 
 6. **PDF.**
    - PDF through the model reads unpdf's `Document` (iyulab/unpdf, MIT, pure Rust) with default features off, page by page through `for_each_page` with a sequential `PageStreamOptions`, which starts no thread. almiladoc maps its blocks into the model, its styled runs' bold, italic, strike, superscript and subscript into `Style`, and rules each page's verdict from unpdf's page facts (text and image operators, image coverage, suppressed runs, unreadable fonts, undecodable streams).
-   - It waits for an unpdf release carrying almiladoc's pull requests: `/Differences` glyph names on a standard-14 font, superscript, subscript and strike runs, bracket mirroring in right-to-left text, the clef placement and false `binary_density` suppression `text.pdf` shows, and page facts for invisible text (render mode 3), clipped text, margin text, whitespace-only text runs and fill operators. A pull request declined, or left a week without review, falls back to a fork of unpdf, published (first version by a scoped token, later by its own trusted publisher) before any `almiladoc` candidate depends on it.
-   - pdf-inspector 1.25.2 stays the engine until then.
+   - It reads unpdf as `almila-unpdf` 0.48.0, unpdf 0.48.0 with almiladoc's pull requests iyulab/unpdf #11-#17 applied: `/Differences` glyph names on a standard-14 font; superscript, subscript and strike runs; bracket mirroring in right-to-left text; a number set against its first word opening a list item; the clef placement and false `binary_density` suppression `text.pdf` shows; and page facts for invisible text in render mode 3, clipped text, margin text, whitespace-only text runs and fill operators. It is published from `almila-app/almila-unpdf`, its first version by token and later ones by its own trusted publisher (ADR 0003 decision 9), and its library keeps the name `unpdf`. almiladoc does not wait for those pull requests' review; once an unpdf release carries all of them but #15, a list fix pdf-model does not need, it depends on unpdf again.
+   - pdf-inspector 1.25.2 stays the engine until PDF goes through the model.
    - unpdf bundles Adobe's BSD-3-Clause CMap data and a PDFium-derived BSD-3-Clause CMYK table.
 
 7. **Adapters.** Crate-private frontends take one `ParseCtx`.
@@ -85,21 +85,21 @@ Date: 2026-10-14
 
 19. **Order.** 1. Trim, as ADR 0004's first candidate. 2. Dependency upgrades. 3. Configuration, ledger, diagnostics, errors and bounds. 4. Lints.
     - Steps 1 to 4 land in order; after them each feature lands with its first producer, and the binding follows step 4.
-    - A `0.1.0` release candidate publishes, the primary consumer's integration tests pass on it without shims, and the first final 0.x release follows. PDF through the model and gap fills ship as 0.x minors, each passing those tests again.
+    - A `0.1.0` release candidate publishes once PDF goes through the model and gap fills land, the primary consumer's integration tests pass on it without shims, and the first final 0.x release follows; each later 0.x minor passes those tests again.
     - 1.0 needs the deny set clean, the fuzz campaigns run and the consumer's tests green on the 1.0 candidate.
 
 ## Consequences
 
 - Under `on_loss = Fail`, documents whose OLE objects, VML pictures, charts or `mc:Fallback` go unread fail `Incomplete`, per a site table owed before step 3.
 - RTF labelled DOC and cross-labelled ODF fail `FormatMismatch`; callers retry with `detected`.
-- Owed: measured stack costs before the first release; the unpdf release decision 6 waits for before PDF goes through the model; hayro's `LAB.icc` licence (ADR 0002) before a rasterizer ships.
+- Owed: measured stack costs before the first release; hayro's `LAB.icc` licence (ADR 0002) before a rasterizer ships.
 
 ## Alternatives considered
 
 - `Format::Image`: a consumer OCRs a standalone image itself.
 - A public `markdown::render` for caller-built models: unrequired, and on the caller's stack.
 - An ambient-read inventory: machinery for three known reads.
-- Every step in strict order before a release: holds the consumer's non-PDF wheel behind the unpdf release decision 6 waits for.
+- A first release before PDF goes through the model and gap fills land: the consumer would adopt today's PDF path and its `NeedsOcr` behaviour, then change both again.
 - A git fork: `cargo publish` refuses it (https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories). Vendoring: unpdf's 50.6k lines of lint debt.
 - The pdf-inspector fork as the engine: on a 22-file corpus of papers, reports, slides and scans (535 pages) it refused 12 text pages as needing OCR: 8 as garbled text, 4 as scans ruled by image pixel count rather than page coverage, where a rule over unpdf's facts misjudged none; it read papers worst of the pdf-inspector line, and pdf-inspector merged no outside pull request after 2026-08-06, so its 132k lines would be maintained alone.
 - One engine's text over another's page verdicts: two parsers in the wheel. pdfboss: its own threads, raw ligatures, no page facts, one author. MuPDF (AGPL-3.0), Poppler (GPL): licence. PDFium: a native library.

@@ -49,7 +49,7 @@ Date: 2026-10-14
    - Two `v*` tag rulesets, as a bypass spans its ruleset (https://github.com/github/docs/blob/bcb11fe40765ec7935bdcff0da8cd3cee0bfba50/content/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository.md#L23): creation, admin-bypassable only; update and deletion, unbypassable.
    - Environments `pypi`, `testpypi`, `crates-io`: maintainer-reviewed, `v*` tags only, no admin bypass.
    - Trusted publishers bind `release.yml` and the environment, optional in both registries; pending PyPI publishers precede the first rc tag.
-   - Trusted publishing cannot create a crate (https://github.com/rust-lang/crates.io/blob/e15f258b77b9e73dded45339bb695960f660d33b/src/controllers/krate/publish.rs#L190-L195): the maintainer adds the trusted publisher and `trustpub_only` after decision 6's first token publish. A fork of unpdf, ADR 0001 decision 6's fallback, is published from its own repository by the same bootstrap before any `almiladoc` candidate depends on it.
+   - Trusted publishing cannot create a crate (https://github.com/rust-lang/crates.io/blob/e15f258b77b9e73dded45339bb695960f660d33b/src/controllers/krate/publish.rs#L190-L195): the maintainer adds the trusted publisher and `trustpub_only` after decision 6's first token publish. `almila-unpdf`, ADR 0001 decision 6's fork of unpdf, was published from `almila-app/almila-unpdf` by the same bootstrap, and its later versions go through its own trusted publisher.
 
 ## Consequences
 
