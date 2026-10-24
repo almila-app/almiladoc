@@ -6,7 +6,7 @@ almiladoc is Fair Source (source-available) software, not open source: see [Lice
 
 ## Status
 
-No release yet. The first release candidate goes to TestPyPI once PDF reads through the document model and OCR fills its gaps; PyPI and crates.io receive the first final release. The API below will change before it.
+No release yet. The first release candidate goes to TestPyPI once the OCR stack fills a PDF's gaps; PyPI and crates.io receive the first final release. The API below will change before it.
 
 ## Formats
 

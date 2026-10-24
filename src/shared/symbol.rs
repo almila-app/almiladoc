@@ -8,8 +8,8 @@
 //! Deprecated or NFC-changed character. A code D.5 leaves undefined, and 0x60 (radical
 //! extension, which Unicode does not encode), has none.
 //!
-//! Compared against Adobe's `symbol.txt`, Apple's `SYMBOL.TXT`, the Adobe Glyph List, lopdf and
-//! pdf-inspector: this table departs from them only where they give a Private Use value, a
+//! Compared against Adobe's `symbol.txt`, Apple's `SYMBOL.TXT`, the Adobe Glyph List and lopdf:
+//! this table departs from them only where they give a Private Use value, a
 //! compatibility or Deprecated twin, U+00A0 for the space, or a fact error (lopdf's missing Euro
 //! and white card suits).
 

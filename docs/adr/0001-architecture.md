@@ -5,14 +5,14 @@ Date: 2026-10-14
 
 ## Context
 
-- The primary consumer, a Python document-conversion service, converts untrusted documents in-process and OCRs out of process.
+- The primary consumer, a Python document-conversion service, converts untrusted documents in a child process and OCRs in its parent.
 - PDF bypassed the model, and recovery dropped content yet returned `Ok`.
 
 ## Decision
 
 1. **Distribution.**
    - Crate `almiladoc` and the unpublished abi3 cdylib `python/` (PyPI `almiladoc`) share one version, with `fuzz/` outside; both declare `BUSL-1.1 AND MIT` and ship ADR 0003's `LICENCE_SET`.
-   - Features: default `pdf`; `serde`. The binding enables both. No rasterizer, OCR feature or rten dependency enters until an adapter that needs it (ADR 0002).
+   - Features: default `pdf` and `raster`; `serde`; `ocr-http`. The binding enables all four. No rten dependency enters (ADR 0002 decision 8).
 
 2. **API.**
    - `Converter::new(Config)` validates `Config` and `Limits`, failing `ConfigError`.
@@ -26,9 +26,9 @@ Date: 2026-10-14
 
 5. **Model.**
    - The model carries resolved superscript and subscript position and typed unit milestones. Anchor targets have a document-scoped id and optional destination unit; only that unit being unread suppresses a missing-anchor loss. Readable empty units keep their original ordinals and zero-length output spans; hidden sheets and unreadable units have no milestone, bar a PPT slide whose slide-list text outlives its lost container.
-   - `Block::Gap` awaits OCR under an opaque `GapId` of unit plus ordinal; `Parsed::gaps()` yields each gap's id, `OcrOrigin` and reason.
+   - `Block::Gap` awaits OCR under an opaque `GapId` of an optional unit plus an ordinal within it, or within the document without one; `Parsed::gaps()` walks every container in document order and yields each gap's id, `OcrOrigin` and reason.
    - The caller returns outcomes through ADR 0002's channel under the kept `Limits`: `fill_gap` takes a gap and its `GapFill`; `fail_gap` records `ocr_failed`.
-   - `GapError` is `UnknownGap`, `Settled` or `Convert(ConvertError)`; a refused call changes nothing, fuel included.
+   - `GapError` is `UnknownGap`, `Settled`, `Refused { limit }` or `Convert(ConvertError)`, which carries only `max_work`, `Cancelled` and `Internal`; a refused call changes nothing, fuel included.
 
 6. **PDF.**
    - PDF through the model reads unpdf's `Document` (iyulab/unpdf, MIT, pure Rust) with default features off, page by page through `for_each_page` with a sequential `PageStreamOptions`, which starts no thread. almiladoc maps its blocks into the model, its styled runs' bold, italic, strike, superscript and subscript into `Style`, and rules each page's verdict from unpdf's page facts (text and image operators, image coverage, suppressed runs, unreadable fonts, undecodable streams).
@@ -57,7 +57,7 @@ Date: 2026-10-14
 
 11. **Content policy.** Side content is fixed: headers, footers and comments are omitted, revisions accepted, and hidden text omitted as `hidden_omitted`. `images: ImagePolicy` (default `Placeholder`) and `ImageOcr` are explicit, fingerprinted policies.
 
-12. **Limits.** Today's constants become `Limits` defaults; new ones (`max_input_bytes`, `max_compression_ratio`, `max_pages`, `max_output_bytes`, `max_work`), beside ADR 0002 decision 11's OCR limits, take fixed defaults, each documented on `Limits` with its reason, that admit ordinary large documents; no limit ships before the site that charges it, and one abuse fixture per limit trips it. `max_nesting_depth` bounds every recursion over input nesting, the renderer's included, below a compile-time ceiling. One saturating ledger charges deterministic `max_work` fuel and checks cancellation.
+12. **Limits.** Today's constants become `Limits` defaults; new ones (`max_input_bytes`, `max_compression_ratio`, `max_pages`, `max_output_bytes`, `max_work`), beside ADR 0002 decision 11's `max_ocr_text_bytes`, take fixed defaults, each documented on `Limits` with its reason, that admit ordinary large documents; no limit ships before the site that charges it, and one abuse fixture per limit trips it. `max_nesting_depth` bounds every recursion over input nesting, the renderer's included, below a compile-time ceiling. One saturating ledger charges deterministic `max_work` fuel and checks cancellation.
 
 13. **PDF engine.** Limits and cancellation reach unpdf only between pages: inside a page its stream decoding keeps its own fixed ratio rule and takes no caller budget. The page count meets `max_pages` before any page is read; the consumer isolates PDF work in a memory-capped, recyclable worker.
 
@@ -83,21 +83,21 @@ Date: 2026-10-14
 
 19. **Order.** 1. Trim, as ADR 0004's first candidate. 2. Dependency upgrades. 3. Configuration, ledger, diagnostics, errors and bounds. 4. Lints.
     - Steps 1 to 4 land in order; after them each feature lands with its first producer, and the binding follows step 4.
-    - A `0.1.0` release candidate publishes once PDF goes through the model and gap fills land, the primary consumer's integration tests pass on it without shims, and the first final 0.x release follows; each later 0.x minor passes those tests again.
+    - A `0.1.0` release candidate publishes once ADR 0002's OCR stack lands (gap fills, the engine port, the rasterizer and `ocr-http`), the primary consumer's integration tests pass on it without shims, and the first final 0.x release follows; each later 0.x minor passes those tests again.
     - 1.0 needs the deny set clean, the fuzz campaigns run and the consumer's tests green on the 1.0 candidate.
 
 ## Consequences
 
 - Under `on_loss = Fail`, documents whose OLE objects, VML pictures, charts or `mc:Fallback` go unread fail `Incomplete`, per a site table owed before step 3.
 - RTF labelled DOC and cross-labelled ODF fail `FormatMismatch`; callers retry with `detected`.
-- Owed: measured stack costs before the first release; hayro's `LAB.icc` licence (ADR 0002) before a rasterizer ships.
+- Owed: measured stack costs before the first release.
 
 ## Alternatives considered
 
 - `Format::Image`: a consumer OCRs a standalone image itself.
 - A public `markdown::render` for caller-built models: unrequired, and on the caller's stack.
 - An ambient-read inventory: machinery for three known reads.
-- A first release before PDF goes through the model and gap fills land: the consumer would adopt today's PDF path and its `NeedsOcr` behaviour, then change both again.
+- A first release before the OCR stack lands: the consumer would adopt today's PDF path and its `NeedsOcr` behaviour, then change both again.
 - A git dependency on unpdf's unreleased fixes: `cargo publish` refuses it (https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories). Vendoring: unpdf's 50.6k lines of lint debt.
-- The pdf-inspector fork as the engine: on a 22-file corpus of papers, reports, slides and scans (535 pages) it refused 12 text pages as needing OCR: 8 as garbled text, 4 as scans ruled by image pixel count rather than page coverage, where a rule over unpdf's facts misjudged none; it read papers worst of the pdf-inspector line, and pdf-inspector merged no outside pull request after 2026-08-06, so its 132k lines would be maintained alone.
+- Keeping the previous engine as a fork: on a 22-file corpus of papers, reports, slides and scans (535 pages) it refused 12 text pages as needing OCR: 8 as garbled text, 4 as scans ruled by image pixel count rather than page coverage, where a rule over unpdf's facts misjudged none; it read papers worst of the engines measured, and its upstream merged no outside pull request after 2026-08-06, so its 132k lines would be maintained alone.
 - One engine's text over another's page verdicts: two parsers in the wheel. pdfboss: its own threads, raw ligatures, no page facts, one author. MuPDF (AGPL-3.0), Poppler (GPL): licence. PDFium: a native library.

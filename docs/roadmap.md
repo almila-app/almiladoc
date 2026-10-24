@@ -54,10 +54,14 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W8 | ocr-channel | |
+| W8 | ocr-pages | |
+| W9 | ocr-channel | |
+| W10 | ocr-engine | |
+| W11 | rasterizer | |
+| W12 | ocr-http | |
 
-Prove the native PDF API and its real-consumer integration together before publication. The first
-release follows W8, so it carries pdf-model and ocr-channel.
+Prove the native PDF API and its real-consumer integration together before publication; the first
+release follows W12.
 
 ## Items
 
@@ -76,110 +80,188 @@ release follows W8, so it carries pdf-model and ocr-channel.
 
 ### W8
 
-#### ocr-channel: fill page and image gaps with the caller's OCR
-- **Goal:** the caller's OCR completes flagged pages and pictures in place.
+#### ocr-pages: the caller makes chosen PDF pages gaps
+- **Goal:** a caller OCRs pages whose text layer it distrusts (ADR 0002 decision 2).
 - **Scope:**
-  - `Parsed::fill_gap(&mut self, GapId, GapFill) -> Result<(), GapError>` and `fail_gap(GapId)`, on the
-    pool; `GapState { Unfilled, Failed, Filled(Vec<Block>) }`; gaps indexed once.
-  - `GapFill::Markdown`: `max_ocr_text_bytes` (1 MiB) checked first; a pulldown-cmark reader in the
-    new `src/shared/markdown.rs` (all raw HTML escaped, `<sup>` included), tables, strikethrough,
-    emphasis, headings, lists and code only; links as label, images as alt; each event charged;
-    container plus fill depth within `max_nesting_depth`; NFC.
-  - `GapFill::Lines(Vec<OcrLine>)`, `OcrLine { text: String, quad: Option<[Point; 4]>, confidence:
-    Option<f32> }`, `Point { x: f32, y: f32 }`: `max_ocr_lines` (3000), NFC, grouped as below. The
-    `OcrLine` rustdoc states the requirement on every engine: lines in reading order, each line's text
-    in logical order (UAX #9), points in raster pixels of the raster the engine received (origin at its
-    top-left corner, x rightward, y downward).
-  - `GapError { UnknownGap, Settled, Convert(ConvertError) }`; a refusal changes nothing, fuel included.
-  - Filled gaps render their blocks, a failed page `<!-- ocr-failed page N -->`; `render` counts
-    `ocr_gap` and `ocr_failed` from state; `NeedsOcr` lists unfilled and failed pages. A gap's
-    diagnostics take its container's region (Note inside a note, else Body); a page gap's are Body.
-  - `ImageOcr { None, All }` beside `ImagePolicy`: each PNG or JPEG gains an `Image(AssetId)` gap after
-    the innermost block holding the image, within that block's container (body, list item, quote, note
-    or cell); other images count `image_not_ocred`. The image keeps rendering by its policy whatever its
-    gap's state; an unfilled or failed gap renders nothing; a filled one shows both the picture and the
-    text after its block. No image decoder.
-  - **Line grouping** (`src/ocr/group.rs`), a pure, order-preserving, linear pass that reorders nothing:
-    1. *Input.* The accepted lines after NFC and the limit checks, in engine order. In each line every
-       `Cc` character (`char::is_control`, U+0085 included), U+2028 and U+2029 becomes U+0020, then the
-       line's edge White_Space is trimmed (`str::trim`). A line then empty is blank and dropped, neither
-       joining nor breaking. Confidence is ignored. No character is removed beyond the trim, so nothing
-       is de-hyphenated.
-    2. *Usable quad.* `top` is the least y of the four points, `bottom` the greatest, `left` and `right`
-       likewise over x, `height` = bottom - top, `width` = right - left. A quad is usable when its eight
-       coordinates are finite and its axis-aligned box has positive width and height (point order is
-       irrelevant); otherwise the line is quadless. Arithmetic is f64 widened exactly from f32 and uses
-       only min, max, subtraction, ×0.5 and comparisons, no platform float function, so ADR 0001
-       decision 15's cross-architecture identity holds.
-    3. *Break rule.* The previous kept line `a` and the next `b` join if and only if both quads are
-       usable and `min(a.right, b.right) - max(a.left, b.left) >= 0.5 * min(a.width, b.width)`,
-       `b.top >= a.top`, and `b.top - a.bottom <= 0.5 * min(a.height, b.height)` (inclusive). Negative
-       gaps join, since detector boxes are expanded and overlap in tight leading. A quadless line is its
-       own paragraph. Only neighbours are compared. Known cost: a heading closer than half the body
-       line's height joins the next line.
-    4. *Separator.* For a join, from `a`'s last and `b`'s first characters: none when `a` ends in U+002D,
-       U+2010 or U+00AD and the character before it is Alphabetic (the hyphen stays: `well-` + `known`
-       gives `well-known`); none when both lie in U+3000-303F, U+3040-30FF, U+3400-4DBF, U+4E00-9FFF,
-       U+F900-FAFF, U+FF00-FF9F or U+20000-3FFFF (Hangul excluded, since Korean separates words);
-       otherwise U+0020.
-    5. *Order.* Multi-column pages whose rows align yield one paragraph per line, interleaved; no text is
-       lost either way. Ordering columns is the engine adapter's job.
-    6. *Placement.* The paragraphs replace the gap block in place, so fill order never changes output; an
-       empty result leaves nothing; text never joins across gaps or with source text. `shape::loose`
-       skips gap blocks, so unfilled gaps leave a list tight, and a filled gap's paragraphs
-       count as blocks.
-    7. *Table cells.* The paragraphs are cell blocks, so `render_cell` `<br>`-joins them; a paragraph's
-       lines stay space-joined, no other `<br>` arises, and `|` is escaped. In a list inside a cell an
-       item's blocks join with a space; a single-cell table renders as a one-cell table.
-  - `image_not_ocred` and `ocr_failed` join `src/diagnostics.rs` here with their `LossClass`
-    (`Omitted`, `Deferred`).
-  - Python mirror via `/change-core-api`: `fill_gap(gap, *, markdown | lines)`.
-  - Revisit the grouping rule if a scan corpus with paragraph ground truth shows single-column pages
-    missing over 5% of breaks (or over 5% after headings), more than 2% of joins wrong, or 2° of skew
-    missing 5 points more breaks than the upright page (oriented geometry is then owed). A change to
-    grouping after release alters OCR Markdown, which ADR 0001 decision 15 allows only outside a patch
-    release.
-- **Files:** new `src/ocr/{mod,fill,group,images}.rs`, `src/shared/markdown.rs`;
-  `src/shared/mod.rs`; `src/{converter,config,identity,lib,limits,diagnostics}.rs`,
-  `src/model/gap.rs`, `src/render/markdown/{mod,shape,table}.rs`; `Cargo.toml` (unconditional
-  `unicode-normalization` and `pulldown-cmark`), `Cargo.lock`, `fuzz/{Cargo.toml,Cargo.lock}`,
-  `fuzz/fuzz_targets/gap_fill.rs` (new), `fuzz/seeds/gap_fill/` (new), `fuzz/regressions/gap_fill/`
-  (new); `tests/it/ocr.rs` (new), `tests/fixturegen/docx.py`, snapshots;
-  `python/{src/lib.rs,almiladoc/__init__.py,almiladoc/_almiladoc.pyi,tests/test_almiladoc.py}`;
-  `README.md`, `REUSE.toml`.
+  - `ocr_pages: PageSelection { None (default), All, Pages(BTreeSet<NonZeroU32>) }`, a parse option
+    (`Input::with_ocr_pages`): a selected page becomes a `Page` gap with reason `caller_requested`
+    whatever its text layer; its extracted text is discarded, never merged, and reports no loss.
+    Running headers and folios are still judged across all pages.
+  - A page past `page_count` is refused before extraction as the new variant
+    `ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page, page_count })`, code
+    `invalid_config`, the one variant for every caller-configuration error (ADR 0001 decision 9).
+  - Python via `/change-core-api`: `ocr_pages=None | "all" | set[int]`, the `caller_requested`
+    reason and the `InvalidConfig` error.
+- **Files:** `src/formats/pdf.rs`, `src/model/gap.rs`, `src/{converter,config,error,lib}.rs`;
+  `tests/it/pdf.rs`; `python/`; `README.md`, `docs/support.md`.
+- **Tests:** on the five-page fixture, `All` makes five gaps and `Pages({1, 3})` adds gaps 1 and 3
+  to 2 and 5, page 1's text absent and no `Lost` added; page 6 is refused before extraction;
+  `handmade-header-only.pdf` under `Pages({1})` still strips page 3's running head,
+  which pages 2 and 3 alone would not; Python equals Rust.
+- **Credit:** none.
+- **Depends on:** none. **Size:** about 300 lines. **Tier:** T3.
+
+### W9
+
+#### ocr-channel: fill page and image gaps with the caller's OCR
+- **Goal:** the caller's OCR completes flagged pages and pictures in place (ADR 0002 decision 11).
+- **Scope:**
+  - `Parsed::fill_gap(&mut self, GapId, GapFill) -> Result<(), GapError>` and `fail_gap(GapId)` on
+    the pool; `GapState { Unfilled, Failed, Filled(Vec<Block>) }` indexed once; fill events charged.
+  - `GapId { unit: Option<Unit>, ordinal }`: the ordinal counts within its unit, or the document
+    without one (DOCX, ODT, RTF), `JSON_SCHEMA_VERSION` rising; `Parsed::gaps()` walks every
+    container in order.
+  - `GapFill::Markdown(String)`, `#[non_exhaustive]`, within `max_ocr_text_bytes` (1 MiB) and,
+    container included, `max_nesting_depth`: pulldown-cmark keeps tables, strikethrough, emphasis,
+    headings, lists and code, escapes raw HTML, keeps link labels and image alts; NFC.
+  - `GapError { UnknownGap, Settled, Refused { limit: Limit }, Convert(ConvertError) }`: a refusal
+    changes nothing, fuel included; `Convert` carries only `max_work`, `Cancelled` and `Internal`.
+  - Filled gaps render in place, a failed page as `<!-- ocr-failed page N -->` and a failed image as
+    nothing, each counting `ocr_failed` (`Deferred`); `NeedsOcr` lists unfilled and failed pages.
+  - `ImageOcr { None, All }` beside `ImagePolicy`: each PNG or JPEG gains an
+    `OcrOrigin::Image(AssetId)` gap after its innermost block, in that block's container and region;
+    other images count `image_not_ocred` (`Omitted`); the image keeps its policy.
+  - Python via `/change-core-api`: `fill_gap(gap, markdown)`, `fail_gap`, `ImageOcr`, `GapRefused`.
+- **Files:** new `src/ocr/{mod,fill,images}.rs`, `src/shared/markdown.rs`; `src/{model,render}/`,
+  `src/{converter,config,identity,lib,limits,diagnostics}.rs`, `Cargo.*`, `fuzz/`, `tests/`,
+  `python/`, `README.md`, `REUSE.toml`, `docs/support.md`, ADR 0001.
 - **Tests:**
-  - A heading-and-table fill equals that Markdown born-digital; a `caller_requested` page renders only
-    its fill.
-  - `<script>`, `[a](javascript:x)` and `![a](http://x)` give escaped text, `a` and `a`; a fill of
-    `x<sup>2</sup>` renders the tags escaped.
-  - At defaults, 1 MiB + 1 bytes, 3001 lines and 257 nested `>` refuse as no-ops; refilling is `Settled`.
-  - Unfilled image gaps equal `ImageOcr::None`; a cell fill gives `x<br>a b<br>c`; reverse fills keep
-    order; EMF counts `image_not_ocred`.
-  - `group` on fixed quads: a gap of 0.4h joins as `a b`; exactly 0.5h joins and `b.top` at the next f32
-    above breaks; an overlap of exactly half the narrower width joins and `b.left` at the next f32 above
-    breaks; `(0,0,101,20)` then `(100,0,200,20)` breaks; the narrow fragment `(0,0,100,20)` then
-    `(96,0,104,20)` joins; `b` above `a` breaks; a 100 px heading over 20 px body breaks at a 15 px gap
-    and joins at 5 px; a line skewed 2° over 2000 px joins its successor; a quadless line splits its
-    neighbours; NaN, infinite and zero-height quads are quadless; empty and whitespace-only lines
-    neither join nor break; `\n`, `\t` and U+0085 and U+2028 become spaces; `abc ` + `def` gives
-    `abc def`; `日本 ` + `語` gives `日本語`, `日本` + `abc` gives `日本 abc`, `ＦＯＯ` + `ＢＡＲ` gives
-    `ＦＯＯＢＡＲ`, Hangul keeps its space; `well-` + `known` gives `well-known`, `conver-` + `sion` gives
-    `conver-sion`, `conver` U+00AD `sion` keeps the U+00AD, `5 -` + `7` and `1-` + `2` keep the space;
-    side-by-side tall columns stay one paragraph each; aligned rows `L1, R1, L2, R2` give four paragraphs
-    in that order; `L1, R1, L2, L3, R2` from unequal pitches joins `L2 L3` and keeps every character.
-  - Proptests on integer coordinates: invariance under mirror `x → W - x`, translation and power-of-two
-    scaling; flattening the paragraphs' lines equals the non-blank input after the mapping and trim, in
-    order, and each paragraph is its lines joined by the separators; equal inputs give equal bytes.
-  - A fake engine on generated DOCX: images in a paragraph, list item, heading, block quote and note,
-    each filled text after its block in its container; a filled image under `Placeholder` renders
-    `![alt](asset:N)` and then its text, under `Omit` the text alone; two images in one paragraph
-    filled in reverse give document order; a nested cell; a list in a cell; a single-cell table;
-    cell text `| <br> # h` renders escaped in one cell; under `Report` with no engine, unfilled image
-    gaps give the `ImageOcr::None` Markdown, lists tight. A page gap is replaced in place; an empty fill
-    leaves nothing; hand-run phases equal `convert`.
-  - Pool threads equal `threads`; Python equals Rust; `gap_fill` replays.
+  - The five-page fixture's pages 2 and 5 filled with `# A\n\n| x |\n| - |\n| 1 |` render it in
+    place; page 5 failed renders `<!-- ocr-failed page 5 -->`, and `Fail` raises `NeedsOcr`.
+  - `<script>`, `[a](javascript:x)`, `![a](http://x)` and `<table><tr><td>x</td></tr></table>` give
+    escaped text, `a`, `a` and escaped tags.
+  - At defaults 1 MiB + 1 bytes and 257 nested `>` are `Refused` naming their limit, and the gap
+    then fills; under raised limits both fill; a lowered `max_work` gives `Convert(ResourceLimit)`;
+    a refill is `Settled`.
+  - Generated DOCX: unit-less image gaps in a paragraph, list item, quote, note and cell list in
+    order and fill after their block; `Placeholder` gives `![alt](asset:N)` then the text; reverse
+    fills keep order; a cell `x` with an image filled `a b\n\nc` gives `x<br>a b<br>c`; unfilled and
+    failed ones render as `ImageOcr::None`; an unfilled one in a note counts `ocr_gap` in Note.
+  - Hand-run phases equal `convert`; Python equals Rust; fuzz target `gap_fill` replays.
 - **Credit:** none; issue #157 moves to Taken.
-- **Depends on:** pdf-model. **Size:** about 1100 lines. **Tier:** T3.
+- **Depends on:** ocr-pages. **Size:** about 800 lines. **Tier:** T3.
+
+### W10
+
+#### ocr-engine: an engine fills the gaps, in-process or across processes
+- **Goal:** an engine fills gaps in-process or from exported requests (ADR 0002 decisions 1-3, 12).
+- **Scope:** through `/change-core-api`:
+  - `src/ocr/engine.rs`: `OcrEngine: Send + Sync`, `batch_size()` (default 1) and
+    `recognize(&self, &[OcrRequest], &CancelToken) -> Vec<OcrOutcome>`; `#[non_exhaustive]`
+    `OcrOutcome { Fill(GapFill), Failed(OcrFailure), Unattempted(OcrFailure) }` and
+    `OcrFailure { status: Option<u16> }`.
+  - `src/ocr/request.rs`, owned and `#[non_exhaustive]`: `OcrRequest { gap, origin, reasons, image,
+    max_text_bytes }` (the parse's `max_ocr_text_bytes`) and `OcrImage { bytes: Arc<[u8]>,
+    media_type }` (PNG or JPEG); an image request copies its asset at one unit per 16 bytes.
+  - `Parsed::ocr_requests(&mut self, gaps: Option<&[GapId]>)`: the listed unfilled gaps' requests in
+    document order; page gaps yield none until the rasterizer.
+  - `Parsed::ocr(&mut self, &dyn OcrEngine, gaps) -> Result<OcrSummary, ConvertError>`: pooled
+    batches of `batch_size`, each outcome a `fill_gap` or `fail_gap`; an `Unattempted` stops later
+    batches; a `Refused` fill fails its gap, a wrong outcome count its batch.
+  - `Converter::convert_with_ocr(Input, &dyn OcrEngine)`; `Parsed` keeps the parse's `CancelToken`,
+    which `render`, `to_json`, `ocr_requests` and `ocr` check.
+  - Python: `Parsed.ocr_requests` and a pickling `OcrRequest`; a Python OCR fills the gaps through
+    `fill_gap` and `fail_gap`, and Python takes no engine of its own.
+- **Files:** new `src/ocr/{engine,request,driver}.rs`, `python/src/ocr.rs`; `src/ocr/`, `tests/`,
+  `src/{converter,lib}.rs`, `python/`, `README.md`, `REUSE.toml`, ADR 0001, `CLAUDE.md`, `.claude/`.
+- **Tests:**
+  - A fake engine on the DOCX image fixtures: `ocr`, hand-run `ocr_requests` and `fill_gap`,
+    `convert_with_ocr` and a Python loop over unpickled requests agree.
+  - `batch_size` 3 over 7 gaps calls `recognize` with 3, 3 and 1 requests in order; a second batch
+    answering `Fill`, `Unattempted`, `Fill` fills 4 and 6, never requests 7, and a later call fills
+    5 and 7; 2 outcomes for 3 requests fail all 3; a 1 MiB + 1 byte fill fails its gap alone.
+  - A cancel in `recognize` keeps earlier fills and refuses `render`; a panic gives `Internal`; a
+    lowered `max_work` trips on image bytes; a request carries a raised `max_ocr_text_bytes`.
+- **Credit:** none.
+- **Depends on:** ocr-channel. **Size:** about 1000 lines. **Tier:** T3.
+
+### W11
+
+#### rasterizer: every page gap reaches the engine as an image
+- **Goal:** a page gap's request carries its page as the parse read it (ADR 0002 decisions 5 and 6).
+- **Scope:**
+  - Feature `raster = ["pdf", "unpdf/raster", "unpdf/standard-fonts"]`, on by default. `Parsed`
+    keeps unpdf's parser in an `Arc`; a page gap keeps its media box and rotation. Without it
+    `RasterSpec` and `ocr_requests`' signature stay, and page gaps yield no request.
+  - `RasterSpec { dpi: 150, max_pixels: 12_845_056 }` and `OcrEngine::raster()`; a dpi outside
+    50-600 or `max_pixels` outside 1 to 40 Mpx (`MAX_PIXELS_CEILING`) fails `ConfigError::Raster`.
+  - `ocr_requests(&mut self, &RasterSpec, gaps)`: per page gap the largest dpi up to the spec's
+    whose rotated media box (an upper bound for the crop box painted), rounded up, fits
+    `max_pixels`; one unit per 128 pixels; `render_page` (crop box, `/Rotate`, opaque white, RGB
+    PNG); one unit per 16 PNG bytes; the effective dpi as `OcrImage::dpi: Option<u32>`, `None` for
+    an embedded image; up to `threads` pages at once through a new `pool::map_ordered`, in order,
+    the token checked per page.
+  - Once a page gap is filled, unpdf's `RasterGaps` text runs, images, inline images and undecodable
+    content streams report `raster_incomplete` (`Lost`) in its unit, shadings and soft masks
+    nothing. `max_work`'s rustdoc states both rates and that they and the cap alone bound painting.
+  - Python via `/change-core-api`: `ocr_requests(*, dpi=150, max_pixels=12_845_056, gaps=None)`,
+    `OcrRequest.dpi`; fuzz target `pdf_raster` paints every page under `ocr_pages: All`; release
+    smoke checks a page's PNG `IHDR`; NOTICE names the CC0 ICC profiles `raster` builds in.
+- **Files:** new `src/ocr/raster.rs`; `src/ocr/`, `src/formats/pdf.rs`, `src/model/gap.rs`,
+  `src/{converter,config,diagnostics,limits,lib,pool}.rs`, `Cargo.*`, `fuzz/`, `tests/`, fixtures,
+  `python/`, licence files, `README.md`, `docs/support.md`, `.github/`, ADRs 0001 and 0003.
+- **Tests:**
+  - The five-page fixture exports pages 2 and 5 only, PNGs 1275 by 1650 at a stated 150 dpi;
+    `ocr_pages: All` exports five; bytes are equal across runs and at 1 and 4 threads.
+  - A 2725 by 2089 pt page renders within 12 845 056 pixels at a lower dpi; a `/CropBox` half its
+    `/MediaBox` renders below the cap; `/Rotate 90` swaps the sides; dpi 49 and 601,
+    `max_pixels` 1 048 575 and past `MAX_PIXELS_CEILING` are refused.
+  - Under `ocr_pages: All`, `handmade-predefined-cmap.pdf` filled reports `raster_incomplete` and
+    fails `Incomplete` under `Fail`; a scanned JPEG page and a mesh-shading page, filled, report
+    none.
+  - A cancel from another thread stops a 20-page export before the next page; a lowered `max_work`
+    trips before painting and at the PNG charge; `convert_with_ocr` equals the hand flow; Python's
+    `dpi=300` reaches its requests; `pdf_raster` replays.
+- **Credit:** none.
+- **Depends on:** ocr-engine. **Size:** about 900 lines. **Tier:** T3.
+
+### W12
+
+#### ocr-http: an OpenAI-compatible vision server fills the gaps, with no code
+- **Goal:** a base URL, a model and a key let a vision server fill the gaps (ADR 0002 decision 7).
+- **Scope:**
+  - Feature `ocr-http`, on in the binding: ureq 3, latest stable (`rustls-no-provider`,
+    `rustls-webpki-roots`), `rustls` on `ring`, `base64`, `serde_json`; `python/Cargo.toml` takes
+    `log` with `max_level_off`.
+  - `OcrHttpConfig`: `base_url`, `model`, `api_key`, `prompt` (its own one-sentence default, in the
+    rustdoc), `image_first` (true), `extra_body`, `max_tokens` 8192, `temperature` 0.0, `raster`,
+    `concurrency` 1 (`batch_size()` twice it), `retries` 3; `raster: RasterSpec` exists without
+    the `raster` feature; `new` opens no socket and refuses a bad field, a reserved `extra_body`
+    key or a key over `http://` beyond loopback.
+  - A reply counts only as string `choices[0].message.content` with `finish_reason` `stop`; a
+    leading `<think>…</think>` is stripped, an unclosed one fails the gap.
+  - Resets before a response and 408, 429, 500, 502-504 retry after 0.5 to 30 s or `Retry-After` up
+    to 60 s, which a cancel ends; 400, 413, 422, `length` and a malformed or refused reply fail the
+    gap, other failures leave it and the rest of the batch unattempted, each with its status.
+  - ureq: one agent built in `new` on the caller's thread, never on a worker, its proxy-environment
+    read discarded by `proxy(None)`; timeouts connect 10 s, send request 60 s, send body 60 s,
+    response 300 s and body 60 s, none for resolve or overall; ring as rustls' provider; no
+    redirect; a body capped at its request's `max_text_bytes` + 64 KiB; errors mapped without
+    `Display`.
+  - `pool::fan_out` runs `min(concurrency, n)` scoped workers; `scripts/ocr_live.py` logs method,
+    path, status and gap.
+  - Python via `/change-core-api`: `OcrHttp(base_url, model, *, api_key=None, …)`, releasing the
+    GIL, with `recognize(requests)` giving `str` or a pickling `OcrFailure(*, attempted=True,
+    status=None)` each, so a parent fills a child's exported requests; `Parsed.ocr(engine)` with
+    `OcrSummary`, and `Converter.convert(…, ocr=None)`.
+- **Files:** `src/ocr/` (new `http/`), `scripts/`, `src/{pool,ledger,config,lib}.rs`, `README.md`,
+  `Cargo.*`, `fuzz/`, `tests/`, `python/`, `deny*.toml`, `Makefile`, licences, `.github/`, ADRs.
+- **Tests:** against a loopback server on port 0:
+  - `<think>x</think>\n# A` fills `# A`; an unclosed think block, `null` content, `length` and a
+    body past the cap fail the gap, a 1.5 MiB reply under a raised limit fills; the body holds the
+    model, one `image_url` data URI and the prompt, image first unless `image_first = false`;
+    `Authorization` only with a key.
+  - 503 then 200 fills after 2 attempts; 400 fails after 1 with status 400; a 302 elsewhere is not
+    followed and leaves its gap with status 302; a closed port leaves a batch of 4 unattempted after
+    one attempt; `concurrency` 3 keeps at most 3 in flight; a cancel in backoff returns in 100 ms.
+  - No failure, error or `Debug` holds an echoed key or prompt, or a URL's userinfo or query; `new`
+    refuses `extra_body` holding `model`, `concurrency` 0 and a key over `http://` to 192.0.2.1, not
+    to 127.0.0.1, `[::1]` or `localhost`; dead `HTTPS_PROXY` and `SSL_CERT_FILE` change nothing.
+  - A cancel in a stalled response attempts no later request of its batch; no thread outlives
+    `recognize`; a self-signed server leaves its gaps; Python equals Rust, a child's pickled
+    requests filled by the parent's `OcrHttp` included; `ocr_reply` replays.
+- **Credit:** none.
+- **Depends on:** rasterizer. **Size:** about 1150 lines. **Tier:** T3.
 
 ## Deferred
 
@@ -204,14 +286,14 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   combinations of the two bools.
 - **document-meta** (document title, author and dates). Trigger: the consumer needs them; `DocumentMeta`
   lands with that producer (ADR 0001 decision 5).
-- **py-ocr** (the parent process OCRs through Python). Trigger: an in-crate engine (rasterizer, ocr-http
-  or the local crate) lands; the Python `fill_gap` and `fail_gap` mirror already ships with ocr-channel.
-- **rasterizer** (with page-gap wiring). Trigger: a caller without its own rasterizer; the hayro items
-  under External tracks gate it.
-- **ocr-http** (OCR over the network inside the crate, an OpenAI-compatible vision adapter, ADR 0002
-  decision 7). Trigger: a caller wants it. A plain-text reply is split at UAX #14 mandatory breaks into
-  one quadless `OcrLine` per non-empty piece, in reply order, so each line is its own paragraph; a JSON
-  `{"lines": [...]}` is taken as given, never split; the wire contract in the README says so.
+- **ocr-lines** (`GapFill::Lines`: located lines grouped into paragraphs in the crate). Trigger: a
+  caller whose engine returns only located lines.
+- **ocr-http-roots** (caller trust anchors and an explicit proxy for `OcrHttp`). Trigger: a caller
+  behind a private CA or an explicit proxy.
+- **raster-hook** (painting charged per operation by the area it paints and cancelled inside a page,
+  and counts of glyphs without an outline and of unpainted annotation appearances; needs `unpdf`
+  changes). Trigger: a caller painting untrusted PDFs outside a memory-capped worker, or a measured
+  paint cost.
 - **ocr-local-pipeline** (offline OCR as a separate crate wrapping oar-ocr or ocrs, never in this one,
   ADR 0002 decision 8). Trigger: demand for offline OCR, the rten pool fixes and a scan corpus. It
   returns lines in reading order across columns, not the engine's row-first order: a two-column fixture
@@ -219,31 +301,27 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
 
 ## External tracks
 
-For hayro and rten: upstream first, then wait a week for the maintainers, then decide: merged, take
-the release; silent or declined, fall back as ADR 0002 says. unpdf's pull requests are checked at the
-start of each wave, and hayro's and rten's when the deferred item they gate is next. Check a pull request with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
+For rten: upstream first, then wait a week for the maintainers, then decide: merged, take the
+release; silent or declined, fall back as its bullet says. unpdf's pull requests are checked at the
+start of each wave, rten's when ocr-local-pipeline is next. Check a pull request with
+`gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
 
 - **unpdf** (ADR 0001 decision 6): unpdf 0.50.0 carries every pull request below but #21, which is
   on its main for the next release; unpdf-clip takes that release.
-- **hayro** (dormant; gates only the deferred rasterizer and local OCR). `LAB.icc`'s licence is stated
-  upstream (#1497), so `NOTICE` cites it from the first hayro release that carries it. Font-loss
-  warnings arrive with the first hayro release that carries #1498. Open: undecodable page content has
-  no upstream warning, since upstream declined #1499 until it reworks warnings.
-- **rten** (dormant; gates only the deferred local OCR). rten's AI policy bars agent-authored pull
-  requests, so the maintainer opens and answers them. If they stay unmerged, an rten fork is
-  published as ADR 0001 decision 6's unpdf fork was.
+- **rten** (dormant; gates only the deferred local OCR). rten's contribution policy has this
+  repository's maintainer open and answer its pull requests. If they stay unmerged, rten is forked
+  and published under a new name.
 - **Consumer proof** (a change in the primary consumer's own repository). Trigger: the `almiladoc`
-  candidate wheel on TestPyPI (after W8) or on PyPI. It proves the consumer depends on that wheel
+  candidate wheel on TestPyPI (after W12) or on PyPI. It proves the consumer depends on that wheel
   instead of the converter it replaces, a test asserts `importlib.metadata.version("almiladoc")`
   equals the candidate and that no import of that converter remains, and its suite is green. The
-  first run certifies every format, PDF through the model and gap fills included; each later 0.x
-  minor reruns it, and 1.0 needs it green on the 1.0 candidate.
+  first run certifies every format, PDF through the model and the OCR stack on the consumer's own
+  endpoint included, and the `RasterSpec` and `temperature` defaults follow what it measures there
+  before the first final tag; each later 0.x minor reruns it, and 1.0 needs it green on the 1.0
+  candidate.
 
 | Repository | Pull request | Serves | State |
 |---|---|---|---|
-| LaurenzV/hayro | [#1497](https://github.com/LaurenzV/hayro/pull/1497) | `LAB.icc`'s licence stated | merged |
-| LaurenzV/hayro | [#1498](https://github.com/LaurenzV/hayro/pull/1498) | a warning when a font cannot be loaded | merged |
-| LaurenzV/hayro | [#1499](https://github.com/LaurenzV/hayro/pull/1499) | a warning when a page content stream fails to decode | declined |
 | robertknight/rten | [#1523](https://github.com/robertknight/rten/pull/1523) | the global pool only when no custom pool is set | merged |
 | robertknight/rten | [#1524](https://github.com/robertknight/rten/pull/1524) | load-time work on the caller's pool | closed for issue [#1533](https://github.com/robertknight/rten/issues/1533); the maintainer asked for the use context there |
 | robertknight/rten | [#1525](https://github.com/robertknight/rten/pull/1525) | pool build failure visible to the caller | closed: its question on the use context went unanswered |
@@ -258,11 +336,8 @@ start of each wave, and hayro's and rten's when the deferred item they gate is n
 | iyulab/unpdf | [#19](https://github.com/iyulab/unpdf/pull/19) | the lines beside a column gutter counted by baseline (`handmade-legacy-cmap.pdf`) | merged |
 | iyulab/unpdf | [#20](https://github.com/iyulab/unpdf/pull/20) | codes a composite font's ToUnicode leaves out, read through its own data or counted (`undecoded_text_codes`) | in 0.50.0 |
 | iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | on main |
-| iyulab/unpdf | to open | a word space's advance closes the inked extent, so a word-spaced composite run at body size stays one paragraph (`handmade-legacy-cmap.pdf`) | to open |
-| iyulab/unpdf | to open | a composite font's codes its `ToUnicode` leaves out beside codes it maps counted as a page fact, so their loss is reported | to open |
 | iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
 | iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
-| iyulab/unpdf | to open | THIRD-PARTY-NOTICES lists the Adobe Glyph List and the Core14 AFM metrics | to open |
 
 ## Maintainer steps
 
@@ -270,6 +345,7 @@ Asked only when the item that needs them is next.
 
 | Step | Needed by | When |
 |---|---|---|
-| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | after W8, then as each tag is due |
-| Agree with the consumer the PDF-path scope and how it maps `Incomplete` and `Internal` | consumer proof | when the proof starts |
-| A scan corpus with paragraph ground truth and headings marked (the consumer's) | grouping revisit, ocr-local-pipeline | when either is next |
+| An OpenAI-compatible endpoint serving the consumer's model: its base URL, model id and a key in a file outside every repository, for `scripts/ocr_live.py` on the five-page fixture; the key never reaches a log, CI or a commit | the first release | after W12, before the first candidate tag |
+| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | after W12, then as each tag is due |
+| Agree with the consumer the PDF-path scope, how it maps `Incomplete` and `Internal`, its two-phase transport, prompt and `concurrency` | consumer proof | when the proof starts |
+| A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline, ocr-lines | when either is next |
