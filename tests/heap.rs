@@ -174,21 +174,22 @@ const TABLE_SLACK: usize = 64 << 10;
 
 #[test]
 fn a_table_of_empty_positions_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(&corner_cells_xlsx(""));
+    assert_table_heap(String::new);
 }
 
 #[test]
 fn a_table_of_merged_positions_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(&corner_cells_xlsx(&stacked_merges()));
+    assert_table_heap(stacked_merges);
 }
 
 #[test]
 fn a_table_of_one_merge_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(&corner_cells_xlsx(&inner_merge()));
+    assert_table_heap(inner_merge);
 }
 
-fn assert_table_heap(xlsx: &[u8]) {
+fn assert_table_heap(merges: fn() -> String) {
     let _held = exclusive();
+    let xlsx = &corner_cells_xlsx(&merges());
     let converter = converter();
     converter.convert(Input::new(xlsx, Format::Excel)).unwrap();
     let document = parsed_heap(&converter, xlsx, Format::Excel);
