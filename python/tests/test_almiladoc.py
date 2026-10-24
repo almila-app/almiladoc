@@ -186,6 +186,58 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(inspection.pages, ((1, "text", []), (2, "needs_ocr", ["image_backed"])))
         self.assertEqual([(d.code, d.unit) for d in inspection.diagnostics], [("ocr_gap", 2)])
 
+    def test_ocr_pages_makes_each_chosen_pdf_page_a_gap(self):
+        data = MIXED.read_bytes()
+        reporting = almiladoc.Converter(almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT))
+        cases = [
+            ({1}, [["caller_requested"], ["image_backed"]]),
+            (frozenset({1}), [["caller_requested"], ["image_backed"]]),
+            ("all", [["caller_requested"], ["image_backed", "caller_requested"]]),
+        ]
+        for ocr_pages, reasons in cases:
+            with self.subTest(ocr_pages=ocr_pages):
+                parsed = reporting.parse(data, ocr_pages=ocr_pages)
+                gaps = [("page", 1, 1, 1, reasons[0]), ("page", 2, 1, 2, reasons[1])]
+                self.assertEqual(parsed.gaps, gaps)
+                self.assertEqual(
+                    [(d.code, d.unit) for d in parsed.diagnostics],
+                    [("ocr_gap", 1), ("ocr_gap", 2)],
+                )
+                inspection = reporting.inspect(data, ocr_pages=ocr_pages)
+                pages = ((1, "needs_ocr", reasons[0]), (2, "needs_ocr", reasons[1]))
+                self.assertEqual(inspection.pages, pages)
+                markdown = "<!-- needs-ocr page 1 -->\n\n<!-- needs-ocr page 2 -->\n"
+                self.assertEqual(reporting.convert(data, ocr_pages=ocr_pages).markdown, markdown)
+                converted = reporting.convert_path(MIXED, ocr_pages=ocr_pages)
+                self.assertEqual(converted.markdown, markdown)
+        csv = CSV.read_bytes()
+        self.assertEqual(
+            reporting.convert(csv, "csv", ocr_pages={7}).markdown,
+            reporting.convert(csv, "csv").markdown,
+        )
+
+    def test_ocr_pages_past_the_last_raises_invalid_config_and_page_0_value_error(self):
+        converter_ = almiladoc.Converter()
+        data = MIXED.read_bytes()
+        calls = [
+            converter_.convert,
+            converter_.parse,
+            converter_.inspect,
+            lambda _, **kwargs: converter_.convert_path(MIXED, **kwargs),
+        ]
+        for call in calls:
+            with self.assertRaises(almiladoc.InvalidConfigError) as caught:
+                call(data, ocr_pages={2, 3})
+            self.assertEqual(
+                attrgetter("code", "page", "page_count")(caught.exception),
+                ("invalid_config", 3, 2),
+            )
+            for refused in [{0}, {-1}, {2**64}, "some"]:
+                with self.subTest(refused=refused), self.assertRaises(ValueError):
+                    call(data, ocr_pages=refused)
+            with self.assertRaises(TypeError):
+                call(data, ocr_pages={"1"})
+
     def test_convert_takes_a_named_format_or_detects_it(self):
         conversion = almiladoc.Converter().convert(TABLES.read_bytes(), "docx")
         self.assertIn("| Head A | Head B | Head C |", conversion.markdown)
@@ -726,6 +778,11 @@ class ErrorTest(unittest.TestCase):
                 {"code": "incomplete"},
             ),
             (
+                almiladoc.InvalidConfigError,
+                lambda: converter_.convert_path(MIXED, ocr_pages={3}),
+                {"code": "invalid_config", "page": 3, "page_count": 2},
+            ),
+            (
                 almiladoc.ResourceLimitError,
                 lambda: converter_.convert(ZIPBOMB.read_bytes(), "docx"),
                 {"code": "resource_limit", "limit": "max_entry_bytes", "max": 128 * 1024 * 1024},
@@ -787,6 +844,7 @@ class ErrorTest(unittest.TestCase):
             "ResourceLimitError",
             "MissingPartError",
             "IncompleteError",
+            "InvalidConfigError",
             "CancelledError",
             "InternalError",
         ]:

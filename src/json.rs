@@ -445,6 +445,21 @@ mod tests {
     }
 
     #[test]
+    fn gap_reasons_are_their_names() {
+        let reasons = [
+            GapReason::UnreadableContent,
+            GapReason::InvisibleText,
+            GapReason::GarbledText,
+            GapReason::ImageBacked,
+            GapReason::VectorDrawn,
+            GapReason::UnreadableText,
+            GapReason::CallerRequested,
+        ];
+        let expected: Vec<String> = reasons.iter().map(|r| format!("\"{}\"", r.as_str())).collect();
+        assert_eq!(serde_json::to_string(&reasons).unwrap(), format!("[{}]", expected.join(",")));
+    }
+
+    #[test]
     fn field_less_enums_are_their_names() {
         let names = |json: Result<String, serde_json::Error>| json.unwrap();
         let markers = [
@@ -468,16 +483,6 @@ mod tests {
             names(serde_json::to_string(&positions)),
             r#"["baseline","superscript","subscript"]"#
         );
-        let reasons = [
-            GapReason::UnreadableContent,
-            GapReason::InvisibleText,
-            GapReason::GarbledText,
-            GapReason::ImageBacked,
-            GapReason::VectorDrawn,
-            GapReason::UnreadableText,
-        ];
-        let expected: Vec<String> = reasons.iter().map(|r| format!("\"{}\"", r.as_str())).collect();
-        assert_eq!(names(serde_json::to_string(&reasons)), format!("[{}]", expected.join(",")));
         let kinds = [UnitKind::Slide, UnitKind::Sheet, UnitKind::SpineItem, UnitKind::Page];
         assert_eq!(
             names(serde_json::to_string(&kinds)),

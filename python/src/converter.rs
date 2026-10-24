@@ -1,12 +1,14 @@
 //! `Converter` and what its calls take and return.
 
+use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use almiladoc::model::OcrOrigin;
-use almiladoc::{ConvertError, Format, Input, PageVerdict};
+use almiladoc::{ConvertError, Format, Input, PageSelection, PageVerdict};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyInt, PyString, PyTuple};
 
 use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
@@ -220,6 +222,11 @@ impl Parsed {
 /// is admitted; a `format` the content contradicts raises
 /// `UnsupportedError` with `kind` `format_mismatch` and the `detected`
 /// format to retry with.
+///
+/// `ocr_pages`, `"all"` or a set of 1-based pages, makes each selected PDF
+/// page a gap with reason `caller_requested` whatever its text, discarded
+/// without loss; a page past the last raises `InvalidConfigError`, any other
+/// page outside 1 to 4294967295 `ValueError`, and any other format ignores it.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct Converter {
     inner: almiladoc::Converter,
@@ -248,39 +255,45 @@ impl Converter {
     /// `bytes` is read in place; any other buffer is copied once, after its
     /// length is checked against `max_input_bytes`. CSV carries no
     /// signature, so it has to be named.
-    #[pyo3(signature = (data, format = None, *, cancel = None))]
+    #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
     fn convert(
         &self,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
+        ocr_pages: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Conversion> {
         let format = format.map(parse_format).transpose()?;
+        let ocr_pages = page_selection(ocr_pages)?;
         let cancel = cancel.map(|token| &token.get().0);
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
         let converted = py
-            .detach(|| self.call(bytes, format, None, cancel, almiladoc::Converter::convert))
+            .detach(|| {
+                self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::convert)
+            })
             .map_err(|f| f.raise(py))?;
         Conversion::new(py, &converted)
     }
 
     /// Parse `data`, as `convert` takes it, into the document model; a PDF's
     /// pages that await OCR are its `gaps`.
-    #[pyo3(signature = (data, format = None, *, cancel = None))]
+    #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
     fn parse(
         &self,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
+        ocr_pages: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Parsed> {
         let format = format.map(parse_format).transpose()?;
+        let ocr_pages = page_selection(ocr_pages)?;
         let cancel = cancel.map(|token| &token.get().0);
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
-        py.detach(|| self.call(bytes, format, None, cancel, almiladoc::Converter::parse))
+        py.detach(|| self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::parse))
             .map(Parsed)
             .map_err(|f| f.raise(py))
     }
@@ -289,20 +302,24 @@ impl Converter {
     /// each with the verdict `parse` rules for it, and that parse's
     /// diagnostics. Any other format raises `UnsupportedError` with `kind`
     /// `not_inspectable`.
-    #[pyo3(signature = (data, format = None, *, cancel = None))]
+    #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
     fn inspect(
         &self,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
+        ocr_pages: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Inspection> {
         let format = format.map(parse_format).transpose()?;
+        let ocr_pages = page_selection(ocr_pages)?;
         let cancel = cancel.map(|token| &token.get().0);
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
         let inspected = py
-            .detach(|| self.call(bytes, format, None, cancel, almiladoc::Converter::inspect))
+            .detach(|| {
+                self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::inspect)
+            })
             .map_err(|f| f.raise(py))?;
         Inspection::new(py, &inspected)
     }
@@ -330,7 +347,7 @@ impl Converter {
     /// against `max_input_bytes` before it is read, and a directory raises
     /// `OSError` unopened, as does a FIFO or device on Unix. Without a
     /// `format`, the content names it, else the path's extension does.
-    #[pyo3(signature = (path, format = None, *, cancel = None))]
+    #[pyo3(signature = (path, format = None, *, cancel = None, ocr_pages = None))]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 extracts arguments by value, and a borrowed `&Path` would refuse the os.PathLike the stub accepts"
@@ -341,14 +358,16 @@ impl Converter {
         path: PathBuf,
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
+        ocr_pages: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Conversion> {
         let format = format.map(parse_format).transpose()?;
+        let ocr_pages = page_selection(ocr_pages)?;
         let cancel = cancel.map(|token| &token.get().0);
         let converted = py
             .detach(|| {
                 let data = read_file(&path, &self.admission(cancel))?;
                 let fallback = extension_format(&path);
-                self.call(&data, format, fallback, cancel, almiladoc::Converter::convert)
+                self.call(&data, format, fallback, cancel, ocr_pages, almiladoc::Converter::convert)
             })
             .map_err(|f| f.raise(py))?;
         Conversion::new(py, &converted)
@@ -368,10 +387,12 @@ impl Converter {
         format: Option<Format>,
         fallback: Option<Format>,
         cancel: Option<&almiladoc::CancelToken>,
+        ocr_pages: PageSelection,
         run: impl FnOnce(&almiladoc::Converter, Input<'_>) -> Result<T, ConvertError>,
     ) -> Result<T, Failure> {
-        let input =
-            format.map_or_else(|| Input::auto(bytes, fallback), |format| Input::new(bytes, format));
+        let input = format
+            .map_or_else(|| Input::auto(bytes, fallback), |format| Input::new(bytes, format))
+            .with_ocr_pages(ocr_pages);
         let input = match cancel {
             Some(token) => input.with_cancel(token.clone()),
             None => input,
@@ -393,6 +414,27 @@ pub(crate) fn sniff(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<
     let bytes = data.as_bytes();
     admission.check(bytes.len() as u64).map_err(|f| f.raise(py))?;
     Ok(py.detach(|| Format::sniff(bytes)).map(Format::as_str))
+}
+
+/// `None`, `"all"` or an iterable of 1-based page numbers, as `PageSelection`.
+fn page_selection(ocr_pages: Option<&Bound<'_, PyAny>>) -> PyResult<PageSelection> {
+    let refused =
+        || PyValueError::new_err("ocr_pages is None, \"all\" or a set of pages 1 to 4294967295");
+    let Some(ocr_pages) = ocr_pages else { return Ok(PageSelection::None) };
+    if let Ok(name) = ocr_pages.cast::<PyString>() {
+        return if name.to_str()? == "all" { Ok(PageSelection::All) } else { Err(refused()) };
+    }
+    ocr_pages
+        .try_iter()?
+        .map(|page| {
+            let page = page?;
+            let page: u32 = page
+                .extract()
+                .map_err(|error| if page.is_instance_of::<PyInt>() { refused() } else { error })?;
+            NonZeroU32::new(page).ok_or_else(refused)
+        })
+        .collect::<PyResult<BTreeSet<_>>>()
+        .map(PageSelection::Pages)
 }
 
 fn parse_format(name: &str) -> PyResult<Format> {

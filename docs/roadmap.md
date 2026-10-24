@@ -54,7 +54,6 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W8 | ocr-pages | |
 | W9 | ocr-channel | |
 | W10 | ocr-engine | |
 | W11 | rasterizer | |
@@ -77,29 +76,6 @@ release follows W12.
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W8
-
-#### ocr-pages: the caller makes chosen PDF pages gaps
-- **Goal:** a caller OCRs pages whose text layer it distrusts (ADR 0002 decision 2).
-- **Scope:**
-  - `ocr_pages: PageSelection { None (default), All, Pages(BTreeSet<NonZeroU32>) }`, a parse option
-    (`Input::with_ocr_pages`): a selected page becomes a `Page` gap with reason `caller_requested`
-    whatever its text layer; its extracted text is discarded, never merged, and reports no loss.
-    Running headers and folios are still judged across all pages.
-  - A page past `page_count` is refused before extraction as the new variant
-    `ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page, page_count })`, code
-    `invalid_config`, the one variant for every caller-configuration error (ADR 0001 decision 9).
-  - Python via `/change-core-api`: `ocr_pages=None | "all" | set[int]`, the `caller_requested`
-    reason and the `InvalidConfig` error.
-- **Files:** `src/formats/pdf.rs`, `src/model/gap.rs`, `src/{converter,config,error,lib}.rs`;
-  `tests/it/pdf.rs`; `python/`; `README.md`, `docs/support.md`.
-- **Tests:** on the five-page fixture, `All` makes five gaps and `Pages({1, 3})` adds gaps 1 and 3
-  to 2 and 5, page 1's text absent and no `Lost` added; page 6 is refused before extraction;
-  `handmade-header-only.pdf` under `Pages({1})` still strips page 3's running head,
-  which pages 2 and 3 alone would not; Python equals Rust.
-- **Credit:** none.
-- **Depends on:** none. **Size:** about 300 lines. **Tier:** T3.
 
 ### W9
 
@@ -139,7 +115,7 @@ release follows W12.
     failed ones render as `ImageOcr::None`; an unfilled one in a note counts `ocr_gap` in Note.
   - Hand-run phases equal `convert`; Python equals Rust; fuzz target `gap_fill` replays.
 - **Credit:** none; issue #157 moves to Taken.
-- **Depends on:** ocr-pages. **Size:** about 800 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 800 lines. **Tier:** T3.
 
 ### W10
 

@@ -7,8 +7,9 @@ use pyo3::prelude::*;
 use crate::diagnostics::diagnostic_tuple;
 
 use exceptions::{
-    CancelledError, ConfigError, EncryptedError, IncompleteError, InternalError, MalformedError,
-    MissingPartError, NeedsOcrError, ResourceLimitError, UnsupportedError,
+    CancelledError, ConfigError, EncryptedError, IncompleteError, InternalError,
+    InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError,
+    UnsupportedError,
 };
 
 #[expect(
@@ -106,6 +107,14 @@ pub(crate) mod exceptions {
 
     create_exception!(
         almiladoc,
+        InvalidConfigError,
+        ConvertError,
+        "The call's own options do not fit the input: `ocr_pages` names `page`, \
+         past the `page_count` pages the PDF holds."
+    );
+
+    create_exception!(
+        almiladoc,
         CancelledError,
         ConvertError,
         "The call's `CancelToken` was cancelled."
@@ -191,6 +200,7 @@ fn raise(py: Python<'_>, error: &ConvertError, message: String) -> PyErr {
         ConvertError::Encrypted => EncryptedError::new_err(message),
         ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
         ConvertError::Incomplete { .. } => IncompleteError::new_err(message),
+        ConvertError::InvalidConfig(_) => InvalidConfigError::new_err(message),
         ConvertError::Cancelled => CancelledError::new_err(message),
         ConvertError::Internal => InternalError::new_err(message),
         _ => return raise(py, &ConvertError::Internal, message),
@@ -210,6 +220,11 @@ fn raise(py: Python<'_>, error: &ConvertError, message: String) -> PyErr {
         ConvertError::Incomplete { diagnostics, .. } => {
             diagnostic_tuple(py, diagnostics).and_then(|tuple| value.setattr("diagnostics", tuple))
         }
+        ConvertError::InvalidConfig(almiladoc::ConfigError::PageOutOfRange {
+            page,
+            page_count,
+            ..
+        }) => value.setattr("page", *page).and_then(|()| value.setattr("page_count", *page_count)),
         _ => Ok(()),
     });
     detail.err().unwrap_or(raised)

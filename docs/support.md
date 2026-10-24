@@ -83,6 +83,7 @@ What each reader leaves out of the Markdown, and the `DiagnosticCode` that repor
 - `ImageBacked`: it paints an image and reads no text, or an image covers nine tenths of it and each of its texts recurs, digits aside, on another page, or all of them lie in its margins.
 - `VectorDrawn`: it reads no text, paints no image and fills paths.
 - `UnreadableText`: none of these, yet it shows text that reads nothing, unless that text is only whitespace.
+- `CallerRequested`: `Input::with_ocr_pages` selects it, after any reason above; its text is discarded and reports no loss, and running heads and folios are still judged across every page.
 
 A page that needs OCR becomes a gap: under `OnLoss::Fail` the document fails `NeedsOcr` with every such page, before any `Incomplete`, and under `Report` the gap writes `<!-- needs-ocr page N -->`.
 

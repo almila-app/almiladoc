@@ -49,6 +49,8 @@ pub(crate) fn read(
         let unit = scope.unit().model();
         document.blocks.push(Block::UnitStart(unit));
         let verdict = page_verdict(page.as_ref(), &furniture);
+        let verdict =
+            if parse_ctx.ocr_requested(unit.ordinal) { requested(verdict) } else { verdict };
         if let PageVerdict::NeedsOcr { reasons } = &verdict {
             let id = GapId::new(unit, NonZeroU32::MIN);
             let origin = OcrOrigin::Page(unit.ordinal);
@@ -93,6 +95,7 @@ fn extract(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Extracted, ConvertE
     if u64::from(page_count) > max {
         return Err(ConvertError::limit(Limit::Pages, max));
     }
+    parse_ctx.admit_ocr_pages(page_count)?;
     let mut pages = Vec::new();
     pages.resize_with(usize::try_from(page_count).unwrap_or(usize::MAX), || None);
     let mut failed = Ok(());
@@ -318,6 +321,15 @@ fn reasons(page: &Page, text_chars: usize, furniture_only: bool) -> Vec<GapReaso
         reasons.push(GapReason::UnreadableText);
     }
     reasons
+}
+
+fn requested(verdict: PageVerdict) -> PageVerdict {
+    let mut reasons = match verdict {
+        PageVerdict::NeedsOcr { reasons } => reasons,
+        PageVerdict::Text | PageVerdict::Blank => Vec::new(),
+    };
+    reasons.push(GapReason::CallerRequested);
+    PageVerdict::NeedsOcr { reasons }
 }
 
 fn garbled(parse_ctx: &ParseCtx<'_>, page: &Page) {

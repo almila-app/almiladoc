@@ -58,7 +58,8 @@ pub enum OcrOrigin {
     Page(NonZeroU32),
 }
 
-/// Why a page's own text does not stand for what it shows.
+/// Why a page's own text does not stand for what it shows, or that the caller asked for its
+/// OCR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize), serde(rename_all = "snake_case"))]
 #[non_exhaustive]
@@ -76,6 +77,8 @@ pub enum GapReason {
     VectorDrawn,
     /// It shows text that yields no characters for another reason.
     UnreadableText,
+    /// The caller selected it for OCR, whatever its text.
+    CallerRequested,
 }
 
 impl GapReason {
@@ -89,6 +92,7 @@ impl GapReason {
             Self::ImageBacked => "image_backed",
             Self::VectorDrawn => "vector_drawn",
             Self::UnreadableText => "unreadable_text",
+            Self::CallerRequested => "caller_requested",
         }
     }
 }

@@ -10,8 +10,8 @@ use crate::build::docx;
 use crate::support::{configured, converter, corpus, fixture, limited, reporting, trips};
 use almiladoc::model::{GapReason, OcrOrigin, UnitKind};
 use almiladoc::{
-    ConvertError, DiagnosticCode, Format, Input, Limit, LossClass, OnLoss, PageVerdict,
-    UnsupportedKind,
+    ConfigError, ConvertError, DiagnosticCode, Diagnostics, Format, Input, Limit, LossClass,
+    OnLoss, PageSelection, PageVerdict, UnsupportedKind,
 };
 
 /// Each page's verdict and reasons, as `inspect` reports them.
@@ -162,6 +162,123 @@ fn every_page_is_a_unit_in_order_and_inspect_agrees_with_the_parse() {
     }
 }
 
+fn selecting(pages: &[u32]) -> PageSelection {
+    PageSelection::Pages(pages.iter().map(|&page| NonZeroU32::new(page).unwrap()).collect())
+}
+
+fn pdf_input<'a>(bytes: &'a [u8], pages: &PageSelection) -> Input<'a> {
+    Input::new(bytes, Format::Pdf).with_ocr_pages(pages.clone())
+}
+
+fn rows(diagnostics: &Diagnostics) -> Vec<(DiagnosticCode, Option<u32>)> {
+    diagnostics.iter().map(|d| (d.code, d.unit.map(NonZeroU32::get))).collect()
+}
+
+#[test]
+fn a_selected_page_becomes_a_gap_whatever_its_text_and_keeps_its_own_reasons() {
+    use GapReason::{CallerRequested as Asked, ImageBacked as Scanned};
+    let bytes = pdf_fixture("handmade-five-page");
+    type Gaps<'a> = &'a [(u32, &'a [GapReason])];
+    let cases: [(PageSelection, Gaps<'_>, &str); 3] = [
+        (
+            PageSelection::All,
+            &[
+                (1, &[Asked]),
+                (2, &[Scanned, Asked]),
+                (3, &[Asked]),
+                (4, &[Asked]),
+                (5, &[Scanned, Asked]),
+            ],
+            "<!-- needs-ocr page 1 -->\n\n<!-- needs-ocr page 2 -->\n\n<!-- needs-ocr page 3 -->\n\n\
+             <!-- needs-ocr page 4 -->\n\n<!-- needs-ocr page 5 -->\n",
+        ),
+        (
+            selecting(&[1, 3]),
+            &[(1, &[Asked]), (2, &[Scanned]), (3, &[Asked]), (5, &[Scanned])],
+            "<!-- needs-ocr page 1 -->\n\n<!-- needs-ocr page 2 -->\n\n<!-- needs-ocr page 3 -->\n\n\
+             Text on the first page\n\n<!-- needs-ocr page 5 -->\n",
+        ),
+        (selecting(&[5]), &[(2, &[Scanned]), (5, &[Scanned, Asked])], FIVE_PAGES),
+    ];
+    for (pages, gaps, markdown) in cases {
+        let parsed = reporting().parse(pdf_input(&bytes, &pages)).unwrap();
+        let found: Vec<_> =
+            parsed.gaps().map(|gap| (gap.id.unit().ordinal.get(), gap.reasons.clone())).collect();
+        let expected: Vec<_> = gaps.iter().map(|(page, why)| (*page, why.to_vec())).collect();
+        assert_eq!(found, expected, "{pages:?}");
+        let gap_units = gaps.iter().map(|(page, _)| (DiagnosticCode::OcrGap, Some(*page)));
+        assert_eq!(rows(parsed.diagnostics()), gap_units.collect::<Vec<_>>(), "{pages:?}");
+        let conversion = reporting().convert(pdf_input(&bytes, &pages)).unwrap();
+        assert_eq!(conversion.markdown(), markdown, "{pages:?}");
+
+        let inspection = reporting().inspect(pdf_input(&bytes, &pages)).unwrap();
+        let needs: Vec<_> = inspection
+            .pages()
+            .iter()
+            .filter_map(|page| match &page.verdict {
+                PageVerdict::NeedsOcr { reasons } => Some((page.page.get(), reasons.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(needs, expected, "{pages:?}");
+        assert_eq!(inspection.diagnostics(), parsed.diagnostics(), "{pages:?}");
+    }
+}
+
+#[test]
+fn a_selected_page_discards_its_text_without_reporting_its_loss() {
+    let bytes = pdf_fixture("handmade-five-page-garbled");
+    let parsed = reporting().parse(pdf_input(&bytes, &selecting(&[3]))).unwrap();
+    let gaps = [2, 3, 5].map(|page| (DiagnosticCode::OcrGap, Some(page)));
+    assert_eq!(rows(parsed.diagnostics()), gaps);
+    let error = converter(1).convert(pdf_input(&bytes, &selecting(&[3]))).unwrap_err();
+    assert_matches!(&error, ConvertError::NeedsOcr { pages, page_count: 5, .. } if pages == &[2, 3, 5]);
+}
+
+#[test]
+fn a_selected_blank_page_becomes_a_gap() {
+    let bytes = pdf_fixture("handmade-blank");
+    let parsed = reporting().parse(pdf_input(&bytes, &PageSelection::All)).unwrap();
+    let found: Vec<_> = parsed.gaps().map(|gap| gap.reasons.clone()).collect();
+    assert_eq!(found, [vec![GapReason::CallerRequested]]);
+    let reported = reporting().convert(pdf_input(&bytes, &PageSelection::All)).unwrap();
+    assert!(reported.markdown().contains("<!-- needs-ocr page 1 -->"), "{}", reported.markdown());
+    let error = converter(1).convert(pdf_input(&bytes, &PageSelection::All)).unwrap_err();
+    assert_matches!(&error, ConvertError::NeedsOcr { pages, page_count: 1, .. } if pages == &[1]);
+}
+
+#[test]
+fn a_page_past_the_last_is_refused_before_any_page_is_read() {
+    fn refused<T>(result: &Result<T, ConvertError>) -> bool {
+        matches!(
+            result,
+            Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange {
+                page: 6,
+                page_count: 5,
+                ..
+            }))
+        )
+    }
+    let bytes = pdf_fixture("handmade-five-page");
+    let past = selecting(&[2, 6]);
+    assert!(refused(&converter(1).convert(pdf_input(&bytes, &past))));
+    assert!(refused(&converter(1).inspect(pdf_input(&bytes, &past))));
+    let starved = limited(|limits| limits.max_work = 2);
+    assert!(refused(&starved.parse(pdf_input(&bytes, &past))));
+    let error = converter(1).parse(pdf_input(&bytes, &past)).unwrap_err();
+    assert_eq!(error.code(), "invalid_config");
+}
+
+#[test]
+fn other_formats_ignore_the_selection() {
+    let csv = b"name,year\nAda,1843\n";
+    let input = Input::new(csv, Format::Csv).with_ocr_pages(selecting(&[7]));
+    assert_eq!(
+        converter(1).convert(input).unwrap().markdown(),
+        "| name | year |\n| --- | --- |\n| Ada | 1843 |\n"
+    );
+}
+
 #[test]
 fn only_a_pdf_is_inspected() {
     let bytes = docx("<w:p><w:r><w:t>text</w:t></w:r></w:p>");
@@ -222,6 +339,21 @@ fn a_page_holding_only_running_heads_and_folios_is_text_without_them() {
     assert_eq!(markdown.matches("Interviews were transcribed").count(), 2, "{markdown}");
     let spans: Vec<_> = conversion.units().iter().map(|span| span.bytes.len()).collect();
     assert!(spans[0] > 0 && spans[1] == 0 && spans[2] > 0, "{spans:?}");
+}
+
+#[test]
+fn running_heads_are_judged_across_selected_pages_too() {
+    let bytes = pdf_fixture("handmade-header-only");
+    let conversion = reporting().convert(pdf_input(&bytes, &selecting(&[1]))).unwrap();
+    let markdown = conversion.markdown();
+    assert!(markdown.starts_with("<!-- needs-ocr page 1 -->\n\nInterviews were transcribed"));
+    assert!(!markdown.contains("Journal"), "{markdown}");
+    assert_eq!(markdown.matches("Interviews were transcribed").count(), 1, "{markdown}");
+    let heads = [2, 3].map(|page| (DiagnosticCode::HeaderOmitted, Some(page)));
+    assert_eq!(
+        rows(conversion.diagnostics()),
+        [[(DiagnosticCode::OcrGap, Some(1))].as_slice(), &heads].concat()
+    );
 }
 
 #[test]

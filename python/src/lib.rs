@@ -22,6 +22,7 @@ mod _almiladoc {
     #[pymodule_export]
     use crate::errors::exceptions::{
         CancelledError, ConfigError, ConvertError, EncryptedError, IncompleteError, InternalError,
-        MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError, UnsupportedError,
+        InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError,
+        UnsupportedError,
     };
 }

@@ -1,7 +1,8 @@
 # Hand-written stubs for the compiled module. `tests/test_almiladoc.py` checks
 # they stay in step with what the module actually exports.
+import collections.abc
 import os
-from typing import ClassVar, final
+from typing import ClassVar, Literal, final
 
 from typing_extensions import Buffer
 
@@ -22,6 +23,7 @@ __all__ = [
     "IncompleteError",
     "Inspection",
     "InternalError",
+    "InvalidConfigError",
     "Limits",
     "MalformedError",
     "MissingPartError",
@@ -32,6 +34,8 @@ __all__ = [
     "UnsupportedError",
     "sniff",
 ]
+
+_OcrPages = Literal["all"] | collections.abc.Set[int] | None
 
 class ConfigError(ValueError):
     """A `Limits` or `Config` field is out of range."""
@@ -54,7 +58,7 @@ class ConvertError(Exception):
     code: str
     """The failure's stable snake_case name, one per subclass: `unsupported`,
     `needs_ocr`, `malformed`, `encrypted`, `resource_limit`, `missing_part`,
-    `incomplete`, `cancelled` or `internal`."""
+    `incomplete`, `invalid_config`, `cancelled` or `internal`."""
 
 class UnsupportedError(ConvertError):
     """The format is unknown, or cannot be converted at all."""
@@ -110,6 +114,14 @@ class IncompleteError(ConvertError):
 
     diagnostics: tuple[Diagnostic, ...]
     """Every diagnostic of the conversion, the losses among them."""
+
+class InvalidConfigError(ConvertError):
+    """The call's own options do not fit the input."""
+
+    page: int
+    """The page `ocr_pages` names past the document's last."""
+    page_count: int
+    """Pages in the document."""
 
 class CancelledError(ConvertError):
     """The call's `CancelToken` was cancelled."""
@@ -375,26 +387,46 @@ class Converter:
     Without a `format`, a call detects it from the content once the input
     is admitted; a `format` the content contradicts raises
     `UnsupportedError` with `kind` `format_mismatch` and the `detected`
-    format to retry with."""
+    format to retry with.
+
+    `ocr_pages`, `"all"` or a set of 1-based pages, makes each selected PDF
+    page a gap with reason `caller_requested` whatever its text, discarded
+    without loss; a page past the last raises `InvalidConfigError`, any other
+    page outside 1 to 4294967295 `ValueError`, and any other format ignores it."""
 
     def __new__(cls, config: Config | None = None) -> Converter: ...
     @property
     def identity(self) -> Identity:
         """The `Identity` that fixes this converter's output."""
     def convert(
-        self, data: Buffer, format: Format | None = None, *, cancel: CancelToken | None = None
+        self,
+        data: Buffer,
+        format: Format | None = None,
+        *,
+        cancel: CancelToken | None = None,
+        ocr_pages: _OcrPages = None,
     ) -> Conversion:
         """Convert `data`, `bytes` or any contiguous byte buffer, to Markdown.
         `bytes` is read in place; any other buffer is copied once, after its
         length is checked against `max_input_bytes`. CSV carries no
         signature, so it has to be named."""
     def parse(
-        self, data: Buffer, format: Format | None = None, *, cancel: CancelToken | None = None
+        self,
+        data: Buffer,
+        format: Format | None = None,
+        *,
+        cancel: CancelToken | None = None,
+        ocr_pages: _OcrPages = None,
     ) -> Parsed:
         """Parse `data`, as `convert` takes it, into the document model; a PDF's
         pages that await OCR are its `gaps`."""
     def inspect(
-        self, data: Buffer, format: Format | None = None, *, cancel: CancelToken | None = None
+        self,
+        data: Buffer,
+        format: Format | None = None,
+        *,
+        cancel: CancelToken | None = None,
+        ocr_pages: _OcrPages = None,
     ) -> Inspection:
         """Inspect a PDF, as `convert` takes it, without rendering it: its pages,
         each with the verdict `parse` rules for it, and that parse's
@@ -411,6 +443,7 @@ class Converter:
         format: Format | None = None,
         *,
         cancel: CancelToken | None = None,
+        ocr_pages: _OcrPages = None,
     ) -> Conversion:
         """Convert the regular file at `path` to Markdown. Its size is checked
         against `max_input_bytes` before it is read, and a directory raises

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
-use crate::config::ImagePolicy;
+use crate::config::{ConfigError, ImagePolicy, PageSelection};
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::ledger::{CancelToken, Ledger};
@@ -19,6 +19,7 @@ use crate::model::{GridLedger, Unit, UnitKind};
 pub(crate) struct ParseCtx<'a> {
     limits: &'a Limits,
     images: ImagePolicy,
+    ocr_pages: PageSelection,
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
     unit: Cell<Option<Unit>>,
@@ -78,6 +79,7 @@ impl<'a> ParseCtx<'a> {
         Self {
             limits,
             images: ImagePolicy::Placeholder,
+            ocr_pages: PageSelection::None,
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
             unit: Cell::default(),
@@ -96,6 +98,40 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn with_images(self, images: ImagePolicy) -> Self {
         Self { images, ..self }
+    }
+
+    pub(crate) fn with_ocr_pages(self, ocr_pages: PageSelection) -> Self {
+        Self { ocr_pages, ..self }
+    }
+
+    #[cfg_attr(
+        not(feature = "pdf"),
+        expect(dead_code, reason = "only the PDF reader selects pages")
+    )]
+    pub(crate) fn ocr_requested(&self, page: NonZeroU32) -> bool {
+        match &self.ocr_pages {
+            PageSelection::None => false,
+            PageSelection::All => true,
+            PageSelection::Pages(pages) => pages.contains(&page),
+        }
+    }
+
+    /// Refuses a selection naming a page past `page_count`.
+    #[cfg_attr(
+        not(feature = "pdf"),
+        expect(dead_code, reason = "only the PDF reader selects pages")
+    )]
+    pub(crate) fn admit_ocr_pages(&self, page_count: u32) -> Result<(), ConvertError> {
+        let PageSelection::Pages(pages) = &self.ocr_pages else { return Ok(()) };
+        match pages.last() {
+            Some(page) if page.get() > page_count => {
+                Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange {
+                    page: page.get(),
+                    page_count,
+                }))
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn image_loss(&self, loss: ImageLoss, region: Region) {

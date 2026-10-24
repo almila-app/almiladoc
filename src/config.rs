@@ -1,5 +1,8 @@
 //! What a [`Converter`](crate::Converter) is built from, and why it may refuse it.
 
+use std::collections::BTreeSet;
+use std::num::NonZeroU32;
+
 use crate::diagnostics::OnLoss;
 use crate::limits::{Limit, Limits};
 
@@ -128,7 +131,20 @@ impl ImagePolicy {
     }
 }
 
-/// Why a [`Config`] was refused.
+/// The PDF pages a parse makes gaps whatever their text layer, for the caller to OCR; any
+/// other format ignores it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum PageSelection {
+    /// No page.
+    #[default]
+    None,
+    /// Every page.
+    All,
+    /// These one-based pages.
+    Pages(BTreeSet<NonZeroU32>),
+}
+
+/// Why a [`Config`] or a call's option was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
@@ -154,6 +170,15 @@ pub enum ConfigError {
     Threads {
         /// [`Config::MAX_THREADS`].
         max: usize,
+    },
+    /// [`PageSelection::Pages`] names a page past the document's last.
+    #[error("ocr_pages names page {page}, past the {page_count} pages the document holds")]
+    #[non_exhaustive]
+    PageOutOfRange {
+        /// The highest page selected.
+        page: u32,
+        /// Pages in the document.
+        page_count: u32,
     },
 }
 
@@ -226,6 +251,10 @@ mod tests {
                 "max_nesting_depth must not exceed 1024",
             ),
             (ConfigError::Threads { max: 64 }, "threads must be between 1 and 64"),
+            (
+                ConfigError::PageOutOfRange { page: 6, page_count: 5 },
+                "ocr_pages names page 6, past the 5 pages the document holds",
+            ),
         ];
         for (error, message) in cases {
             assert_eq!(error.to_string(), message);

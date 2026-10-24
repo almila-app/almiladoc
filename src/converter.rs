@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::Format;
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, PageSelection};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Diagnostics, OnLoss};
 use crate::error::{ConvertError, UnsupportedKind};
@@ -244,10 +244,10 @@ impl Converter {
         input: Input<'_>,
         work: impl FnOnce(ParseCtx<'_>, Format) -> Result<T, ConvertError> + Send,
     ) -> Result<T, ConvertError> {
-        let Input { bytes, format, cancel } = input;
+        let Input { bytes, format, cancel, ocr_pages } = input;
         self.admit(bytes, cancel.as_ref())?;
         self.on_pool(|| {
-            let parse_ctx = self.parse_ctx(cancel.as_ref());
+            let parse_ctx = self.parse_ctx(cancel.as_ref()).with_ocr_pages(ocr_pages);
             let format = format.resolve(&parse_ctx, bytes)?;
             work(parse_ctx, format)
         })
@@ -269,13 +269,14 @@ impl Converter {
     }
 }
 
-/// One document's bytes, the format they are parsed as, and the token that
-/// may cancel its conversion.
+/// One document's bytes, the format they are parsed as, the token that may
+/// cancel its conversion, and the PDF pages its caller will OCR.
 #[derive(Clone)]
 pub struct Input<'a> {
     bytes: &'a [u8],
     format: FormatSelection,
     cancel: Option<CancelToken>,
+    ocr_pages: PageSelection,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,7 +304,12 @@ impl<'a> Input<'a> {
     /// [`Format::from_extension`] may supply.
     #[must_use]
     pub fn new(bytes: &'a [u8], format: Format) -> Self {
-        Self { bytes, format: FormatSelection::Explicit(format), cancel: None }
+        Self {
+            bytes,
+            format: FormatSelection::Explicit(format),
+            cancel: None,
+            ocr_pages: PageSelection::None,
+        }
     }
 
     /// Detect the input's format under the conversion's own limits, using `fallback` only
@@ -317,7 +323,12 @@ impl<'a> Input<'a> {
     /// ```
     #[must_use]
     pub fn auto(bytes: &'a [u8], fallback: Option<Format>) -> Self {
-        Self { bytes, format: FormatSelection::Detect { fallback }, cancel: None }
+        Self {
+            bytes,
+            format: FormatSelection::Detect { fallback },
+            cancel: None,
+            ocr_pages: PageSelection::None,
+        }
     }
 
     /// This input, its conversion failing [`ConvertError::Cancelled`] once
@@ -346,6 +357,48 @@ impl<'a> Input<'a> {
     pub fn with_cancel(self, token: CancelToken) -> Self {
         Self { cancel: Some(token), ..self }
     }
+
+    /// This input, each PDF page `pages` selects becoming a gap with reason
+    /// [`GapReason::CallerRequested`](crate::model::GapReason::CallerRequested)
+    /// whatever its text layer: its text is discarded and reports no loss,
+    /// while running heads and folios are still judged across every page.
+    /// Any other format ignores it.
+    ///
+    /// # Errors
+    ///
+    /// A call on it fails [`ConvertError::InvalidConfig`] with
+    /// [`ConfigError::PageOutOfRange`] before any page is read when `pages`
+    /// names one past the document's last.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "pdf")] {
+    /// use almiladoc::model::GapReason;
+    /// use almiladoc::{Config, ConfigError, ConvertError, Converter, Format, Input, PageSelection};
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    /// let pdf = std::fs::read(path)?;
+    /// let converter = Converter::new(Config::default())?;
+    ///
+    /// let pages = PageSelection::Pages([1.try_into()?].into());
+    /// let parsed = converter.parse(Input::new(&pdf, Format::Pdf).with_ocr_pages(pages))?;
+    /// let reasons: Vec<_> = parsed.gaps().map(|gap| gap.reasons.clone()).collect();
+    /// assert_eq!(reasons, [vec![GapReason::CallerRequested], vec![GapReason::ImageBacked]]);
+    ///
+    /// let past = PageSelection::Pages([3.try_into()?].into());
+    /// let refused = converter.parse(Input::new(&pdf, Format::Pdf).with_ocr_pages(past));
+    /// assert!(matches!(
+    ///     refused,
+    ///     Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page: 3, page_count: 2, .. }))
+    /// ));
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_ocr_pages(self, pages: PageSelection) -> Self {
+        Self { ocr_pages: pages, ..self }
+    }
 }
 
 impl fmt::Debug for Input<'_> {
@@ -353,6 +406,7 @@ impl fmt::Debug for Input<'_> {
         f.debug_struct("Input")
             .field("len", &self.bytes.len())
             .field("format", &self.format)
+            .field("ocr_pages", &self.ocr_pages)
             .finish()
     }
 }
@@ -949,7 +1003,7 @@ mod tests {
     #[test]
     fn debug_shows_no_input_bytes() {
         let shown = format!("{:?}", Input::new(b"secret", Format::Csv));
-        assert_eq!(shown, "Input { len: 6, format: Explicit(Csv) }");
+        assert_eq!(shown, "Input { len: 6, format: Explicit(Csv), ocr_pages: None }");
     }
 
     fn corpus(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
