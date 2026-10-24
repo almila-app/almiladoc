@@ -1,4 +1,4 @@
-use crate::model::{AnchorId, Inline, List, Table, inlines_to_plain_text};
+use crate::model::{AnchorId, Gap, Inline, List, Table, inlines_to_plain_text};
 
 /// One block-level piece of a document body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,6 +43,8 @@ pub enum Block {
     Rule,
     /// A displayed formula, as LaTeX math without delimiters.
     Math(String),
+    /// Content that awaits OCR, occurring only in the document body.
+    Gap(Gap),
 }
 
 impl Block {
@@ -72,7 +74,7 @@ impl Block {
                     .map(|cell| join(cell.blocks.iter().map(Self::plain_text).collect()))
                     .collect(),
             ),
-            Self::Rule | Self::UnitStart(_) => String::new(),
+            Self::Rule | Self::UnitStart(_) | Self::Gap(_) => String::new(),
         }
     }
 }

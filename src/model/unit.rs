@@ -11,6 +11,8 @@ pub enum UnitKind {
     Sheet,
     /// A publication's spine item.
     SpineItem,
+    /// A PDF page.
+    Page,
 }
 
 impl UnitKind {
@@ -21,6 +23,7 @@ impl UnitKind {
             Self::Slide => "slide",
             Self::Sheet => "sheet",
             Self::SpineItem => "spine_item",
+            Self::Page => "page",
         }
     }
 }

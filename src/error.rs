@@ -55,9 +55,10 @@ pub enum ConvertError {
         /// where the PDF engine does not say.
         max: u64,
     },
-    /// Some pages of a PDF are scanned or image-only and need OCR, which
-    /// almiladoc does not do. Nothing is returned for the document, so
-    /// output missing those pages never passes as complete.
+    /// Some pages of a PDF await OCR, which almiladoc does not do, and the
+    /// configuration's [`OnLoss`](crate::OnLoss) is `Fail`. It is raised
+    /// before [`ConvertError::Incomplete`], so output missing those pages
+    /// never passes as complete.
     #[error("{}", needs_ocr(pages, *page_count))]
     #[non_exhaustive]
     NeedsOcr {
@@ -102,8 +103,8 @@ pub enum UnsupportedKind {
         /// The format the content was recognized as.
         detected: Format,
     },
-    /// A PDF has no document-model form; it converts to Markdown only.
-    PdfDocumentModel,
+    /// [`Converter::inspect`](crate::Converter::inspect) reads only a PDF.
+    NotInspectable,
 }
 
 impl UnsupportedKind {
@@ -114,7 +115,7 @@ impl UnsupportedKind {
     /// use almiladoc::UnsupportedKind;
     ///
     /// assert_eq!(UnsupportedKind::UnknownFormat.as_str(), "unknown_format");
-    /// assert_eq!(UnsupportedKind::PdfDocumentModel.as_str(), "pdf_document_model");
+    /// assert_eq!(UnsupportedKind::NotInspectable.as_str(), "not_inspectable");
     /// ```
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
@@ -122,7 +123,7 @@ impl UnsupportedKind {
             Self::UnknownFormat => "unknown_format",
             Self::FeatureDisabled { .. } => "feature_disabled",
             Self::FormatMismatch { .. } => "format_mismatch",
-            Self::PdfDocumentModel => "pdf_document_model",
+            Self::NotInspectable => "not_inspectable",
         }
     }
 }
@@ -137,9 +138,7 @@ impl fmt::Display for UnsupportedKind {
             Self::FormatMismatch { detected } => {
                 write!(f, "the content is {detected}, not the format named")
             }
-            Self::PdfDocumentModel => {
-                f.write_str("a PDF has no document model; convert it to Markdown")
-            }
+            Self::NotInspectable => f.write_str("only a PDF can be inspected"),
         }
     }
 }
@@ -378,12 +377,12 @@ mod tests {
             UnsupportedKind::UnknownFormat,
             UnsupportedKind::FeatureDisabled { feature: "pdf" },
             UnsupportedKind::FormatMismatch { detected: Format::Rtf },
-            UnsupportedKind::PdfDocumentModel,
+            UnsupportedKind::NotInspectable,
         ];
         let names: Vec<&str> = kinds.iter().map(UnsupportedKind::as_str).collect();
         assert_eq!(
             names,
-            ["unknown_format", "feature_disabled", "format_mismatch", "pdf_document_model"]
+            ["unknown_format", "feature_disabled", "format_mismatch", "not_inspectable"]
         );
         assert!(names.iter().all(|name| is_snake_case(name)), "{names:?}");
     }
@@ -432,8 +431,8 @@ mod tests {
                 "unsupported input: the content is rtf, not the format named",
             ),
             (
-                ConvertError::from(UnsupportedKind::PdfDocumentModel),
-                "unsupported input: a PDF has no document model; convert it to Markdown",
+                ConvertError::from(UnsupportedKind::NotInspectable),
+                "unsupported input: only a PDF can be inspected",
             ),
             (ConvertError::Encrypted, "document is encrypted"),
             (

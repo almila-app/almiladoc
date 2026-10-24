@@ -131,8 +131,8 @@ HTML_ARM = (
 HTML_IN_DOCSTRING = (FORMAT_LITERAL, "`.ppsx`, ...)", '`.ppsx`, "html", ...)')
 TOO_LARGE = (
     "src/error.rs",
-    "    PdfDocumentModel,",
-    "    PdfDocumentModel,\n    /// Too large.\n    TooLarge,",
+    "    NotInspectable,",
+    "    NotInspectable,\n    /// Too large.\n    TooLarge,",
 )
 MAX_SLIDES = (
     "src/limits.rs",

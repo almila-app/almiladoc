@@ -1,0 +1,13 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+Text on the first page
+
+<!-- needs-ocr page 2 -->
+
+Text on the first page
+
+Text on the first page
+
+<!-- needs-ocr page 5 -->

@@ -1,0 +1,8 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+ocr_gap deferred body unit=1 count=1
+ocr_gap deferred body unit=2 count=1
+ocr_gap deferred body unit=3 count=1
+under fail: needs_ocr

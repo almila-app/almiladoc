@@ -72,7 +72,7 @@ diagnostic_codes! {
     /// or that a reference names and the package lacks, and a part that holds
     /// formatting alone when it may hide content.
     PartUnreadable = "part_unreadable", Lost;
-    /// A listed sheet, slide, notes page or chapter that is absent or unreadable.
+    /// A listed sheet, slide, notes page, chapter or PDF page that is absent or unreadable.
     UnitUnreadable = "unit_unreadable", Lost;
     /// A cell or record whose value cannot be decoded or was never cached.
     CellValueUnreadable = "cell_value_unreadable", Lost;
@@ -92,6 +92,8 @@ diagnostic_codes! {
     ImageUnavailable = "image_unavailable", Lost;
     /// An asset reference stands in for image content.
     ImagePlaceholder = "image_placeholder", Deferred;
+    /// A page that awaits OCR: its marker stands where its text would be.
+    OcrGap = "ocr_gap", Deferred;
     /// Image content dropped by the selected image policy.
     ImageOmitted = "image_omitted", Omitted;
     /// A picture the document shows that gets no place in the output.
@@ -122,7 +124,9 @@ diagnostic_codes! {
     RecoveredStreamOrder = "recovered_stream_order", Lost;
     /// A form control's state and caption not read.
     FormControlUnread = "form_control_unread", Lost;
-    /// Text from fonts whose encoding is broken.
+    /// Text runs suppressed for their font's encoding (a composite font's codes nothing maps,
+    /// or a simple font's that decode to binary noise) on a page whose other text renders, and
+    /// each code a composite font leaves out of a run whose other codes it reads.
     GarbledFontEncoding = "garbled_font_encoding", Lost;
     /// Header content, or slide master and layout content, dropped by policy.
     HeaderOmitted = "header_omitted", Omitted;
@@ -352,7 +356,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const CODES: [(&str, LossClass); 42] = [
+    const CODES: [(&str, LossClass); 43] = [
         ("part_unreadable", LossClass::Lost),
         ("unit_unreadable", LossClass::Lost),
         ("cell_value_unreadable", LossClass::Lost),
@@ -364,6 +368,7 @@ mod tests {
         ("unresolved_entity", LossClass::Lost),
         ("image_unavailable", LossClass::Lost),
         ("image_placeholder", LossClass::Deferred),
+        ("ocr_gap", LossClass::Deferred),
         ("image_omitted", LossClass::Omitted),
         ("image_unplaced", LossClass::Lost),
         ("embedded_object", LossClass::Lost),

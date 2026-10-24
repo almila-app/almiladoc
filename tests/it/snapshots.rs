@@ -3,7 +3,7 @@
 //! One snapshot per fixture of the single conversion result under
 //! `OnLoss::Report`: the Markdown output, or the terminal error. A fixture
 //! with diagnostics has a second snapshot, `<name>.diagnostics`, of each
-//! diagnostic and the verdict under `OnLoss::Fail`. Logs are never
+//! diagnostic and the outcome of converting it under `OnLoss::Fail`. Logs are never
 //! snapshotted. A reader that panics fails the sweep. Fixtures under
 //! `abuse/` are resource-abuse shapes, each asserted against its limit in
 //! `tests/it/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
@@ -12,7 +12,7 @@
 
 use crate::support::{self, converter, fixture, fixture_root, format_of, inlines, reporting, walk};
 use almiladoc::model::{Block, Document, ImageSource, Inline, inlines_are_empty};
-use almiladoc::{Conversion, ConvertError, Diagnostics, Format, Input};
+use almiladoc::{Conversion, ConvertError, Converter, Diagnostics, Format, Input};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event as XmlEvent};
@@ -22,10 +22,10 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
-fn convert_file(path: &Path) -> Result<Conversion, ConvertError> {
+fn convert_file(converter: &Converter, path: &Path) -> Result<Conversion, ConvertError> {
     let bytes = std::fs::read(path).unwrap();
     let format = format_of(path, &bytes).unwrap();
-    reporting().convert(Input::new(&bytes, format))
+    converter.convert(Input::new(&bytes, format))
 }
 
 fn document(rel: &str, format: Format) -> Document {
@@ -49,8 +49,11 @@ fn assert_snapshot(name: &str, value: &str) {
     settings.bind(|| insta::assert_snapshot!(format!("snapshots__{name}"), value));
 }
 
-/// Each diagnostic on a line, then what `OnLoss::Fail` makes of them.
-fn diagnostics_snapshot(diagnostics: &Diagnostics) -> String {
+/// Each diagnostic on a line, then the code of the error `failed` ended in, else `complete`.
+fn diagnostics_snapshot(
+    diagnostics: &Diagnostics,
+    failed: &Result<Conversion, ConvertError>,
+) -> String {
     let mut out = String::new();
     for d in diagnostics.iter() {
         write!(out, "{} {} {}", d.code.as_str(), d.class.as_str(), d.region.as_str()).unwrap();
@@ -59,7 +62,7 @@ fn diagnostics_snapshot(diagnostics: &Diagnostics) -> String {
         }
         writeln!(out, " count={}", d.count).unwrap();
     }
-    let verdict = if diagnostics.has_loss() { "incomplete" } else { "complete" };
+    let verdict = failed.as_ref().map_or_else(ConvertError::code, |_| "complete");
     writeln!(out, "under fail: {verdict}").unwrap();
     out
 }
@@ -95,7 +98,7 @@ fn sweep(pdf: bool) {
         corpus_cases().into_iter().filter(|(path, _)| is_pdf(path) == pdf).collect();
     assert!(!cases.is_empty(), "no fixtures in this sweep");
     for (path, name) in cases {
-        let (output, diagnostics) = outcome(&name, convert_file(&path));
+        let (output, diagnostics) = outcome(&name, convert_file(&reporting(), &path));
         if let Some(expected) = expected_outcome(&path) {
             let is_err = output.starts_with("ERROR: ");
             match expected {
@@ -111,7 +114,8 @@ fn sweep(pdf: bool) {
             let stale = snapshot_dir().join(format!("snapshots__{diagnostics_name}.snap"));
             assert!(!stale.exists(), "{name} reports nothing, yet {} exists", stale.display());
         } else {
-            assert_snapshot(&diagnostics_name, &diagnostics_snapshot(&diagnostics));
+            let failed = convert_file(&converter(1), &path);
+            assert_snapshot(&diagnostics_name, &diagnostics_snapshot(&diagnostics, &failed));
         }
     }
 }
@@ -321,19 +325,6 @@ fn retyped_fixtures_type_only_parts_they_hold() {
 }
 
 #[test]
-#[cfg(feature = "pdf")]
-fn scanned_pages_are_reported_not_dropped() {
-    match convert_file(&fixture_root().join("pdf/handmade-mixed.pdf"))
-        .map(Conversion::into_markdown)
-    {
-        Err(ConvertError::NeedsOcr { pages, page_count, .. }) => {
-            assert_eq!((pages, page_count), (vec![2], 2));
-        }
-        other => panic!("expected NeedsOcr, got {other:?}"),
-    }
-}
-
-#[test]
 fn embedded_ole_payload_is_retained() {
     let doc = document("pptx/handmade-order.pptx", Format::Pptx);
     let ole = doc
@@ -407,7 +398,7 @@ fn samples_sweep() {
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let (output, _) = outcome(&name, convert_file(&path));
+        let (output, _) = outcome(&name, convert_file(&reporting(), &path));
         assert_snapshot(&format!("sample__{name}"), &digest(&output));
     }
 }

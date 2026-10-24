@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use almiladoc::{ConvertError, Format, Input};
+use almiladoc::model::OcrOrigin;
+use almiladoc::{ConvertError, Format, Input, PageVerdict};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
@@ -24,8 +25,7 @@ impl CancelToken {
     }
 
     /// Cancel every call holding this token, from any thread: each raises
-    /// `CancelledError` at its next unit of work, a PDF only before its
-    /// extraction starts.
+    /// `CancelledError` at its next unit of work, a PDF's between its pages.
     fn cancel(&self) {
         self.0.cancel();
     }
@@ -78,8 +78,8 @@ pub(crate) struct Conversion {
     /// Source units as `(kind, ordinal, start, end)`, with Unicode string offsets.
     #[pyo3(get)]
     units: Py<PyTuple>,
-    /// True when no content was lost; only `OnLoss.REPORT` returns a
-    /// conversion for which it is false.
+    /// True when no content was lost and no page awaits OCR; only
+    /// `OnLoss.REPORT` returns a conversion for which it is false.
     #[pyo3(get)]
     is_complete: bool,
 }
@@ -104,6 +104,42 @@ impl Conversion {
             markdown: PyString::new(py, conversion.markdown()).unbind(),
             diagnostics: diagnostic_tuple(py, conversion.diagnostics())?.unbind(),
             is_complete: conversion.is_complete(),
+        })
+    }
+}
+
+/// A gap as `(unit_kind, unit_ordinal, ordinal, page, reasons)`.
+type GapRow = (&'static str, u32, u32, Option<u32>, Vec<&'static str>);
+
+/// What `Converter.inspect` reports of a PDF.
+#[pyclass(frozen, module = "almiladoc")]
+pub(crate) struct Inspection {
+    /// The pages the document holds.
+    #[pyo3(get)]
+    page_count: u32,
+    /// Every page in order as `(page, verdict, reasons)`: its 1-based number,
+    /// `text`, `no_text` or `needs_ocr`, and for `needs_ocr` why its own
+    /// text does not serve.
+    #[pyo3(get)]
+    pages: Py<PyTuple>,
+    /// Every `Diagnostic` a parse of the document reports.
+    #[pyo3(get)]
+    diagnostics: Py<PyTuple>,
+}
+
+impl Inspection {
+    fn new(py: Python<'_>, inspection: &almiladoc::Inspection) -> PyResult<Self> {
+        let pages = inspection.pages().iter().map(|page| {
+            let reasons: Vec<&str> = match &page.verdict {
+                PageVerdict::NeedsOcr { reasons } => reasons.iter().map(|r| r.as_str()).collect(),
+                _ => Vec::new(),
+            };
+            (page.page.get(), page.verdict.as_str(), reasons)
+        });
+        Ok(Self {
+            page_count: inspection.page_count(),
+            pages: PyTuple::new(py, pages)?.unbind(),
+            diagnostics: diagnostic_tuple(py, inspection.diagnostics())?.unbind(),
         })
     }
 }
@@ -141,6 +177,26 @@ impl Parsed {
     /// Python 3.11 reads only under a raised recursion limit.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         py.detach(|| self.0.to_json()).map_err(|e| convert_error(py, &e))
+    }
+
+    /// Every gap the document awaits OCR in, in document order, as
+    /// `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the unit it stands
+    /// in, its place among that unit's gaps, the 1-based PDF page OCR reads to
+    /// fill it, and why the page's own text does not serve.
+    #[getter]
+    fn gaps(&self) -> Vec<GapRow> {
+        self.0
+            .gaps()
+            .map(|gap| {
+                let page = match gap.origin {
+                    OcrOrigin::Page(page) => Some(page.get()),
+                    _ => None,
+                };
+                let unit = gap.id.unit();
+                let reasons = gap.reasons.iter().map(|reason| reason.as_str()).collect();
+                (unit.kind.as_str(), unit.ordinal.get(), gap.id.ordinal().get(), page, reasons)
+            })
+            .collect()
     }
 
     /// Every embedded asset as `(id, media_type, data)`, `id` being the
@@ -210,9 +266,8 @@ impl Converter {
         Conversion::new(py, &converted)
     }
 
-    /// Parse `data`, as `convert` takes it, into the document model. A PDF
-    /// has no model form and raises `UnsupportedError` with `kind`
-    /// `pdf_document_model`.
+    /// Parse `data`, as `convert` takes it, into the document model; a PDF's
+    /// pages that await OCR are its `gaps`.
     #[pyo3(signature = (data, format = None, *, cancel = None))]
     fn parse(
         &self,
@@ -228,6 +283,28 @@ impl Converter {
         py.detach(|| self.call(bytes, format, None, cancel, almiladoc::Converter::parse))
             .map(Parsed)
             .map_err(|f| f.raise(py))
+    }
+
+    /// Inspect a PDF, as `convert` takes it, without rendering it: its pages,
+    /// each with the verdict `parse` rules for it, and that parse's
+    /// diagnostics. Any other format raises `UnsupportedError` with `kind`
+    /// `not_inspectable`.
+    #[pyo3(signature = (data, format = None, *, cancel = None))]
+    fn inspect(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        format: Option<&str>,
+        cancel: Option<&Bound<'_, CancelToken>>,
+    ) -> PyResult<Inspection> {
+        let format = format.map(parse_format).transpose()?;
+        let cancel = cancel.map(|token| &token.get().0);
+        let data = buffer(py, data, &self.admission(cancel))?;
+        let bytes = data.as_bytes();
+        let inspected = py
+            .detach(|| self.call(bytes, format, None, cancel, almiladoc::Converter::inspect))
+            .map_err(|f| f.raise(py))?;
+        Inspection::new(py, &inspected)
     }
 
     /// The format `data`'s content names, detected as a call without a

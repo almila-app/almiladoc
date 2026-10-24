@@ -16,6 +16,7 @@ mod sheet;
 use crate::Format;
 use crate::ctx::ParseCtx;
 use crate::error::{ConvertError, UnsupportedKind};
+use crate::inspect::PageVerdict;
 use crate::model::Document;
 
 pub(crate) fn parse(
@@ -33,11 +34,29 @@ pub(crate) fn parse(
         Format::Rtf => rtf::parse(parse_ctx, bytes),
         Format::Doc => doc::parse(parse_ctx, bytes),
         Format::Ppt => ppt::parse(parse_ctx, bytes),
-        Format::Pdf => Err(ConvertError::from(if cfg!(feature = "pdf") {
-            UnsupportedKind::PdfDocumentModel
-        } else {
-            UnsupportedKind::FeatureDisabled { feature: "pdf" }
-        })),
+        #[cfg(feature = "pdf")]
+        Format::Pdf => pdf::parse(parse_ctx, bytes),
+        #[cfg(not(feature = "pdf"))]
+        Format::Pdf => Err(ConvertError::from(UnsupportedKind::FeatureDisabled { feature: "pdf" })),
+    }
+}
+
+/// A PDF's document and each page's verdict, in page order; any other format is not inspectable.
+#[cfg_attr(
+    not(feature = "pdf"),
+    expect(unused_variables, reason = "without the PDF reader nothing reads the input")
+)]
+pub(crate) fn inspect(
+    parse_ctx: &ParseCtx<'_>,
+    bytes: &[u8],
+    format: Format,
+) -> Result<(Document, Vec<PageVerdict>), ConvertError> {
+    match format {
+        #[cfg(feature = "pdf")]
+        Format::Pdf => pdf::read(parse_ctx, bytes),
+        #[cfg(not(feature = "pdf"))]
+        Format::Pdf => Err(ConvertError::from(UnsupportedKind::FeatureDisabled { feature: "pdf" })),
+        _ => Err(ConvertError::from(UnsupportedKind::NotInspectable)),
     }
 }
 

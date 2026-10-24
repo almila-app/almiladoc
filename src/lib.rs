@@ -25,6 +25,7 @@ mod diagnostics;
 mod error;
 mod formats;
 mod identity;
+mod inspect;
 #[cfg(feature = "serde")]
 mod json;
 mod ledger;
@@ -39,6 +40,7 @@ pub use converter::{Conversion, Converter, Input, Parsed, UnitSpan};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, LossClass, OnLoss, Region};
 pub use error::{ConvertError, PartName, UnsupportedKind};
 pub use identity::EngineIdentity;
+pub use inspect::{Inspection, PageInspection, PageVerdict};
 #[cfg(feature = "serde")]
 pub use json::JSON_SCHEMA_VERSION;
 pub use ledger::CancelToken;
@@ -50,6 +52,7 @@ const _: () = {
     assert_send_sync::<ConfigError>();
     assert_send_sync::<Converter>();
     assert_send_sync::<Parsed>();
+    assert_send_sync::<Inspection>();
 };
 
 #[cfg(doctest)]
@@ -90,13 +93,13 @@ pub enum Format {
     Docx,
     /// OpenDocument Text (`.odt`).
     Odt,
-    /// Converted with [pdf-inspector], which emits Markdown directly:
-    /// [`Converter::parse`] is unsupported for PDFs, and a build without the
-    /// `pdf` feature converts none. Scanned or image-only pages need OCR,
-    /// which almiladoc does not do: the document errors with
-    /// [`ConvertError::NeedsOcr`] naming them.
+    /// Read page by page with [unpdf], each page a unit; a build without the
+    /// `pdf` feature converts none. A scanned or image-only page becomes a
+    /// [`Gap`](model::Gap) awaiting OCR, which almiladoc does not do: under
+    /// [`OnLoss::Fail`] the document errors with [`ConvertError::NeedsOcr`]
+    /// naming those pages.
     ///
-    /// [pdf-inspector]: https://docs.rs/pdf-inspector
+    /// [unpdf]: https://docs.rs/unpdf
     Pdf,
     /// Binary PowerPoint 97-2003 (`.ppt`, `.pps`, `.pot`).
     Ppt,

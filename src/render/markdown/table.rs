@@ -208,7 +208,7 @@ fn cell_block_text(
                 push_math_span(tex, InlineContext::TableCell, out).map(|()| true)
             })
         }
-        Block::Rule | Block::UnitStart(_) => Ok(()),
+        Block::Rule | Block::UnitStart(_) | Block::Gap(_) => Ok(()),
     }
 }
 

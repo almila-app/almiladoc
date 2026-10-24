@@ -1,38 +1,43 @@
 ---
-source: tests/snapshots.rs
-expression: output
+source: tests/it/snapshots.rs
+expression: value
 ---
 # Fixture Document
 
-Plain paragraph with **bold**, *italic*, and <s>struck</s> runs. **Style-bold paragraph with a** NotBold-styled span **inside.**
+Plain paragraph with **bold**, _italic_, and ~~struck~~ runs. **Style-bold paragraph with a** NotBold-styled span **inside.**
 
 ## Lists
 
-1.First numbered
-2.Second numbered
-a)Alpha sub one
-b)Alpha sub two
-i.Roman sub sub
-3.Third numbered Interrupting paragraph between lists.
-4.Fourth, continuing the count IV.Roman starting at four
-V.Roman five •Bullet one •Bullet two ◦Nested bullet **Table** Wide head End Tall B2 C2
+1. First numbered
+2. Second numbered a)Alpha sub one b)Alpha sub two i.Roman sub sub
+3. Third numbered Interrupting paragraph between lists.
+4. Fourth, continuing the count IV.Roman starting at four V.Roman five
+
+- Bullet one
+- Bullet two
+- Nested bullet
+
+## Table
+
+Wide head End Tall B2 C2
+
 B3 C3
 
 ## Notes and special text
 
-Music clef 𝄞 appears before this footnote¹ reference. An endnote follows here<sup>i</sup>. Persian with ZWNJ: میخواهم. Family emoji: 👨👩👧. Markdown specials: *stars* _under_ [bracket] `tick` #hash 1. dotted | pipe.
+Music clef 𝄞 appears before this footnote1 reference. An endnote follows herei. Persian with ZWNJ: می‌خواهم. Family emoji: 👨‍👩‍👧 . Markdown specials: \*stars* \_under_ \[bracket] \`tick` #hash 1. dotted | pipe.
 
 ## Links and anchors
 
-External link to example. Relative link to <u>a sibling file</u>. This plain paragraph carries a bookmark. Jump to <u>the bookmarked paragraph</u>.
+External link to example. Relative link to a sibling file. This plain paragraph carries a bookmark. Jump to the bookmarked paragraph.
 
 ## Objects
 
-Inline image: done.
+Inline image:  done.
 
-### Inside the text box.
+Inside the text box.
 
-Text box: after the box.
+Text box:  after the box.
 
 ## Quote and code
 

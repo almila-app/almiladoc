@@ -17,8 +17,8 @@ use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{
-    Block, Cell, CellSlot, Document, Inline, LinkTarget, List, MarkerKind, Note, Table, Unit,
-    UnitKind, inlines_are_empty,
+    Block, Cell, CellSlot, Document, Inline, LinkTarget, List, MarkerKind, Note, OcrOrigin, Table,
+    Unit, UnitKind, inlines_are_empty,
 };
 use crate::shared::uri::is_safe_link;
 use crate::{ImagePolicy, UnitSpan};
@@ -231,6 +231,10 @@ pub(crate) fn render_losses(
     .into_iter()
     .filter(|&(_, _, _, count)| count > 0)
     .collect();
+    losses.extend(doc.blocks.iter().filter_map(|block| match block {
+        Block::Gap(gap) => Some((DiagnosticCode::OcrGap, Region::Body, Some(gap.id.unit()), 1)),
+        _ => None,
+    }));
     losses.extend(
         body.images
             .into_iter()
@@ -442,7 +446,11 @@ fn children(block: &Block) -> Vec<Node<'_>> {
         Block::List(list) => list.items.iter().map(|item| Node::Blocks(&item.blocks)).collect(),
         Block::Table(t) => Cells::of(t).map(Node::Cells).into_iter().collect(),
         Block::BlockQuote(blocks) => vec![Node::Blocks(blocks)],
-        Block::CodeBlock { .. } | Block::Rule | Block::Math(_) | Block::UnitStart(_) => Vec::new(),
+        Block::CodeBlock { .. }
+        | Block::Rule
+        | Block::Math(_)
+        | Block::UnitStart(_)
+        | Block::Gap(_) => Vec::new(),
     }
 }
 
@@ -666,6 +674,10 @@ fn write_block(
                 escape_math(tex, MathSite::Block, |piece| sink.write(piece))?;
                 sink.write("\n$$")?;
             }
+        }
+        Block::Gap(gap) => {
+            let OcrOrigin::Page(page) = gap.origin;
+            sink.write(&format!("<!-- needs-ocr page {page} -->"))?;
         }
         Block::UnitStart(_) => {}
     }

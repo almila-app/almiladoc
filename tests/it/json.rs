@@ -72,7 +72,7 @@ fn one_and_three_threads_parse_and_serialise_every_fixture_identically() {
     let mut compared = 0;
     for path in corpus() {
         let bytes = std::fs::read(&path).unwrap();
-        let Some(format) = format_of(&path, &bytes).filter(|format| *format != Format::Pdf) else {
+        let Some(format) = format_of(&path, &bytes) else {
             continue;
         };
         let parsed = |converter: &almiladoc::Converter| converter.parse(Input::new(&bytes, format));

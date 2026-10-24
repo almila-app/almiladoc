@@ -2,19 +2,21 @@
 //! calls that walk one [`Input`] on its per-call pool.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
 use crate::Format;
 use crate::config::{Config, ConfigError};
 use crate::ctx::ParseCtx;
-use crate::diagnostics::{Diagnostics, OnLoss};
-use crate::error::ConvertError;
+use crate::diagnostics::{DiagnosticCode, Diagnostics, OnLoss};
+use crate::error::{ConvertError, UnsupportedKind};
 use crate::formats;
 use crate::identity::EngineIdentity;
+use crate::inspect::{Inspection, PageInspection};
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
-use crate::model::{Document, Unit};
+use crate::model::{Block, Document, Gap, OcrOrigin, Unit, UnitKind};
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
 
@@ -107,11 +109,9 @@ impl Converter {
     ///
     /// # Errors
     ///
-    /// [`ConvertError`] when no complete document could be parsed. A PDF has
-    /// no document-model form and fails
-    /// [`UnsupportedKind::PdfDocumentModel`](crate::UnsupportedKind::PdfDocumentModel),
-    /// or [`UnsupportedKind::FeatureDisabled`](crate::UnsupportedKind::FeatureDisabled)
-    /// in a build without the `pdf` feature.
+    /// [`ConvertError`] when no complete document could be parsed; a PDF
+    /// fails [`UnsupportedKind::FeatureDisabled`] in a build without the
+    /// `pdf` feature.
     ///
     /// # Examples
     ///
@@ -147,13 +147,13 @@ impl Converter {
     }
 
     /// Convert `input` to Markdown: [`Converter::parse`] then
-    /// [`Parsed::render`] on one pool, and a PDF through its own extraction.
+    /// [`Parsed::render`] on one pool.
     ///
     /// # Errors
     ///
-    /// [`ConvertError`] when no complete conversion was possible, and
-    /// [`ConvertError::Incomplete`] when content was lost under
-    /// [`OnLoss::Fail`].
+    /// [`ConvertError`] when no complete conversion was possible, and under
+    /// [`OnLoss::Fail`] [`ConvertError::NeedsOcr`] when a PDF page awaits
+    /// OCR, else [`ConvertError::Incomplete`] when content was lost.
     ///
     /// # Examples
     ///
@@ -174,33 +174,57 @@ impl Converter {
     /// ```
     pub fn convert(&self, input: Input<'_>) -> Result<Conversion, ConvertError> {
         let bytes = input.bytes;
-        let limits = &self.config.limits;
         self.prepare(input, move |parse_ctx, format| {
-            let (markdown, units, diagnostics) = match format {
-                #[cfg(feature = "pdf")]
-                Format::Pdf => {
-                    let markdown = formats::pdf::to_markdown(&parse_ctx, bytes)?;
-                    if markdown.len() as u64 > limits.max_output_bytes {
-                        return Err(ConvertError::limit(
-                            Limit::OutputBytes,
-                            limits.max_output_bytes,
-                        ));
-                    }
-                    let (diagnostics, ..) = parse_ctx.into_report();
-                    (markdown, Vec::new(), diagnostics)
-                }
-                format => {
-                    let document = parse_document(&parse_ctx, bytes, format)?;
-                    let meter = Meter::new(parse_ctx.ledger(), limits.max_output_bytes);
-                    let rendered = render(&document, &meter, self.config.images)?;
-                    (
-                        rendered.markdown,
-                        rendered.units,
-                        diagnostics_of(parse_ctx, &document, self.config.images)?,
-                    )
-                }
-            };
-            conclude(self.config.on_loss, markdown, units, diagnostics)
+            let document = parse_document(&parse_ctx, bytes, format)?;
+            refuse_gaps(self.config.on_loss, &document)?;
+            let meter = Meter::new(parse_ctx.ledger(), self.config.limits.max_output_bytes);
+            let rendered = render(&document, &meter, self.config.images)?;
+            let diagnostics = diagnostics_of(parse_ctx, &document, self.config.images)?;
+            conclude(self.config.on_loss, rendered.markdown, rendered.units, diagnostics)
+        })
+    }
+
+    /// Inspect a PDF without rendering it: its pages, each with the verdict
+    /// [`Converter::parse`] rules for it, and the diagnostics of that parse.
+    ///
+    /// # Errors
+    ///
+    /// [`ConvertError`] when the PDF cannot be parsed, and
+    /// [`UnsupportedKind::NotInspectable`] for any other format.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, ConvertError, Converter, Format, Input, UnsupportedKind};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    /// # #[cfg(feature = "pdf")] {
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    /// let pdf = std::fs::read(path)?;
+    /// let inspection = converter.inspect(Input::new(&pdf, Format::Pdf))?;
+    /// let verdicts: Vec<&str> = inspection.pages().iter().map(|p| p.verdict.as_str()).collect();
+    /// assert_eq!(verdicts, ["text", "needs_ocr"]);
+    /// # }
+    ///
+    /// let csv = converter.inspect(Input::new(b"a,b\n", Format::Csv));
+    /// assert!(matches!(
+    ///     csv,
+    ///     Err(ConvertError::Unsupported { kind: UnsupportedKind::NotInspectable, .. })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn inspect(&self, input: Input<'_>) -> Result<Inspection, ConvertError> {
+        let bytes = input.bytes;
+        self.prepare(input, move |parse_ctx, format| {
+            let (document, verdicts) =
+                within_nesting(&parse_ctx, || formats::inspect(&parse_ctx, bytes, format))?;
+            let diagnostics = diagnostics_of(parse_ctx, &document, self.config.images)?;
+            let numbers = std::iter::successors(Some(NonZeroU32::MIN), |n| n.checked_add(1));
+            let pages = numbers
+                .zip(verdicts)
+                .map(|(page, verdict)| PageInspection { page, verdict })
+                .collect();
+            Ok(Inspection { pages, diagnostics })
         })
     }
 
@@ -269,7 +293,7 @@ impl FormatSelection {
             }
             Self::Detect { fallback } => formats::detect::detect(parse_ctx, bytes)?
                 .or(fallback)
-                .ok_or_else(|| ConvertError::from(crate::UnsupportedKind::UnknownFormat)),
+                .ok_or_else(|| ConvertError::from(UnsupportedKind::UnknownFormat)),
         }
     }
 }
@@ -297,7 +321,7 @@ impl<'a> Input<'a> {
     }
 
     /// This input, its conversion failing [`ConvertError::Cancelled`] once
-    /// `token` is cancelled; a PDF is checked only before extraction starts.
+    /// `token` is cancelled; a PDF is checked between its pages.
     ///
     /// # Examples
     ///
@@ -363,14 +387,38 @@ impl Parsed {
         &self.diagnostics
     }
 
+    /// The gaps the document awaits OCR in, in document order: a PDF's
+    /// pages whose own text does not stand for what they show.
+    ///
+    /// ```
+    /// # #[cfg(feature = "pdf")] {
+    /// use almiladoc::model::OcrOrigin;
+    /// use almiladoc::{Config, Converter, Format, Input};
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    /// let pdf = std::fs::read(path)?;
+    /// let parsed = Converter::new(Config::default())?.parse(Input::new(&pdf, Format::Pdf))?;
+    /// let pages: Vec<OcrOrigin> = parsed.gaps().map(|gap| gap.origin).collect();
+    /// assert_eq!(pages, [OcrOrigin::Page(2.try_into()?)]);
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn gaps(&self) -> impl Iterator<Item = &Gap> + '_ {
+        self.document.blocks.iter().filter_map(|block| match block {
+            Block::Gap(gap) => Some(gap),
+            _ => None,
+        })
+    }
+
     /// Render the document to Markdown on a pool built from its [`Config`],
     /// carrying the parse's diagnostics and charging its work on from the
     /// parse's, as [`Converter::convert`] does.
     ///
     /// # Errors
     ///
-    /// [`ConvertError::Incomplete`] when content was lost under
-    /// [`OnLoss::Fail`]; [`ConvertError::ResourceLimit`] when the document
+    /// Under [`OnLoss::Fail`], [`ConvertError::NeedsOcr`] when a gap awaits
+    /// OCR, else [`ConvertError::Incomplete`] when content was lost;
+    /// [`ConvertError::ResourceLimit`] when the document
     /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth),
     /// its Markdown passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
     /// or the parse and the render together charge more than
@@ -397,6 +445,7 @@ impl Parsed {
     /// ```
     pub fn render(&self) -> Result<Conversion, ConvertError> {
         self.on_pool(|| {
+            refuse_gaps(self.config.on_loss, &self.document)?;
             let ledger = self.resumed()?;
             let rendered = render(
                 &self.document,
@@ -484,9 +533,17 @@ fn parse_document(
     bytes: &[u8],
     format: Format,
 ) -> Result<Document, ConvertError> {
-    let document = formats::parse(parse_ctx, bytes, format)?;
+    within_nesting(parse_ctx, || Ok((formats::parse(parse_ctx, bytes, format)?, ())))
+        .map(|(document, ())| document)
+}
+
+fn within_nesting<T>(
+    parse_ctx: &ParseCtx<'_>,
+    read: impl FnOnce() -> Result<(Document, T), ConvertError>,
+) -> Result<(Document, T), ConvertError> {
+    let (document, read) = read()?;
     check_nesting(&document, parse_ctx.limits().max_nesting_depth)?;
-    Ok(document)
+    Ok((document, read))
 }
 
 /// What the parse reported, and what rendering `document` loses, read on the parse's ledger.
@@ -511,6 +568,24 @@ fn report_of(
         diagnostics.add(code, region, unit.map(|u| u.ordinal), count);
     }
     Ok((diagnostics, ledger.spent()))
+}
+
+/// Under [`OnLoss::Fail`], refuse a document that awaits OCR, naming every page it awaits.
+fn refuse_gaps(on_loss: OnLoss, document: &Document) -> Result<(), ConvertError> {
+    if on_loss != OnLoss::Fail {
+        return Ok(());
+    }
+    let (mut pages, mut page_count) = (Vec::new(), 0_u32);
+    for block in &document.blocks {
+        match block {
+            Block::UnitStart(unit) if unit.kind == UnitKind::Page => {
+                page_count = page_count.saturating_add(1);
+            }
+            Block::Gap(Gap { origin: OcrOrigin::Page(page), .. }) => pages.push(page.get()),
+            _ => {}
+        }
+    }
+    if pages.is_empty() { Ok(()) } else { Err(ConvertError::NeedsOcr { pages, page_count }) }
 }
 
 fn conclude(
@@ -568,11 +643,12 @@ impl Conversion {
         &self.diagnostics
     }
 
-    /// True when no content was [`Lost`](crate::LossClass::Lost); only
+    /// True when no content was [`Lost`](crate::LossClass::Lost) and no page awaits OCR; only
     /// [`OnLoss::Report`] returns a conversion for which it is false.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         !self.diagnostics.has_loss()
+            && !self.diagnostics.iter().any(|d| d.code == DiagnosticCode::OcrGap)
     }
 
     /// The GitHub-Flavored Markdown.
@@ -595,8 +671,8 @@ impl Conversion {
 )]
 mod tests {
     use super::*;
-    use crate::diagnostics::{DiagnosticCode, Region};
-    use crate::model::{Block, Inline};
+    use crate::diagnostics::Region;
+    use crate::model::Inline;
     use crate::shared::test_support::zip_package;
     use std::assert_matches;
     use std::sync::atomic::Ordering::Relaxed;
@@ -830,31 +906,6 @@ mod tests {
         assert_eq!(parsed.into_document().blocks.len(), 2);
     }
 
-    #[cfg(feature = "pdf")]
-    #[test]
-    fn a_pdf_reports_into_the_calls_context() {
-        let sentence = "The board approved the plan for the coming season after a long review.";
-        let bytes = formats::pdf::tests::composite_font_pdf(sentence, &[0x0200]);
-        let expected = [(
-            DiagnosticCode::GarbledFontEncoding,
-            crate::diagnostics::LossClass::Lost,
-            Region::Body,
-        )];
-        let reported = |diagnostics: &Diagnostics| -> Vec<_> {
-            diagnostics.iter().map(|d| (d.code, d.class, d.region)).collect()
-        };
-        match converter(1).convert(Input::new(&bytes, Format::Pdf)) {
-            Err(ConvertError::Incomplete { diagnostics }) => {
-                assert_eq!(reported(&diagnostics), expected);
-            }
-            other => panic!("{other:?}"),
-        }
-        let conversion = reporting().convert(Input::new(&bytes, Format::Pdf)).unwrap();
-        assert!(!conversion.is_complete());
-        assert!(conversion.markdown().starts_with(sentence), "{}", conversion.markdown());
-        assert_eq!(reported(conversion.diagnostics()), expected);
-    }
-
     #[test]
     fn errors_pass_through() {
         let error = converter(1).convert(Input::new(b"not a package", Format::Docx)).unwrap_err();
@@ -922,9 +973,7 @@ mod tests {
             let bytes = std::fs::read(path).unwrap();
             let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let format = Format::sniff(&bytes).or_else(|| Format::from_extension(extension));
-            let Some(format) = format.filter(|format| *format != Format::Pdf) else {
-                continue;
-            };
+            let Some(format) = format else { continue };
             let fuel = || {
                 let parse_ctx = ParseCtx::default();
                 let parsed = formats::parse(&parse_ctx, &bytes, format).is_ok();

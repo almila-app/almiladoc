@@ -1,8 +1,7 @@
 //! The per-call thread pool every walking call runs on.
 //!
-//! Each call builds its own pool of `Config::threads` threads, so no work,
-//! the PDF engine's parallel iterators included, reaches rayon's global pool
-//! or the caller's stack.
+//! Each call builds its own pool of `Config::threads` threads, so no work
+//! reaches rayon's global pool or the caller's stack.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

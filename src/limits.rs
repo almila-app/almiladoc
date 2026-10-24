@@ -16,9 +16,9 @@ const MIB: u64 = 1024 * 1024;
 ///
 /// The defaults admit ordinary large documents.
 ///
-/// Limits and cancellation stop at the PDF engine (pdf-inspector and lopdf),
-/// whose decoders allocate from stream headers: isolate PDF work in a
-/// memory-capped worker that is recycled after a failure.
+/// Limits and cancellation reach the PDF engine (unpdf) only between pages:
+/// inside a page its stream decoding takes no caller budget, so isolate PDF
+/// work in a memory-capped worker that is recycled after a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -76,15 +76,15 @@ pub struct Limits {
     /// bytes one serialisation writes: escaping and repeated references
     /// amplify the input, and the JSON's field names and `kind` tags amplify
     /// it several times over, as each styled run of text spells out its
-    /// style. A PDF's Markdown is measured once extracted.
+    /// style.
     pub max_output_bytes: u64,
     /// Work units one conversion charges, bounding its time
     /// deterministically: XML events, RTF tokens, CSS rules an element's tag
     /// or classes name, KiB decompressed from an archive, records and cells
-    /// (CSV, PPT, DOC), style and numbering resolution, grid positions counted
-    /// against [`Limits::max_grid_slots`], inlines the Markdown renderer reads,
-    /// looks ahead at and writes, and 64 bytes of Markdown or JSON written
-    /// (not a PDF's Markdown). Detection shares these counters with parsing,
+    /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
+    /// style and numbering resolution, grid positions counted against
+    /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
+    /// ahead at and writes, and 64 bytes of Markdown or JSON written. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges
@@ -93,14 +93,14 @@ pub struct Limits {
     /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging its
     /// range read and its label compared, asks 545 259 782.
     pub max_work: u64,
-    /// Units one document holds: slides, sheets and EPUB spine items, a CSV
-    /// being one sheet. Each unit costs fixed work that its bytes and nodes
-    /// do not price, such as the relationships part a `.pptx` reads per
-    /// slide: a 2.7 KB `.odp` of empty `draw:page` elements declares
+    /// Units one document holds: slides, sheets, EPUB spine items and PDF
+    /// pages, a CSV being one sheet. Each unit costs fixed work that its
+    /// bytes and nodes do not price, such as the relationships part a `.pptx`
+    /// reads per slide: a 2.7 KB `.odp` of empty `draw:page` elements declares
     /// 100 001. Each is numbered by its place in the document's own list, so
     /// a hidden, skipped or unreadable one still takes its number, and the
-    /// first unit numbered past this is refused. At most `u32::MAX`. A PDF's
-    /// pages are not counted yet.
+    /// first unit numbered past this is refused; a PDF declaring more pages is
+    /// refused before any is read. At most `u32::MAX`.
     pub max_pages: u64,
 }
 

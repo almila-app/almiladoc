@@ -47,7 +47,7 @@ pub(crate) mod exceptions {
         ConvertError,
         "The format is unknown, or cannot be converted at all. `kind` says which: \
          `unknown_format`, `feature_disabled`, `format_mismatch` or \
-         `pdf_document_model`. `detected` names the format the content was \
+         `not_inspectable`. `detected` names the format the content was \
          recognized as when it is not the one named, to retry with, and is `None` \
          otherwise."
     );
@@ -56,9 +56,9 @@ pub(crate) mod exceptions {
         almiladoc,
         NeedsOcrError,
         ConvertError,
-        "Pages of a PDF are scanned or image-only and need OCR, which almiladoc does \
-         not do. `pages` lists them (1-indexed) and `page_count` is the length of \
-         the document."
+        "Pages of a PDF await OCR, which almiladoc does not do, under \
+         `OnLoss.FAIL`; it is raised before `IncompleteError`. `pages` lists them \
+         (1-indexed) and `page_count` is the length of the document."
     );
 
     create_exception!(

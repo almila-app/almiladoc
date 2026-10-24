@@ -1,5 +1,5 @@
 ---
-source: tests/snapshots.rs
-expression: output
+source: tests/it/snapshots.rs
+expression: value
 ---
-ERROR: page 1 of 1 needs OCR
+<!-- needs-ocr page 1 -->

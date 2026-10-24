@@ -14,7 +14,9 @@ mod _almiladoc {
     #[pymodule_export]
     use crate::config::{Config, ImagePolicy, Limits, OnLoss};
     #[pymodule_export]
-    use crate::converter::{CancelToken, Conversion, Converter, Identity, Parsed, sniff};
+    use crate::converter::{
+        CancelToken, Conversion, Converter, Identity, Inspection, Parsed, sniff,
+    };
     #[pymodule_export]
     use crate::diagnostics::Diagnostic;
     #[pymodule_export]

@@ -4,6 +4,12 @@ Copyright 2026 Harun Erkurt
 Portions Copyright (c) 2026 Sideguide Technologies Inc., licensed under the MIT
 License (LICENSES/MIT.txt). REUSE.toml records which files carry them.
 
+The PDF engine, unpdf (MIT), carries Adobe's CMap cid2code tables, the Adobe
+Glyph List and PDFium's CMYK colour table under the BSD 3-Clause License, the
+advance widths of Adobe's Core14 AFM metrics under Adobe's AFM terms (APAFML),
+and the Unicode Consortium's Adobe vendor mappings for Symbol and ZapfDingbats
+under Unicode's notice; THIRD-PARTY-LICENSES holds their notices.
+
 Everything else is licensed under the Business Source License 1.1 (LICENSE).
 Each version becomes available under the MIT License on the fourth anniversary
 of the date it is first made publicly available.

@@ -41,8 +41,8 @@ use crate::limits::{Limit, Limits};
 pub struct Config {
     /// The safety limits every call enforces.
     pub limits: Limits,
-    /// Threads each call runs on, from 1 to [`Config::MAX_THREADS`]; only PDF
-    /// extraction works on more than one.
+    /// Threads each call's pool holds, from 1 to [`Config::MAX_THREADS`]; no
+    /// reader works on more than one yet.
     pub threads: usize,
     /// What a conversion does once some content was lost.
     pub on_loss: OnLoss,

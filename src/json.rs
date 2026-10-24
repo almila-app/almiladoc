@@ -74,8 +74,9 @@ mod tests {
     use crate::ledger::Ledger;
     use crate::limits::Limit;
     use crate::model::{
-        Asset, AssetId, Block, Cell, CellSlot, ImageOrigin, ImageSource, Inline, LinkTarget, List,
-        ListItem, MarkerKind, Note, NoteKind, Style, Table, Unit, UnitKind, VerticalPosition,
+        Asset, AssetId, Block, Cell, CellSlot, Gap, GapId, GapReason, ImageOrigin, ImageSource,
+        Inline, LinkTarget, List, ListItem, MarkerKind, Note, NoteKind, OcrOrigin, Style, Table,
+        Unit, UnitKind, VerticalPosition,
     };
     use std::num::NonZeroU32;
 
@@ -234,6 +235,17 @@ mod tests {
         }
     }
 
+    /// A page unit and the gap that stands for its content.
+    fn awaiting_ocr() -> Document {
+        let page = Unit::new(UnitKind::Page, NonZeroU32::MIN);
+        let gap = Gap {
+            id: GapId::new(page, NonZeroU32::MIN),
+            origin: OcrOrigin::Page(NonZeroU32::MIN),
+            reasons: vec![GapReason::InvisibleText, GapReason::ImageBacked],
+        };
+        Document { blocks: vec![Block::UnitStart(page), Block::Gap(gap)], ..Document::default() }
+    }
+
     fn inline_kinds(inlines: &[Inline], kinds: &mut Vec<&'static str>) {
         for inline in inlines {
             kinds.push(match inline {
@@ -293,14 +305,17 @@ mod tests {
                 Block::Rule => "rule",
                 Block::UnitStart(_) => "unit_start",
                 Block::Math(_) => "math",
+                Block::Gap(_) => "gap",
             };
             kinds.push(kind);
         }
     }
 
-    fn every_kind(document: &Document) -> Vec<&'static str> {
+    fn every_kind(documents: &[Document]) -> Vec<&'static str> {
         let mut kinds = Vec::new();
-        block_kinds(&document.blocks, &mut kinds);
+        for document in documents {
+            block_kinds(&document.blocks, &mut kinds);
+        }
         kinds.sort_unstable();
         kinds.dedup();
         kinds
@@ -309,13 +324,14 @@ mod tests {
     #[test]
     fn the_sample_holds_every_variant() {
         assert_eq!(
-            every_kind(&every_variant()),
+            every_kind(&[every_variant(), awaiting_ocr()]),
             [
                 "anchor",
                 "block_quote",
                 "checkbox",
                 "code_block",
                 "covered",
+                "gap",
                 "heading",
                 "image asset",
                 "image external",
@@ -415,6 +431,20 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_has_its_wire_form() {
+        let json = json(&awaiting_ocr(), &Diagnostics::default()).unwrap();
+        let (_, document) = json.split_once(r#""document":"#).unwrap();
+        insta::assert_snapshot!(lines(document), @r#"
+        {"blocks":[
+        {"kind":"unit_start","value":
+        {"kind":"page","ordinal":1}},
+        {"kind":"gap","value":{"id":{"unit":
+        {"kind":"page","ordinal":1},"ordinal":1},"origin":
+        {"kind":"page","value":1},"reasons":["invisible_text","image_backed"]}}],"notes":[],"assets":[]},"diagnostics":[]}
+        "#);
+    }
+
+    #[test]
     fn field_less_enums_are_their_names() {
         let names = |json: Result<String, serde_json::Error>| json.unwrap();
         let markers = [
@@ -437,6 +467,21 @@ mod tests {
         assert_eq!(
             names(serde_json::to_string(&positions)),
             r#"["baseline","superscript","subscript"]"#
+        );
+        let reasons = [
+            GapReason::UnreadableContent,
+            GapReason::InvisibleText,
+            GapReason::GarbledText,
+            GapReason::ImageBacked,
+            GapReason::VectorDrawn,
+            GapReason::UnreadableText,
+        ];
+        let expected: Vec<String> = reasons.iter().map(|r| format!("\"{}\"", r.as_str())).collect();
+        assert_eq!(names(serde_json::to_string(&reasons)), format!("[{}]", expected.join(",")));
+        let kinds = [UnitKind::Slide, UnitKind::Sheet, UnitKind::SpineItem, UnitKind::Page];
+        assert_eq!(
+            names(serde_json::to_string(&kinds)),
+            r#"["slide","sheet","spine_item","page"]"#
         );
         let notes = [NoteKind::Footnote, NoteKind::Endnote];
         assert_eq!(names(serde_json::to_string(&notes)), r#"["footnote","endnote"]"#);

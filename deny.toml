@@ -12,9 +12,6 @@ targets = [
 
 [advisories]
 yanked = "deny"
-ignore = [
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained and reached through pdf-inspector, whose latest release still depends on it" },
-]
 
 [licenses]
 allow = [

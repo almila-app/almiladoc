@@ -34,8 +34,8 @@ repository's own work is BUSL-1.1.
 
 - bytes → `Format` (`Input::new`'s checked label, else `Input::auto`: a content sniff in
   `src/formats/detect.rs`, then its fallback, Python's path extension; CSV is never sniffed) →
-  `formats::parse` → frontend → `model::Document` → `render::markdown`. PDF skips the model:
-  pdf-inspector writes Markdown, and `parse` on a PDF is `Unsupported`.
+  `formats::parse` → frontend → `model::Document` → `render::markdown`. A PDF page that needs OCR
+  is a `Block::Gap`; others map as usual, bar running heads and pictures (`image_omitted`).
 - Frontends resolve style cascades (tri-state `shared::delta::StyleDelta` into `Style`),
   numbering and list labels, relationships and fields. Note references and internal anchors stay
   ids for the renderer, which alone decides Markdown syntax. Images retain their source locations
@@ -53,8 +53,8 @@ repository's own work is BUSL-1.1.
   Code that swallows an error still propagates `Err(e) if e.is_fatal()`: `ResourceLimit`,
   `Cancelled` and `Internal` are fatal and hard-fail everywhere, optional parts and OLE streams
   included.
-- A PDF whose flagged pages still need OCR fails as `NeedsOcr { pages (1-indexed), page_count }`,
-  never with partial output.
+- Under `OnLoss::Fail` an unfilled gap fails `NeedsOcr { pages (1-indexed), page_count }` before
+  any `Incomplete`; under `Report` it writes `<!-- needs-ocr page N -->` and counts `ocr_gap`.
 - Limits come from `Config` through the one `ParseCtx` (`src/ctx.rs`) each frontend is handed
   as `&ParseCtx`; per-parse state in it is a `Cell` behind `&self`. `Limits::DEFAULT`
   (`src/limits.rs`) holds the defaults. Bytes are charged where consumed, and every unit of work

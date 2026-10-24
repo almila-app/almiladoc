@@ -24,6 +24,8 @@ mod image_regressions;
 #[cfg(feature = "serde")]
 mod json;
 mod limits;
+#[cfg(feature = "pdf")]
+mod pdf;
 mod robustness;
 mod sheet_bounds;
 mod snapshots;

@@ -20,6 +20,7 @@ __all__ = [
     "Identity",
     "ImagePolicy",
     "IncompleteError",
+    "Inspection",
     "InternalError",
     "Limits",
     "MalformedError",
@@ -60,14 +61,14 @@ class UnsupportedError(ConvertError):
 
     kind: str
     """Why, as a stable snake_case name: `unknown_format`, `feature_disabled`,
-    `format_mismatch` or `pdf_document_model`."""
+    `format_mismatch` or `not_inspectable`."""
     detected: Format | None
     """The format the content was recognized as when it is not the one
     named, to retry with; `None` otherwise."""
 
 class NeedsOcrError(ConvertError):
-    """Pages of a PDF are scanned or image-only and need OCR, which almiladoc
-    does not do."""
+    """Pages of a PDF await OCR, which almiladoc does not do, under
+    `OnLoss.FAIL`; it is raised before `IncompleteError`."""
 
     pages: list[int]
     """1-indexed pages that need OCR."""
@@ -211,14 +212,15 @@ class Limits:
         """Work units one call charges, bounding its time deterministically."""
     @property
     def max_pages(self) -> int:
-        """Slides, sheets and spine items one document holds, each numbered by
-        its place in the document's list, at most 4294967295."""
+        """Slides, sheets, spine items and PDF pages one document holds, each
+        numbered by its place in the document's list, at most 4294967295; a
+        PDF declaring more is refused before any page is read."""
 
 @final
 class Config:
     """The configuration of one `Converter`, frozen and keyword-only: its
-    `Limits`, the threads each call runs on (1 to 64; only PDF extraction
-    uses more than one) and what a loss does. Omitted fields, and `None`,
+    `Limits`, the threads each call runs on (1 to 64; no reader uses more
+    than one) and what a loss does. Omitted fields, and `None`,
     take almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL` and
     `ImagePolicy.PLACEHOLDER`.
     A thread count out of range raises `ConfigError`."""
@@ -250,8 +252,8 @@ class CancelToken:
 
     def cancel(self) -> None:
         """Cancel every call holding this token, from any thread: each raises
-        `CancelledError` at its next unit of work, a PDF only before its
-        extraction starts."""
+        `CancelledError` at its next unit of work, a PDF's between its
+        pages."""
     @property
     def cancelled(self) -> bool:
         """True once `cancel` was called."""
@@ -310,8 +312,8 @@ class Conversion:
         """Every `Diagnostic` of the conversion."""
     @property
     def is_complete(self) -> bool:
-        """True when no content was lost; only `OnLoss.REPORT` returns a
-        conversion for which it is false."""
+        """True when no content was lost and no page awaits OCR; only
+        `OnLoss.REPORT` returns a conversion for which it is false."""
 
 @final
 class Parsed:
@@ -337,9 +339,31 @@ class Parsed:
         about 140 levels writes JSON over 1000 levels deep, which
         `json.loads` on Python 3.11 reads only under a raised recursion
         limit."""
+    @property
+    def gaps(self) -> list[tuple[str, int, int, int | None, list[str]]]:
+        """Every gap the document awaits OCR in, in document order, as
+        `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the unit it stands
+        in, its place among that unit's gaps, the 1-based PDF page OCR reads to
+        fill it, and why the page's own text does not serve."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""
+
+@final
+class Inspection:
+    """What `Converter.inspect` reports of a PDF."""
+
+    @property
+    def page_count(self) -> int:
+        """The pages the document holds."""
+    @property
+    def pages(self) -> tuple[tuple[int, str, list[str]], ...]:
+        """Every page in order as `(page, verdict, reasons)`: its 1-based number,
+        `text`, `no_text` or `needs_ocr`, and for `needs_ocr` why its own
+        text does not serve."""
+    @property
+    def diagnostics(self) -> tuple[Diagnostic, ...]:
+        """Every `Diagnostic` a parse of the document reports."""
 
 @final
 class Converter:
@@ -367,9 +391,15 @@ class Converter:
     def parse(
         self, data: Buffer, format: Format | None = None, *, cancel: CancelToken | None = None
     ) -> Parsed:
-        """Parse `data`, as `convert` takes it, into the document model. A PDF
-        has no model form and raises `UnsupportedError` with `kind`
-        `pdf_document_model`."""
+        """Parse `data`, as `convert` takes it, into the document model; a PDF's
+        pages that await OCR are its `gaps`."""
+    def inspect(
+        self, data: Buffer, format: Format | None = None, *, cancel: CancelToken | None = None
+    ) -> Inspection:
+        """Inspect a PDF, as `convert` takes it, without rendering it: its pages,
+        each with the verdict `parse` rules for it, and that parse's
+        diagnostics. Any other format raises `UnsupportedError` with `kind`
+        `not_inspectable`."""
     def sniff(self, data: Buffer, *, cancel: CancelToken | None = None) -> Format | None:
         """The format `data`'s content names, detected as a call without a
         `format` detects it: under this converter's limits and `cancel`, once

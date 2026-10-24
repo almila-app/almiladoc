@@ -135,8 +135,9 @@ limits! {
     max_output_bytes,
     /// Work units one call charges, bounding its time deterministically.
     max_work,
-    /// Slides, sheets and spine items one document holds, each numbered by
-    /// its place in the document's list, at most 4294967295.
+    /// Slides, sheets, spine items and PDF pages one document holds, each
+    /// numbered by its place in the document's list, at most 4294967295; a
+    /// PDF declaring more is refused before any page is read.
     max_pages,
 }
 
@@ -147,8 +148,8 @@ impl Hash for Limits {
 }
 
 /// The configuration of one `Converter`, frozen and keyword-only: its
-/// `Limits`, the threads each call runs on (1 to 64; only PDF extraction
-/// uses more than one) and what a loss does. Omitted fields, and `None`,
+/// `Limits`, the threads each call runs on (1 to 64; no reader uses more
+/// than one) and what a loss does. Omitted fields, and `None`,
 /// take almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL` and
 /// `ImagePolicy.PLACEHOLDER`.
 /// A thread count out of range raises `ConfigError`.

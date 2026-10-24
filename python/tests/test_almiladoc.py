@@ -165,6 +165,27 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(markdown, snapshot.read_text(encoding="utf-8").split("---\n", 2)[2])
         self.assertIn("한국어 글꼴의 문자 코드를 유니코드로", markdown)
 
+    def test_a_scanned_page_is_a_gap_that_fails_needs_ocr_or_writes_its_marker(self):
+        data = MIXED.read_bytes()
+        with self.assertRaises(almiladoc.NeedsOcrError) as caught:
+            almiladoc.Converter().convert(data)
+        self.assertEqual((caught.exception.pages, caught.exception.page_count), ([2], 2))
+        reporting = almiladoc.Converter(almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT))
+        conversion = reporting.convert(data)
+        self.assertEqual(
+            conversion.markdown, "Text on the first page\n\n<!-- needs-ocr page 2 -->\n"
+        )
+        self.assertFalse(conversion.is_complete)
+        self.assertEqual([unit[:2] for unit in conversion.units], [("page", 1), ("page", 2)])
+        parsed = reporting.parse(data)
+        self.assertEqual(parsed.gaps, [("page", 2, 1, 2, ["image_backed"])])
+        self.assertEqual(parsed.render().markdown, conversion.markdown)
+        self.assertFalse(parsed.render().is_complete)
+        inspection = reporting.inspect(data, "pdf")
+        self.assertEqual(inspection.page_count, 2)
+        self.assertEqual(inspection.pages, ((1, "text", []), (2, "needs_ocr", ["image_backed"])))
+        self.assertEqual([(d.code, d.unit) for d in inspection.diagnostics], [("ocr_gap", 2)])
+
     def test_convert_takes_a_named_format_or_detects_it(self):
         conversion = almiladoc.Converter().convert(TABLES.read_bytes(), "docx")
         self.assertIn("| Head A | Head B | Head C |", conversion.markdown)
@@ -749,9 +770,9 @@ class ErrorTest(unittest.TestCase):
             self.assertEqual(caught.exception.detected, "rtf")
 
         with self.assertRaises(almiladoc.UnsupportedError) as caught:
-            converter_.parse(MIXED.read_bytes(), "pdf")
+            converter_.inspect(CSV.read_bytes(), "csv")
         self.assertIsNone(caught.exception.detected)
-        self.assertEqual(code_and_kind(caught.exception), ("unsupported", "pdf_document_model"))
+        self.assertEqual(code_and_kind(caught.exception), ("unsupported", "not_inspectable"))
         with self.assertRaises(almiladoc.UnsupportedError) as caught:
             converter_.parse(CSV.read_bytes())
         self.assertIsNone(caught.exception.detected)

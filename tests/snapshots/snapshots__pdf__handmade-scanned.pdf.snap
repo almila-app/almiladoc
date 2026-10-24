@@ -1,5 +1,7 @@
 ---
-source: tests/snapshots.rs
-expression: output
+source: tests/it/snapshots.rs
+expression: value
 ---
-ERROR: all 2 pages need OCR
+<!-- needs-ocr page 1 -->
+
+<!-- needs-ocr page 2 -->

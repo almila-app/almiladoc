@@ -53,7 +53,7 @@ table lands on its own, before the first wave whose files it shares.
 
 | Wave | Items | Placement |
 |---|---|---|
-| W7 | pdf-model (on `almila-unpdf` 0.48.0) | |
+| W7 | unpdf-clip (on the unpdf release that carries #21) | |
 | W8 | ocr-channel | |
 
 Prove the native PDF API and its real-consumer integration together before publication. The first
@@ -63,68 +63,16 @@ release follows W8, so it carries pdf-model and ocr-channel.
 
 ### W7
 
-#### pdf-model: PDF through the model, with page verdicts and page gaps
-- **Goal:** PDF gets the same escaping, link policy, limits and diagnostics as every other format; a
-  scanned page becomes a fillable gap, not an empty result.
-- **Scope:**
-  - unpdf's `Document` replaces pdf-inspector and the bypass in `src/converter.rs`,
-    `src/formats/pdf.rs` and `src/formats/mod.rs` (ADR 0001 decision 6): default features off,
-    `page_count` charged against `max_pages` before any page, then `for_each_page` with a literal
-    sequential `PageStreamOptions`, charging each page. deny.toml's RUSTSEC-2026-0192 ignore goes
-    with pdf-inspector if ttf-parser leaves the tree.
-  - Each page calls `ctx.begin_unit(UnitKind::Page, index)?` (0-based page index) and maps its
-    blocks into the model: headings, paragraphs, lists, tables through `GridBuilder` (row and column
-    spans), styled runs into `Style` (bold, italic, strike, superscript, subscript); the renderer
-    escapes their text as it does every format's. Running headers and folios are stripped across all
-    pages, also when `ocr_pages` selects some.
-  - The page verdict is almiladoc's rule over unpdf's page facts: Blank with no text, image, fill or
-    undecodable stream; `Block::Gap { id: GapId { unit, ordinal }, origin: OcrOrigin::Page(n),
-    reasons }` when a content stream is undecodable (`unreadable_content`), when no visible text
-    survives over an image or over fill operators, or when the text is invisible; else Text, its
-    suppressed runs and unreadable fonts counted as `garbled_font_encoding`.
-  - `Converter::inspect(Input)` for PDF only (ADR 0001 decision 4), on the pool: container facts,
-    diagnostics and 1-based page units, each `Text`, `Blank` (`no_text`) or `NeedsOcr { reasons }`; any
-    other format is `Unsupported`; distinct from `package::directory::inspect`.
-  - A placed figure renders nothing, adding `image_omitted`.
-  - `Parsed::gaps()`; `parse` accepts PDF; `UnsupportedKind::PdfDocumentModel` goes.
-  - Unfilled gaps: `Fail` raises `NeedsOcr { pages, page_count }` before `Incomplete`; `Report` writes
-    stable `<!-- needs-ocr page N -->` and counts `ocr_gap`, which joins `src/diagnostics.rs`
-    here (`Deferred`).
-  - `ocr_pages: PageSelection { None (default), All, Pages(BTreeSet<NonZeroU32>) }`, a parse option
-    (`Input::with_ocr_pages`): a selected page becomes a `Page` gap with reason `caller_requested`
-    whatever its text layer; its extracted text is discarded, never merged, and reports no loss. A page
-    number past `page_count` is refused before extraction as
-    the new variant `ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page, page_count })`
-    (ADR 0001 decision 9), code `invalid_config`: one variant for every caller-configuration error,
-    reusing `Converter::new`'s `ConfigError`, mirrored through change-core-api.
-  - The staleness check gains upstream unpdf releases and advisories while `almila-unpdf` is in use
-    (ADR 0003 decision 4).
-  - Binding via `/change-core-api`. Above 1500 lines, `ocr_pages` splits out.
-- **Files:** `src/formats/{pdf,mod}.rs`, `src/model/gap.rs` (new), `src/model/{block,mod}.rs`,
-  `src/render/markdown/mod.rs`, `src/inspect.rs` (new), `src/{converter,error,lib,identity}.rs`,
-  `Cargo.{toml,lock}`, `deny.toml`, `about.toml`, `THIRD-PARTY-LICENSES`, `NOTICE`, `REUSE.toml`,
-  `README.md`, `docs/support.md`, `CLAUDE.md`'s PDF invariants,
-  `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `tests/it/pdf.rs` (new),
-  `tests/it/{snapshots,converter}.rs`, `.github/scripts/staleness.py`,
-  `python/{src/lib.rs,almiladoc/_almiladoc.pyi,tests/test_almiladoc.py}`.
-- **Tests:** five pages TEXT/IMAGE/TEXT/TEXT/IMAGE: `Fail` gives `NeedsOcr { [2, 5], 5 }` despite a
-  `Lost`; `Report` keeps pages 1, 3 and 4. Pinned verdicts: blank, header-only, image-only,
-  invisible text, at most 10 inkless characters, running-head stamped scan, tiled scan, glyphs drawn
-  only by fills, an undecodable-only page, a text page with one undecodable stream. `<script>`,
-  `1. x`, `[x](javascript:…)` and a forged marker render as DOCX does; sup, sub and strike; figures
-  pass `Fail`; `ocr_pages` both ways, and a page past `page_count` refused before extraction with
-  the ruled variant; a lowered `max_pages` trips; the five-page fixture's units are Page 1-5 in
-  order, gaps included; a garbled-encoding page still adds `garbled_font_encoding` and stays Text; a
-  page of text over a full-page image is Text; the ligature, Arabic and `text.pdf` snapshots keep
-  their text; output is byte-identical across two runs as well as at 1 and 4 threads; inspected page
-  verdicts and 1-based page indices equal the parse's units and gaps on the five-page fixture, and a
-  DOCX gives `Unsupported`.
-  - a fixture on a legacy predefined CMap (KSC-EUC-H with EUC-KR bytes and no ToUnicode), which
-    pdf-inspector 1.25.2 cannot convert and unpdf's bundled CMaps can, joins the fixtures;
-    `handmade-predefined-cmap.pdf`'s snapshot is pdf-model's to change.
+#### unpdf-clip: take the unpdf release that counts only what the clip shows
+- **Goal:** a run the clip hides entirely reports no loss (iyulab/unpdf #21).
+- **Scope:** move `unpdf` to the first release carrying upstream 2418af6 and 6dbc96c; a
+  `tests/it/pdf.rs` case: readable text beside a run clipped away entirely (`q 0 0 10 10 re W n … Q`,
+  drawn far outside) that holds one code its ToUnicode leaves out converts under `OnLoss::Fail` with
+  no diagnostic and gives only the readable text; the docs naming the version follow.
+- **Files:** `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `tests/it/pdf.rs`, `THIRD-PARTY-LICENSES`,
+  ADR 0001 decision 6.
 - **Credit:** none.
-- **Depends on:** `almila-unpdf` 0.48.0, published (External tracks).
-  **Size:** about 1400 lines. **Tier:** T3.
+- **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
 
 ### W8
 
@@ -273,14 +221,10 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
 
 For hayro and rten: upstream first, then wait a week for the maintainers, then decide: merged, take
 the release; silent or declined, fall back as ADR 0002 says. unpdf's pull requests are checked at the
-start of each wave, so that the dependency moves back to unpdf once a release carries all of them but
-#15, and hayro's and rten's when the deferred item they gate is next. Check a pull request with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
+start of each wave, and hayro's and rten's when the deferred item they gate is next. Check a pull request with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
 
-- **unpdf** (ADR 0001 decision 6): iyulab/unpdf #11-#17 below, one concern each with its test,
-  opened 2026-10-23. pdf-model reads PDF through `almila-unpdf` 0.48.0, which carries them, without
-  waiting for their review. Once an unpdf release carries all of them but #15, a list fix pdf-model
-  does not need, the dependency moves back to unpdf. Issue #18 asks for the notice of the bundled
-  Adobe CMap data, which `almila-unpdf`'s THIRD-PARTY-NOTICES already carries.
+- **unpdf** (ADR 0001 decision 6): unpdf 0.50.0 carries every pull request below but #21, which is
+  on its main for the next release; unpdf-clip takes that release.
 - **hayro** (dormant; gates only the deferred rasterizer and local OCR). `LAB.icc`'s licence is stated
   upstream (#1497), so `NOTICE` cites it from the first hayro release that carries it. Font-loss
   warnings arrive with the first hayro release that carries #1498. Open: undecodable page content has
@@ -303,14 +247,22 @@ start of each wave, so that the dependency moves back to unpdf once a release ca
 | robertknight/rten | [#1523](https://github.com/robertknight/rten/pull/1523) | the global pool only when no custom pool is set | merged |
 | robertknight/rten | [#1524](https://github.com/robertknight/rten/pull/1524) | load-time work on the caller's pool | closed for issue [#1533](https://github.com/robertknight/rten/issues/1533); the maintainer asked for the use context there |
 | robertknight/rten | [#1525](https://github.com/robertknight/rten/pull/1525) | pool build failure visible to the caller | closed: its question on the use context went unanswered |
-| iyulab/unpdf | [#11](https://github.com/iyulab/unpdf/pull/11) | ligature glyph names in `/Differences` read as their letters (`handmade-ligatures.pdf`) | open |
-| iyulab/unpdf | [#12](https://github.com/iyulab/unpdf/pull/12) | superscript, subscript and struck runs (`text.pdf`) | open |
-| iyulab/unpdf | [#13](https://github.com/iyulab/unpdf/pull/13) | page facts: invisible, painted, margin and clipped text, blank runs, fills | open |
-| iyulab/unpdf | [#14](https://github.com/iyulab/unpdf/pull/14) | brackets mirrored in right-to-left runs (`handmade-arabic.pdf`) | open |
-| iyulab/unpdf | [#15](https://github.com/iyulab/unpdf/pull/15) | a number set against its first word opens a list item (`text.pdf`) | open |
-| iyulab/unpdf | [#16](https://github.com/iyulab/unpdf/pull/16) | `unmapped_codes` for codes a font draws but gives no character (`text.pdf`'s false `binary_density`) | open |
-| iyulab/unpdf | [#17](https://github.com/iyulab/unpdf/pull/17) | a glyph drawn into a gap of an earlier run reads there (`text.pdf`'s clef) | open |
-| iyulab/unpdf | issue [#18](https://github.com/iyulab/unpdf/issues/18) | the bundled Adobe CMap data's BSD-3-Clause notice | open |
+| iyulab/unpdf | [#11](https://github.com/iyulab/unpdf/pull/11) | ligature glyph names in `/Differences` read as their letters (`handmade-ligatures.pdf`) | merged |
+| iyulab/unpdf | [#12](https://github.com/iyulab/unpdf/pull/12) | superscript, subscript and struck runs (`text.pdf`) | closed: reworked by the maintainer, in 0.49.0 |
+| iyulab/unpdf | [#13](https://github.com/iyulab/unpdf/pull/13) | page facts: invisible, painted, margin and clipped text, blank runs, fills | in 0.49.0 |
+| iyulab/unpdf | [#14](https://github.com/iyulab/unpdf/pull/14) | brackets mirrored in right-to-left runs (`handmade-arabic.pdf`) | merged |
+| iyulab/unpdf | [#15](https://github.com/iyulab/unpdf/pull/15) | a number set against its first word opens a list item (`text.pdf`) | in 0.49.0 |
+| iyulab/unpdf | [#16](https://github.com/iyulab/unpdf/pull/16) | `unmapped_codes` for codes a font draws but gives no character (`text.pdf`'s false `binary_density`) | in 0.49.0 |
+| iyulab/unpdf | [#17](https://github.com/iyulab/unpdf/pull/17) | a glyph drawn into a gap of an earlier run reads there (`text.pdf`'s clef) | in 0.49.0 |
+| iyulab/unpdf | issue [#18](https://github.com/iyulab/unpdf/issues/18) | the bundled Adobe CMap data's BSD-3-Clause notice | fixed in 0.49.0 |
+| iyulab/unpdf | [#19](https://github.com/iyulab/unpdf/pull/19) | the lines beside a column gutter counted by baseline (`handmade-legacy-cmap.pdf`) | merged |
+| iyulab/unpdf | [#20](https://github.com/iyulab/unpdf/pull/20) | codes a composite font's ToUnicode leaves out, read through its own data or counted (`undecoded_text_codes`) | in 0.50.0 |
+| iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | on main |
+| iyulab/unpdf | to open | a word space's advance closes the inked extent, so a word-spaced composite run at body size stays one paragraph (`handmade-legacy-cmap.pdf`) | to open |
+| iyulab/unpdf | to open | a composite font's codes its `ToUnicode` leaves out beside codes it maps counted as a page fact, so their loss is reported | to open |
+| iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
+| iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
+| iyulab/unpdf | to open | THIRD-PARTY-NOTICES lists the Adobe Glyph List and the Core14 AFM metrics | to open |
 
 ## Maintainer steps
 

@@ -133,7 +133,7 @@ pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bo
             })?
         }
         Block::BlockQuote(blocks) => any(blocks, |b| shows(b, rc, meter))?,
-        Block::CodeBlock { .. } | Block::Rule => true,
+        Block::CodeBlock { .. } | Block::Rule | Block::Gap(_) => true,
         Block::UnitStart(_) => false,
         Block::Math(tex) => !tex.trim().is_empty(),
     })
@@ -168,7 +168,7 @@ fn shows_in_cell(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool,
         Block::CodeBlock { text: source, .. } | Block::Math(source) => {
             Ok(!source.trim().is_empty())
         }
-        Block::Rule | Block::UnitStart(_) => Ok(false),
+        Block::Rule | Block::UnitStart(_) | Block::Gap(_) => Ok(false),
     }
 }
 
@@ -255,7 +255,11 @@ fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, Convert
             "\n```",
         ]),
         Block::Math(tex) => !tex.trim().is_empty() && has_empty_line(["$$\n", tex.trim(), "\n$$"]),
-        Block::Table(_) | Block::BlockQuote(_) | Block::Rule | Block::UnitStart(_) => false,
+        Block::Table(_)
+        | Block::BlockQuote(_)
+        | Block::Rule
+        | Block::UnitStart(_)
+        | Block::Gap(_) => false,
     })
 }
 
@@ -572,8 +576,7 @@ mod tests {
                 let bytes = std::fs::read(&path).unwrap();
                 let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let format = crate::Format::sniff(&bytes)
-                    .or_else(|| crate::Format::from_extension(extension))
-                    .filter(|format| *format != crate::Format::Pdf);
+                    .or_else(|| crate::Format::from_extension(extension));
                 let Some(format) = format else { continue };
                 let parse_ctx = ParseCtx::default();
                 if let Ok(doc) = crate::formats::parse(&parse_ctx, &bytes, format) {

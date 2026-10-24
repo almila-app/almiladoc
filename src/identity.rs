@@ -10,9 +10,7 @@ use crate::config::Config;
 ///
 /// Under the committed `Cargo.lock`, equal identities and equal input give
 /// byte-identical output across threads, calls and, except for PDF,
-/// architectures. Identity does not hold while pdf-inspector's
-/// `PI_NO_MERGE` or `PDF_INSPECTOR_BCMAPS_DIR` environment variable is set,
-/// until a pinned release reads neither.
+/// architectures.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]

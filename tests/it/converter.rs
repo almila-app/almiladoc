@@ -3,8 +3,7 @@ use crate::support::{
     configured, converter, corpus, fixture, format_of, limit_mut, reporting, zip_package,
 };
 use almiladoc::{
-    CancelToken, Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits,
-    OnLoss, UnsupportedKind,
+    CancelToken, Config, ConfigError, ConvertError, Converter, Format, Input, Limit, Limits, OnLoss,
 };
 use std::assert_matches;
 
@@ -49,19 +48,6 @@ fn a_config_out_of_range_is_refused() {
     }
 }
 
-#[cfg(feature = "pdf")]
-#[test]
-fn a_pdf_converts_but_has_no_document_model() {
-    let bytes = fixture("pdf/text.pdf");
-    let converter = converter(1);
-    assert_ne!(converter.convert(Input::new(&bytes, Format::Pdf)).unwrap().markdown(), "");
-    let error = converter.parse(Input::new(&bytes, Format::Pdf)).unwrap_err();
-    assert_matches!(
-        error,
-        ConvertError::Unsupported { kind: UnsupportedKind::PdfDocumentModel, .. }
-    );
-}
-
 #[cfg(not(feature = "pdf"))]
 #[test]
 fn a_build_without_pdf_refuses_every_pdf() {
@@ -72,12 +58,13 @@ fn a_build_without_pdf_refuses_every_pdf() {
         converter.parse(Input::new(&bytes, Format::Pdf)).unwrap_err(),
         converter.convert(Input::auto(&bytes, None)).unwrap_err(),
         converter.parse(Input::auto(&bytes, None)).unwrap_err(),
+        converter.inspect(Input::new(&bytes, Format::Pdf)).unwrap_err(),
     ];
     for error in errors {
         assert_matches!(
             error,
             ConvertError::Unsupported {
-                kind: UnsupportedKind::FeatureDisabled { feature: "pdf", .. },
+                kind: almiladoc::UnsupportedKind::FeatureDisabled { feature: "pdf", .. },
                 ..
             }
         );
