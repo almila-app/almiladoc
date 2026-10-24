@@ -94,6 +94,8 @@ diagnostic_codes! {
     ImagePlaceholder = "image_placeholder", Deferred;
     /// A page that awaits OCR: its marker stands where its text would be.
     OcrGap = "ocr_gap", Deferred;
+    /// A page whose OCR failed: its marker stands where its text would be.
+    OcrFailed = "ocr_failed", Deferred;
     /// Image content dropped by the selected image policy.
     ImageOmitted = "image_omitted", Omitted;
     /// A picture the document shows that gets no place in the output.
@@ -236,6 +238,31 @@ impl Diagnostics {
         }
     }
 
+    /// Take back `count` occurrences [`Diagnostics::add`] counted, from the
+    /// entry without a unit where `unit` was folded into it.
+    pub(crate) fn remove(
+        &mut self,
+        code: DiagnosticCode,
+        region: Region,
+        unit: Option<NonZeroU32>,
+        count: u64,
+    ) {
+        let Some(units) = self.entries.get_mut(&(code, region)) else { return };
+        let emptied = if let Some(kept) = unit.and_then(|unit| units.by_unit.get_mut(&unit)) {
+            *kept = kept.saturating_sub(count);
+            *kept == 0
+        } else {
+            units.across = units.across.saturating_sub(count);
+            false
+        };
+        if emptied && let Some(unit) = unit {
+            units.by_unit.remove(&unit);
+        }
+        if units.across == 0 && units.by_unit.is_empty() {
+            self.entries.remove(&(code, region));
+        }
+    }
+
     /// Every diagnostic, ordered by code, region and unit, with the entry
     /// that has no unit first.
     pub fn iter(&self) -> impl Iterator<Item = Diagnostic> + '_ {
@@ -356,7 +383,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const CODES: [(&str, LossClass); 43] = [
+    const CODES: [(&str, LossClass); 44] = [
         ("part_unreadable", LossClass::Lost),
         ("unit_unreadable", LossClass::Lost),
         ("cell_value_unreadable", LossClass::Lost),
@@ -369,6 +396,7 @@ mod tests {
         ("image_unavailable", LossClass::Lost),
         ("image_placeholder", LossClass::Deferred),
         ("ocr_gap", LossClass::Deferred),
+        ("ocr_failed", LossClass::Deferred),
         ("image_omitted", LossClass::Omitted),
         ("image_unplaced", LossClass::Lost),
         ("embedded_object", LossClass::Lost),
@@ -510,6 +538,38 @@ mod tests {
         assert_eq!((entries[0].unit, entries[0].count), (None, 20));
         assert_eq!(entries[1].unit, unit(1));
         assert_eq!(entries[Diagnostics::MAX_UNITS].unit, unit(max));
+    }
+
+    #[test]
+    fn a_removal_takes_back_a_kept_or_folded_unit_and_drops_an_emptied_entry() {
+        let mut diagnostics = Diagnostics::default();
+        let max = u32::try_from(Diagnostics::MAX_UNITS).unwrap();
+        for n in 1..=max + 2 {
+            diagnostics.add(DiagnosticCode::OcrGap, Region::Body, unit(n), 1);
+        }
+        diagnostics.add(DiagnosticCode::OcrGap, Region::Note, unit(1), 1);
+        let body = |diagnostics: &Diagnostics| -> Vec<(Option<NonZeroU32>, u64)> {
+            diagnostics
+                .iter()
+                .filter(|d| d.region == Region::Body)
+                .map(|d| (d.unit, d.count))
+                .collect()
+        };
+        diagnostics.remove(DiagnosticCode::OcrGap, Region::Body, unit(max + 2), 1);
+        diagnostics.remove(DiagnosticCode::OcrGap, Region::Body, unit(2), 1);
+        let kept = body(&diagnostics);
+        assert_eq!(kept.len(), Diagnostics::MAX_UNITS);
+        assert_eq!(kept[..2], [(None, 1), (unit(1), 1)]);
+        diagnostics.remove(DiagnosticCode::OcrGap, Region::Body, unit(max + 1), 1);
+        assert_eq!(body(&diagnostics)[0], (unit(1), 1));
+        for n in (1..=max).filter(|&n| n != 2) {
+            diagnostics.remove(DiagnosticCode::OcrGap, Region::Body, unit(n), 1);
+        }
+        diagnostics.remove(DiagnosticCode::OcrGap, Region::Header, unit(1), 1);
+        let left: Vec<_> = diagnostics.iter().map(|d| (d.region, d.unit, d.count)).collect();
+        assert_eq!(left, [(Region::Note, unit(1), 1)]);
+        diagnostics.remove(DiagnosticCode::OcrGap, Region::Note, unit(1), 1);
+        assert_eq!(diagnostics, Diagnostics::default());
     }
 
     #[test]

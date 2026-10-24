@@ -133,7 +133,11 @@ pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bo
             })?
         }
         Block::BlockQuote(blocks) => any(blocks, |b| shows(b, rc, meter))?,
-        Block::CodeBlock { .. } | Block::Rule | Block::Gap(_) => true,
+        Block::Gap(gap) => match rc.fills.filled(gap) {
+            Some(blocks) => any(blocks, |b| shows(b, rc, meter))?,
+            None => true,
+        },
+        Block::CodeBlock { .. } | Block::Rule => true,
         Block::UnitStart(_) => false,
         Block::Math(tex) => !tex.trim().is_empty(),
     })
@@ -255,11 +259,11 @@ fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, Convert
             "\n```",
         ]),
         Block::Math(tex) => !tex.trim().is_empty() && has_empty_line(["$$\n", tex.trim(), "\n$$"]),
-        Block::Table(_)
-        | Block::BlockQuote(_)
-        | Block::Rule
-        | Block::UnitStart(_)
-        | Block::Gap(_) => false,
+        Block::Gap(gap) => match rc.fills.filled(gap) {
+            Some(blocks) => blank_body(blocks, rc, meter)?,
+            None => false,
+        },
+        Block::Table(_) | Block::BlockQuote(_) | Block::Rule | Block::UnitStart(_) => false,
     })
 }
 
@@ -291,6 +295,7 @@ mod tests {
         Cell, Document, ImageSource, LinkTarget, ListItem, MarkerKind, Note, NoteKind, Table,
         VerticalPosition,
     };
+    use crate::ocr::GapFills;
     use crate::render::markdown::sink::Sink;
     use crate::render::markdown::table::render_cell;
     use crate::render::markdown::write_block;
@@ -309,7 +314,8 @@ mod tests {
     fn agrees_with_rendering(doc: &Document, name: &str) {
         let ledger = Ledger::new(u64::MAX, None);
         let meter = Meter::new(&ledger, u64::MAX);
-        let rc = Ctx::of(doc, ImagePolicy::Placeholder, &meter).unwrap();
+        let fills = GapFills::default();
+        let rc = Ctx::of(doc, &fills, ImagePolicy::Placeholder, &meter).unwrap();
         let mut blocks: Vec<&Block> = doc.blocks.iter().collect();
         blocks.extend(doc.notes.iter().flat_map(|note| &note.blocks));
         while let Some(block) = blocks.pop() {
@@ -547,7 +553,8 @@ mod tests {
         let ledger = Ledger::new(u64::MAX, None);
         let meter = Meter::new(&ledger, u64::MAX);
         let doc = Document::default();
-        let rc = Ctx::of(&doc, ImagePolicy::Placeholder, &meter).unwrap();
+        let fills = GapFills::default();
+        let rc = Ctx::of(&doc, &fills, ImagePolicy::Placeholder, &meter).unwrap();
         let content = [Inline::LineBreak];
         for (label, ctx, shown) in [
             ("block", InlineContext::Block, true),

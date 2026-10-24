@@ -16,6 +16,7 @@ use crate::model::{
     Inline, LinkTarget, List, ListItem, MarkerKind, Note, NoteKind, Style, Table, Unit, UnitKind,
     VerticalPosition,
 };
+use crate::ocr::GapFills;
 use crate::shared::text::collapse_ws;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::assert_matches;
@@ -138,7 +139,7 @@ fn render_at(
     images: ImagePolicy,
 ) -> Result<Rendered, ConvertError> {
     let ledger = Ledger::new(max_work, None);
-    render(document, &Meter::new(&ledger, max_output), images)
+    render(document, &GapFills::default(), &Meter::new(&ledger, max_output), images)
 }
 
 fn rendered(document: &Document, images: ImagePolicy) -> String {
@@ -636,8 +637,9 @@ fn a_nested_cell_holds_its_text_once_whatever_its_depth() {
     let ledger = Ledger::new(u64::MAX, None);
     let meter = Meter::new(&ledger, u64::MAX);
     let mut out = super::sink::Text::new(&meter);
-    super::table::render_cell(&nested, &Ctx::of(&document, Placeholder, &meter).unwrap(), &mut out)
-        .unwrap();
+    let fills = GapFills::default();
+    let rc = Ctx::of(&document, &fills, Placeholder, &meter).unwrap();
+    super::table::render_cell(&nested, &rc, &mut out).unwrap();
     assert_eq!(out.as_str(), long);
     assert!(meter.admitted() <= long.len() as u64 + 100 * 8, "{}", meter.admitted());
 }
@@ -1047,7 +1049,7 @@ fn every_container_nests_to_the_limit_and_no_further() {
     ];
     let refused = |doc: &Document| {
         matches!(
-            check_nesting(doc, 4),
+            check_nesting(doc, &GapFills::default(), 4),
             Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 4 })
         )
     };
@@ -1062,8 +1064,8 @@ fn every_container_nests_to_the_limit_and_no_further() {
         let body = |depth| Document { blocks: vec![nested(depth)], ..Document::default() };
         let notes =
             |depth| Document { notes: vec![note("1", vec![nested(depth)])], ..Document::default() };
-        assert!(check_nesting(&body(4), 4).is_ok(), "{case}");
-        assert!(check_nesting(&notes(4), 4).is_ok(), "{case}");
+        assert!(check_nesting(&body(4), &GapFills::default(), 4).is_ok(), "{case}");
+        assert!(check_nesting(&notes(4), &GapFills::default(), 4).is_ok(), "{case}");
         assert!(refused(&body(5)), "{case}");
         assert!(refused(&notes(5)), "{case}");
     }
@@ -1090,11 +1092,14 @@ fn a_table_with_no_cell_holds_nothing_deeper_than_where_it_stands() {
         ),
     ];
     for (name, table, expected) in cases {
-        assert_eq!(check_nesting(&in_lists(4, table), 4), expected, "{name}");
+        assert_eq!(check_nesting(&in_lists(4, table), &GapFills::default(), 4), expected, "{name}");
     }
     let deep_cell = Cell::new(vec![bulleted(vec![text("y")])]);
     let second_cell_too_deep = grid(vec![vec![origin(), CellSlot::Origin(deep_cell)]]);
-    assert_eq!(check_nesting(&in_lists(3, second_cell_too_deep), 4), too_deep());
+    assert_eq!(
+        check_nesting(&in_lists(3, second_cell_too_deep), &GapFills::default(), 4),
+        too_deep()
+    );
 }
 
 #[test]
@@ -1152,7 +1157,9 @@ fn nested_links_render_in_work_linear_in_their_depth() {
             }
             let doc = Document { blocks: vec![Block::Paragraph(content)], ..Document::default() };
             let ledger = Ledger::new(u64::MAX, None);
-            let rendered = render(&doc, &Meter::new(&ledger, u64::MAX), Placeholder).unwrap();
+            let rendered =
+                render(&doc, &GapFills::default(), &Meter::new(&ledger, u64::MAX), Placeholder)
+                    .unwrap();
             assert_eq!(rendered.markdown, expected, "{name}");
             ledger.spent()
         };
@@ -1661,7 +1668,7 @@ fn a_wrapper_chain_at_the_nesting_limit_renders_unwrapped() {
         block = frame(vec![block]);
     }
     let document = Document { blocks: vec![block], ..Document::default() };
-    check_nesting(&document, 4).unwrap();
+    check_nesting(&document, &GapFills::default(), 4).unwrap();
     assert_eq!(document_to_markdown(&document), TWO_BY_ONE);
 }
 

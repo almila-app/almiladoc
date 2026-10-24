@@ -33,6 +33,7 @@ RTF = FIXTURES / "rtf" / "text.rtf"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
+FIVE_PAGE = FIXTURES / "pdf" / "handmade-five-page.pdf"
 PREDEFINED_CMAP = FIXTURES / "pdf" / "handmade-predefined-cmap.pdf"
 UNCLOSED = FIXTURES / "malformed" / "unclosed-notes--skips.docx"
 
@@ -237,6 +238,124 @@ class ConversionTest(unittest.TestCase):
                     call(data, ocr_pages=refused)
             with self.assertRaises(TypeError):
                 call(data, ocr_pages={"1"})
+
+    def test_fill_gap_writes_the_ocr_in_place_and_fail_gap_its_marker(self):
+        data = FIVE_PAGE.read_bytes()
+        parsed = almiladoc.Converter().parse(data)
+        two, five = parsed.gaps
+        for gap in [two, five]:
+            parsed.fill_gap(gap, "# A\n\n| x |\n| - |\n| 1 |")
+        conversion = parsed.render()
+        self.assertEqual(
+            conversion.markdown,
+            "Text on the first page\n\n# A\n\n| x |\n| --- |\n| 1 |\n\n"
+            "Text on the first page\n\nText on the first page\n\n"
+            "# A\n\n| x |\n| --- |\n| 1 |\n",
+        )
+        self.assertTrue(conversion.is_complete)
+        self.assertEqual((parsed.diagnostics, parsed.gaps), ((), [two, five]))
+        for refill in [lambda: parsed.fill_gap(two, "x"), lambda: parsed.fail_gap(five)]:
+            with self.assertRaises(ValueError) as caught:
+                refill()
+            self.assertNotIsInstance(caught.exception, almiladoc.GapRefused)
+
+        reporting = almiladoc.Converter(almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT))
+        failing, reported = almiladoc.Converter().parse(data), reporting.parse(data)
+        for parsed in [failing, reported]:
+            parsed.fill_gap(two, "two")
+            parsed.fail_gap(five)
+            self.assertEqual([(d.code, d.unit) for d in parsed.diagnostics], [("ocr_failed", 5)])
+        with self.assertRaises(almiladoc.NeedsOcrError) as caught:
+            failing.render()
+        self.assertEqual(caught.exception.pages, [5])
+        conversion = reported.render()
+        self.assertEqual(
+            conversion.markdown,
+            "Text on the first page\n\ntwo\n\nText on the first page\n\n"
+            "Text on the first page\n\n<!-- ocr-failed page 5 -->\n",
+        )
+        self.assertFalse(conversion.is_complete)
+
+    def test_the_json_holds_each_fill_in_its_gap_s_place(self):
+        reporting = almiladoc.Converter(almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT))
+        parsed = reporting.parse(FIVE_PAGE.read_bytes())
+        two, five = parsed.gaps
+        parsed.fill_gap(two, "# A\n\n| x |\n| - |\n| 1 |")
+        parsed.fail_gap(five)
+        envelope = json.loads(parsed.to_json())
+        blocks = envelope["document"]["blocks"]
+        self.assertEqual(
+            [block["kind"] for block in blocks],
+            ["unit_start", "paragraph", "unit_start", "heading", "table"]
+            + ["unit_start", "paragraph"] * 2
+            + ["unit_start", "gap"],
+        )
+        heading, table = blocks[3]["value"], blocks[4]["value"]
+        self.assertEqual(
+            (heading["level"], [inline["value"]["text"] for inline in heading["content"]]),
+            (1, ["A"]),
+        )
+        cells = [
+            slot["value"]["blocks"][0]["value"][0]["value"]["text"]
+            for row in table["grid"]
+            for slot in row
+        ]
+        self.assertEqual((cells, table["header_rows"]), (["x", "1"], 1))
+        self.assertEqual(blocks[-1]["value"]["origin"], {"kind": "page", "value": 5})
+        self.assertEqual(
+            [(d["code"], d["unit"], d["count"]) for d in envelope["diagnostics"]],
+            [("ocr_failed", 5, 1)],
+        )
+
+    def test_a_fill_of_a_gap_no_row_names_or_past_a_limit_is_refused(self):
+        data = MIXED.read_bytes()
+        parsed = almiladoc.Converter().parse(data)
+        (gap,) = parsed.gaps
+        unknown = [
+            ("page", 1, 1, 1, []),
+            ("slide", 2, 1, 2, []),
+            ("page", 2, 2, 2, []),
+            ("page", 2**64, 1, 2, []),
+            ("page", 2, 2**64, 2, []),
+            ("page", 2, -1, 2, []),
+        ]
+        for row in unknown:
+            with self.subTest(row=row):
+                with self.assertRaises(KeyError):
+                    parsed.fill_gap(row, "x")
+                with self.assertRaises(KeyError):
+                    parsed.fail_gap(row)
+        with self.assertRaises(TypeError):
+            parsed.fill_gap(("page", "2", 1, 2, []), "x")
+        refusals = [
+            ("a" * ((1 << 20) + 1), "max_ocr_text_bytes"),
+            ("> " * 257, "max_nesting_depth"),
+        ]
+        for markdown, limit in refusals:
+            with self.assertRaises(almiladoc.GapRefused) as caught:
+                parsed.fill_gap(gap, markdown)
+            self.assertEqual(caught.exception.limit, limit)
+            self.assertNotIsInstance(caught.exception, almiladoc.ConvertError)
+        parsed.fill_gap(gap, "scanned")
+        self.assertEqual(parsed.render().markdown, "Text on the first page\n\nscanned\n")
+
+        def parses(max_work: int) -> bool:
+            config = almiladoc.Config(limits=almiladoc.Limits(max_work=max_work))
+            try:
+                almiladoc.Converter(config).parse(data)
+            except almiladoc.ResourceLimitError:
+                return False
+            return True
+
+        low, high = 1, 1 << 20
+        while low < high:
+            middle = (low + high) // 2
+            low, high = (low, middle) if parses(middle) else (middle + 1, high)
+        config = almiladoc.Config(limits=almiladoc.Limits(max_work=low))
+        starved = almiladoc.Converter(config).parse(data)
+        with self.assertRaises(almiladoc.ResourceLimitError) as caught:
+            starved.fill_gap(gap, "a")
+        self.assertEqual((caught.exception.limit, caught.exception.max), ("max_work", low))
 
     def test_convert_takes_a_named_format_or_detects_it(self):
         conversion = almiladoc.Converter().convert(TABLES.read_bytes(), "docx")
@@ -472,7 +591,7 @@ class ConfigTest(unittest.TestCase):
         self.assertRegex(
             repr(config),
             r"^Config\(limits=Limits\(max_entry_bytes=134217728, .*, max_work=536870912, "
-            r"max_pages=100000\), "
+            r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER\)$",
         )
 

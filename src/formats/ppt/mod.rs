@@ -2543,7 +2543,9 @@ mod tests {
     fn rendered(document: &Document) -> crate::render::markdown::Rendered {
         let ledger = crate::ledger::Ledger::new(u64::MAX, None);
         let meter = crate::render::markdown::Meter::new(&ledger, u64::MAX);
-        crate::render::markdown::render(document, &meter, crate::ImagePolicy::Placeholder).unwrap()
+        let fills = crate::ocr::GapFills::default();
+        crate::render::markdown::render(document, &fills, &meter, crate::ImagePolicy::Placeholder)
+            .unwrap()
     }
 
     fn spans(rendered: &crate::render::markdown::Rendered) -> Vec<(UnitKind, u32, &str)> {

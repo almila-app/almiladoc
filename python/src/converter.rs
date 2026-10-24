@@ -1,18 +1,20 @@
 //! `Converter` and what its calls take and return.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use almiladoc::model::OcrOrigin;
-use almiladoc::{ConvertError, Format, Input, PageSelection, PageVerdict};
+use almiladoc::model::{GapId, OcrOrigin};
+use almiladoc::{ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::sync::MutexExt;
 use pyo3::types::{PyBytes, PyInt, PyString, PyTuple};
 
 use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
-use crate::errors::{Failure, config_error, convert_error};
+use crate::errors::{Failure, config_error, convert_error, gap_error};
 use crate::input::{Admission, buffer, read_file};
 
 /// A flag any thread sets to cancel the calls it was passed to.
@@ -146,27 +148,88 @@ impl Inspection {
     }
 }
 
-/// A parsed document, keeping the `Config` it was parsed under: its model
-/// and diagnostics as JSON, the bytes of the assets it embeds, and its
-/// Markdown through `render`.
+/// A gap's row as `Parsed.gaps` gives it.
+type GapKey<'py> =
+    (String, Bound<'py, PyInt>, Bound<'py, PyInt>, Bound<'py, PyAny>, Bound<'py, PyAny>);
+
+/// A parsed document, keeping the `Config` it was parsed under and what OCR
+/// gave its gaps: its model and diagnostics as JSON, the bytes of the assets
+/// it embeds, and its Markdown through `render`.
 #[pyclass(frozen, module = "almiladoc")]
-pub(crate) struct Parsed(almiladoc::Parsed);
+pub(crate) struct Parsed {
+    parsed: Mutex<almiladoc::Parsed>,
+    ids: HashMap<(String, u32, u32), GapId>,
+}
+
+impl Parsed {
+    fn new(parsed: almiladoc::Parsed) -> Self {
+        let ids = parsed
+            .gaps()
+            .map(|gap| {
+                let (unit, ordinal) = (gap.id.unit(), gap.id.ordinal().get());
+                ((unit.kind.as_str().to_owned(), unit.ordinal.get(), ordinal), gap.id)
+            })
+            .collect();
+        Self { parsed: Mutex::new(parsed), ids }
+    }
+
+    fn lock(&self, py: Python<'_>) -> MutexGuard<'_, almiladoc::Parsed> {
+        self.parsed.lock_py_attached(py).unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The id of the gap `key` names, an ordinal past `u32` naming none.
+    fn gap_id(&self, key: GapKey<'_>) -> Result<GapId, GapError> {
+        let (kind, unit, ordinal, _, _) = key;
+        let (Ok(unit), Ok(ordinal)) = (unit.extract::<u32>(), ordinal.extract::<u32>()) else {
+            return Err(GapError::UnknownGap);
+        };
+        self.ids.get(&(kind, unit, ordinal)).copied().ok_or(GapError::UnknownGap)
+    }
+}
 
 #[pymethods]
 impl Parsed {
     /// Render the document to Markdown, as `Converter.convert` does, with
-    /// the parse's diagnostics; a loss under `OnLoss.FAIL` raises
+    /// the parse's diagnostics and each filled gap's text in its place; a gap
+    /// not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and then a loss
     /// `IncompleteError`.
     fn render(&self, py: Python<'_>) -> PyResult<Conversion> {
-        let rendered = py.detach(|| self.0.render()).map_err(|e| convert_error(py, &e))?;
+        let parsed = self.lock(py);
+        let parsed = &*parsed;
+        let rendered = py.detach(|| parsed.render()).map_err(|e| convert_error(py, &e))?;
         Conversion::new(py, &rendered)
     }
 
+    /// Fill `gap`, a row of `gaps`, with the Markdown OCR read for it, plain
+    /// text included, with the GIL released: raw HTML in it stays text, a
+    /// link its label and an image its alt. A gap no row of `gaps` names
+    /// raises `KeyError`, one filled or failed already `ValueError`, Markdown
+    /// past `Limits.max_ocr_text_bytes`, nested past `max_nesting_depth` or
+    /// whose tables may pass `max_grid_slots` `GapRefused`, and work past
+    /// `max_work` `ResourceLimitError`; each leaves the document as it was.
+    fn fill_gap(&self, py: Python<'_>, gap: GapKey<'_>, markdown: String) -> PyResult<()> {
+        let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
+        let mut parsed = self.lock(py);
+        let parsed: &mut almiladoc::Parsed = &mut parsed;
+        py.detach(|| parsed.fill_gap(id, GapFill::Markdown(markdown)))
+            .map_err(|e| gap_error(py, &e))
+    }
+
+    /// Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
+    /// `<!-- ocr-failed page N -->` in its place, and the diagnostics count
+    /// `ocr_failed` for it instead of `ocr_gap`. A gap no row names raises
+    /// `KeyError`, and one filled or failed already `ValueError`.
+    fn fail_gap(&self, py: Python<'_>, gap: GapKey<'_>) -> PyResult<()> {
+        let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
+        self.lock(py).fail_gap(id).map_err(|e| gap_error(py, &e))
+    }
+
     /// What the parse could not carry into the document, and what rendering
-    /// it drops, as a tuple of `Diagnostic`.
+    /// it drops, as a tuple of `Diagnostic`: `ocr_gap` for each gap not yet
+    /// filled or failed, and `ocr_failed` for each failed one.
     #[getter]
     fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        diagnostic_tuple(py, self.0.diagnostics())
+        diagnostic_tuple(py, self.lock(py).diagnostics())
     }
 
     /// The document and its diagnostics as one JSON object,
@@ -178,16 +241,18 @@ impl Parsed {
     /// levels writes JSON over 1000 levels deep, which `json.loads` on
     /// Python 3.11 reads only under a raised recursion limit.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
-        py.detach(|| self.0.to_json()).map_err(|e| convert_error(py, &e))
+        let parsed = self.lock(py);
+        let parsed = &*parsed;
+        py.detach(|| parsed.to_json()).map_err(|e| convert_error(py, &e))
     }
 
-    /// Every gap the document awaits OCR in, in document order, as
-    /// `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the unit it stands
-    /// in, its place among that unit's gaps, the 1-based PDF page OCR reads to
-    /// fill it, and why the page's own text does not serve.
+    /// Every gap of the document in document order, filled and failed ones
+    /// included, as `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the
+    /// unit it stands in, its place among that unit's gaps, the 1-based PDF
+    /// page OCR reads to fill it, and why the page's own text does not serve.
     #[getter]
-    fn gaps(&self) -> Vec<GapRow> {
-        self.0
+    fn gaps(&self, py: Python<'_>) -> Vec<GapRow> {
+        self.lock(py)
             .gaps()
             .map(|gap| {
                 let page = match gap.origin {
@@ -203,12 +268,12 @@ impl Parsed {
 
     /// Every embedded asset as `(id, media_type, data)`, `id` being the
     /// index an image's `asset` source names.
-    fn assets<'py>(&self, py: Python<'py>) -> Vec<(usize, &str, Bound<'py, PyBytes>)> {
-        self.0
+    fn assets<'py>(&self, py: Python<'py>) -> Vec<(usize, String, Bound<'py, PyBytes>)> {
+        self.lock(py)
             .document()
             .assets
             .iter()
-            .map(|asset| (asset.id.0, asset.media_type.as_str(), PyBytes::new(py, &asset.bytes)))
+            .map(|asset| (asset.id.0, asset.media_type.clone(), PyBytes::new(py, &asset.bytes)))
             .collect()
     }
 }
@@ -294,7 +359,7 @@ impl Converter {
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
         py.detach(|| self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::parse))
-            .map(Parsed)
+            .map(Parsed::new)
             .map_err(|f| f.raise(py))
     }
 

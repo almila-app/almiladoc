@@ -30,6 +30,7 @@ mod inspect;
 mod json;
 mod ledger;
 mod limits;
+mod ocr;
 mod package;
 mod pool;
 mod render;
@@ -45,6 +46,7 @@ pub use inspect::{Inspection, PageInspection, PageVerdict};
 pub use json::JSON_SCHEMA_VERSION;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
+pub use ocr::{GapError, GapFill};
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = {
@@ -53,6 +55,7 @@ const _: () = {
     assert_send_sync::<Converter>();
     assert_send_sync::<Parsed>();
     assert_send_sync::<Inspection>();
+    assert_send_sync::<GapError>();
 };
 
 #[cfg(doctest)]

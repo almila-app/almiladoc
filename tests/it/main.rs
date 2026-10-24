@@ -25,6 +25,8 @@ mod image_regressions;
 mod json;
 mod limits;
 #[cfg(feature = "pdf")]
+mod ocr;
+#[cfg(feature = "pdf")]
 mod pdf;
 mod robustness;
 mod sheet_bounds;

@@ -18,6 +18,7 @@ __all__ = [
     "Converter",
     "Diagnostic",
     "EncryptedError",
+    "GapRefused",
     "Identity",
     "ImagePolicy",
     "IncompleteError",
@@ -36,6 +37,15 @@ __all__ = [
 ]
 
 _OcrPages = Literal["all"] | collections.abc.Set[int] | None
+_GapRow = tuple[str, int, int, int | None, list[str]]
+
+class GapRefused(ValueError):
+    """A gap's fill crossed a limit that bounds one fill, and the document is
+    unchanged."""
+
+    limit: str
+    """The limit: `max_ocr_text_bytes`, `max_nesting_depth` or
+    `max_grid_slots`, which a smaller fill may pass."""
 
 class ConfigError(ValueError):
     """A `Limits` or `Config` field is out of range."""
@@ -150,7 +160,8 @@ class ImagePolicy:
 @final
 class Limits:
     """The safety limits of one `Converter`, frozen; each crossing raises
-    `ResourceLimitError` naming it. Every field is keyword-only, defaults to
+    `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
+    than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
     almiladoc's own default, and must be at least 1; `max_nesting_depth` at
     most 1024 and `max_pages` at most 4294967295. A field out of range raises
     `ConfigError`."""
@@ -174,6 +185,7 @@ class Limits:
         max_output_bytes: int = ...,
         max_work: int = ...,
         max_pages: int = ...,
+        max_ocr_text_bytes: int = ...,
     ) -> Limits: ...
     @property
     def max_entry_bytes(self) -> int:
@@ -227,6 +239,10 @@ class Limits:
         """Slides, sheets, spine items and PDF pages one document holds, each
         numbered by its place in the document's list, at most 4294967295; a
         PDF declaring more is refused before any page is read."""
+    @property
+    def max_ocr_text_bytes(self) -> int:
+        """Bytes of one gap's fill, past which `Parsed.fill_gap` raises
+        `GapRefused`."""
 
 @final
 class Config:
@@ -329,18 +345,33 @@ class Conversion:
 
 @final
 class Parsed:
-    """A parsed document, keeping the `Config` it was parsed under: its model
-    and diagnostics as JSON, the bytes of the assets it embeds, and its
-    Markdown through `render`."""
+    """A parsed document, keeping the `Config` it was parsed under and what
+    OCR gave its gaps: its model and diagnostics as JSON, the bytes of the
+    assets it embeds, and its Markdown through `render`."""
 
     def render(self) -> Conversion:
         """Render the document to Markdown, as `Converter.convert` does, with
-        the parse's diagnostics; a loss under `OnLoss.FAIL` raises
+        the parse's diagnostics and each filled gap's text in its place; a gap
+        not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and then a loss
         `IncompleteError`."""
+    def fill_gap(self, gap: _GapRow, markdown: str) -> None:
+        """Fill `gap`, a row of `gaps`, with the Markdown OCR read for it,
+        plain text included, with the GIL released: raw HTML in it stays text,
+        a link its label and an image its alt. A gap no row of `gaps` names
+        raises `KeyError`, one filled or failed already `ValueError`, Markdown
+        past `Limits.max_ocr_text_bytes`, nested past `max_nesting_depth` or
+        whose tables may pass `max_grid_slots` `GapRefused`, and work past
+        `max_work` `ResourceLimitError`; each leaves the document as it was."""
+    def fail_gap(self, gap: _GapRow) -> None:
+        """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
+        `<!-- ocr-failed page N -->` in its place, and the diagnostics count
+        `ocr_failed` for it instead of `ocr_gap`. A gap no row names raises
+        `KeyError`, and one filled or failed already `ValueError`."""
     @property
     def diagnostics(self) -> tuple[Diagnostic, ...]:
         """What the parse could not carry into the document, and what
-        rendering it drops, as a tuple of `Diagnostic`."""
+        rendering it drops, as a tuple of `Diagnostic`: `ocr_gap` for each gap
+        not yet filled or failed, and `ocr_failed` for each failed one."""
     def to_json(self) -> str:
         """The document and its diagnostics as one JSON object,
         `{schema_version, identity, document, diagnostics}`, written with the
@@ -352,11 +383,12 @@ class Parsed:
         `json.loads` on Python 3.11 reads only under a raised recursion
         limit."""
     @property
-    def gaps(self) -> list[tuple[str, int, int, int | None, list[str]]]:
-        """Every gap the document awaits OCR in, in document order, as
-        `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the unit it stands
-        in, its place among that unit's gaps, the 1-based PDF page OCR reads to
-        fill it, and why the page's own text does not serve."""
+    def gaps(self) -> list[_GapRow]:
+        """Every gap of the document in document order, filled and failed
+        ones included, as `(unit_kind, unit_ordinal, ordinal, page, reasons)`:
+        the unit it stands in, its place among that unit's gaps, the 1-based
+        PDF page OCR reads to fill it, and why the page's own text does not
+        serve."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""

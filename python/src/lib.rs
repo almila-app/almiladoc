@@ -21,8 +21,8 @@ mod _almiladoc {
     use crate::diagnostics::Diagnostic;
     #[pymodule_export]
     use crate::errors::exceptions::{
-        CancelledError, ConfigError, ConvertError, EncryptedError, IncompleteError, InternalError,
-        InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError,
-        UnsupportedError,
+        CancelledError, ConfigError, ConvertError, EncryptedError, GapRefused, IncompleteError,
+        InternalError, InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError,
+        ResourceLimitError, UnsupportedError,
     };
 }

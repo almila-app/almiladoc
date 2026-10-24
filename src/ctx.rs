@@ -96,6 +96,10 @@ impl<'a> ParseCtx<'a> {
         Self { ledger: Ledger::new(self.limits.max_work, cancel), ..self }
     }
 
+    pub(crate) fn starting_at(self, spent: u64) -> Self {
+        Self { ledger: self.ledger.starting_at(spent), ..self }
+    }
+
     pub(crate) fn with_images(self, images: ImagePolicy) -> Self {
         Self { images, ..self }
     }

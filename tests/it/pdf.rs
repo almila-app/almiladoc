@@ -438,7 +438,7 @@ fn pdf_output_is_identical_across_runs_and_threads() {
 
 /// A page for each content stream, its /F1 Helvetica, its /F2 a font whose codes give no
 /// characters and its /F3 Courier.
-fn pdf_pages(pages: &[&str]) -> Vec<u8> {
+pub(crate) fn pdf_pages(pages: &[&str]) -> Vec<u8> {
     let pages: Vec<Vec<(&str, &str)>> = pages.iter().map(|content| vec![("", *content)]).collect();
     let pages: Vec<&[(&str, &str)]> = pages.iter().map(Vec::as_slice).collect();
     pdf_tree(&pages, &|kids, count| format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>"))

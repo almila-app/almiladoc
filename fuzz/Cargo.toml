@@ -134,3 +134,9 @@ name = "odf_content"
 path = "fuzz_targets/odf_content.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "gap_fill"
+path = "fuzz_targets/gap_fill.rs"
+test = false
+doc = false

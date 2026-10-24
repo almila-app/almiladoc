@@ -16,9 +16,11 @@ use crate::identity::EngineIdentity;
 use crate::inspect::{Inspection, PageInspection};
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
-use crate::model::{Block, Document, Gap, OcrOrigin, Unit, UnitKind};
+use crate::model::{Block, Document, Gap, GapId, OcrOrigin, Unit, UnitKind};
+use crate::ocr::{GapError, GapFill, GapFills, GapState, gaps};
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
+use crate::shared::markdown;
 
 /// Converts documents under one validated [`Config`]; share it across threads
 /// and calls.
@@ -143,7 +145,8 @@ impl Converter {
             let (diagnostics, fuel) = report_of(parse_ctx, &document, self.config.images)?;
             Ok((document, diagnostics, fuel))
         })?;
-        Ok(Parsed { document, diagnostics, fuel, config: Arc::clone(&self.config) })
+        let fills = GapFills::of(&document);
+        Ok(Parsed { document, diagnostics, fuel, config: Arc::clone(&self.config), fills })
     }
 
     /// Convert `input` to Markdown: [`Converter::parse`] then
@@ -176,9 +179,10 @@ impl Converter {
         let bytes = input.bytes;
         self.prepare(input, move |parse_ctx, format| {
             let document = parse_document(&parse_ctx, bytes, format)?;
-            refuse_gaps(self.config.on_loss, &document)?;
+            let fills = GapFills::default();
+            refuse_gaps(self.config.on_loss, &document, &fills)?;
             let meter = Meter::new(parse_ctx.ledger(), self.config.limits.max_output_bytes);
-            let rendered = render(&document, &meter, self.config.images)?;
+            let rendered = render(&document, &fills, &meter, self.config.images)?;
             let diagnostics = diagnostics_of(parse_ctx, &document, self.config.images)?;
             conclude(self.config.on_loss, rendered.markdown, rendered.units, diagnostics)
         })
@@ -412,13 +416,15 @@ impl fmt::Debug for Input<'_> {
 }
 
 /// A parsed document and its diagnostics, keeping the [`Config`] it was
-/// parsed under and the work its parse charged for [`Parsed::render`].
+/// parsed under, the work its parse charged and what OCR gave its gaps for
+/// [`Parsed::render`].
 #[derive(Debug, Clone)]
 pub struct Parsed {
     document: Document,
     diagnostics: Diagnostics,
     fuel: u64,
     config: Arc<Config>,
+    fills: GapFills,
 }
 
 impl Parsed {
@@ -435,14 +441,16 @@ impl Parsed {
     }
 
     /// What the parse could not carry into the document, and what rendering
-    /// it drops.
+    /// it drops: `ocr_gap` for each gap not yet filled or failed, and
+    /// `ocr_failed` for each failed one.
     #[must_use]
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
     }
 
-    /// The gaps the document awaits OCR in, in document order: a PDF's
-    /// pages whose own text does not stand for what they show.
+    /// Every gap of the document in document order, the body's before the
+    /// notes', filled and failed ones included: a PDF's pages whose own text
+    /// does not stand for what they show.
     ///
     /// ```
     /// # #[cfg(feature = "pdf")] {
@@ -458,10 +466,94 @@ impl Parsed {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn gaps(&self) -> impl Iterator<Item = &Gap> + '_ {
-        self.document.blocks.iter().filter_map(|block| match block {
-            Block::Gap(gap) => Some(gap),
-            _ => None,
-        })
+        gaps(&self.document).map(|located| located.gap)
+    }
+
+    /// Fill the gap `id` names with what OCR read for it, on a pool built from
+    /// its [`Config`] and charging each Markdown event on from the work
+    /// charged so far; [`Parsed::render`] writes the fill in the gap's place.
+    ///
+    /// # Errors
+    ///
+    /// Each leaves the document, its diagnostics and its work as they were.
+    /// [`GapError::UnknownGap`] when no gap has that id,
+    /// [`GapError::Settled`] when it was filled or failed already, and
+    /// [`GapError::Refused`] when the fill passes
+    /// [`Limits::max_ocr_text_bytes`](crate::Limits::max_ocr_text_bytes),
+    /// nests deeper than
+    /// [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth) with
+    /// the gap's container, or its tables may hold more cells than
+    /// [`Limits::max_grid_slots`](crate::Limits::max_grid_slots);
+    /// [`GapError::Convert`] when the work passes
+    /// [`Limits::max_work`](crate::Limits::max_work), or with
+    /// [`ConvertError::Internal`] when the pool cannot start or the fill panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "pdf")] {
+    /// use almiladoc::{Config, Converter, Format, GapError, GapFill, Input};
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    /// let pdf = std::fs::read(path)?;
+    /// let mut parsed = Converter::new(Config::default())?.parse(Input::new(&pdf, Format::Pdf))?;
+    /// let gap = parsed.gaps().next().map(|gap| gap.id).ok_or("no gap")?;
+    /// parsed.fill_gap(gap, GapFill::Markdown("A *scanned* page".into()))?;
+    /// let conversion = parsed.render()?;
+    /// assert_eq!(conversion.markdown(), "Text on the first page\n\nA _scanned_ page\n");
+    /// assert!(conversion.is_complete());
+    ///
+    /// let again = parsed.fill_gap(gap, GapFill::Markdown(String::new()));
+    /// assert_eq!(again, Err(GapError::Settled));
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn fill_gap(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
+        let depth = self.fills.unsettled(id)?;
+        let GapFill::Markdown(text) = fill;
+        let (blocks, fuel) = self.on_pool(|| {
+            let parse_ctx = ParseCtx::new(&self.config.limits).starting_at(self.fuel);
+            let blocks = markdown::blocks(&parse_ctx, &text, depth)?;
+            Ok((blocks, parse_ctx.ledger().spent()))
+        })?;
+        self.fuel = fuel;
+        self.fills.settle(id, GapState::Filled(blocks), &mut self.diagnostics);
+        Ok(())
+    }
+
+    /// Record that OCR of the gap `id` names failed: [`Parsed::render`]
+    /// writes `<!-- ocr-failed page N -->` in its place, and the diagnostics
+    /// count `ocr_failed` for it instead of `ocr_gap`.
+    ///
+    /// # Errors
+    ///
+    /// [`GapError::UnknownGap`] when no gap has that id, and
+    /// [`GapError::Settled`] when it was filled or failed already; either
+    /// leaves the document as it was.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "pdf")] {
+    /// use almiladoc::{Config, Converter, Format, Input, OnLoss};
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    /// let pdf = std::fs::read(path)?;
+    /// let mut config = Config::default();
+    /// config.on_loss = OnLoss::Report;
+    /// let mut parsed = Converter::new(config)?.parse(Input::new(&pdf, Format::Pdf))?;
+    /// let gap = parsed.gaps().next().map(|gap| gap.id).ok_or("no gap")?;
+    /// parsed.fail_gap(gap)?;
+    /// let conversion = parsed.render()?;
+    /// assert!(conversion.markdown().ends_with("<!-- ocr-failed page 2 -->\n"));
+    /// assert!(!conversion.is_complete());
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn fail_gap(&mut self, id: GapId) -> Result<(), GapError> {
+        self.fills.unsettled(id)?;
+        self.fills.settle(id, GapState::Failed, &mut self.diagnostics);
+        Ok(())
     }
 
     /// Render the document to Markdown on a pool built from its [`Config`],
@@ -470,8 +562,8 @@ impl Parsed {
     ///
     /// # Errors
     ///
-    /// Under [`OnLoss::Fail`], [`ConvertError::NeedsOcr`] when a gap awaits
-    /// OCR, else [`ConvertError::Incomplete`] when content was lost;
+    /// Under [`OnLoss::Fail`], [`ConvertError::NeedsOcr`] when a gap is not
+    /// filled, else [`ConvertError::Incomplete`] when content was lost;
     /// [`ConvertError::ResourceLimit`] when the document
     /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth),
     /// its Markdown passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
@@ -499,10 +591,11 @@ impl Parsed {
     /// ```
     pub fn render(&self) -> Result<Conversion, ConvertError> {
         self.on_pool(|| {
-            refuse_gaps(self.config.on_loss, &self.document)?;
+            refuse_gaps(self.config.on_loss, &self.document, &self.fills)?;
             let ledger = self.resumed()?;
             let rendered = render(
                 &self.document,
+                &self.fills,
                 &Meter::new(&ledger, self.config.limits.max_output_bytes),
                 self.config.images,
             )?;
@@ -562,6 +655,7 @@ impl Parsed {
             crate::json::write(
                 &EngineIdentity::of(&self.config),
                 &self.document,
+                &self.fills,
                 &self.diagnostics,
                 &meter,
             )
@@ -570,7 +664,7 @@ impl Parsed {
 
     fn resumed(&self) -> Result<Ledger<'static>, ConvertError> {
         let limits = &self.config.limits;
-        check_nesting(&self.document, limits.max_nesting_depth)?;
+        check_nesting(&self.document, &self.fills, limits.max_nesting_depth)?;
         Ok(Ledger::new(limits.max_work, None).starting_at(self.fuel))
     }
 
@@ -596,7 +690,7 @@ fn within_nesting<T>(
     read: impl FnOnce() -> Result<(Document, T), ConvertError>,
 ) -> Result<(Document, T), ConvertError> {
     let (document, read) = read()?;
-    check_nesting(&document, parse_ctx.limits().max_nesting_depth)?;
+    check_nesting(&document, &GapFills::default(), parse_ctx.limits().max_nesting_depth)?;
     Ok((document, read))
 }
 
@@ -624,8 +718,9 @@ fn report_of(
     Ok((diagnostics, ledger.spent()))
 }
 
-/// Under [`OnLoss::Fail`], refuse a document that awaits OCR, naming every page it awaits.
-fn refuse_gaps(on_loss: OnLoss, document: &Document) -> Result<(), ConvertError> {
+/// Under [`OnLoss::Fail`], refuse a document whose gaps are not all filled, naming every page
+/// that awaits OCR or whose OCR failed.
+fn refuse_gaps(on_loss: OnLoss, document: &Document, fills: &GapFills) -> Result<(), ConvertError> {
     if on_loss != OnLoss::Fail {
         return Ok(());
     }
@@ -635,7 +730,11 @@ fn refuse_gaps(on_loss: OnLoss, document: &Document) -> Result<(), ConvertError>
             Block::UnitStart(unit) if unit.kind == UnitKind::Page => {
                 page_count = page_count.saturating_add(1);
             }
-            Block::Gap(Gap { origin: OcrOrigin::Page(page), .. }) => pages.push(page.get()),
+            Block::Gap(gap @ Gap { origin: OcrOrigin::Page(page), .. })
+                if fills.filled(gap).is_none() =>
+            {
+                pages.push(page.get());
+            }
             _ => {}
         }
     }
@@ -655,13 +754,23 @@ fn conclude(
 }
 
 /// The result of a conversion: its Markdown and its diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct Conversion {
     markdown: String,
     units: Vec<UnitSpan>,
     diagnostics: Diagnostics,
+}
+
+impl fmt::Debug for Conversion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Conversion")
+            .field("markdown_bytes", &self.markdown.len())
+            .field("units", &self.units)
+            .field("diagnostics", &self.diagnostics)
+            .finish()
+    }
 }
 
 /// A source unit's UTF-8 byte range in the converted Markdown body.
@@ -697,12 +806,15 @@ impl Conversion {
         &self.diagnostics
     }
 
-    /// True when no content was [`Lost`](crate::LossClass::Lost) and no page awaits OCR; only
+    /// True when no content was [`Lost`](crate::LossClass::Lost) and every gap was filled; only
     /// [`OnLoss::Report`] returns a conversion for which it is false.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         !self.diagnostics.has_loss()
-            && !self.diagnostics.iter().any(|d| d.code == DiagnosticCode::OcrGap)
+            && !self
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d.code, DiagnosticCode::OcrGap | DiagnosticCode::OcrFailed))
     }
 
     /// The GitHub-Flavored Markdown.
@@ -773,12 +885,117 @@ mod tests {
     }
 
     fn parsed(blocks: Vec<Block>, config: Config) -> Parsed {
+        let document = Document { blocks, ..Document::default() };
         Parsed {
-            document: Document { blocks, ..Document::default() },
+            fills: GapFills::of(&document),
+            document,
             diagnostics: Diagnostics::default(),
             fuel: 0,
             config: Arc::new(config),
         }
+    }
+
+    fn page_gap(page: u32) -> Block {
+        let page = NonZeroU32::new(page).unwrap();
+        Block::Gap(Gap {
+            id: GapId::new(Unit::new(UnitKind::Page, page), NonZeroU32::MIN),
+            origin: OcrOrigin::Page(page),
+            reasons: Vec::new(),
+        })
+    }
+
+    fn bullets(items: &[&str]) -> Block {
+        let items = items
+            .iter()
+            .map(|text| crate::model::ListItem {
+                blocks: vec![Block::Paragraph(vec![Inline::plain(*text)])],
+                marker_label: None,
+            })
+            .collect();
+        Block::List(crate::model::List {
+            marker: crate::model::MarkerKind::Bullet,
+            start: 1,
+            items,
+        })
+    }
+
+    fn filled(mut blocks: Vec<Block>, fills: &[&str]) -> String {
+        blocks.insert(0, Block::UnitStart(Unit::new(UnitKind::Page, NonZeroU32::MIN)));
+        let mut parsed = parsed(blocks, Config::default());
+        let ids: Vec<GapId> = parsed.gaps().map(|gap| gap.id).collect();
+        for (id, fill) in ids.into_iter().zip(fills) {
+            parsed.fill_gap(id, GapFill::Markdown((*fill).to_owned())).unwrap();
+        }
+        parsed.render().unwrap().into_markdown()
+    }
+
+    #[test]
+    fn a_fill_is_read_where_its_gap_stands() {
+        let item = |blocks| crate::model::ListItem { blocks, marker_label: None };
+        let list = |items| {
+            Block::List(crate::model::List {
+                marker: crate::model::MarkerKind::Bullet,
+                start: 1,
+                items,
+            })
+        };
+        let text = |text: &str| Block::Paragraph(vec![Inline::plain(text)]);
+        let linked = Block::Paragraph(vec![Inline::Link {
+            content: vec![Inline::plain("l")],
+            target: crate::model::LinkTarget::anchor("x".into()),
+        }]);
+        let heading = Block::Heading {
+            level: 1,
+            anchor: Some("x".into()),
+            content: vec![Inline::plain("A")],
+        };
+        let cases = [
+            (vec![page_gap(1), bullets(&["b"])], vec!["- a"], "- a\n\n* b\n"),
+            (vec![bullets(&["a"]), page_gap(1)], vec!["- b"], "- a\n\n* b\n"),
+            (vec![page_gap(1), heading, linked], vec!["# A"], "# A\n\n# A\n\n[l](#a-1)\n"),
+            (
+                vec![list(vec![
+                    item(vec![list(vec![item(vec![page_gap(1), text("b")])])]),
+                    item(vec![text("c")]),
+                ])],
+                vec![" "],
+                "- - b\n- c\n",
+            ),
+            (
+                vec![list(vec![item(vec![page_gap(1)]), item(vec![text("c")])])],
+                vec!["a\n\nb"],
+                "- a\n\n  b\n\n- c\n",
+            ),
+        ];
+        for (blocks, fills, expected) in cases {
+            assert_eq!(filled(blocks, &fills), expected, "{fills:?}");
+        }
+    }
+
+    #[test]
+    fn a_fill_nests_in_its_gaps_container() {
+        let document = Document { blocks: vec![page_gap(1)], ..Document::default() };
+        let mut fills = GapFills::of(&document);
+        let id = GapId::new(Unit::new(UnitKind::Page, NonZeroU32::MIN), NonZeroU32::MIN);
+        fills.settle(id, GapState::Filled(quoted(4, "x")), &mut Diagnostics::default());
+        check_nesting(&document, &fills, 4).unwrap();
+        assert_eq!(
+            check_nesting(&document, &fills, 3),
+            Err(ConvertError::limit(Limit::NestingDepth, 3))
+        );
+    }
+
+    #[test]
+    fn a_fill_is_refused_past_the_nesting_left_by_its_gaps_container() {
+        let mut config = Config::default();
+        config.limits.max_nesting_depth = 3;
+        let mut parsed = parsed(vec![Block::BlockQuote(vec![page_gap(1)])], config);
+        let id = GapId::new(Unit::new(UnitKind::Page, NonZeroU32::MIN), NonZeroU32::MIN);
+        let fill = |text: &str| GapFill::Markdown(text.to_owned());
+        let refused = parsed.fill_gap(id, fill("> > > a"));
+        assert_matches!(refused, Err(GapError::Refused { limit: Limit::NestingDepth, .. }));
+        parsed.fill_gap(id, fill("> > a")).unwrap();
+        assert_eq!(parsed.render().unwrap().markdown(), "> > > a\n");
     }
 
     #[test]
@@ -1133,6 +1350,7 @@ mod tests {
                     let document = parse_document(&ctx, br"{\rtf1 hello}", format)?;
                     let rendered = render(
                         &document,
+                        &GapFills::default(),
                         &Meter::new(ctx.ledger(), u64::MAX),
                         crate::ImagePolicy::Placeholder,
                     )?;
@@ -1205,6 +1423,7 @@ mod tests {
                 let document = parse_document(&ctx, &bytes, format)?;
                 let rendered = render(
                     &document,
+                    &GapFills::default(),
                     &Meter::new(ctx.ledger(), u64::MAX),
                     crate::ImagePolicy::Placeholder,
                 )?;

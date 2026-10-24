@@ -3,8 +3,10 @@
 //!
 //! These are hard caps against abuse input shapes (decompression bombs,
 //! pathological nesting, runaway expansion): crossing one returns
-//! [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit),
-//! always.
+//! [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit), bar
+//! a [`Parsed::fill_gap`](crate::Parsed::fill_gap) that crosses one other
+//! than [`Limits::max_work`], which is
+//! [`GapError::Refused`](crate::GapError::Refused).
 
 use std::fmt;
 
@@ -12,7 +14,7 @@ const MIB: u64 = 1024 * 1024;
 
 /// The safety limits of one [`Converter`](crate::Converter), each crossing
 /// failing [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit)
-/// with its [`Limit`].
+/// with its [`Limit`], or refusing a fill as the module documents.
 ///
 /// The defaults admit ordinary large documents.
 ///
@@ -34,7 +36,8 @@ pub struct Limits {
     pub max_entry_count: u64,
     /// Nesting depth of input structure (XML elements in a part, RTF groups,
     /// Word fields) and of the parsed document's lists, table cells, quotes
-    /// and links: recursion over it needs stack in proportion. At most
+    /// and links, a gap's fill counted from the container the gap sits in:
+    /// recursion over it needs stack in proportion. At most
     /// [`Limits::MAX_NESTING_CEILING`].
     pub max_nesting_depth: u64,
     /// XML nodes one part holds at once: each costs about 400 bytes once
@@ -50,6 +53,8 @@ pub struct Limits {
     /// admitted before the table is built. A CSV's table does not. An xlsx,
     /// xlsb or xls worksheet's cells and the losses they report, hidden ones
     /// too, count against the positions left as its rows and records stream.
+    /// A gap's fill counts the cells its tables may hold, padding included,
+    /// before it is parsed, against the whole limit.
     pub max_grid_slots: u64,
     /// Content-bearing cells a span or repeat expansion produces per table.
     pub max_expansion: u64,
@@ -84,7 +89,8 @@ pub struct Limits {
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
     /// style and numbering resolution, grid positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
-    /// ahead at and writes, and 64 bytes of Markdown or JSON written. Detection shares these counters with parsing,
+    /// ahead at and writes, 64 bytes of Markdown or JSON written, and the
+    /// Markdown events of each gap's fill. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges
@@ -102,6 +108,9 @@ pub struct Limits {
     /// first unit numbered past this is refused; a PDF declaring more pages is
     /// refused before any is read. At most `u32::MAX`.
     pub max_pages: u64,
+    /// Bytes of one gap's fill: a model's reply is untrusted, and its
+    /// Markdown parse holds the whole of it at once.
+    pub max_ocr_text_bytes: u64,
 }
 
 impl Limits {
@@ -126,9 +135,10 @@ impl Limits {
         max_output_bytes: 256 * MIB,
         max_work: 2 * 256 * MIB,
         max_pages: 100_000,
+        max_ocr_text_bytes: MIB,
     };
 
-    pub(crate) fn fields(&self) -> [(Limit, u64); 16] {
+    pub(crate) fn fields(&self) -> [(Limit, u64); 17] {
         [
             (Limit::EntryBytes, self.max_entry_bytes),
             (Limit::TotalBytes, self.max_total_bytes),
@@ -146,6 +156,7 @@ impl Limits {
             (Limit::OutputBytes, self.max_output_bytes),
             (Limit::Work, self.max_work),
             (Limit::Pages, self.max_pages),
+            (Limit::OcrTextBytes, self.max_ocr_text_bytes),
         ]
     }
 
@@ -200,6 +211,8 @@ pub enum Limit {
     Work,
     /// Units one document holds.
     Pages,
+    /// Bytes of one gap's fill.
+    OcrTextBytes,
     /// A memory reservation the allocator refused.
     Allocation,
 }
@@ -225,6 +238,7 @@ impl Limit {
             Self::OutputBytes => "max_output_bytes",
             Self::Work => "max_work",
             Self::Pages => "max_pages",
+            Self::OcrTextBytes => "max_ocr_text_bytes",
             Self::Allocation => "allocation",
         }
     }
@@ -267,6 +281,7 @@ mod tests {
             (Limit::OutputBytes, "max_output_bytes"),
             (Limit::Work, "max_work"),
             (Limit::Pages, "max_pages"),
+            (Limit::OcrTextBytes, "max_ocr_text_bytes"),
             (Limit::Allocation, "allocation"),
         ];
         for (limit, name) in names {
@@ -297,6 +312,7 @@ mod tests {
                 (Limit::OutputBytes, 256 * 1024 * 1024),
                 (Limit::Work, 536_870_912),
                 (Limit::Pages, 100_000),
+                (Limit::OcrTextBytes, 1024 * 1024),
             ]
         );
     }
@@ -356,6 +372,9 @@ mod tests {
                 }
                 Limit::Work => {
                     ("tests/it/limits.rs", "ppt_links_each_over_one_long_text_trip_max_work")
+                }
+                Limit::OcrTextBytes => {
+                    ("tests/it/ocr.rs", "a_fill_past_a_limit_is_refused_and_the_gap_then_fills")
                 }
                 Limit::Allocation => {
                     ("src/package/archive.rs", "an_allocation_failure_mid_read_is_a_resource_limit")

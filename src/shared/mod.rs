@@ -27,6 +27,7 @@ pub(crate) mod list;
     reason = "std has no float-to-integer or u64-to-f64 conversion, so each named conversion is an `as` cast with its rounding and saturation documented and tested"
 )]
 pub(crate) mod lossy;
+pub(crate) mod markdown;
 pub(crate) mod math;
 pub(crate) mod mc;
 pub(crate) mod numbering;

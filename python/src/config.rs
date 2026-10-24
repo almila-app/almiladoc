@@ -58,7 +58,8 @@ impl ImagePolicy {
 }
 
 /// The safety limits of one `Converter`, frozen; each crossing raises
-/// `ResourceLimitError` naming it. Every field is keyword-only, defaults to
+/// `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
+/// than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
 /// almiladoc's own default, and must be at least 1; `max_nesting_depth` at
 /// most 1024 and `max_pages` at most 4294967295. A field out of range raises
 /// `ConfigError`.
@@ -139,6 +140,9 @@ limits! {
     /// numbered by its place in the document's list, at most 4294967295; a
     /// PDF declaring more is refused before any page is read.
     max_pages,
+    /// Bytes of one gap's fill, past which `Parsed.fill_gap` raises
+    /// `GapRefused`.
+    max_ocr_text_bytes,
 }
 
 impl Hash for Limits {

@@ -350,7 +350,7 @@ fn every_inline_read_is_charged_even_where_it_writes_nothing() {
     cancel.cancel();
     let ledger = Ledger::new(u64::MAX, Some(&cancel));
     assert_matches!(
-        render(&document, &Meter::new(&ledger, u64::MAX), Placeholder),
+        render(&document, &GapFills::default(), &Meter::new(&ledger, u64::MAX), Placeholder),
         Err(ConvertError::Cancelled)
     );
     let omitted = |count| -> Vec<Inline> {
@@ -366,7 +366,7 @@ fn every_inline_read_is_charged_even_where_it_writes_nothing() {
                 blocks: vec![Block::Paragraph(vec![fallback(omitted(count))])],
                 ..Document::default()
             };
-            least_work(|meter| render(&document, meter, Omit).is_ok())
+            least_work(|meter| render(&document, &GapFills::default(), meter, Omit).is_ok())
         };
         assert_eq!(least(20) - least(10), 10);
     }
@@ -386,7 +386,7 @@ fn a_list_item_paragraph_is_charged_where_its_shape_is_read_and_where_it_is_writ
     let least = |count| {
         let list = List { marker: MarkerKind::Bullet, start: 1, items: vec![item(count)] };
         let document = Document { blocks: vec![Block::List(list)], ..Document::default() };
-        least_work(|meter| render(&document, meter, Placeholder).is_ok())
+        least_work(|meter| render(&document, &GapFills::default(), meter, Placeholder).is_ok())
     };
     assert_eq!(least(20) - least(10), 2 * 10);
 }

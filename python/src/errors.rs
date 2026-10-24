@@ -1,13 +1,14 @@
 //! The exceptions the binding raises, and the one mapping from each failure
 //! onto them.
 
-use almiladoc::{ConvertError, Limit, UnsupportedKind};
+use almiladoc::{ConvertError, GapError, Limit, UnsupportedKind};
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::diagnostics::diagnostic_tuple;
 
 use exceptions::{
-    CancelledError, ConfigError, EncryptedError, IncompleteError, InternalError,
+    CancelledError, ConfigError, EncryptedError, GapRefused, IncompleteError, InternalError,
     InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError,
     UnsupportedError,
 };
@@ -29,6 +30,15 @@ pub(crate) mod exceptions {
          (`threads` for the thread count); `ceiling` is the highest value a \
          limit with one accepts and `max` the most threads, each `None` where \
          it does not apply."
+    );
+
+    create_exception!(
+        almiladoc,
+        GapRefused,
+        PyValueError,
+        "A gap's fill crossed a limit that bounds one fill, and the document is \
+         unchanged: `limit` names it, `max_ocr_text_bytes`, `max_nesting_depth` \
+         or `max_grid_slots`, which a smaller fill may pass."
     );
 
     create_exception!(
@@ -234,6 +244,21 @@ fn mismatched(kind: UnsupportedKind) -> Option<&'static str> {
     match kind {
         UnsupportedKind::FormatMismatch { detected, .. } => Some(detected.as_str()),
         _ => None,
+    }
+}
+
+/// The exception for a fill or fail the core refused; a variant newer than
+/// this binding raises as `Internal`.
+pub(crate) fn gap_error(py: Python<'_>, error: &GapError) -> PyErr {
+    match error {
+        GapError::UnknownGap => PyKeyError::new_err(error.to_string()),
+        GapError::Settled => PyValueError::new_err(error.to_string()),
+        GapError::Refused { limit, .. } => {
+            let raised = GapRefused::new_err(error.to_string());
+            raised.value(py).setattr("limit", limit.as_str()).err().unwrap_or(raised)
+        }
+        GapError::Convert(error) => convert_error(py, error),
+        _ => raise(py, &ConvertError::Internal, error.to_string()),
     }
 }
 

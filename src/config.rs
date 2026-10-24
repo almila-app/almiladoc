@@ -263,7 +263,7 @@ mod tests {
 
     type LimitField = fn(&mut Limits) -> &mut u64;
 
-    const FIELDS: [(Limit, LimitField); 16] = [
+    const FIELDS: [(Limit, LimitField); 17] = [
         (Limit::EntryBytes, |limits| &mut limits.max_entry_bytes),
         (Limit::TotalBytes, |limits| &mut limits.max_total_bytes),
         (Limit::EntryCount, |limits| &mut limits.max_entry_count),
@@ -280,6 +280,7 @@ mod tests {
         (Limit::OutputBytes, |limits| &mut limits.max_output_bytes),
         (Limit::Work, |limits| &mut limits.max_work),
         (Limit::Pages, |limits| &mut limits.max_pages),
+        (Limit::OcrTextBytes, |limits| &mut limits.max_ocr_text_bytes),
     ];
 
     fn field_of(limit: Limit) -> LimitField {

@@ -10,6 +10,7 @@ use crate::diagnostics::Diagnostics;
 use crate::error::ConvertError;
 use crate::identity::EngineIdentity;
 use crate::model::Document;
+use crate::ocr::GapFills;
 use crate::render::markdown::Meter;
 
 /// The version of the JSON [`Parsed::to_json`](crate::Parsed::to_json)
@@ -29,9 +30,11 @@ struct Envelope<'a> {
 pub(crate) fn write(
     identity: &EngineIdentity,
     document: &Document,
+    fills: &GapFills,
     diagnostics: &Diagnostics,
     meter: &Meter<'_>,
 ) -> Result<String, ConvertError> {
+    let document = &fills.spliced(document);
     let envelope =
         Envelope { schema_version: JSON_SCHEMA_VERSION, identity, document, diagnostics };
     let mut out = Metered { meter, json: Vec::new(), refused: None };
@@ -83,7 +86,13 @@ mod tests {
     fn json(document: &Document, diagnostics: &Diagnostics) -> Result<String, ConvertError> {
         let ledger = Ledger::new(u64::MAX, None);
         let identity = EngineIdentity::of(&Config::default());
-        write(&identity, document, diagnostics, &Meter::new(&ledger, u64::MAX))
+        write(
+            &identity,
+            document,
+            &GapFills::default(),
+            diagnostics,
+            &Meter::new(&ledger, u64::MAX),
+        )
     }
 
     fn lines(json: &str) -> String {
@@ -567,7 +576,13 @@ mod tests {
         let identity = EngineIdentity::of(&Config::default());
         let with = |max_work, max_output| {
             let ledger = Ledger::new(max_work, None);
-            write(&identity, &document, &Diagnostics::default(), &Meter::new(&ledger, max_output))
+            write(
+                &identity,
+                &document,
+                &GapFills::default(),
+                &Diagnostics::default(),
+                &Meter::new(&ledger, max_output),
+            )
         };
         assert_eq!(with(u64::MAX, len), Ok(full));
         assert_eq!(with(u64::MAX, len - 1), Err(ConvertError::limit(Limit::OutputBytes, len - 1)));

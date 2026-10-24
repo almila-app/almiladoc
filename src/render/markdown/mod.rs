@@ -17,9 +17,10 @@ use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{
-    Block, Cell, CellSlot, Document, Inline, LinkTarget, List, MarkerKind, Note, OcrOrigin, Table,
-    Unit, UnitKind, inlines_are_empty,
+    Block, Cell, CellSlot, Document, Gap, Inline, LinkTarget, List, MarkerKind, Note, OcrOrigin,
+    Table, Unit, UnitKind, inlines_are_empty,
 };
+use crate::ocr::{GapFills, GapState};
 use crate::shared::uri::is_safe_link;
 use crate::{ImagePolicy, UnitSpan};
 use anchors::{AnchorMap, resolve_anchors};
@@ -35,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 type NoteNumbers = HashMap<String, usize>;
 
 pub(crate) struct Ctx<'d> {
+    fills: &'d GapFills,
     nums: NoteNumbers,
     anchors: AnchorMap,
     shapes: Shapes,
@@ -46,13 +48,19 @@ pub(crate) struct Ctx<'d> {
 }
 
 impl<'d> Ctx<'d> {
-    fn of(doc: &'d Document, images: ImagePolicy, meter: &Meter<'_>) -> Result<Self, ConvertError> {
+    fn of(
+        doc: &'d Document,
+        fills: &'d GapFills,
+        images: ImagePolicy,
+        meter: &Meter<'_>,
+    ) -> Result<Self, ConvertError> {
         let mut defined_notes = HashSet::new();
         let selected_notes: Vec<&Note> =
             doc.notes.iter().filter(|note| defined_notes.insert(note.id.as_str())).collect();
         let duplicate_notes =
             u64::try_from(doc.notes.len() - selected_notes.len()).unwrap_or(u64::MAX);
         let mut ctx = Self {
+            fills,
             nums: HashMap::new(),
             anchors: AnchorMap::default(),
             shapes: Shapes::default(),
@@ -65,9 +73,9 @@ impl<'d> Ctx<'d> {
         if images == ImagePolicy::Omit {
             ctx.omit_image_notes(meter)?;
         }
-        ctx.nums = number_notes(&doc.blocks, &ctx.selected_notes, &ctx.omitted_notes);
+        ctx.nums = number_notes(&doc.blocks, &ctx.selected_notes, &ctx.omitted_notes, fills);
         let notes: Vec<&Note> = numbered_notes(&ctx).into_iter().map(|(note, _)| note).collect();
-        ctx.anchors = resolve_anchors(doc, &notes, images, &ctx.nums);
+        ctx.anchors = resolve_anchors(doc, fills, &notes, images, &ctx.nums);
         Ok(ctx)
     }
 
@@ -131,13 +139,15 @@ pub(crate) struct Rendered {
     pub(crate) units: Vec<UnitSpan>,
 }
 
-/// Render `doc` as GitHub-Flavored Markdown, every byte charged to `meter`.
+/// Render `doc` with its gaps as `fills` holds them as GitHub-Flavored Markdown, every byte
+/// charged to `meter`.
 pub(crate) fn render(
     doc: &Document,
+    fills: &GapFills,
     meter: &Meter<'_>,
     images: ImagePolicy,
 ) -> Result<Rendered, ConvertError> {
-    let rc = Ctx::of(doc, images, meter)?;
+    let rc = Ctx::of(doc, fills, images, meter)?;
     let mut sink = Sink::new(meter);
     let units = write_body(&doc.blocks, &rc, &mut sink)?;
     for (note, num) in numbered_notes(&rc) {
@@ -156,7 +166,7 @@ pub(crate) fn render(
 #[cfg(test)]
 pub(crate) fn document_to_markdown(doc: &Document) -> String {
     let ledger = crate::ledger::Ledger::new(u64::MAX, None);
-    render(doc, &Meter::new(&ledger, u64::MAX), ImagePolicy::Placeholder)
+    render(doc, &GapFills::default(), &Meter::new(&ledger, u64::MAX), ImagePolicy::Placeholder)
         .expect("an unlimited render succeeds")
         .markdown
 }
@@ -202,7 +212,8 @@ pub(crate) fn render_losses(
     images: ImagePolicy,
     meter: &Meter<'_>,
 ) -> Result<Vec<RenderLoss>, ConvertError> {
-    let rc = Ctx::of(doc, images, meter)?;
+    let fills = GapFills::default();
+    let rc = Ctx::of(doc, &fills, images, meter)?;
     let mut notes = LossCounts::default();
     for note in &rc.selected_notes {
         let omitted = rc.omitted_notes.contains(note.id.as_str());
@@ -299,7 +310,7 @@ fn visit_inlines(blocks: &[Block], rc: &Ctx<'_>, visit: &mut impl FnMut(&Inline,
             }
         }
     }
-    for child in blocks.iter().flat_map(children) {
+    for child in blocks.iter().flat_map(|block| children(block, rc.fills)) {
         match child {
             Node::Inlines(inlines) => walk(inlines, false, rc, visit),
             Node::Blocks(blocks) => visit_inlines(blocks, rc, visit),
@@ -327,6 +338,7 @@ fn number_notes<'d>(
     blocks: &'d [Block],
     notes: &[&'d Note],
     omitted: &HashSet<&str>,
+    fills: &'d GapFills,
 ) -> NoteNumbers {
     let valid: HashMap<&str, &Note> = notes
         .iter()
@@ -338,7 +350,7 @@ fn number_notes<'d>(
         .collect();
     let mut order = Vec::new();
     let mut seen = HashSet::new();
-    collect_note_refs(blocks, &valid, &mut order, &mut seen);
+    collect_note_refs(blocks, &valid, &mut order, &mut seen, fills);
     for note in notes {
         if valid.contains_key(note.id.as_str()) && seen.insert(note.id.as_str()) {
             order.push(note.id.as_str());
@@ -362,6 +374,7 @@ fn collect_note_refs<'d>(
     valid: &HashMap<&str, &'d Note>,
     order: &mut Vec<&'d str>,
     seen: &mut HashSet<&'d str>,
+    fills: &'d GapFills,
 ) {
     let mut stack: Vec<Node<'_>> = vec![Node::Blocks(blocks)];
     while let Some(node) = stack.pop() {
@@ -383,7 +396,7 @@ fn collect_note_refs<'d>(
             Node::Inline(_) => {}
             Node::Blocks(blocks) => {
                 for block in blocks.iter().rev() {
-                    stack.extend(children(block).into_iter().rev());
+                    stack.extend(children(block, fills).into_iter().rev());
                 }
             }
             Node::Cells(mut cells) => {
@@ -437,8 +450,8 @@ impl<'d> Iterator for Cells<'d> {
     }
 }
 
-/// What `block` holds, in document order.
-fn children(block: &Block) -> Vec<Node<'_>> {
+/// What `block` holds, in document order, a filled gap its fill.
+fn children<'d>(block: &'d Block, fills: &'d GapFills) -> Vec<Node<'d>> {
     match block {
         Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } => {
             vec![Node::Inlines(inlines)]
@@ -446,18 +459,19 @@ fn children(block: &Block) -> Vec<Node<'_>> {
         Block::List(list) => list.items.iter().map(|item| Node::Blocks(&item.blocks)).collect(),
         Block::Table(t) => Cells::of(t).map(Node::Cells).into_iter().collect(),
         Block::BlockQuote(blocks) => vec![Node::Blocks(blocks)],
-        Block::CodeBlock { .. }
-        | Block::Rule
-        | Block::Math(_)
-        | Block::UnitStart(_)
-        | Block::Gap(_) => Vec::new(),
+        Block::Gap(gap) => fills.filled(gap).map(Node::Blocks).into_iter().collect(),
+        Block::CodeBlock { .. } | Block::Rule | Block::Math(_) | Block::UnitStart(_) => Vec::new(),
     }
 }
 
 /// Fail [`Limit::NestingDepth`] when lists, table cells, quotes and links
-/// nest deeper than `max` anywhere in `doc`, before a recursive walk renders
-/// it; the walk itself is iterative.
-pub(crate) fn check_nesting(doc: &Document, max: u64) -> Result<(), ConvertError> {
+/// nest deeper than `max` anywhere in `doc`, a fill in its gap's container,
+/// before a recursive walk renders it; the walk itself is iterative.
+pub(crate) fn check_nesting(
+    doc: &Document,
+    fills: &GapFills,
+    max: u64,
+) -> Result<(), ConvertError> {
     let mut stack: Vec<(Node<'_>, u64)> = vec![(Node::Blocks(&doc.blocks), 0)];
     stack.extend(doc.notes.iter().map(|note| (Node::Blocks(&note.blocks), 0)));
     while let Some((node, depth)) = stack.pop() {
@@ -468,10 +482,10 @@ pub(crate) fn check_nesting(doc: &Document, max: u64) -> Result<(), ConvertError
             Node::Blocks(blocks) => {
                 for block in blocks {
                     let inner = match block {
-                        Block::Paragraph(_) | Block::Heading { .. } => depth,
+                        Block::Paragraph(_) | Block::Heading { .. } | Block::Gap(_) => depth,
                         _ => depth.saturating_add(1),
                     };
-                    stack.extend(children(block).into_iter().map(|child| (child, inner)));
+                    stack.extend(children(block, fills).into_iter().map(|child| (child, inner)));
                 }
             }
             Node::Inlines(inlines) => {
@@ -675,11 +689,27 @@ fn write_block(
                 sink.write("\n$$")?;
             }
         }
-        Block::Gap(gap) => {
-            let OcrOrigin::Page(page) = gap.origin;
+        Block::Gap(gap) => return write_gap(gap, rc, sink, last),
+        Block::UnitStart(_) => {}
+    }
+    Ok(None)
+}
+
+/// Write a filled gap's fill in its place after the sibling list marked `last`, else its
+/// marker.
+fn write_gap(
+    gap: &Gap,
+    rc: &Ctx<'_>,
+    sink: &mut Sink<'_>,
+    last: Option<ListMark>,
+) -> Result<Option<ListMark>, ConvertError> {
+    let OcrOrigin::Page(page) = gap.origin;
+    match rc.fills.state(gap.id) {
+        Some(GapState::Filled(blocks)) => return write_blocks(blocks, rc, sink, last),
+        Some(GapState::Failed) => sink.write(&format!("<!-- ocr-failed page {page} -->"))?,
+        Some(GapState::Unfilled) | None => {
             sink.write(&format!("<!-- needs-ocr page {page} -->"))?;
         }
-        Block::UnitStart(_) => {}
     }
     Ok(None)
 }

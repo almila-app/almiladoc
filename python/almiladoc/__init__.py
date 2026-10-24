@@ -4,8 +4,8 @@ Build a `Converter` once from a `Config` and share it; its calls return a
 `Conversion` or a `Parsed` document. A failed conversion raises a
 `ConvertError` subclass whose `code`, and for `UnsupportedError` whose `kind`
 too, is a stable snake_case name to branch on; a field out of range raises
-`ConfigError`, and a `format` that is not exactly one `Format` name
-`ValueError`.
+`ConfigError`, a `format` that is not exactly one `Format` name
+`ValueError`, and a gap's fill past a fill limit `GapRefused`.
 """
 
 from typing import Literal
@@ -20,6 +20,7 @@ from almiladoc._almiladoc import (
     ConvertError,
     Diagnostic,
     EncryptedError,
+    GapRefused,
     Identity,
     ImagePolicy,
     IncompleteError,
@@ -55,6 +56,7 @@ __all__ = [
     "Diagnostic",
     "EncryptedError",
     "Format",
+    "GapRefused",
     "Identity",
     "ImagePolicy",
     "IncompleteError",

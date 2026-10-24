@@ -200,3 +200,22 @@ fn assert_table_heap(xlsx: &[u8]) {
         "{peak} bytes for a document of {document} and a Markdown buffer of {buffer}"
     );
 }
+
+#[cfg(feature = "pdf")]
+#[test]
+#[expect(clippy::disallowed_methods, reason = "the test reads a PDF fixture")]
+fn a_fill_of_padded_tables_is_refused_before_its_parse_builds_them() {
+    use almiladoc::{GapError, GapFill, Limit};
+    let _held = exclusive();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
+    let pdf = std::fs::read(path).unwrap();
+    let mut parsed = converter().parse(Input::new(&pdf, Format::Pdf)).unwrap();
+    let gap = parsed.gaps().next().unwrap().id;
+    let table = format!("{}\n{}\n{}\n", "|a".repeat(512), "|-".repeat(512), "a\n".repeat(511));
+    let padded = table.repeat(1024 * 1024 / table.len());
+    let _profiler = dhat::Profiler::builder().testing().build();
+    let refused = parsed.fill_gap(gap, GapFill::Markdown(padded));
+    let peak = dhat::HeapStats::get().max_bytes;
+    assert!(matches!(refused, Err(GapError::Refused { limit: Limit::GridSlots, .. })));
+    assert!(peak < 64 * 1024, "{peak} bytes");
+}

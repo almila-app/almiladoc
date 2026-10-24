@@ -95,6 +95,7 @@ pub(crate) fn limit_mut(limits: &mut Limits, limit: Limit) -> &mut u64 {
         Limit::OutputBytes => &mut limits.max_output_bytes,
         Limit::Work => &mut limits.max_work,
         Limit::Pages => &mut limits.max_pages,
+        Limit::OcrTextBytes => &mut limits.max_ocr_text_bytes,
         other => panic!("{other} has no Limits field"),
     }
 }

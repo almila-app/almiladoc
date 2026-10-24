@@ -9,6 +9,7 @@
 
 use crate::ImagePolicy;
 use crate::model::{Block, Document, Inline, LinkTarget, Note, Unit};
+use crate::ocr::GapFills;
 use crate::render::markdown::escape::controls_to_spaces;
 use crate::render::markdown::image;
 use crate::render::markdown::inline::url_label;
@@ -47,6 +48,7 @@ impl AnchorMap {
 
 pub(crate) fn resolve_anchors(
     doc: &Document,
+    fills: &GapFills,
     notes: &[&Note],
     images: ImagePolicy,
     note_numbers: &HashMap<String, usize>,
@@ -57,7 +59,7 @@ pub(crate) fn resolve_anchors(
     // Anchor ids some link in the document targets, notes included.
     let mut linked: HashSet<&str> = HashSet::new();
     let mut linked_units = HashSet::new();
-    walk_all(doc, notes, &mut |block| {
+    walk_all(doc, fills, notes, &mut |block| {
         if let Some(content) = inlines(block) {
             for_each_link_target(content, &mut linked, &mut linked_units);
         }
@@ -86,7 +88,7 @@ pub(crate) fn resolve_anchors(
             for_each_anchor(content, &mut bind);
         }
     };
-    walk_all(doc, notes, &mut heading);
+    walk_all(doc, fills, notes, &mut heading);
 
     // Pass 2: every remaining anchor a link targets gets a sanitized HTML id.
     let mut assign = |id: &str| {
@@ -97,7 +99,7 @@ pub(crate) fn resolve_anchors(
             resolved.insert(id.to_string(), Resolved { fragment: html, emit_html: true });
         }
     };
-    walk_all(doc, notes, &mut |block| {
+    walk_all(doc, fills, notes, &mut |block| {
         if let Some(content) = inlines(block) {
             for_each_anchor(content, &mut assign);
         }
@@ -181,15 +183,19 @@ fn inlines(block: &Block) -> Option<&[Inline]> {
     }
 }
 
-fn walk_all<'a>(doc: &'a Document, notes: &[&'a Note], f: &mut impl FnMut(&'a Block)) {
-    walk_blocks(&doc.blocks, f);
+fn walk_all<'a>(
+    doc: &'a Document,
+    fills: &'a GapFills,
+    notes: &[&'a Note],
+    f: &mut impl FnMut(&'a Block),
+) {
+    walk_blocks(&doc.blocks, fills, f);
     for note in notes {
-        walk_blocks(&note.blocks, f);
+        walk_blocks(&note.blocks, fills, f);
     }
 }
 
-/// Depth-first walk over all blocks, using an explicit stack.
-fn walk_blocks<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a Block)) {
+fn walk_blocks<'a>(blocks: &'a [Block], fills: &'a GapFills, f: &mut impl FnMut(&'a Block)) {
     let mut stack: Vec<&Block> = blocks.iter().rev().collect();
     while let Some(block) = stack.pop() {
         f(block);
@@ -205,6 +211,7 @@ fn walk_blocks<'a>(blocks: &'a [Block], f: &mut impl FnMut(&'a Block)) {
                 }
             }
             Block::BlockQuote(inner) => stack.extend(inner.iter().rev()),
+            Block::Gap(gap) => stack.extend(fills.filled(gap).into_iter().flatten().rev()),
             _ => {}
         }
     }
@@ -357,7 +364,14 @@ mod tests {
             assets: Vec::new(),
         };
         assert_eq!(
-            resolve_anchors(&doc, &[], ImagePolicy::Placeholder, &HashMap::new()).fragment("toc"),
+            resolve_anchors(
+                &doc,
+                &GapFills::default(),
+                &[],
+                ImagePolicy::Placeholder,
+                &HashMap::new()
+            )
+            .fragment("toc"),
             Some("part-one-overview")
         );
     }
@@ -381,7 +395,9 @@ mod tests {
             blocks: vec![Block::Paragraph(vec![anchor("body"), link("target")])],
             ..Document::default()
         };
-        let anchors = resolve_anchors(&doc, &[&note], ImagePolicy::Placeholder, &HashMap::new());
+        let fills = GapFills::default();
+        let anchors =
+            resolve_anchors(&doc, &fills, &[&note], ImagePolicy::Placeholder, &HashMap::new());
         assert_eq!(anchors.fragment("in-note"), Some("note-title"));
         assert_eq!(anchors.html_id("body"), Some("body"));
         assert_eq!(anchors.html_id("target"), Some("target"));
