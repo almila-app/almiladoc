@@ -53,8 +53,8 @@ repository's own work is BUSL-1.1.
   Code that swallows an error still propagates `Err(e) if e.is_fatal()`: `ResourceLimit`,
   `Cancelled` and `Internal` are fatal and hard-fail everywhere, optional parts and OLE streams
   included.
-- Under `OnLoss::Fail` an unfilled gap fails `NeedsOcr { pages (1-indexed), page_count }` before
-  any `Incomplete`; under `Report` it writes `<!-- needs-ocr page N -->` and counts `ocr_gap`.
+- Under `OnLoss::Fail` any gap not filled, unfilled or failed, fails `NeedsOcr { pages (1-indexed),
+  page_count }` before any `Incomplete`; `Report`'s markers and counts are in `docs/support.md`.
 - Limits come from `Config` through the one `ParseCtx` (`src/ctx.rs`) each frontend is handed
   as `&ParseCtx`; per-parse state in it is a `Cell` behind `&self`. `Limits::DEFAULT`
   (`src/limits.rs`) holds the defaults. Bytes are charged where consumed, and every unit of work
