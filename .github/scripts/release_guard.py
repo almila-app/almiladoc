@@ -28,8 +28,9 @@ WORKFLOW = "release.yml"
 REQUIRED_CHECK = "ci / required"
 VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?")
 FAQ = (
-    "### Competing Use",
+    "### Licensing",
     "- **What is a Competing Use?**",
+    "- **What is free?**",
     "- **When does a version become MIT?**",
 )
 DATES = Path("docs/release-dates.tsv")
@@ -61,7 +62,7 @@ def tree_problems(root: Path) -> list[str]:
         problems.append(f"rust-version {rust_version} is not the minor of the toolchain {channel}")
     readme = (root / "README.md").read_text(encoding="utf-8").splitlines()
     problems += [
-        f"README.md lacks the Competing Use FAQ's {line!r}"
+        f"README.md lacks the licensing FAQ's {line!r}"
         for line in FAQ
         if not any(row.startswith(line) for row in readme)
     ]
@@ -98,9 +99,9 @@ def pep440(version: str) -> str:
 
 def mit_day(available: dt.date) -> dt.date:
     try:
-        return available.replace(year=available.year + 2)
+        return available.replace(year=available.year + 4)
     except ValueError:
-        return dt.date(available.year + 2, 3, 1)
+        return dt.date(available.year + 4, 3, 1)
 
 
 def pages(fetch: Fetch, url: str) -> Iterator[dict]:
@@ -177,7 +178,7 @@ def tag_problems(
         problems.append(f"no repository activity has made {commit} available")
         return problems, ""
     notes = (
-        f"{message.rstrip()}\n\nMade available on {day.isoformat()}: its FSL-1.1-MIT portions "
+        f"{message.rstrip()}\n\nMade available on {day.isoformat()}: its BUSL-1.1 portions "
         f"become available under the MIT License on {mit_day(day).isoformat()}.\n"
     )
     return problems, notes
@@ -309,7 +310,7 @@ REPO = "o/r"
 COMMIT = "c" * 40
 README = "".join(f"{line} text\n" for line in FAQ)
 HEADER = DATES_HEADER + "\n"
-ROWS = HEADER + "v0.1.0\t2026-10-23\t2028-10-23\n"
+ROWS = HEADER + "v0.1.0\t2026-10-23\t2030-10-23\n"
 PROVENANCE_CLAIMS = {"claims": None}
 
 
@@ -407,9 +408,9 @@ def test_versions(expect: Expect) -> None:
     )
     expect(key("0.1.0-rc.2") < key("0.1.0") < key("0.1.1-rc.1"), "version order")
     expect(
-        [mit_day(dt.date(2028, 2, 29)), mit_day(dt.date(2026, 10, 23))]
-        == [dt.date(2030, 3, 1), dt.date(2028, 10, 23)],
-        "the second anniversary",
+        [mit_day(dt.date(2096, 2, 29)), mit_day(dt.date(2026, 10, 23))]
+        == [dt.date(2100, 3, 1), dt.date(2030, 10, 23)],
+        "the fourth anniversary",
     )
 
 
@@ -424,14 +425,14 @@ def test_trees(expect: Expect, base: Path) -> None:
         ),
         "a missing FAQ entry": (
             ("0.2.0-rc.1", "1.99", README.replace(FAQ[2], "When"), HEADER),
-            [f"README.md lacks the Competing Use FAQ's {FAQ[2]!r}"],
+            [f"README.md lacks the licensing FAQ's {FAQ[2]!r}"],
         ),
         "an alpha version": (
             ("0.2.0-alpha.1", "1.99", README, HEADER),
             ["version 0.2.0-alpha.1 is neither X.Y.Z nor X.Y.Z-rc.N"],
         ),
         "a dates file without its header": (
-            ("0.2.0-rc.1", "1.99", README, "v0.1.0\t2026-10-23\t2028-10-23\n"),
+            ("0.2.0-rc.1", "1.99", README, "v0.1.0\t2026-10-23\t2030-10-23\n"),
             [f"{DATES} does not start with the header {DATES_HEADER!r}"],
         ),
     }
@@ -449,8 +450,8 @@ def test_tags(expect: Expect, base: Path) -> None:
         f"an earlier final tag missing its dates row: {problems}",
     )
     expect(
-        notes == "almiladoc 0.2.0-rc.1\n\nMade available on 2028-02-29: its FSL-1.1-MIT portions "
-        "become available under the MIT License on 2030-03-01.\n",
+        notes == "almiladoc 0.2.0-rc.1\n\nMade available on 2028-02-29: its BUSL-1.1 portions "
+        "become available under the MIT License on 2032-02-29.\n",
         f"the notes carry the earliest containing activity's day: {notes!r}",
     )
     tagged = "tag v0.2.0-rc.1"

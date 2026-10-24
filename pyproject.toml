@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "almiladoc"
 description = "Convert documents (doc, docx, odt, rtf, epub, pdf, presentations, spreadsheets, csv) to GitHub-Flavored Markdown"
 readme = "README.md"
-license = "FSL-1.1-MIT AND MIT"
+license = "BUSL-1.1 AND MIT"
 license-files = ["LICENSE", "LICENSES/*.txt", "NOTICE", "REUSE.toml", "THIRD-PARTY-LICENSES"]
 requires-python = ">=3.11"
 keywords = ["markdown", "docx", "pdf", "pptx", "xlsx", "epub", "converter", "document"]

@@ -116,16 +116,16 @@ PDF support is the default `pdf` feature; without it, a PDF is `Unsupported`. Li
 
 ## Licence
 
-- This repository's own work is under the [Functional Source License 1.1, MIT Future License](LICENSE) (FSL-1.1-MIT). Each version becomes available under the MIT License two years after its release.
+- This repository's own work is under the [Business Source License 1.1](LICENSE) (BUSL-1.1). Each version becomes available under the MIT License four years after it is first made publicly available.
 - The portions [REUSE.toml](REUSE.toml) marks MIT are under the [MIT License](LICENSES/MIT.txt), with the copyright line it records; REUSE.toml records the copyright and licence of each file.
 
-For other licensing terms, write to almilaapp@gmail.com.
+A commercial licence covers any other production use: USD 1,000 per project per year for an organisation whose gross revenue and outside funding are each at most USD 5 million, a project being one product, service or internal application that uses almiladoc; above that, priced per company. Write to almilaapp@gmail.com.
 
-### Competing Use
+### Licensing
 
-- **What is a Competing Use?** Making almiladoc available to others in a commercial product or service that substitutes for it, substitutes for another product or service the licensor offers using it (one that exists when that version is made available), or offers the same or substantially similar functionality. [LICENSE](LICENSE) is the binding text.
-- **What is allowed?** Any other purpose, for example internal use, non-commercial education and research, and using it inside a product or service that does not compete with it, including modifying and redistributing it under the same licence.
-- **When does a version become MIT?** On the second anniversary of the date that version is made available; from then on, that version has no Competing Use restriction.
+- **What is a Competing Use?** Making almiladoc available to others in a commercial product or service that substitutes for it or offers the same or substantially similar functionality. [LICENSE](LICENSE) is the binding text.
+- **What is free?** Any non-production use, such as evaluation, development and testing, and production use other than a Competing Use by an individual for personal, non-commercial purposes, for non-commercial teaching or academic research, or by an organisation that, with its affiliates, had less than USD 100,000 in gross revenue in the preceding 12 months and has raised less than USD 100,000 in outside funding in total.
+- **When does a version become MIT?** On the fourth anniversary of the date that version is first made publicly available; from then on, that version is under the MIT License alone.
 
 ## Contributing
 

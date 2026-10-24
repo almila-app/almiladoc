@@ -11,7 +11,7 @@ Date: 2026-10-14
 ## Decision
 
 1. **Distribution.**
-   - Crate `almiladoc` and the unpublished abi3 cdylib `python/` (PyPI `almiladoc`) share one version, with `fuzz/` outside; both declare `FSL-1.1-MIT AND MIT` and ship ADR 0003's `LICENCE_SET`.
+   - Crate `almiladoc` and the unpublished abi3 cdylib `python/` (PyPI `almiladoc`) share one version, with `fuzz/` outside; both declare `BUSL-1.1 AND MIT` and ship ADR 0003's `LICENCE_SET`.
    - Features: default `pdf`; `serde`. The binding enables both. No rasterizer, OCR feature or rten dependency enters until an adapter that needs it (ADR 0002).
 
 2. **API.**

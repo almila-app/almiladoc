@@ -33,9 +33,9 @@ allow = [
 confidence-threshold = 0.93
 unused-allowed-license = "allow"
 exceptions = [
-    { crate = "almiladoc", allow = ["FSL-1.1-MIT"] },
-    { crate = "almiladoc-python", allow = ["FSL-1.1-MIT"] },
-    { crate = "almiladoc-fuzz", allow = ["FSL-1.1-MIT"] },
+    { crate = "almiladoc", allow = ["BUSL-1.1"] },
+    { crate = "almiladoc-python", allow = ["BUSL-1.1"] },
+    { crate = "almiladoc-fuzz", allow = ["BUSL-1.1"] },
     { crate = "libfuzzer-sys", allow = ["NCSA"] },
 ]
 

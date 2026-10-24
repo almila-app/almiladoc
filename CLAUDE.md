@@ -5,7 +5,7 @@ GitHub-Flavored Markdown, with a Python binding (PyO3, maturin). Crate, PyPI dis
 import package are `almiladoc`; the native module `almiladoc._almiladoc` is the unpublished
 binding crate in `python/`, built through the root `pyproject.toml`. Public repository; licensing
 is per file (NOTICE, REUSE.toml): the portions REUSE.toml marks MIT stay MIT, and this
-repository's own work is FSL-1.1-MIT.
+repository's own work is BUSL-1.1.
 
 ## This setup
 
@@ -105,11 +105,11 @@ cargo test --locked --test it -- --ignored      # ./samples/ sweep: fails when a
 
 ## Traps
 
-- A change that adds a file updates REUSE.toml: the new file joins the `FSL-1.1-MIT` list. A
+- A change that adds a file updates REUSE.toml: the new file joins the `BUSL-1.1` list. A
   file in an MIT-bearing annotation stays there, with every copyright line, while it exists, and
   each such annotation keeps `precedence = "override"`; `reuse lint` accepts a wrong expression,
   so `make dco`'s licence guard (`.github/scripts/dco.py`) holds this. A file edited while its
-  annotation is `MIT` joins the `FSL-1.1-MIT AND MIT` list, keeping its lines and adding the
+  annotation is `MIT` joins the `BUSL-1.1 AND MIT` list, keeping its lines and adding the
   licensor's.
 - `git commit -s`: subject at most 72 columns, a few-line body on what changed and why, no gates or
   process narrative; `Co-authored-by` goes in the final trailer block with `Tier`, `Signed-off-by`.

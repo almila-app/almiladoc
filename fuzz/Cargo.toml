@@ -3,7 +3,7 @@ name = "almiladoc-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
-license = "FSL-1.1-MIT AND MIT"
+license = "BUSL-1.1 AND MIT"
 
 [package.metadata]
 cargo-fuzz = true

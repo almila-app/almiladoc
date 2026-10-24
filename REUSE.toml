@@ -7,6 +7,12 @@ SPDX-FileCopyrightText = "2026 Sideguide Technologies Inc."
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = "LICENSES/BUSL-1.1.txt"
+precedence = "override"
+SPDX-FileCopyrightText = ["2017 MariaDB Corporation Ab", "2026 Harun Erkurt"]
+SPDX-License-Identifier = "BUSL-1.1"
+
+[[annotations]]
 path = [
     "NOTICE",
     "REUSE.toml",
@@ -203,7 +209,7 @@ path = [
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Harun Erkurt"
-SPDX-License-Identifier = "FSL-1.1-MIT"
+SPDX-License-Identifier = "BUSL-1.1"
 
 [[annotations]]
 path = [
@@ -390,7 +396,7 @@ SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",
     "2026 Harun Erkurt",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/sheet/numfmt.rs"
@@ -400,7 +406,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Thai Son Dinh <87920408+sondt99@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/docx/numbering.rs"
@@ -410,7 +416,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 hari <64578610+Mr-Neutr0n@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/render/markdown/escape.rs"
@@ -420,7 +426,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/docx/content.rs"
@@ -432,7 +438,7 @@ SPDX-FileCopyrightText = [
     "2026 breken <312387581+breken-ai@users.noreply.github.com>",
     "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = [
@@ -449,7 +455,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 HanZephyr <50990263+HanZephyr@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/pptx/mod.rs"
@@ -459,7 +465,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/render/markdown/anchors.rs"
@@ -469,7 +475,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 breken <312387581+breken-ai@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/rtf/mod.rs"
@@ -479,7 +485,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Jack <272938095+jackoconner45@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/lib.rs"
@@ -489,7 +495,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Marcell Manfrin Barbacena <20461967+marcellmanfrin@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/package/archive.rs"
@@ -500,7 +506,7 @@ SPDX-FileCopyrightText = [
     "2026 Gabriel Pereira Rodrigues <173825442+Creatixpy@users.noreply.github.com>",
     "2026 abhinavmir <36011576+AbhinavMir@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/package/xml.rs"
@@ -512,7 +518,7 @@ SPDX-FileCopyrightText = [
     "2026 Vaibhav Dabas <145040528+vaibhavdabas16@users.noreply.github.com>",
     "2026 XuJian <265865031+xujiantop-crypto@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/csv.rs"
@@ -522,7 +528,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 APZN <129354802+jsk1004ha@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/epub/mod.rs"
@@ -532,7 +538,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Ray Tien <29456968+Ray0907@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/ppt/mod.rs"
@@ -542,7 +548,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Mark Xian <53885024+xianjianlf2@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/formats/odf/mod.rs"
@@ -552,7 +558,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 tutu <10495375+Ready22Race@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = "src/render/markdown/inline.rs"
@@ -562,7 +568,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Alexis Kowalski <312066465+alexiskowalski@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = [
@@ -577,7 +583,7 @@ SPDX-FileCopyrightText = [
     "2026 Shubham Mathur <16467235+mathurshubham@users.noreply.github.com>",
     "2026 Chriscoveries <212684707+chriscoveries@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = [
@@ -590,7 +596,7 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Chriscoveries <212684707+chriscoveries@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = [
@@ -603,4 +609,4 @@ SPDX-FileCopyrightText = [
     "2026 Harun Erkurt",
     "2026 Shubham Mathur <16467235+mathurshubham@users.noreply.github.com>",
 ]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "BUSL-1.1 AND MIT"

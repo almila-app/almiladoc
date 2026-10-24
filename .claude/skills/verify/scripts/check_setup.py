@@ -526,7 +526,7 @@ def self_test_cases() -> tuple[list[str], int]:
         found = tree_with(inject)
         if not any(expected in problem for problem in found):
             failures.append(f"`{expected}` not reported: {found}")
-    benign = "UTF-16, SHA-256, ECMA-376, RUSTSEC-2000-0000, FSL-1.1-MIT, v0.15.0, E402, padding\n"
+    benign = "UTF-16, SHA-256, ECMA-376, RUSTSEC-2000-0000, BUSL-1.1, v0.15.0, E402, padding\n"
     local_facts = f"build host {HOME} at {PRIVATE_IP}\n"
     unreported = {
         "CLAUDE.md": benign,

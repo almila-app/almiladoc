@@ -274,7 +274,8 @@ def self_test() -> int:
     return 1 if failures else 0
 
 
-LICENCE_BASE = """version = 1
+PRIOR = "FS" + "L-1.1-MIT"
+LICENCE_BASE = f"""version = 1
 
 [[annotations]]
 path = "**"
@@ -286,7 +287,7 @@ SPDX-License-Identifier = "MIT"
 path = ["own/*", "LICENSES/**", "REUSE.toml", "listed.txt"]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Licensor"
-SPDX-License-Identifier = "FSL-1.1-MIT"
+SPDX-License-Identifier = "BUSL-1.1"
 
 [[annotations]]
 path = "third.txt"
@@ -298,7 +299,7 @@ SPDX-License-Identifier = "MIT"
 path = "mixed ş.txt"
 precedence = "override"
 SPDX-FileCopyrightText = ["2026 Holder Inc.", "2026 Licensor"]
-SPDX-License-Identifier = "FSL-1.1-MIT AND MIT"
+SPDX-License-Identifier = "{PRIOR} AND MIT"
 """
 
 
@@ -328,12 +329,12 @@ def licence_self_test() -> list[str]:
         alone = git(root, *identity, "commit-tree", "HEAD^{tree}", "-m", "alone").strip()
         git(root, "branch", "main")
         git(root, "branch", "unrelated", alone)
-        fsl = '"own/*", "LICENSES/**",'
+        own = '"own/*", "LICENSES/**",'
 
         def added() -> None:
             write("fresh.txt", "new\n")
             write("split.txt", "split\n")
-            text = LICENCE_BASE.replace(fsl, f'{fsl} "fresh.txt",')
+            text = LICENCE_BASE.replace(own, f'{own} "fresh.txt",')
             write("REUSE.toml", text.replace('"mixed ş.txt"', '["mixed ş.txt", "split.txt"]'))
             (root / "gone.txt").unlink()
 
@@ -345,8 +346,8 @@ def licence_self_test() -> list[str]:
             reuse('path = "**"\nprecedence = "override"\n', 'path = "**"\n')
 
         def left() -> None:
-            text = LICENCE_BASE.replace(fsl, f'{fsl} "kept.txt", "own/deep/**",')
-            write("REUSE.toml", text.replace('"FSL-1.1-MIT AND MIT"', '"FSL-1.1-MIT"'))
+            text = LICENCE_BASE.replace(own, f'{own} "kept.txt", "own/deep/**",')
+            write("REUSE.toml", text.replace(" AND MIT", ""))
 
         def lost() -> None:
             text = LICENCE_BASE.replace(
@@ -363,15 +364,20 @@ def licence_self_test() -> list[str]:
                 "main",
                 ["own/moved ü.txt"],
             ),
-            "an FSL file renamed out of its glob": (
+            "an own-work file renamed out of its glob": (
                 lambda: (root / "own" / "a.txt").rename(root / "a ü.txt"),
                 "main",
                 ["a ü.txt"],
             ),
-            "an FSL file dropped from its list": (
+            "an own-work file dropped from its list": (
                 lambda: reuse(', "listed.txt"]', "]"),
                 "main",
                 ["listed.txt"],
+            ),
+            "an own-work id relabelled beside MIT": (
+                lambda: reuse(f'"{PRIOR} AND MIT"', '"BUSL-1.1 AND MIT"'),
+                "main",
+                [],
             ),
             "lost copyright lines": (lost, "main", ["mixed ş.txt", "third.txt"]),
             "an undeclared new file": (undeclared, "main", ["loose ü.txt"]),

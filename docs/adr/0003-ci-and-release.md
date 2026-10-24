@@ -16,7 +16,7 @@ Date: 2026-10-14
    - `rust`: fmt, clippy, locked tests and docs, all features, `-D warnings`; snapshots byte-compared and never updated; proptest seeds fixed.
    - `rust-arm`: `make test` on `ubuntu-26.04-arm`, byte-comparing non-PDF snapshots only.
    - `features`: clippy of `almiladoc` and its tests without default features (the binding asks for the defaults, so the workspace's clippy equals `make clippy`); each feature alone.
-   - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `FSL-1.1-MIT AND MIT` metadata.
+   - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `BUSL-1.1 AND MIT` metadata.
    - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq`, `hyper`, `reqwest`, `libloading` and `rten` from the default and binding graphs; a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
    - `dco`: `make dco`, sign-offs and REUSE.toml's MIT-bearing annotations (ADR 0004), and `make setup`, the tracked agent setup's own check and its self-test.
    - `fuzz`: every target builds, with each declared feature; an empty seed directory fails; seeds and `fuzz/regressions/` replay once; the docs.rs build passes.
@@ -31,7 +31,7 @@ Date: 2026-10-14
 5. **OCR goldens.** Deferred with ADR 0002's local OCR, a separate crate.
 
 6. **Release.** `release.yml` runs on `v*` tag pushes, which alone publish, and rehearses on dispatch and weekly. Only publish jobs and `attest` hold `id-token: write`.
-   - `guard`: advisories pass; on a tag push, the Competing Use FAQ exists, the annotated tag equals the workspace version, `rust-version` the toolchain minor, its commit on `main` with green `ci / required`, and `docs/release-dates.tsv` covers earlier final tags.
+   - `guard`: advisories pass; on a tag push, the licensing FAQ exists, the annotated tag equals the workspace version, `rust-version` the toolchain minor, its commit on `main` with green `ci / required`, and `docs/release-dates.tsv` covers earlier final tags.
    - `linux`: maturin `--zig` builds `manylinux_2_28` and `musllinux_1_2` wheels on native-arch Ubuntu runners. Smoke, in PyPA's matching digest-pinned image: CPython 3.11 and 3.15 tests, a CMap-needing PDF, the licence test; compressed wheels under 12 MB.
    - `native`: `macos-26`, `macos-26-intel`, `windows-2025`, `windows-11-arm`; same smoke.
    - `sdist`, `crate`: both carry `$(LICENCE_SET)`; the sdist's own wheel is smoked. `attest` covers every file.
@@ -40,9 +40,9 @@ Date: 2026-10-14
    - `verify-published` checks PyPI's files and provenance publisher (workflow, environment) against attestations; crates.io's checksum against the attested `.crate` and, after the first version, its trusted-publishing repository, run and commit.
    - `github-release`: the tag message, dists and `SHA256SUMS`, uploaded to a draft that is then published, as an immutable release takes no asset after publication.
 
-7. **Dates.** The FSL's future grant counts from "the date we make the Software available": the UTC day of the earliest repository activity entry (https://docs.github.com/en/rest/repos/repos#list-repository-activities) whose `after` contains the tagged commit. The release notes, with the day FSL-1.1-MIT portions become MIT, and later `docs/release-dates.tsv` record it.
+7. **Dates.** The BUSL-1.1 Change Date is the fourth anniversary of the day a version is first made publicly available: the UTC day of the earliest repository activity entry (https://docs.github.com/en/rest/repos/repos#list-repository-activities) whose `after` contains the tagged commit. The release notes, with the day its BUSL-1.1 portions become MIT, and later `docs/release-dates.tsv` record it.
 
-8. **Supply chain.** Dependabot, daily for every ecosystem, covers `cargo` (minor and patch grouped; `/fuzz` for `libfuzzer-sys` only), `uv` (minor and patch grouped), `rust-toolchain` (both) and `github-actions` (grouped). An update, Dependabot's or the maintainer's, is adopted as soon as it is released and its candidate is green, so zizmor's `dependabot-cooldown` audit is off. The maintainer adopts each update as an own signed-off commit (ADR 0004), moving fuzz's `cfb` and `zip` with the root and `rust-version` with the toolchain. `deny.toml`: permissive licences; exceptions FSL-1.1-MIT for `almiladoc`, the binding and fuzz crates alone, fuzz's declaring `FSL-1.1-MIT AND MIT`; NCSA for `libfuzzer-sys`; yanked crates, non-path wildcards, `openssl-sys`, `ort-sys` and `aws-lc-sys` denied; crates.io only; wheel targets.
+8. **Supply chain.** Dependabot, daily for every ecosystem, covers `cargo` (minor and patch grouped; `/fuzz` for `libfuzzer-sys` only), `uv` (minor and patch grouped), `rust-toolchain` (both) and `github-actions` (grouped). An update, Dependabot's or the maintainer's, is adopted as soon as it is released and its candidate is green, so zizmor's `dependabot-cooldown` audit is off. The maintainer adopts each update as an own signed-off commit (ADR 0004), moving fuzz's `cfb` and `zip` with the root and `rust-version` with the toolchain. `deny.toml`: permissive licences; exceptions BUSL-1.1 for `almiladoc`, the binding and fuzz crates alone, fuzz's declaring `BUSL-1.1 AND MIT`; NCSA for `libfuzzer-sys`; yanked crates, non-path wildcards, `openssl-sys`, `ort-sys` and `aws-lc-sys` denied; crates.io only; wheel targets.
 
 9. **Settings** the maintainer checks before the first release:
    - `sha_pinning_required`; immutable releases; private vulnerability reporting; CodeQL default setup outside `required`.
@@ -53,7 +53,7 @@ Date: 2026-10-14
 
 ## Consequences
 
-- The first candidate owes every gate input: `THIRD-PARTY-LICENSES`, with cargo-about clarifications for Adobe's BSD-3-Clause CMaps (ADR 0001 decision 6), eight fuzz seeds, a tracked `fuzz/Cargo.lock`; schedules, the recipient key and a decryption drill; the first tag, the Competing Use FAQ.
+- The first candidate owes every gate input: `THIRD-PARTY-LICENSES`, with cargo-about clarifications for Adobe's BSD-3-Clause CMaps (ADR 0001 decision 6), eight fuzz seeds, a tracked `fuzz/Cargo.lock`; schedules, the recipient key and a decryption drill; the first tag, the licensing FAQ.
 - New advisories red unrelated pull requests; schedules stop after 60 inactive days.
 - Unexercised: zig musl builds, unguaranteed by maturin; CPython 3.11 on `windows-11-arm`, where setup-python's last arm64 build is 3.11.9 (https://github.com/actions/python-versions/blob/49858b91c92d27403416ee43117032e91d00ce24/versions-manifest.json#L10809-L10812); attestations; crates.io's exchange.
 
