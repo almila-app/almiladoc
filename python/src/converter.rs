@@ -29,7 +29,9 @@ impl CancelToken {
     }
 
     /// Cancel every call holding this token, from any thread: each raises
-    /// `CancelledError` at its next unit of work, a PDF's between its pages.
+    /// `CancelledError` at its next unit of work, a PDF's between its pages,
+    /// as do `render`, `to_json` and `fill_gap` on a `Parsed` a parse holding
+    /// it made.
     fn cancel(&self) {
         self.0.cancel();
     }

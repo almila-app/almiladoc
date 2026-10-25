@@ -16,7 +16,7 @@ Date: 2026-10-14
 
 2. **API.**
    - `Converter::new(Config)` validates `Config` and `Limits`, failing `ConfigError`.
-   - `inspect`, `parse` and `convert` take `Input::new(bytes, format)` or `Input::auto(bytes, fallback)`, optionally `with_cancel(CancelToken)` and, for PDF, `with_ocr_pages(PageSelection)`; content detection, label validation and parsing share one budget; `Format::sniff` is separate.
+   - `inspect`, `parse` and `convert` take `Input::new(bytes, format)` or `Input::auto(bytes, fallback)`, optionally `with_cancel(CancelToken)`, which the `Parsed` keeps, and, for PDF, `with_ocr_pages(PageSelection)`; content detection, label validation and parsing share one budget; `Format::sniff` is separate.
    - `parse` returns `Parsed { document, diagnostics }`, keeping its `Config`; `Parsed::render()` ends `convert` with a `Conversion`, whose `units()` yields each unit's Markdown byte span.
    - Public types are `#[non_exhaustive]`; `Converter` is `Send + Sync`.
 

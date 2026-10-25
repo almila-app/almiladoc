@@ -93,8 +93,8 @@ release follows W12.
   - `Parsed::ocr(&mut self, &dyn OcrEngine, gaps) -> Result<OcrSummary, ConvertError>`: pooled
     batches of `batch_size`, each outcome a `fill_gap` or `fail_gap`; an `Unattempted` stops later
     batches; a `Refused` fill fails its gap, a wrong outcome count its batch.
-  - `Converter::convert_with_ocr(Input, &dyn OcrEngine)`; `Parsed` keeps the parse's `CancelToken`,
-    which `render`, `to_json`, `ocr_requests` and `ocr` check.
+  - `Converter::convert_with_ocr(Input, &dyn OcrEngine)`; `ocr_requests` and `ocr` check the
+    `CancelToken` `Parsed` keeps.
   - Python: `Parsed.ocr_requests` and a pickling `OcrRequest`; a Python OCR fills the gaps through
     `fill_gap` and `fail_gap`, and Python takes no engine of its own.
 - **Files:** new `src/ocr/{engine,request,driver}.rs`, `python/src/ocr.rs`; `src/ocr/`, `tests/`,

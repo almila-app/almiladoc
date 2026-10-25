@@ -139,14 +139,15 @@ impl Converter {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
-        let bytes = input.bytes;
+        let (bytes, cancel) = (input.bytes, input.cancel.clone());
         let (document, diagnostics, fuel) = self.prepare(input, move |parse_ctx, format| {
             let document = parse_document(&parse_ctx, bytes, format)?;
             let (diagnostics, fuel) = report_of(parse_ctx, &document, self.config.images)?;
             Ok((document, diagnostics, fuel))
         })?;
         let fills = GapFills::of(&document);
-        Ok(Parsed { document, diagnostics, fuel, config: Arc::clone(&self.config), fills })
+        let config = Arc::clone(&self.config);
+        Ok(Parsed { document, diagnostics, fuel, config, fills, cancel })
     }
 
     /// Convert `input` to Markdown: [`Converter::parse`] then
@@ -418,8 +419,9 @@ impl fmt::Debug for Input<'_> {
 }
 
 /// A parsed document and its diagnostics, keeping the [`Config`] it was
-/// parsed under, the work its parse charged and what OCR gave its gaps for
-/// [`Parsed::render`].
+/// parsed under, the work its parse charged, the [`CancelToken`] it was
+/// given, which its clones share and its calls that charge work watch, and
+/// what OCR gave its gaps for [`Parsed::render`].
 #[derive(Debug, Clone)]
 pub struct Parsed {
     document: Document,
@@ -427,6 +429,7 @@ pub struct Parsed {
     fuel: u64,
     config: Arc<Config>,
     fills: GapFills,
+    cancel: Option<CancelToken>,
 }
 
 impl Parsed {
@@ -488,7 +491,8 @@ impl Parsed {
     /// the gap's container, or its tables may hold more cells than
     /// [`Limits::max_grid_slots`](crate::Limits::max_grid_slots);
     /// [`GapError::Convert`] when the work passes
-    /// [`Limits::max_work`](crate::Limits::max_work), or with
+    /// [`Limits::max_work`](crate::Limits::max_work), with
+    /// [`ConvertError::Cancelled`] once the parse's token is cancelled, or with
     /// [`ConvertError::Internal`] when the pool cannot start or the fill panics.
     ///
     /// # Examples
@@ -512,15 +516,11 @@ impl Parsed {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn fill_gap(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
+        self.refuse_cancelled()?;
         let depth = self.fills.unsettled(id)?;
         let GapFill::Markdown(text) = fill;
-        let (blocks, fuel) = self.on_pool(|| {
-            let parse_ctx = ParseCtx::new(&self.config.limits).starting_at(self.fuel);
-            let blocks = markdown::blocks(&parse_ctx, &text, depth)?;
-            Ok((blocks, parse_ctx.ledger().spent()))
-        })?;
-        self.fuel = fuel;
-        self.fills.settle(id, GapState::Filled(blocks), &mut self.diagnostics);
+        let read = self.on_pool(|| self.read_fill(depth, &text))?;
+        self.settle_fill(id, read);
         Ok(())
     }
 
@@ -573,6 +573,7 @@ impl Parsed {
     /// its Markdown passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
     /// or the parse and the render together charge more than
     /// [`Limits::max_work`](crate::Limits::max_work);
+    /// [`ConvertError::Cancelled`] once the parse's token is cancelled;
     /// [`ConvertError::Internal`] when the pool cannot start or rendering
     /// panics.
     ///
@@ -594,6 +595,7 @@ impl Parsed {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn render(&self) -> Result<Conversion, ConvertError> {
+        self.refuse_cancelled()?;
         self.on_pool(|| {
             refuse_gaps(self.config.on_loss, &self.document, &self.fills)?;
             let ledger = self.resumed()?;
@@ -633,6 +635,7 @@ impl Parsed {
     /// its JSON passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
     /// or the parse and the serialisation together charge more than
     /// [`Limits::max_work`](crate::Limits::max_work);
+    /// [`ConvertError::Cancelled`] once the parse's token is cancelled;
     /// [`ConvertError::Internal`] when the pool cannot start or serialisation
     /// panics.
     ///
@@ -653,6 +656,7 @@ impl Parsed {
     /// ```
     #[cfg(feature = "serde")]
     pub fn to_json(&self) -> Result<String, ConvertError> {
+        self.refuse_cancelled()?;
         self.on_pool(|| {
             let ledger = self.resumed()?;
             let meter = Meter::new(&ledger, self.config.limits.max_output_bytes);
@@ -666,10 +670,32 @@ impl Parsed {
         })
     }
 
-    fn resumed(&self) -> Result<Ledger<'static>, ConvertError> {
+    fn resumed(&self) -> Result<Ledger<'_>, ConvertError> {
         let limits = &self.config.limits;
         check_nesting(&self.document, &self.fills, limits.max_nesting_depth)?;
-        Ok(Ledger::new(limits.max_work, None).starting_at(self.fuel))
+        Ok(Ledger::new(limits.max_work, self.cancel.as_ref()).starting_at(self.fuel))
+    }
+
+    fn refuse_cancelled(&self) -> Result<(), ConvertError> {
+        match &self.cancel {
+            Some(cancel) if cancel.is_cancelled() => Err(ConvertError::Cancelled),
+            _ => Ok(()),
+        }
+    }
+
+    /// The blocks of `text`, read for a gap in a container at `depth`, and the work spent
+    /// once they are.
+    fn read_fill(&self, depth: u64, text: &str) -> Result<(Vec<Block>, u64), ConvertError> {
+        let parse_ctx = ParseCtx::new(&self.config.limits)
+            .with_cancel(self.cancel.as_ref())
+            .starting_at(self.fuel);
+        let blocks = markdown::blocks(&parse_ctx, text, depth)?;
+        Ok((blocks, parse_ctx.ledger().spent()))
+    }
+
+    fn settle_fill(&mut self, id: GapId, (blocks, fuel): (Vec<Block>, u64)) {
+        self.fuel = fuel;
+        self.fills.settle(id, GapState::Filled(blocks), &mut self.diagnostics);
     }
 
     fn on_pool<T: Send>(
@@ -900,6 +926,7 @@ mod tests {
             diagnostics: Diagnostics::default(),
             fuel: 0,
             config: Arc::new(config),
+            cancel: None,
         }
     }
 
@@ -1475,5 +1502,27 @@ mod tests {
         assert_eq!(converter.detections.load(Relaxed), 3);
         assert_eq!(converter.sniff(bytes, None).unwrap(), Some(Format::Rtf));
         assert_eq!(converter.detections.load(Relaxed), 4);
+    }
+
+    #[test]
+    fn a_cancel_refuses_each_call_before_its_checks_and_stops_its_work() {
+        let token = CancelToken::new();
+        let mut config = Config::default();
+        config.limits.max_nesting_depth = 2;
+        let mut deep = parsed(quoted(3, "x"), config);
+        let mut working = parsed(vec![page_gap(1)], Config::default());
+        (deep.cancel, working.cancel) = (Some(token.clone()), Some(token.clone()));
+        assert_matches!(deep.render(), Err(ConvertError::ResourceLimit { .. }));
+        working.read_fill(0, "a").unwrap();
+        token.cancel();
+        assert_eq!(deep.render().err(), Some(ConvertError::Cancelled));
+        #[cfg(feature = "serde")]
+        assert_eq!(deep.to_json().err(), Some(ConvertError::Cancelled));
+        let unknown = GapId::new(None, NonZeroU32::MIN);
+        let fill = deep.fill_gap(unknown, GapFill::Markdown("a".into()));
+        assert_eq!(fill, Err(GapError::Convert(ConvertError::Cancelled)));
+        let charged = working.resumed().and_then(|ledger| ledger.charge(0));
+        assert_eq!(charged, Err(ConvertError::Cancelled));
+        assert_eq!(working.read_fill(0, "a").err(), Some(ConvertError::Cancelled));
     }
 }

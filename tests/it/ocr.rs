@@ -8,7 +8,7 @@ use crate::pdf::pdf_pages;
 use crate::support::{configured, fixture, limit_mut, limited, reporting};
 use almiladoc::model::GapId;
 use almiladoc::{
-    ConvertError, Converter, DiagnosticCode, Format, GapError, GapFill, Input, Limit,
+    CancelToken, ConvertError, Converter, DiagnosticCode, Format, GapError, GapFill, Input, Limit,
     PageSelection, Parsed,
 };
 
@@ -256,4 +256,24 @@ fn each_fill_charges_its_events_on_from_the_work_before_it() {
         })
     };
     assert_eq!([filling(1) - filling(0), filling(2) - filling(0)], [3, 6]);
+}
+
+#[test]
+fn a_cancelled_parse_refuses_every_later_call_but_a_failure() {
+    let bytes = fixture("pdf/handmade-five-page.pdf");
+    let token = CancelToken::new();
+    let input = Input::new(&bytes, Format::Pdf).with_cancel(token.clone());
+    let mut parsed = reporting().parse(input).unwrap();
+    let [two, five] = parsed.gaps().map(|gap| gap.id).collect::<Vec<_>>().try_into().unwrap();
+    parsed.fill_gap(two, markdown("two")).unwrap();
+    token.cancel();
+    assert_eq!(parsed.render(), Err(ConvertError::Cancelled));
+    #[cfg(feature = "serde")]
+    assert_eq!(parsed.to_json(), Err(ConvertError::Cancelled));
+    assert_eq!(
+        parsed.fill_gap(five, markdown("five")),
+        Err(GapError::Convert(ConvertError::Cancelled))
+    );
+    assert_eq!(parsed.fail_gap(five), Ok(()));
+    assert_eq!(parsed.clone().render(), Err(ConvertError::Cancelled));
 }

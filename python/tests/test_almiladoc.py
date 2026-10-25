@@ -867,6 +867,16 @@ class CancellationTest(unittest.TestCase):
                 call()
             self.assertEqual(caught.exception.code, "cancelled")
 
+    def test_a_parse_keeps_its_token_for_render_and_to_json(self):
+        token = almiladoc.CancelToken()
+        parsed = almiladoc.Converter().parse(CSV.read_bytes(), "csv", cancel=token)
+        self.assertEqual(parsed.render().markdown[:6], "| Kind")
+        token.cancel()
+        for call in [parsed.render, parsed.to_json]:
+            with self.assertRaises(almiladoc.CancelledError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "cancelled")
+
     def test_a_running_conversion_is_cancelled_from_another_thread(self):
         unbounded = converter(max_work=U64_MAX)
         sample = rtf_flood(4 << 20)

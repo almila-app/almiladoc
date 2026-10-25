@@ -296,7 +296,8 @@ class CancelToken:
     def cancel(self) -> None:
         """Cancel every call holding this token, from any thread: each raises
         `CancelledError` at its next unit of work, a PDF's between its
-        pages."""
+        pages, as do `render`, `to_json` and `fill_gap` on a `Parsed` a parse
+        holding it made."""
     @property
     def cancelled(self) -> bool:
         """True once `cancel` was called."""
