@@ -80,6 +80,53 @@ pub(crate) fn map_ordered<T: Sync, R: Send>(
     items.par_iter().map(map).collect()
 }
 
+#[cfg(feature = "ocr-http")]
+pub(crate) use network::wait;
+
+/// What a network engine's requests run on: the calling thread's waits, which a cancel ends.
+#[cfg(feature = "ocr-http")]
+mod network {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use crate::ledger::CancelToken;
+
+    /// How often a wait looks at its token.
+    const CANCEL_POLL: Duration = Duration::from_millis(25);
+
+    /// Wait `delay` on the calling thread, unless `cancel` is cancelled first; whether it was not.
+    pub(crate) fn wait(delay: Duration, cancel: &CancelToken) -> bool {
+        let end = Instant::now() + delay;
+        loop {
+            if cancel.is_cancelled() {
+                return false;
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return true;
+            }
+            thread::sleep(left.min(CANCEL_POLL));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_wait_ends_at_its_delay_or_at_a_cancel() {
+            let cancel = CancelToken::new();
+            let start = Instant::now();
+            assert!(wait(Duration::from_millis(60), &cancel));
+            assert!(start.elapsed() >= Duration::from_millis(60));
+            cancel.cancel();
+            let start = Instant::now();
+            assert!(!wait(Duration::from_secs(30), &cancel));
+            assert!(start.elapsed() < Duration::from_millis(100));
+        }
+    }
+}
+
 fn run_in<T: Send>(
     pool: Result<ThreadPool, ThreadPoolBuildError>,
     work: impl FnOnce() -> Result<T, ConvertError> + Send,

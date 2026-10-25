@@ -79,6 +79,7 @@ insta = "1.49.0"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 
 [dependencies]
+base64 = { version = "0.23.1", optional = true }
 cfb = "0.15.0"
 csv = "1.4.0"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
@@ -92,6 +93,7 @@ sha2 = "0.11.1"
 thiserror = "2.0.21"
 unicode-normalization = "0.1.26"
 unpdf = { version = "0.50.0", default-features = false, optional = true }
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"], optional = true }
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [features]
@@ -99,6 +101,7 @@ default = ["pdf", "raster"]
 pdf = ["dep:unpdf"]
 raster = ["pdf", "unpdf/raster", "unpdf/standard-fonts"]
 serde = ["dep:serde", "dep:serde_json"]
+ocr-http = ["dep:ureq", "dep:base64", "dep:serde_json"]
 
 [profile.release]
 lto = "thin"

@@ -27,6 +27,8 @@ mod limits;
 #[cfg(feature = "pdf")]
 mod ocr;
 mod ocr_engine;
+#[cfg(feature = "ocr-http")]
+mod ocr_http;
 mod ocr_images;
 #[cfg(feature = "pdf")]
 mod pdf;

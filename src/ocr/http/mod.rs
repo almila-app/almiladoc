@@ -1,0 +1,520 @@
+mod wire;
+
+use core::net::IpAddr;
+use std::fmt;
+use std::io::ErrorKind;
+use std::time::Duration;
+
+use serde_json::{Map, Value};
+use ureq::Agent;
+use ureq::config::ConfigBuilder;
+use ureq::http::Uri;
+use ureq::http::header::{AUTHORIZATION, CONTENT_TYPE, EXPECT, RETRY_AFTER};
+use ureq::typestate::AgentScope;
+
+use crate::config::ConfigError;
+use crate::ledger::CancelToken;
+use crate::ocr::{GapFill, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, RasterSpec};
+use crate::pool::wait;
+
+/// How [`OcrHttp`] reaches an OpenAI-compatible vision server.
+///
+/// # Examples
+///
+/// ```
+/// use almiladoc::{OcrHttp, OcrHttpConfig};
+///
+/// let mut config = OcrHttpConfig::new("http://127.0.0.1:8000/v1", "vision-model");
+/// config.api_key = Some("secret".into());
+/// let engine = OcrHttp::new(config)?;
+/// assert!(!format!("{engine:?}").contains("secret"));
+/// # Ok::<(), almiladoc::ConfigError>(())
+/// ```
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct OcrHttpConfig {
+    /// The API's base URL, `http` or `https` with no user, query or fragment; each image is
+    /// posted to its `chat/completions`.
+    pub base_url: String,
+    /// The model the server runs.
+    pub model: String,
+    /// A bearer token, sent only over `https` or to a loopback host.
+    pub api_key: Option<String>,
+    /// What the model is asked of each image; [`OcrHttpConfig::DEFAULT_PROMPT`] by default.
+    pub prompt: String,
+    /// Whether the image comes before the prompt in the message; true by default.
+    pub image_first: bool,
+    /// More top-level fields of each request body, none of `messages`, `model`, `max_tokens`,
+    /// `temperature`, `n` and `stream`.
+    pub extra_body: Map<String, Value>,
+    /// The most tokens a reply holds; 8192 by default.
+    pub max_tokens: u32,
+    /// The sampling temperature, 0 to 2; 0 by default.
+    pub temperature: f32,
+    /// How large an image of a page the server takes.
+    pub raster: RasterSpec,
+    /// Attempts after the first for a request the server could not take yet, at most 10; 3 by
+    /// default.
+    pub retries: u32,
+}
+
+impl OcrHttpConfig {
+    /// The prompt a config starts with.
+    pub const DEFAULT_PROMPT: &str = "Transcribe all text in this image as Markdown, keeping \
+        its headings, lists and tables, and reply with the Markdown alone.";
+    const MAX_RETRIES: u32 = 10;
+
+    /// The defaults for `model` behind `base_url`.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            api_key: None,
+            prompt: Self::DEFAULT_PROMPT.into(),
+            image_first: true,
+            extra_body: Map::new(),
+            max_tokens: 8192,
+            temperature: 0.0,
+            raster: RasterSpec::default(),
+            retries: 3,
+        }
+    }
+}
+
+impl fmt::Debug for OcrHttpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OcrHttpConfig")
+            .field("base_url", &Redacted(&self.base_url))
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
+            .field("image_first", &self.image_first)
+            .field("extra_body", &self.extra_body.keys().collect::<Vec<_>>())
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("raster", &self.raster)
+            .field("retries", &self.retries)
+            .finish()
+    }
+}
+
+/// A URL shown with its scheme, host, port and path alone.
+struct Redacted<'a>(&'a str);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Ok(uri) = self.0.parse::<Uri>() else { return f.write_str("<unparsed>") };
+        let (scheme, host) = (uri.scheme_str().unwrap_or_default(), uri.host().unwrap_or_default());
+        let port = uri.port_u16().map(|port| format!(":{port}")).unwrap_or_default();
+        write!(f, "\"{scheme}://{host}{port}{}\"", uri.path())
+    }
+}
+
+/// An [`OcrEngine`] that asks an OpenAI-compatible vision server for each image's Markdown,
+/// one image per request.
+///
+/// Each request asks the server to answer before its body is sent (`Expect: 100-continue`),
+/// sending it after a second without an answer. A request the server could not take yet (a
+/// reset before its response, or 408, 429, 500, 502, 503 or 504) is retried after 0.5 s
+/// doubling to 30 s, or the `Retry-After` seconds up to 60 s, a cancel ending the wait. A
+/// request the server rejects (400, 413 or 422) or a reply that holds no Markdown fails its
+/// gap; any other failure leaves its gap and the rest of its batch unattempted. It follows no
+/// redirect, uses no proxy, verifies TLS against the Mozilla roots on rustls' process-wide
+/// provider or ring, and reads a reply body of under six times the request's `max_text_bytes`
+/// and 64 KiB.
+pub struct OcrHttp {
+    agent: Agent,
+    endpoint: Uri,
+    authorization: Option<String>,
+    template: wire::Template,
+    raster: RasterSpec,
+    retries: u32,
+}
+
+impl fmt::Debug for OcrHttp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OcrHttp")
+            .field("endpoint", &Redacted(&self.endpoint.to_string()))
+            .field("authorized", &self.authorization.is_some())
+            .field("raster", &self.raster)
+            .field("retries", &self.retries)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Status codes of a request the server could not take yet.
+const RETRYABLE: [u16; 6] = [408, 429, 500, 502, 503, 504];
+/// Status codes of a request the server rejects.
+const REJECTED: [u16; 3] = [400, 413, 422];
+const FIRST_DELAY: Duration = Duration::from_millis(500);
+const MAX_DELAY: Duration = Duration::from_secs(30);
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+impl OcrHttp {
+    /// An engine for `config`, opening no socket.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Raster`] when its raster spec is out of range, and
+    /// [`ConfigError::OcrHttp`] naming the first field refused: `base_url` that is not `http`
+    /// or `https` with a host and no user, query or fragment, an empty `model`, `api_key` that
+    /// is empty, holds anything but visible ASCII, or would go over `http` to a host other than
+    /// loopback, `extra_body` naming a field the engine sets or reads, `max_tokens` of 0,
+    /// `temperature` outside 0 to 2, or `retries` above 10.
+    pub fn new(config: OcrHttpConfig) -> Result<Self, ConfigError> {
+        config.raster.validate()?;
+        let refuse = |field| ConfigError::OcrHttp { field };
+        let (endpoint, secure) = endpoint(&config.base_url).ok_or(refuse("base_url"))?;
+        if config.model.is_empty() {
+            return Err(refuse("model"));
+        }
+        let authorization = match &config.api_key {
+            Some(key) if key.is_empty() || !key.bytes().all(|b| b.is_ascii_graphic()) => {
+                return Err(refuse("api_key"));
+            }
+            Some(_) if !secure => return Err(refuse("api_key")),
+            Some(key) => Some(format!("Bearer {key}")),
+            None => None,
+        };
+        if wire::RESERVED.iter().any(|field| config.extra_body.contains_key(*field)) {
+            return Err(refuse("extra_body"));
+        }
+        if config.max_tokens == 0 {
+            return Err(refuse("max_tokens"));
+        }
+        if !(0.0..=2.0).contains(&config.temperature) {
+            return Err(refuse("temperature"));
+        }
+        if config.retries > OcrHttpConfig::MAX_RETRIES {
+            return Err(refuse("retries"));
+        }
+        let mut fields = config.extra_body;
+        fields.insert("model".into(), config.model.into());
+        fields.insert("max_tokens".into(), config.max_tokens.into());
+        fields.insert("temperature".into(), config.temperature.into());
+        let template =
+            wire::Template { fields, prompt: config.prompt, image_first: config.image_first };
+        Ok(Self {
+            agent: configured(Agent::config_builder()).build().into(),
+            endpoint,
+            authorization,
+            template,
+            raster: config.raster,
+            retries: config.retries,
+        })
+    }
+
+    /// What the server made of `request`, after retries.
+    fn read(&self, request: &OcrRequest, cancel: &CancelToken) -> OcrOutcome {
+        let body = self.template.body(&request.image);
+        let cap = request.max_text_bytes.saturating_mul(6).saturating_add(64 << 10);
+        let (mut status, mut pause) = (None, None);
+        for attempt in 0..=self.retries {
+            if let Some(delay) = pause.take()
+                && !wait(delay, cancel)
+            {
+                break;
+            }
+            match self.post(&body, cap) {
+                Exchange::Read(text) => return OcrOutcome::Fill(GapFill::Markdown(text)),
+                Exchange::Rejected(code) => return OcrOutcome::Failed(OcrFailure::new(code)),
+                Exchange::Stopped(code) => return OcrOutcome::Unattempted(OcrFailure::new(code)),
+                Exchange::Later(code, after) => {
+                    status = code;
+                    pause = Some(delay(attempt, after.as_deref()));
+                }
+            }
+        }
+        OcrOutcome::Unattempted(OcrFailure::new(status))
+    }
+
+    fn post(&self, body: &[u8], cap: u64) -> Exchange {
+        let mut post = self
+            .agent
+            .post(&self.endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .header(EXPECT, "100-continue");
+        if let Some(authorization) = &self.authorization {
+            post = post.header(AUTHORIZATION, authorization);
+        }
+        let mut response = match post.send(body) {
+            Ok(response) => response,
+            Err(ureq::Error::Io(error)) if reset(error.kind()) => {
+                return Exchange::Later(None, None);
+            }
+            Err(_) => return Exchange::Stopped(None),
+        };
+        let code = response.status().as_u16();
+        if RETRYABLE.contains(&code) {
+            let after = response.headers().get(RETRY_AFTER).and_then(|value| value.to_str().ok());
+            return Exchange::Later(Some(code), after.map(str::to_owned));
+        }
+        if REJECTED.contains(&code) {
+            return Exchange::Rejected(Some(code));
+        }
+        if !response.status().is_success() {
+            return Exchange::Stopped(Some(code));
+        }
+        match response.body_mut().with_config().limit(cap).read_to_vec() {
+            Ok(reply) => {
+                wire::content(&reply).map_or(Exchange::Rejected(Some(code)), Exchange::Read)
+            }
+            Err(ureq::Error::BodyExceedsLimit(_)) => Exchange::Rejected(Some(code)),
+            Err(_) => Exchange::Stopped(Some(code)),
+        }
+    }
+}
+
+impl OcrEngine for OcrHttp {
+    fn batch_size(&self) -> usize {
+        2
+    }
+
+    fn raster(&self) -> RasterSpec {
+        self.raster
+    }
+
+    fn recognize(&self, requests: &[OcrRequest], cancel: &CancelToken) -> Vec<OcrOutcome> {
+        let mut stopped = false;
+        requests
+            .iter()
+            .map(|request| {
+                if stopped || cancel.is_cancelled() {
+                    return OcrOutcome::Unattempted(OcrFailure::new(None));
+                }
+                let outcome = self.read(request, cancel);
+                stopped = matches!(outcome, OcrOutcome::Unattempted(_));
+                outcome
+            })
+            .collect()
+    }
+}
+
+/// One attempt's result.
+enum Exchange {
+    Read(String),
+    Rejected(Option<u16>),
+    Later(Option<u16>, Option<String>),
+    Stopped(Option<u16>),
+}
+
+/// `base_url`'s `chat/completions` endpoint, and whether a key may travel to it.
+fn endpoint(base_url: &str) -> Option<(Uri, bool)> {
+    let uri: Uri = base_url.parse().ok()?;
+    let authority = uri.authority()?;
+    let secure = match uri.scheme_str()? {
+        "https" => true,
+        "http" => loopback(authority.host()),
+        _ => return None,
+    };
+    if authority.as_str().contains('@') || uri.query().is_some() || base_url.contains('#') {
+        return None;
+    }
+    let path = format!("{}/chat/completions", uri.path().trim_end_matches('/'));
+    let endpoint = Uri::builder()
+        .scheme(uri.scheme_str()?)
+        .authority(authority.as_str())
+        .path_and_query(path)
+        .build()
+        .ok()?;
+    Some((endpoint, secure))
+}
+
+fn loopback(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `builder` as every request's agent takes it: no proxy, no redirect, statuses as responses,
+/// and no resolve, per-call or overall timeout, each of which would resolve on a thread of its
+/// own.
+fn configured(builder: ConfigBuilder<AgentScope>) -> ConfigBuilder<AgentScope> {
+    builder
+        .proxy(None)
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(Duration::from_secs(60)))
+        .timeout_send_body(Some(Duration::from_secs(60)))
+        .timeout_recv_response(Some(Duration::from_secs(300)))
+        .timeout_recv_body(Some(Duration::from_secs(60)))
+}
+
+/// Whether an I/O error before the response means the connection dropped.
+fn reset(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+    )
+}
+
+/// The wait after attempt `attempt`, counted from 0: `retry_after`'s seconds up to 60, or else
+/// 0.5 s doubling to 30 s.
+fn delay(attempt: u32, retry_after: Option<&str>) -> Duration {
+    match retry_after.and_then(|value| value.trim().parse::<u64>().ok()) {
+        Some(seconds) => Duration::from_secs(seconds).min(MAX_RETRY_AFTER),
+        None => FIRST_DELAY.saturating_mul(1 << attempt.min(6)).min(MAX_DELAY),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(base_url: &str) -> OcrHttpConfig {
+        OcrHttpConfig::new(base_url, "m")
+    }
+
+    fn refused(config: OcrHttpConfig) -> Option<&'static str> {
+        match OcrHttp::new(config) {
+            Err(ConfigError::OcrHttp { field }) => Some(field),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_base_url_takes_a_host_and_no_user_query_or_fragment() {
+        for base in
+            ["http://127.0.0.1:8000/v1", "https://example.com/v1/", "http://[::1]:9/", "https://h"]
+        {
+            assert_eq!(refused(config(base)), None, "{base}");
+        }
+        for base in [
+            "",
+            "127.0.0.1:8000",
+            "ftp://h/v1",
+            "http:///v1",
+            "https://u:p@h/v1",
+            "https://h/v1?k=1",
+            "https://h/v1#f",
+        ] {
+            assert_eq!(refused(config(base)), Some("base_url"), "{base}");
+        }
+        let (endpoint, _) = endpoint("https://h:8443/v1/").unwrap();
+        assert_eq!(endpoint.to_string(), "https://h:8443/v1/chat/completions");
+    }
+
+    #[test]
+    fn a_key_travels_only_over_https_or_to_loopback() {
+        for (base, key, field) in [
+            ("http://127.0.0.1/v1", "k", None),
+            ("http://127.8.0.1/v1", "k", None),
+            ("http://[::1]/v1", "k", None),
+            ("http://LocalHost/v1", "k", None),
+            ("https://192.0.2.1/v1", "k", None),
+            ("http://192.0.2.1/v1", "k", Some("api_key")),
+            ("http://127.0.0.1.example/v1", "k", Some("api_key")),
+            ("https://h/v1", "", Some("api_key")),
+            ("https://h/v1", "a b", Some("api_key")),
+            ("https://h/v1", "k\n", Some("api_key")),
+        ] {
+            let mut config = config(base);
+            config.api_key = Some(key.into());
+            assert_eq!(refused(config), field, "{base} {key:?}");
+        }
+        assert_eq!(refused(config("http://192.0.2.1/v1")), None);
+    }
+
+    #[test]
+    fn each_other_field_is_checked() {
+        let base = "https://h/v1";
+        let mut empty = config(base);
+        empty.model = String::new();
+        let reserved = wire::RESERVED.map(|field| {
+            let mut reserved = config(base);
+            reserved.extra_body.insert(field.into(), Value::from("other"));
+            reserved
+        });
+        let mut tokens = config(base);
+        tokens.max_tokens = 0;
+        let mut hot = config(base);
+        hot.temperature = 2.5;
+        let mut unknown = config(base);
+        unknown.temperature = f32::NAN;
+        let mut retries = config(base);
+        retries.retries = 11;
+        for (config, field) in [
+            (empty, "model"),
+            (tokens, "max_tokens"),
+            (hot, "temperature"),
+            (unknown, "temperature"),
+            (retries, "retries"),
+        ]
+        .into_iter()
+        .chain(reserved.map(|config| (config, "extra_body")))
+        {
+            assert_eq!(refused(config), Some(field));
+        }
+        let mut raster = config(base);
+        raster.raster.dpi = 601;
+        assert_eq!(OcrHttp::new(raster).err(), Some(ConfigError::Raster));
+    }
+
+    #[test]
+    fn no_debug_holds_a_key_a_prompt_or_a_url_s_user_or_query() {
+        let mut config = config("https://user:pass@h:8443/v1?sig=qq");
+        config.api_key = Some("sk-secret".into());
+        config.prompt = "private prompt".into();
+        config.extra_body.insert("top_p".into(), Value::from("hidden"));
+        let shown = format!("{config:?}");
+        for hidden in ["sk-secret", "private prompt", "user", "pass", "sig", "qq", "hidden"] {
+            assert!(!shown.contains(hidden), "{hidden}: {shown}");
+        }
+        assert!(shown.contains("\"https://h:8443/v1\"") && shown.contains("top_p"), "{shown}");
+        let mut config = OcrHttpConfig::new("https://h/v1", "m");
+        config.api_key = Some("sk-secret".into());
+        let shown = format!("{:?}", OcrHttp::new(config).unwrap());
+        assert!(!shown.contains("sk-secret") && shown.contains("authorized: true"), "{shown}");
+    }
+
+    #[test]
+    fn the_agent_drops_a_proxy_follows_no_redirect_and_verifies_tls() {
+        let proxy = ureq::Proxy::new("http://127.0.0.1:1").unwrap();
+        let config = configured(Agent::config_builder().proxy(Some(proxy))).build();
+        assert!(config.proxy().is_none());
+        assert_eq!(config.max_redirects(), 0);
+        assert!(!config.http_status_as_error());
+        let tls = config.tls_config();
+        assert_eq!(tls.provider(), ureq::tls::TlsProvider::Rustls);
+        assert!(matches!(tls.root_certs(), ureq::tls::RootCerts::WebPki));
+        assert!(!tls.disable_verification());
+    }
+
+    #[test]
+    fn a_wait_takes_retry_after_up_to_a_minute_or_doubles_to_thirty_seconds() {
+        let seconds = |attempt, after| delay(attempt, after).as_secs_f64();
+        for (attempt, after, waited) in [
+            (0, None, 0.5),
+            (1, None, 1.0),
+            (5, None, 16.0),
+            (6, None, 30.0),
+            (10, None, 30.0),
+            (0, Some(" 7 "), 7.0),
+            (0, Some("0"), 0.0),
+            (3, Some("3600"), 60.0),
+            (1, Some("Wed, 21 Oct 2026 07:28:00 GMT"), 1.0),
+        ] {
+            assert_eq!(seconds(attempt, after), waited, "{attempt} {after:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_dropped_connection_counts_as_a_reset() {
+        for (kind, dropped) in [
+            (ErrorKind::ConnectionReset, true),
+            (ErrorKind::ConnectionAborted, true),
+            (ErrorKind::BrokenPipe, true),
+            (ErrorKind::UnexpectedEof, true),
+            (ErrorKind::ConnectionRefused, false),
+            (ErrorKind::TimedOut, false),
+            (ErrorKind::Other, false),
+        ] {
+            assert_eq!(reset(kind), dropped, "{kind:?}");
+        }
+    }
+}

@@ -50,6 +50,8 @@ pub use ocr::{
     GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrOutcome, OcrRequest, OcrSummary,
     RasterSpec,
 };
+#[cfg(feature = "ocr-http")]
+pub use ocr::{OcrHttp, OcrHttpConfig};
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = {

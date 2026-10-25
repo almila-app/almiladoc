@@ -3,6 +3,8 @@
 mod driver;
 mod engine;
 mod fill;
+#[cfg(feature = "ocr-http")]
+mod http;
 mod images;
 mod raster;
 mod request;
@@ -15,6 +17,8 @@ use crate::limits::Limit;
 pub(crate) use driver::{Target, run};
 pub use engine::{OcrEngine, OcrFailure, OcrOutcome, OcrSummary};
 pub(crate) use fill::{GapFills, GapState, gaps};
+#[cfg(feature = "ocr-http")]
+pub use http::{OcrHttp, OcrHttpConfig};
 pub(crate) use images::leave_image_gaps;
 pub use raster::RasterSpec;
 pub(crate) use request::{Inputs, requests};

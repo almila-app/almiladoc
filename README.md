@@ -106,6 +106,8 @@ The `serde` feature derives `Serialize` for the model, `Diagnostic`, `EngineIden
 
 PDF support is the default `pdf` feature, read with [unpdf](https://docs.rs/unpdf) page by page on the call's own thread; without it, a PDF is `Unsupported`. Limits and cancellation reach the PDF engine only between pages, since inside a page its stream decoding takes no caller budget: isolate PDF work in a memory-capped worker that is recycled after a failure.
 
+The `ocr-http` feature adds `OcrHttp`, an `OcrEngine` that posts each image to an OpenAI-compatible server's `chat/completions`, as `OcrHttpConfig` sets out: a base URL, a model, an optional key sent only over `https` or to loopback, the prompt and sampling fields. A request the server cannot take yet is retried, a reply it rejects or that holds no Markdown fails its gap, and any other failure leaves its gap for a later call; `OcrHttp::new` opens no socket, and it uses no proxy and follows no redirect.
+
 ### Identity
 
 `Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures.

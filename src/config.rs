@@ -211,6 +211,13 @@ pub enum ConfigError {
     /// outside 1 Mpx to [`RasterSpec::MAX_PIXELS_CEILING`](crate::RasterSpec::MAX_PIXELS_CEILING).
     #[error("a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels")]
     Raster,
+    /// An `OcrHttpConfig` field that `OcrHttp::new` refuses.
+    #[error("ocr-http refuses its {field}")]
+    #[non_exhaustive]
+    OcrHttp {
+        /// The field's name, such as `base_url`.
+        field: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -290,6 +297,7 @@ mod tests {
                 ConfigError::Raster,
                 "a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",
             ),
+            (ConfigError::OcrHttp { field: "base_url" }, "ocr-http refuses its base_url"),
         ];
         for (error, message) in cases {
             assert_eq!(error.to_string(), message);

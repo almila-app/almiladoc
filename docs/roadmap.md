@@ -54,7 +54,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W12 | ocr-http | |
+| W12 | ocr-http-fanout then ocr-http-python | |
 | W13 | raster-hook (on the unpdf release that carries a paint budget) | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
@@ -81,51 +81,49 @@ release follows W12.
 
 ### W12
 
-#### ocr-http: an OpenAI-compatible vision server fills the gaps, with no code
-- **Goal:** a base URL, a model and a key let a vision server fill the gaps (ADR 0002 decision 7).
-- **Scope:**
-  - Feature `ocr-http`, on in the binding: ureq 3, latest stable (`rustls-no-provider`,
-    `rustls-webpki-roots`), `rustls` on `ring`, `base64`, `serde_json`; `python/Cargo.toml` takes
-    `log` with `max_level_off`.
-  - `OcrHttpConfig`: `base_url`, `model`, `api_key`, `prompt` (its own one-sentence default, in the
-    rustdoc), `image_first` (true), `extra_body`, `max_tokens` 8192, `temperature` 0.0, `raster`,
-    `concurrency` 1 (`batch_size()` twice it), `retries` 3; `raster: RasterSpec` exists without
-    the `raster` feature; `new` opens no socket and refuses a bad field, a reserved `extra_body`
-    key or a key over `http://` beyond loopback.
-  - A reply counts only as string `choices[0].message.content` with `finish_reason` `stop`; a
-    leading `<think>…</think>` is stripped, an unclosed one fails the gap.
-  - Resets before a response and 408, 429, 500, 502-504 retry after 0.5 to 30 s or `Retry-After` up
-    to 60 s, which a cancel ends; 400, 413, 422, `length` and a malformed or refused reply fail the
-    gap, other failures leave it and the rest of the batch unattempted, each with its status.
-  - ureq: one agent built in `new` on the caller's thread, never on a worker, its proxy-environment
-    read discarded by `proxy(None)`; timeouts connect 10 s, send request 60 s, send body 60 s,
-    response 300 s and body 60 s, none for resolve or overall; ring as rustls' provider; no
-    redirect; a body capped at its request's `max_text_bytes` + 64 KiB; errors mapped without
-    `Display`.
-  - `pool::fan_out` runs `min(concurrency, n)` scoped workers; `scripts/ocr_live.py` logs method,
-    path, status and gap.
-  - Python via `/change-core-api`: `OcrHttp(base_url, model, *, api_key=None, …)`, releasing the
-    GIL, with `recognize(requests)` giving `str` or a pickling `OcrFailure(*, attempted=True,
-    status=None)` each, so a parent fills a child's exported requests; `Parsed.ocr(engine)` with
-    `OcrSummary`, and `Converter.convert(…, ocr=None)`.
-- **Files:** `src/ocr/` (new `http/`), `scripts/`, `src/{pool,ledger,config,lib}.rs`, `README.md`,
-  `Cargo.*`, `fuzz/`, `tests/`, `python/`, `deny*.toml`, `Makefile`, licences, `.github/`, ADRs.
-- **Tests:** against a loopback server on port 0:
-  - `<think>x</think>\n# A` fills `# A`; an unclosed think block, `null` content, `length` and a
-    body past the cap fail the gap, a 1.5 MiB reply under a raised limit fills; the body holds the
-    model, one `image_url` data URI and the prompt, image first unless `image_first = false`;
-    `Authorization` only with a key.
-  - 503 then 200 fills after 2 attempts; 400 fails after 1 with status 400; a 302 elsewhere is not
-    followed and leaves its gap with status 302; a closed port leaves a batch of 4 unattempted after
-    one attempt; `concurrency` 3 keeps at most 3 in flight; a cancel in backoff returns in 100 ms.
-  - No failure, error or `Debug` holds an echoed key or prompt, or a URL's userinfo or query; `new`
-    refuses `extra_body` holding `model`, `concurrency` 0 and a key over `http://` to 192.0.2.1, not
-    to 127.0.0.1, `[::1]` or `localhost`; dead `HTTPS_PROXY` and `SSL_CERT_FILE` change nothing.
-  - A cancel in a stalled response attempts no later request of its batch; no thread outlives
-    `recognize`; a self-signed server leaves its gaps; Python equals Rust, a child's pickled
-    requests filled by the parent's `OcrHttp` included; `ocr_reply` replays.
+`OcrHttp` (feature `ocr-http`) posts one image per request on the caller's worker, two to a batch;
+what remains of ADR 0002 decision 7 is concurrency and Python. A proptest over any reply body
+stands for the `ocr_reply` fuzz target, as the parser is crate-private and serde_json reads it.
+
+#### ocr-http-fanout: `concurrency` requests in flight on scoped workers
+- **Goal:** a batch's requests go out `concurrency` at once without a thread outliving
+  `recognize`.
+- **Scope:** `OcrHttpConfig::concurrency` (1 by default, 1 to 16), `batch_size()` twice it;
+  `pool::fan_out` runs `min(concurrency, n)` scoped workers that take requests in order and stop
+  taking them once one is left unattempted or the token is cancelled; `scripts/ocr_live.py` runs the
+  five-page fixture against a live endpoint, logging method, path, status and gap.
+- **Files:** `src/ocr/http/`, `src/pool.rs`, `clippy.toml`, `Cargo.*`, `scripts/`, `tests/`,
+  `README.md`, `REUSE.toml`.
+- **Tests:** `concurrency` 3 keeps at most 3 in flight over a batch of 6; a cancel during a
+  stalled response attempts no later request of its batch; the process's threads number the same
+  before and after `recognize`; `concurrency` 0 and 17 are refused. Carried from `OcrHttp`'s
+  change: a loopback rustls server with a certificate made by the test leaves its gap unattempted
+  after one connection, and a dead `HTTPS_PROXY` and `SSL_CERT_FILE` set for a child test process
+  change no outcome.
 - **Credit:** none.
-- **Depends on:** none open. **Size:** about 1150 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 300 lines. **Tier:** T3.
+
+#### ocr-http-python: Python fills gaps through `OcrHttp`, with no code
+- **Goal:** a base URL, a model and a key let a Python caller fill a parse's gaps, in-process or
+  from a child's pickled requests.
+- **Scope:**
+  - `python/Cargo.toml` turns `ocr-http` on and takes `log` with `max_level_off`; ADR 0003
+    decision 2's `deny-offline.toml` then bans `ureq` from the default graph only, `make policy`
+    proving the binding's graph.
+  - Through `/change-core-api`: a public way to recognize an image without a `GapId` (the
+    binding cannot build an `OcrRequest`, which is `#[non_exhaustive]`); `OcrHttp(base_url, model,
+    *, api_key=None, …)` releasing the GIL and copying images before it does, with
+    `recognize(requests, *, cancel=None)` giving `str` or a pickling `OcrFailure(*,
+    attempted=True, status=None)` each, so a parent fills a child's exported requests;
+    `Parsed.ocr(engine)` with `OcrSummary`; `Converter.convert(…, ocr=None)` on the core's
+    `convert_with_ocr`; `ConfigError` with `limit` naming a refused `OcrHttp` field.
+  - No `repr`, error or log holds a key, a prompt, or a URL's user or query.
+- **Files:** `python/`, `src/`, `deny-offline.toml`, ADR 0003, `README.md`, `REUSE.toml`.
+- **Tests:** against a loopback server: Python equals Rust on the rich DOCX fixture, a child's
+  pickled requests filled by the parent's `OcrHttp` included; a refused field raises
+  `ConfigError`; a cancel ends a retry wait.
+- **Credit:** none.
+- **Depends on:** ocr-http-fanout. **Size:** about 500 lines. **Tier:** T3.
 
 ### W13
 
