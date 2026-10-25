@@ -1,12 +1,13 @@
 use crate::error::ConvertError;
 use crate::ledger::CancelToken;
 use crate::model::{Gap, GapId};
-use crate::ocr::{GapError, GapFill, OcrEngine, OcrOutcome, OcrRequest, OcrSummary};
+use crate::ocr::{GapError, GapFill, OcrEngine, OcrOutcome, OcrRequest, OcrSummary, RasterSpec};
 
 /// The parsed document an OCR call asks requests of and settles gaps in.
 pub(crate) trait Target {
-    /// The request for `gap`, its copy charged.
-    fn request(&mut self, gap: &Gap) -> Result<Option<OcrRequest>, ConvertError>;
+    /// The request for `gap`, its image charged, a page painted under `spec`.
+    fn request(&mut self, gap: &Gap, spec: &RasterSpec)
+    -> Result<Option<OcrRequest>, ConvertError>;
     fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError>;
     fn fail(&mut self, id: GapId) -> Result<(), GapError>;
 }
@@ -21,12 +22,12 @@ pub(crate) fn run(
     engine: &dyn OcrEngine,
     cancel: &CancelToken,
 ) -> Result<OcrSummary, ConvertError> {
-    let size = engine.batch_size().max(1);
+    let (size, spec) = (engine.batch_size().max(1), engine.raster());
     let mut summary = OcrSummary::default();
     for (done, batch) in gaps.chunks(size).enumerate() {
         let mut requests = Vec::with_capacity(batch.len());
         for gap in batch {
-            requests.extend(target.request(gap)?);
+            requests.extend(target.request(gap, &spec)?);
         }
         refuse_cancelled(cancel)?;
         let outcomes = engine.recognize(&requests, cancel);
@@ -112,12 +113,16 @@ mod tests {
     }
 
     impl Target for Fake {
-        fn request(&mut self, gap: &Gap) -> Result<Option<OcrRequest>, ConvertError> {
+        fn request(
+            &mut self,
+            gap: &Gap,
+            _: &RasterSpec,
+        ) -> Result<Option<OcrRequest>, ConvertError> {
             Ok(Some(OcrRequest {
                 gap: gap.id,
                 origin: gap.origin,
                 reasons: Vec::new(),
-                image: OcrImage { bytes: Vec::new().into(), media_type: "image/png" },
+                image: OcrImage { bytes: Vec::new().into(), media_type: "image/png", dpi: None },
                 max_text_bytes: 1,
             }))
         }

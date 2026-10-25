@@ -12,15 +12,15 @@ use crate::config::{Config, ConfigError, ImageOcr, PageSelection};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Diagnostics, OnLoss};
 use crate::error::{ConvertError, UnsupportedKind};
-use crate::formats;
+use crate::formats::{self, Source};
 use crate::identity::EngineIdentity;
 use crate::inspect::{Inspection, PageInspection};
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
 use crate::model::{Block, Document, Gap, GapId, OcrOrigin, Unit, UnitKind};
 use crate::ocr::{
-    GapError, GapFill, GapFills, GapState, OcrEngine, OcrRequest, OcrSummary, Target, gaps,
-    image_of, leave_image_gaps, request,
+    GapError, GapFill, GapFills, GapState, Inputs, OcrEngine, OcrRequest, OcrSummary, RasterSpec,
+    Target, gaps, leave_image_gaps, request,
 };
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
@@ -144,14 +144,15 @@ impl Converter {
     /// ```
     pub fn parse(&self, input: Input<'_>) -> Result<Parsed, ConvertError> {
         let (bytes, cancel) = (input.bytes, input.cancel.clone());
-        let (document, diagnostics, fuel) = self.prepare(input, move |parse_ctx, format| {
-            let document = parse_document(&parse_ctx, bytes, format)?;
-            let (diagnostics, fuel) = report_of(parse_ctx, &document, self.config.images)?;
-            Ok((document, diagnostics, fuel))
-        })?;
+        let (document, source, diagnostics, fuel) =
+            self.prepare(input, move |parse_ctx, format| {
+                let (document, source) = parse_document(&parse_ctx, bytes, format)?;
+                let (diagnostics, fuel) = report_of(parse_ctx, &document, self.config.images)?;
+                Ok((document, source, diagnostics, fuel))
+            })?;
         let fills = GapFills::of(&document);
-        let config = Arc::clone(&self.config);
-        Ok(Parsed { document, diagnostics, fuel, config, fills, cancel })
+        let (config, source) = (Arc::clone(&self.config), Arc::new(source));
+        Ok(Parsed { document, diagnostics, fuel, config, fills, cancel, source })
     }
 
     /// Convert `input` to Markdown: [`Converter::parse`] then
@@ -183,7 +184,7 @@ impl Converter {
     pub fn convert(&self, input: Input<'_>) -> Result<Conversion, ConvertError> {
         let bytes = input.bytes;
         self.prepare(input, move |parse_ctx, format| {
-            let document = parse_document(&parse_ctx, bytes, format)?;
+            let (document, _) = parse_document(&parse_ctx, bytes, format)?;
             let fills = GapFills::default();
             refuse_gaps(self.config.on_loss, &document, &fills)?;
             let meter = Meter::new(parse_ctx.ledger(), self.config.limits.max_output_bytes);
@@ -450,6 +451,7 @@ pub struct Parsed {
     config: Arc<Config>,
     fills: GapFills,
     cancel: Option<CancelToken>,
+    source: Arc<Source>,
 }
 
 impl Parsed {
@@ -596,30 +598,32 @@ impl Parsed {
     /// # Examples
     ///
     /// ```
-    /// use almiladoc::{Config, Converter, Format, GapFill, ImageOcr, Input};
+    /// use almiladoc::{Config, Converter, Format, GapFill, ImageOcr, Input, RasterSpec};
     ///
     /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/docx/handmade-rich.docx");
     /// let docx = std::fs::read(path)?;
     /// let mut config = Config::default();
     /// config.image_ocr = ImageOcr::All;
     /// let mut parsed = Converter::new(config)?.parse(Input::new(&docx, Format::Docx))?;
-    /// for request in parsed.ocr_requests(None)? {
+    /// for request in parsed.ocr_requests(&RasterSpec::default(), None)? {
     ///     assert_eq!(request.image.media_type, "image/png");
     ///     parsed.fill_gap(request.gap, GapFill::Markdown("A dot".into()))?;
     /// }
-    /// assert!(parsed.ocr_requests(None)?.is_empty());
+    /// assert!(parsed.ocr_requests(&RasterSpec::default(), None)?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn ocr_requests(
         &mut self,
+        spec: &RasterSpec,
         gaps: Option<&[GapId]>,
     ) -> Result<Vec<OcrRequest>, ConvertError> {
         self.refuse_cancelled()?;
+        spec.validate().map_err(ConvertError::InvalidConfig)?;
         let config = Arc::clone(&self.config);
         run_on_pool(&config, || {
             let mut requests = Vec::new();
             for gap in self.asking(gaps) {
-                requests.extend(Target::request(self, &gap)?);
+                requests.extend(Target::request(self, &gap, spec)?);
             }
             Ok(requests)
         })
@@ -672,6 +676,7 @@ impl Parsed {
         gaps: Option<&[GapId]>,
     ) -> Result<OcrSummary, ConvertError> {
         self.refuse_cancelled()?;
+        engine.raster().validate().map_err(ConvertError::InvalidConfig)?;
         let (config, cancel) = (Arc::clone(&self.config), self.cancel.clone().unwrap_or_default());
         run_on_pool(&config, || {
             let asking = self.asking(gaps);
@@ -825,9 +830,13 @@ impl Parsed {
             .map(|located| located.gap)
             .filter(|gap| listed.as_ref().is_none_or(|listed| listed.contains(&gap.id)))
             .filter(|gap| self.fills.unsettled(gap.id).is_ok())
-            .filter(|gap| image_of(gap, &self.document.assets).is_some())
+            .filter(|gap| self.inputs().asks(gap))
             .cloned()
             .collect()
+    }
+
+    fn inputs(&self) -> Inputs<'_> {
+        Inputs { assets: &self.document.assets, source: &self.source }
     }
 
     fn on_pool<T: Send>(
@@ -839,10 +848,14 @@ impl Parsed {
 }
 
 impl Target for Parsed {
-    fn request(&mut self, gap: &Gap) -> Result<Option<OcrRequest>, ConvertError> {
+    fn request(
+        &mut self,
+        gap: &Gap,
+        spec: &RasterSpec,
+    ) -> Result<Option<OcrRequest>, ConvertError> {
         let limits = &self.config.limits;
         let ledger = Ledger::new(limits.max_work, self.cancel.as_ref()).starting_at(self.fuel);
-        let made = request(gap, &self.document.assets, &ledger, limits.max_ocr_text_bytes)?;
+        let made = request(gap, self.inputs(), spec, &ledger, limits.max_ocr_text_bytes)?;
         self.fuel = ledger.spent();
         Ok(made)
     }
@@ -864,13 +877,13 @@ fn parse_document(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
     format: Format,
-) -> Result<Document, ConvertError> {
-    let (mut document, ()) =
-        within_nesting(parse_ctx, || Ok((formats::parse(parse_ctx, bytes, format)?, ())))?;
+) -> Result<(Document, Source), ConvertError> {
+    let (mut document, source) =
+        within_nesting(parse_ctx, || formats::parse_keeping(parse_ctx, bytes, format))?;
     if parse_ctx.image_ocr() == ImageOcr::All {
         leave_image_gaps(parse_ctx, &mut document)?;
     }
-    Ok(document)
+    Ok((document, source))
 }
 
 fn within_nesting<T>(
@@ -1081,6 +1094,7 @@ mod tests {
             fuel: 0,
             config: Arc::new(config),
             cancel: None,
+            source: Arc::default(),
         }
     }
 
@@ -1536,7 +1550,7 @@ mod tests {
             converter
                 .prepare(input, |ctx, format| {
                     assert_eq!(format, Format::Rtf);
-                    let document = parse_document(&ctx, br"{\rtf1 hello}", format)?;
+                    let (document, _) = parse_document(&ctx, br"{\rtf1 hello}", format)?;
                     let rendered = render(
                         &document,
                         &GapFills::default(),
@@ -1609,7 +1623,7 @@ mod tests {
         let converter = converter(1);
         let (total, work, length) = converter
             .prepare(Input::auto(&bytes, None), |ctx, format| {
-                let document = parse_document(&ctx, &bytes, format)?;
+                let (document, _) = parse_document(&ctx, &bytes, format)?;
                 let rendered = render(
                     &document,
                     &GapFills::default(),
@@ -1693,7 +1707,7 @@ mod tests {
         let mut empty = parsed(Vec::new(), Config::default());
         empty.cancel = Some(token.clone());
         assert_eq!(empty.ocr(&Unread, None), Err(ConvertError::Cancelled));
-        assert_eq!(empty.ocr_requests(None), Err(ConvertError::Cancelled));
+        assert_eq!(empty.ocr_requests(&RasterSpec::default(), None), Err(ConvertError::Cancelled));
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
         let (media_type, origin_part) = ("image/png".into(), String::new());
         let mut imaged = parsed(Vec::new(), Config::default());
@@ -1701,6 +1715,7 @@ mod tests {
         imaged.cancel = Some(token);
         let id = GapId::new(None, NonZeroU32::MIN);
         let gap = Gap { id, origin: OcrOrigin::Image(AssetId(0)), reasons: Vec::new() };
-        assert_eq!(Target::request(&mut imaged, &gap), Err(ConvertError::Cancelled));
+        let request = Target::request(&mut imaged, &gap, &RasterSpec::default());
+        assert_eq!(request, Err(ConvertError::Cancelled));
     }
 }

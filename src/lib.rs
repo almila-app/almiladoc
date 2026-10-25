@@ -48,6 +48,7 @@ pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 pub use ocr::{
     GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrOutcome, OcrRequest, OcrSummary,
+    RasterSpec,
 };
 
 const fn assert_send_sync<T: Send + Sync>() {}

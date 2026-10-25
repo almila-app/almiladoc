@@ -488,7 +488,7 @@ fn pdf_tree(pages: &[&[(&str, &str)]], tree: &dyn Fn(&str, usize) -> String) -> 
     write_pdf(&objects)
 }
 
-fn write_pdf(objects: &[String]) -> Vec<u8> {
+pub(crate) fn write_pdf(objects: &[String]) -> Vec<u8> {
     let mut out = String::from("%PDF-1.4\n");
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {

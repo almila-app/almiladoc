@@ -54,7 +54,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W11 | rasterizer | |
+| W11 | raster-losses then raster-surfaces | |
 | W12 | ocr-http | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
@@ -77,43 +77,35 @@ release follows W12.
 
 ### W11
 
-#### rasterizer: every page gap reaches the engine as an image
-- **Goal:** a page gap's request carries its page as the parse read it (ADR 0002 decisions 5 and 6).
+#### raster-losses: pages painted at once, and what painting missed reported
+- **Goal:** a batch's pages paint in parallel, and a filled page reports what its image lacked
+  (ADR 0002 decision 5).
 - **Scope:**
-  - Feature `raster = ["pdf", "unpdf/raster", "unpdf/standard-fonts"]`, on by default. `Parsed`
-    keeps unpdf's parser in an `Arc`; a page gap keeps its media box and rotation. Without it
-    `RasterSpec` and `ocr_requests`' signature stay, and page gaps yield no request.
-  - `RasterSpec { dpi: 150, max_pixels: 12_845_056 }` and `OcrEngine::raster()`; a dpi outside
-    50-600 or `max_pixels` outside 1 to 40 Mpx (`MAX_PIXELS_CEILING`) fails `ConfigError::Raster`.
-  - `ocr_requests(&mut self, &RasterSpec, gaps)`: per page gap the largest dpi up to the spec's
-    whose rotated media box (an upper bound for the crop box painted), rounded up, fits
-    `max_pixels`; one unit per 128 pixels; `render_page` (crop box, `/Rotate`, opaque white, RGB
-    PNG); one unit per 16 PNG bytes; the effective dpi as `OcrImage::dpi: Option<u32>`, `None` for
-    an embedded image; up to `threads` pages at once through a new `pool::map_ordered`, in order,
-    the token checked per page.
-  - Once a page gap is filled, unpdf's `RasterGaps` text runs, images, inline images and undecodable
-    content streams report `raster_incomplete` (`Lost`) in its unit, shadings and soft masks
-    nothing. `max_work`'s rustdoc states both rates and that they and the cap alone bound painting.
-  - Python via `/change-core-api`: `ocr_requests(*, dpi=150, max_pixels=12_845_056, gaps=None)`,
-    `OcrRequest.dpi`; fuzz target `pdf_raster` paints every page under `ocr_pages: All`; release
-    smoke checks a page's PNG `IHDR`; NOTICE names the CC0 ICC profiles `raster` builds in.
-- **Files:** new `src/ocr/raster.rs`; `src/ocr/`, `src/formats/pdf.rs`, `src/model/gap.rs`,
-  `src/{converter,config,diagnostics,limits,lib,pool}.rs`, `Cargo.*`, `fuzz/`, `tests/`, fixtures,
-  `python/`, licence files, `README.md`, `docs/support.md`, `.github/`, ADRs 0001 and 0003.
-- **Tests:**
-  - The five-page fixture exports pages 2 and 5 only, PNGs 1275 by 1650 at a stated 150 dpi;
-    `ocr_pages: All` exports five; bytes are equal across runs and at 1 and 4 threads.
-  - A 2725 by 2089 pt page renders within 12 845 056 pixels at a lower dpi; a `/CropBox` half its
-    `/MediaBox` renders below the cap; `/Rotate 90` swaps the sides; dpi 49 and 601,
-    `max_pixels` 1 048 575 and past `MAX_PIXELS_CEILING` are refused.
-  - Under `ocr_pages: All`, `handmade-predefined-cmap.pdf` filled reports `raster_incomplete` and
-    fails `Incomplete` under `Fail`; a scanned JPEG page and a mesh-shading page, filled, report
-    none.
-  - A cancel from another thread stops a 20-page export before the next page; a lowered `max_work`
-    trips before painting and at the PNG charge; `convert_with_ocr` equals the hand flow; Python's
-    `dpi=300` reaches its requests; `pdf_raster` replays.
+  - A new `pool::map_ordered` paints up to `threads` pages of one batch (one `ocr_requests` call)
+    at once, in order, the token checked per page; `Target` takes a batch's gaps, the pixels
+    charged serially before the pages fan out and the PNG bytes in page order after.
+  - Once a page gap is filled, unpdf's `RasterGaps` text runs, images, inline images and
+    undecodable content streams report `raster_incomplete` (`Lost`) in its unit, shadings and soft
+    masks nothing.
+- **Files:** `src/ocr/`, `src/{converter,diagnostics,pool}.rs`, `tests/`, fixtures,
+  `docs/support.md`, `REUSE.toml`.
+- **Tests:** under `ocr_pages: All`, `handmade-predefined-cmap.pdf` filled reports
+  `raster_incomplete` and fails `Incomplete` under `Fail`; a scanned JPEG page and a mesh-shading
+  page (new fixtures), filled, report none; PNGs are equal at 1 and 4 threads with a batch of 5.
 - **Credit:** none.
-- **Depends on:** none open. **Size:** about 900 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 400 lines. **Tier:** T3.
+
+#### raster-surfaces: Python's raster spec, a fuzz target and the release smoke
+- **Goal:** Python callers choose the raster spec, and painting is fuzzed and smoke-tested.
+- **Scope:** Python via `/change-core-api`: `ocr_requests(gaps=None, *, dpi=150,
+  max_pixels=12_845_056)`, `OcrRequest.dpi` (pickled), `ConfigError` for a refused spec; fuzz
+  target `pdf_raster` paints every page under `ocr_pages: All` at 1 Mpx and a low dpi; release
+  smoke checks a page's PNG `IHDR`.
+- **Files:** `python/`, `fuzz/`, `.github/`, `README.md`, `REUSE.toml`, ADR 0003.
+- **Tests:** Python's `dpi=300` reaches its requests and a refused spec raises; `pdf_raster`
+  replays.
+- **Credit:** none.
+- **Depends on:** raster-losses. **Size:** about 300 lines. **Tier:** T3.
 
 ### W12
 
@@ -161,7 +153,7 @@ release follows W12.
     `recognize`; a self-signed server leaves its gaps; Python equals Rust, a child's pickled
     requests filled by the parent's `OcrHttp` included; `ocr_reply` replays.
 - **Credit:** none.
-- **Depends on:** rasterizer. **Size:** about 1150 lines. **Tier:** T3.
+- **Depends on:** raster-surfaces. **Size:** about 1150 lines. **Tier:** T3.
 
 ## Deferred
 

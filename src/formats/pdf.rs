@@ -31,16 +31,66 @@ const SCAN_COVERAGE: f32 = 0.9;
 /// The most non-space characters a running head or folio holds.
 const RUNNING_HEAD_CHARS: usize = 80;
 
-pub(crate) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, ConvertError> {
-    read(parse_ctx, bytes).map(|(document, _)| document)
+/// A parsed PDF: its document, each page's verdict in page order, and what its pages are
+/// painted from.
+pub(crate) struct Read {
+    pub(crate) document: Document,
+    pub(crate) verdicts: Vec<PageVerdict>,
+    #[cfg(feature = "raster")]
+    pub(crate) source: PdfSource,
 }
 
-/// The document and each page's verdict, in page order.
-pub(crate) fn read(
-    parse_ctx: &ParseCtx<'_>,
-    bytes: &[u8],
-) -> Result<(Document, Vec<PageVerdict>), ConvertError> {
-    let Extracted { pages, missing } = extract(parse_ctx, bytes)?;
+/// unpdf's parser of a PDF, and each page's box as parsed, `None` for a page that did not
+/// parse.
+#[cfg(feature = "raster")]
+pub(crate) struct PdfSource {
+    pub(crate) parser: PdfParser,
+    pub(crate) boxes: Vec<Option<PageBox>>,
+}
+
+/// A page's media box in points and its `/Rotate`, clockwise degrees.
+#[cfg(feature = "raster")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PageBox {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) rotation: u16,
+}
+
+#[cfg(feature = "raster")]
+impl PdfSource {
+    /// The box of 1-based `page`, read again with no text for a page the parse could not read.
+    pub(crate) fn page_box(&self, page: NonZeroU32) -> Option<PageBox> {
+        let index = usize::try_from(page.get() - 1).ok()?;
+        if let Some(parsed) = self.boxes.get(index)?.as_ref() {
+            return Some(*parsed);
+        }
+        let options = PageStreamOptions {
+            extract_text: false,
+            pages: PageSelection::Pages(vec![page.get()]),
+            ..sequential()
+        };
+        let mut found = None;
+        let _: Result<_, _> = self.parser.for_each_page(options, |event| {
+            if let ParseEvent::PageParsed(parsed) = event {
+                found = Some(PageBox::of(&parsed));
+            }
+            ControlFlow::Continue(())
+        });
+        found
+    }
+}
+
+#[cfg(feature = "raster")]
+impl PageBox {
+    fn of(page: &Page) -> Self {
+        Self { width: page.width, height: page.height, rotation: page.rotation }
+    }
+}
+
+/// The document, each page's verdict and what its pages are painted from.
+pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, ConvertError> {
+    let Extracted { pages, missing, parser } = extract(parse_ctx, bytes)?;
     let furniture = Furniture::of(&pages);
     let mut document = Document::default();
     let mut verdicts = Vec::with_capacity(pages.len());
@@ -64,12 +114,25 @@ pub(crate) fn read(
         verdicts.push(verdict);
     }
     parse_ctx.emit_count(DiagnosticCode::UnitUnreadable, Region::Body, missing);
-    Ok((document, verdicts))
+    #[cfg(feature = "raster")]
+    let source = PdfSource {
+        boxes: pages.iter().map(|read| read.as_ref().map(|read| PageBox::of(&read.page))).collect(),
+        parser,
+    };
+    #[cfg(not(feature = "raster"))]
+    drop(parser);
+    Ok(Read {
+        document,
+        verdicts,
+        #[cfg(feature = "raster")]
+        source,
+    })
 }
 
 struct Extracted {
     pages: Vec<Option<ReadPage>>,
     missing: u64,
+    parser: PdfParser,
 }
 
 struct ReadPage {
@@ -118,7 +181,7 @@ fn extract(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Extracted, ConvertE
     } else {
         0
     };
-    Ok(Extracted { pages, missing })
+    Ok(Extracted { pages, missing, parser })
 }
 
 fn keep(

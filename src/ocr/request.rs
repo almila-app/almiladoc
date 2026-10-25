@@ -2,9 +2,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::error::ConvertError;
+use crate::formats::Source;
 use crate::ledger::Ledger;
 use crate::model::{Asset, Gap, GapId, GapReason, OcrOrigin};
+use crate::ocr::RasterSpec;
 use crate::ocr::images::media_type;
+use crate::ocr::raster::page_image;
 
 /// Bytes of image a request copies per unit of [`Limits::max_work`](crate::Limits::max_work).
 pub(crate) const BYTES_PER_UNIT: u64 = 16;
@@ -27,7 +30,7 @@ pub struct OcrRequest {
     pub max_text_bytes: u64,
 }
 
-/// An image to read, encoded as its source holds it.
+/// An image to read: an embedded one as its source holds it, or a page painted as a PNG.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OcrImage {
@@ -35,6 +38,8 @@ pub struct OcrImage {
     pub bytes: Arc<[u8]>,
     /// `image/png` or `image/jpeg`, from the bytes' signature.
     pub media_type: &'static str,
+    /// The resolution a page was painted at; `None` for an embedded image.
+    pub dpi: Option<u32>,
 }
 
 impl fmt::Debug for OcrImage {
@@ -42,7 +47,26 @@ impl fmt::Debug for OcrImage {
         f.debug_struct("OcrImage")
             .field("media_type", &self.media_type)
             .field("bytes", &self.bytes.len())
+            .field("dpi", &self.dpi)
             .finish()
+    }
+}
+
+/// What a parsed document makes its gaps' requests from.
+#[derive(Clone, Copy)]
+pub(crate) struct Inputs<'a> {
+    pub(crate) assets: &'a [Asset],
+    pub(crate) source: &'a Source,
+}
+
+impl Inputs<'_> {
+    /// Whether `gap` asks for an image an engine can read: an embedded PNG or JPEG, or a page
+    /// of a source kept to paint it.
+    pub(crate) fn asks(self, gap: &Gap) -> bool {
+        match gap.origin {
+            OcrOrigin::Page(_) => self.source.paints(),
+            _ => image_of(gap, self.assets).is_some(),
+        }
     }
 }
 
@@ -53,23 +77,38 @@ pub(crate) fn image_of<'a>(gap: &Gap, assets: &'a [Asset]) -> Option<(&'a [u8], 
     Some((bytes, media_type(bytes)?))
 }
 
-/// The request for `gap`, its image copied at one unit of `ledger` per [`BYTES_PER_UNIT`]
-/// bytes; `None` when it asks for no image.
+/// The request for `gap`: an embedded image copied, or a page painted under `spec`, each byte
+/// charged to `ledger` at one unit per [`BYTES_PER_UNIT`]; `None` when it asks for no image
+/// or its page cannot be painted.
 pub(crate) fn request(
     gap: &Gap,
-    assets: &[Asset],
+    inputs: Inputs<'_>,
+    spec: &RasterSpec,
     ledger: &Ledger<'_>,
     max_text_bytes: u64,
 ) -> Result<Option<OcrRequest>, ConvertError> {
-    let Some((bytes, media_type)) = image_of(gap, assets) else { return Ok(None) };
-    ledger.charge(u64::try_from(bytes.len()).unwrap_or(u64::MAX).div_ceil(BYTES_PER_UNIT))?;
-    Ok(Some(OcrRequest {
+    let image = match gap.origin {
+        OcrOrigin::Page(page) => page_image(inputs.source, page, spec, ledger)?,
+        _ => match image_of(gap, inputs.assets) {
+            Some((bytes, media_type)) => {
+                ledger.charge(byte_units(bytes.len()))?;
+                Some(OcrImage { bytes: Arc::from(bytes), media_type, dpi: None })
+            }
+            None => None,
+        },
+    };
+    Ok(image.map(|image| OcrRequest {
         gap: gap.id,
         origin: gap.origin,
         reasons: gap.reasons.clone(),
-        image: OcrImage { bytes: Arc::from(bytes), media_type },
+        image,
         max_text_bytes,
     }))
+}
+
+/// Units of work `len` bytes of image cost.
+pub(crate) fn byte_units(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX).div_ceil(BYTES_PER_UNIT)
 }
 
 #[cfg(test)]
@@ -93,20 +132,29 @@ mod tests {
         Gap { id: GapId::new(None, NonZeroU32::MIN), origin, reasons: Vec::new() }
     }
 
+    fn requested(
+        gap: &Gap,
+        assets: &[Asset],
+        ledger: &Ledger<'_>,
+    ) -> Result<Option<OcrRequest>, ConvertError> {
+        let source = Source::default();
+        request(gap, Inputs { assets, source: &source }, &RasterSpec::default(), ledger, 7)
+    }
+
     #[test]
     fn an_image_request_copies_its_asset_at_one_unit_per_sixteen_bytes() {
         let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &[0; 25]].concat();
         let ledger = Ledger::new(u64::MAX, None);
-        let made = request(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &ledger, 7);
+        let made = requested(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &ledger);
         let made = made.unwrap().unwrap();
         assert_eq!((&*made.image.bytes, made.image.media_type), (png.as_slice(), "image/png"));
         assert_eq!((made.max_text_bytes, ledger.spent()), (7, 3));
         assert_eq!(
             format!("{:?}", made.image),
-            r#"OcrImage { media_type: "image/png", bytes: 33 }"#
+            r#"OcrImage { media_type: "image/png", bytes: 33, dpi: None }"#
         );
         let short = Ledger::new(2, None);
-        let refused = request(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &short, 7);
+        let refused = requested(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &short);
         assert_eq!(refused, Err(ConvertError::limit(Limit::Work, 2)));
     }
 
@@ -120,7 +168,7 @@ mod tests {
         ];
         for (gap, bytes) in cases {
             let ledger = Ledger::new(u64::MAX, None);
-            assert_eq!(request(&gap, &[asset(bytes)], &ledger, 1), Ok(None), "{gap:?}");
+            assert_eq!(requested(&gap, &[asset(bytes)], &ledger), Ok(None), "{gap:?}");
             assert_eq!(ledger.spent(), 0);
         }
     }

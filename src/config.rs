@@ -207,6 +207,10 @@ pub enum ConfigError {
         /// Pages in the document.
         page_count: u32,
     },
+    /// A [`RasterSpec`](crate::RasterSpec)'s dpi is outside 50 to 600, or its `max_pixels`
+    /// outside 1 Mpx to [`RasterSpec::MAX_PIXELS_CEILING`](crate::RasterSpec::MAX_PIXELS_CEILING).
+    #[error("a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels")]
+    Raster,
 }
 
 #[cfg(test)]
@@ -281,6 +285,10 @@ mod tests {
             (
                 ConfigError::PageOutOfRange { page: 6, page_count: 5 },
                 "ocr_pages names page 6, past the 5 pages the document holds",
+            ),
+            (
+                ConfigError::Raster,
+                "a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",
             ),
         ];
         for (error, message) in cases {

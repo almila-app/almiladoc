@@ -95,8 +95,9 @@ unpdf = { version = "0.50.0", default-features = false, optional = true }
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [features]
-default = ["pdf"]
+default = ["pdf", "raster"]
 pdf = ["dep:unpdf"]
+raster = ["pdf", "unpdf/raster", "unpdf/standard-fonts"]
 serde = ["dep:serde", "dep:serde_json"]
 
 [profile.release]

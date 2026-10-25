@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use almiladoc::model::{GapId, GapReason, OcrOrigin};
-use almiladoc::{ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict};
+use almiladoc::{
+    ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict, RasterSpec,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
@@ -304,8 +306,9 @@ impl Parsed {
             gaps.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect());
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
-        let requests =
-            py.detach(|| parsed.ocr_requests(ids.as_deref())).map_err(|e| convert_error(py, &e))?;
+        let requests = py
+            .detach(|| parsed.ocr_requests(&RasterSpec::default(), ids.as_deref()))
+            .map_err(|e| convert_error(py, &e))?;
         requests
             .iter()
             .map(|request| {

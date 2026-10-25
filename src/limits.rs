@@ -89,8 +89,12 @@ pub struct Limits {
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
     /// style and numbering resolution, grid positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
-    /// ahead at and writes, 64 bytes of Markdown or JSON written, and the
-    /// Markdown events of each gap's fill. Detection shares these counters with parsing,
+    /// ahead at and writes, 64 bytes of Markdown or JSON written, the
+    /// Markdown events of each gap's fill, 16 bytes of each image an OCR
+    /// request copies, and of a page it paints 128 pixels before painting and
+    /// 16 bytes of its PNG after: those two rates and
+    /// [`RasterSpec::max_pixels`](crate::RasterSpec::max_pixels) alone bound
+    /// painting. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges

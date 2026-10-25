@@ -19,12 +19,49 @@ use crate::error::{ConvertError, UnsupportedKind};
 use crate::inspect::PageVerdict;
 use crate::model::Document;
 
+/// What a parse keeps of its input, beside its document, to paint its pages: a PDF's parser.
+#[derive(Default)]
+pub(crate) struct Source {
+    #[cfg(feature = "raster")]
+    pub(crate) pdf: Option<pdf::PdfSource>,
+}
+
+impl Source {
+    /// Whether it keeps pages to paint.
+    #[cfg_attr(
+        not(feature = "raster"),
+        expect(clippy::unused_self, reason = "without painting no source keeps pages")
+    )]
+    pub(crate) fn paints(&self) -> bool {
+        #[cfg(feature = "raster")]
+        return self.pdf.is_some();
+        #[cfg(not(feature = "raster"))]
+        false
+    }
+}
+
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Source").field("paints", &self.paints()).finish()
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn parse(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
     format: Format,
 ) -> Result<Document, ConvertError> {
-    match format {
+    parse_keeping(parse_ctx, bytes, format).map(|(document, _)| document)
+}
+
+/// The document of `bytes` and the source its pages are painted from.
+pub(crate) fn parse_keeping(
+    parse_ctx: &ParseCtx<'_>,
+    bytes: &[u8],
+    format: Format,
+) -> Result<(Document, Source), ConvertError> {
+    let document = match format {
         Format::Excel => sheet::parse(parse_ctx, bytes),
         Format::Csv => csv::parse(parse_ctx, bytes),
         Format::Docx => docx::parse(parse_ctx, bytes),
@@ -34,11 +71,17 @@ pub(crate) fn parse(
         Format::Rtf => rtf::parse(parse_ctx, bytes),
         Format::Doc => doc::parse(parse_ctx, bytes),
         Format::Ppt => ppt::parse(parse_ctx, bytes),
-        #[cfg(feature = "pdf")]
-        Format::Pdf => pdf::parse(parse_ctx, bytes),
+        #[cfg(feature = "raster")]
+        Format::Pdf => {
+            let read = pdf::read(parse_ctx, bytes)?;
+            return Ok((read.document, Source { pdf: Some(read.source) }));
+        }
+        #[cfg(all(feature = "pdf", not(feature = "raster")))]
+        Format::Pdf => pdf::read(parse_ctx, bytes).map(|read| read.document),
         #[cfg(not(feature = "pdf"))]
         Format::Pdf => Err(ConvertError::from(UnsupportedKind::FeatureDisabled { feature: "pdf" })),
-    }
+    }?;
+    Ok((document, Source::default()))
 }
 
 /// A PDF's document and each page's verdict, in page order; any other format is not inspectable.
@@ -53,7 +96,7 @@ pub(crate) fn inspect(
 ) -> Result<(Document, Vec<PageVerdict>), ConvertError> {
     match format {
         #[cfg(feature = "pdf")]
-        Format::Pdf => pdf::read(parse_ctx, bytes),
+        Format::Pdf => pdf::read(parse_ctx, bytes).map(|read| (read.document, read.verdicts)),
         #[cfg(not(feature = "pdf"))]
         Format::Pdf => Err(ConvertError::from(UnsupportedKind::FeatureDisabled { feature: "pdf" })),
         _ => Err(ConvertError::from(UnsupportedKind::NotInspectable)),

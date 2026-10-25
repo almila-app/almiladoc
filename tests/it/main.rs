@@ -30,6 +30,8 @@ mod ocr_engine;
 mod ocr_images;
 #[cfg(feature = "pdf")]
 mod pdf;
+#[cfg(feature = "raster")]
+mod raster;
 mod robustness;
 mod sheet_bounds;
 mod snapshots;

@@ -8,7 +8,7 @@ use crate::build::{docx_with, relationships};
 use crate::support::{configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr, Input,
-    Limit, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed,
+    Limit, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -245,9 +245,9 @@ fn a_request_carries_the_parse_s_fill_limit_and_the_image_s_bytes() {
     assert_eq!(one.ordinal(), NonZeroU32::MIN);
 }
 
-#[cfg(feature = "pdf")]
+#[cfg(all(feature = "pdf", not(feature = "raster")))]
 #[test]
-fn a_page_gap_asks_for_no_image_yet() {
+fn a_page_gap_asks_for_no_image_without_the_rasterizer() {
     let pdf = fixture("pdf/handmade-five-page.pdf");
     let mut parsed = configured(|_| {}).parse(Input::new(&pdf, Format::Pdf)).unwrap();
     let engine = Scripted::new(1, &[]);
@@ -259,10 +259,10 @@ fn hand_run_requests_and_fills_render_the_engine_s_reading() {
     let converter = image_ocr(|config| config.on_loss = OnLoss::Report);
     let rich = fixture("docx/handmade-rich.docx");
     let mut by_hand = parsed(&converter, &rich);
-    for request in by_hand.ocr_requests(None).unwrap() {
+    for request in by_hand.ocr_requests(&RasterSpec::default(), None).unwrap() {
         by_hand.fill_gap(request.gap, GapFill::Markdown(read(&request))).unwrap();
     }
-    assert_eq!(by_hand.ocr_requests(None), Ok(Vec::new()));
+    assert_eq!(by_hand.ocr_requests(&RasterSpec::default(), None), Ok(Vec::new()));
     assert_eq!(by_hand.render().unwrap().markdown(), RICH_READ);
 }
 
@@ -272,19 +272,23 @@ fn requests_pass_over_a_settled_gap_and_charge_their_copies() {
     let converter = image_ocr(|config| config.limits.max_ocr_text_bytes = 3 << 20);
     let mut parsed = parsed(&converter, &bytes);
     let [one, two] = parsed.gaps().map(|gap| gap.id).collect::<Vec<_>>().try_into().unwrap();
-    let requests = parsed.ocr_requests(None).unwrap();
+    let requests = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
     assert_eq!(
         requests.iter().map(|r| (r.gap, r.max_text_bytes)).collect::<Vec<_>>(),
         [(one, 3 << 20), (two, 3 << 20)]
     );
     parsed.fail_gap(one).unwrap();
-    assert_eq!(parsed.ocr_requests(Some(&[one, two])).unwrap(), requests[1..]);
+    assert_eq!(
+        parsed.ocr_requests(&RasterSpec::default(), Some(&[one, two])).unwrap(),
+        requests[1..]
+    );
     let parse = least_work(&bytes, &|_| true);
-    let copied = least_work(&bytes, &|parsed| parsed.ocr_requests(None).is_ok());
+    let copied =
+        least_work(&bytes, &|parsed| parsed.ocr_requests(&RasterSpec::default(), None).is_ok());
     assert_eq!(copied, parse + 2 * 4000_u64.div_ceil(16));
     let cancelled = CancelToken::new();
     let input = Input::new(&bytes, Format::Docx).with_cancel(cancelled.clone());
     let mut parsed = image_ocr(|_| {}).parse(input).unwrap();
     cancelled.cancel();
-    assert_eq!(parsed.ocr_requests(None), Err(ConvertError::Cancelled));
+    assert_eq!(parsed.ocr_requests(&RasterSpec::default(), None), Err(ConvertError::Cancelled));
 }

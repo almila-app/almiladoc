@@ -1,5 +1,5 @@
 use crate::ledger::CancelToken;
-use crate::ocr::{GapFill, OcrRequest};
+use crate::ocr::{GapFill, OcrRequest, RasterSpec};
 
 /// Reads the text of the images it is asked about, for
 /// [`Parsed::ocr`](crate::Parsed::ocr) to fill their gaps with.
@@ -26,6 +26,11 @@ pub trait OcrEngine: Send + Sync {
     /// The most requests one [`OcrEngine::recognize`] call takes; 0 counts as 1.
     fn batch_size(&self) -> usize {
         1
+    }
+
+    /// How large an image of a page it takes.
+    fn raster(&self) -> RasterSpec {
+        RasterSpec::default()
     }
 
     /// One outcome for each of `requests`, in their order. `cancel` is the parse's token,
