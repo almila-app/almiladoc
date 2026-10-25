@@ -141,7 +141,12 @@ fn every_page_is_a_unit_in_order_and_inspect_agrees_with_the_parse() {
     let gaps: Vec<_> = parsed
         .gaps()
         .map(|gap| {
-            (gap.id.unit().ordinal.get(), gap.id.ordinal().get(), gap.origin, gap.reasons.clone())
+            (
+                gap.id.unit().unwrap().ordinal.get(),
+                gap.id.ordinal().get(),
+                gap.origin,
+                gap.reasons.clone(),
+            )
         })
         .collect();
     let page = |n| OcrOrigin::Page(NonZeroU32::new(n).unwrap());
@@ -202,8 +207,10 @@ fn a_selected_page_becomes_a_gap_whatever_its_text_and_keeps_its_own_reasons() {
     ];
     for (pages, gaps, markdown) in cases {
         let parsed = reporting().parse(pdf_input(&bytes, &pages)).unwrap();
-        let found: Vec<_> =
-            parsed.gaps().map(|gap| (gap.id.unit().ordinal.get(), gap.reasons.clone())).collect();
+        let found: Vec<_> = parsed
+            .gaps()
+            .map(|gap| (gap.id.unit().unwrap().ordinal.get(), gap.reasons.clone()))
+            .collect();
         let expected: Vec<_> = gaps.iter().map(|(page, why)| (*page, why.to_vec())).collect();
         assert_eq!(found, expected, "{pages:?}");
         let gap_units = gaps.iter().map(|(page, _)| (DiagnosticCode::OcrGap, Some(*page)));

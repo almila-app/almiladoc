@@ -17,7 +17,7 @@ use crate::render::markdown::Meter;
 /// writes, raised only when a field or `kind` is removed, renamed or changes
 /// meaning: a field or `kind` added keeps it, so a reader ignores those it
 /// does not know.
-pub const JSON_SCHEMA_VERSION: u32 = 4;
+pub const JSON_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Serialize)]
 struct Envelope<'a> {
@@ -248,7 +248,7 @@ mod tests {
     fn awaiting_ocr() -> Document {
         let page = Unit::new(UnitKind::Page, NonZeroU32::MIN);
         let gap = Gap {
-            id: GapId::new(page, NonZeroU32::MIN),
+            id: GapId::new(Some(page), NonZeroU32::MIN),
             origin: OcrOrigin::Page(NonZeroU32::MIN),
             reasons: vec![GapReason::InvisibleText, GapReason::ImageBacked],
         };
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn every_variant_has_its_wire_form() {
         insta::assert_snapshot!(redacted_wire_form(), @r#"
-        {"schema_version":4,"identity":{"version":"[version]","config_fingerprint":"64793a7a830129ecbef0c5e222bb22b493b88b9dde158117a8a41b78855b62e5"},"document":{"blocks":[
+        {"schema_version":5,"identity":{"version":"[version]","config_fingerprint":"d1a451c320c6528d18924f27421c5855c58af1f0cd72c42cb6e77732f81e90fc"},"document":{"blocks":[
         {"kind":"heading","value":{"level":1,"anchor":"top","content":[
         {"kind":"text","value":{"text":"Title","style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}},
         {"kind":"heading","value":{"level":7,"anchor":null,"content":[]}},
@@ -451,6 +451,20 @@ mod tests {
         {"kind":"page","ordinal":1},"ordinal":1},"origin":
         {"kind":"page","value":1},"reasons":["invisible_text","image_backed"]}}],"notes":[],"assets":[]},"diagnostics":[]}
         "#);
+    }
+
+    #[test]
+    fn an_image_gap_has_no_unit_in_a_document_without_units() {
+        let gap = Gap {
+            id: GapId::new(None, NonZeroU32::MIN),
+            origin: OcrOrigin::Image(AssetId(3)),
+            reasons: Vec::new(),
+        };
+        let document = Document { blocks: vec![Block::Gap(gap)], ..Document::default() };
+        let json = json(&document, &Diagnostics::default()).unwrap();
+        assert!(json.contains(
+            r#"{"kind":"gap","value":{"id":{"unit":null,"ordinal":1},"origin":{"kind":"image","value":3},"reasons":[]}}"#
+        ), "{json}");
     }
 
     #[test]

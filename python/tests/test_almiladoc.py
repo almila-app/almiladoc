@@ -179,7 +179,7 @@ class ConversionTest(unittest.TestCase):
         self.assertFalse(conversion.is_complete)
         self.assertEqual([unit[:2] for unit in conversion.units], [("page", 1), ("page", 2)])
         parsed = reporting.parse(data)
-        self.assertEqual(parsed.gaps, [("page", 2, 1, 2, ["image_backed"])])
+        self.assertEqual(parsed.gaps, [("page", 2, 1, 2, None, ["image_backed"])])
         self.assertEqual(parsed.render().markdown, conversion.markdown)
         self.assertFalse(parsed.render().is_complete)
         inspection = reporting.inspect(data, "pdf")
@@ -198,7 +198,7 @@ class ConversionTest(unittest.TestCase):
         for ocr_pages, reasons in cases:
             with self.subTest(ocr_pages=ocr_pages):
                 parsed = reporting.parse(data, ocr_pages=ocr_pages)
-                gaps = [("page", 1, 1, 1, reasons[0]), ("page", 2, 1, 2, reasons[1])]
+                gaps = [("page", 1, 1, 1, None, reasons[0]), ("page", 2, 1, 2, None, reasons[1])]
                 self.assertEqual(parsed.gaps, gaps)
                 self.assertEqual(
                     [(d.code, d.unit) for d in parsed.diagnostics],
@@ -312,12 +312,13 @@ class ConversionTest(unittest.TestCase):
         parsed = almiladoc.Converter().parse(data)
         (gap,) = parsed.gaps
         unknown = [
-            ("page", 1, 1, 1, []),
-            ("slide", 2, 1, 2, []),
-            ("page", 2, 2, 2, []),
-            ("page", 2**64, 1, 2, []),
-            ("page", 2, 2**64, 2, []),
-            ("page", 2, -1, 2, []),
+            ("page", 1, 1, 1, None, []),
+            ("slide", 2, 1, 2, None, []),
+            ("page", 2, 2, 2, None, []),
+            (None, None, 1, 2, None, []),
+            ("page", 2**64, 1, 2, None, []),
+            ("page", 2, 2**64, 2, None, []),
+            ("page", 2, -1, 2, None, []),
         ]
         for row in unknown:
             with self.subTest(row=row):
@@ -326,7 +327,7 @@ class ConversionTest(unittest.TestCase):
                 with self.assertRaises(KeyError):
                     parsed.fail_gap(row)
         with self.assertRaises(TypeError):
-            parsed.fill_gap(("page", "2", 1, 2, []), "x")
+            parsed.fill_gap(("page", "2", 1, 2, None, []), "x")
         refusals = [
             ("a" * ((1 << 20) + 1), "max_ocr_text_bytes"),
             ("> " * 257, "max_nesting_depth"),
@@ -417,7 +418,7 @@ class ConversionTest(unittest.TestCase):
     def test_parse_serialises_the_document_model_to_json(self):
         parsed = json.loads(almiladoc.Converter().parse(OUTLINE.read_bytes(), "docx").to_json())
         self.assertEqual(list(parsed), ["schema_version", "identity", "document", "diagnostics"])
-        self.assertEqual(parsed["schema_version"], 4)
+        self.assertEqual(parsed["schema_version"], 5)
         self.assertEqual(list(parsed["identity"]), ["version", "config_fingerprint"])
         heading = next(b for b in parsed["document"]["blocks"] if b["kind"] == "heading")
         self.assertTrue(1 <= heading["value"]["level"] <= 6)
@@ -558,6 +559,37 @@ class ConversionTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             almiladoc.Config(images="omit")
 
+    def test_image_ocr_leaves_a_gap_after_each_png_or_jpeg_for_the_caller_to_fill(self):
+        self.assertEqual(almiladoc.Config().image_ocr, almiladoc.ImageOcr.NONE)
+        self.assertEqual(
+            [repr(setting) for setting in (almiladoc.ImageOcr.NONE, almiladoc.ImageOcr.ALL)],
+            ["ImageOcr.NONE", "ImageOcr.ALL"],
+        )
+        config = almiladoc.Config(
+            on_loss=almiladoc.OnLoss.REPORT, image_ocr=almiladoc.ImageOcr.ALL
+        )
+        self.assertNotEqual(config, almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT))
+        converter = almiladoc.Converter(config)
+        self.assertNotEqual(
+            converter.identity,
+            almiladoc.Converter(almiladoc.Config(on_loss=almiladoc.OnLoss.REPORT)).identity,
+        )
+        parsed = converter.parse(RICH.read_bytes())
+        (gap,) = parsed.gaps
+        self.assertEqual(gap, (None, None, 1, None, 0, []))
+        self.assertEqual(parsed.assets()[0][2][:8], b"\x89PNG\r\n\x1a\n")
+        self.assertIn(("ocr_gap", None), [(d.code, d.unit) for d in parsed.diagnostics])
+        parsed.fill_gap(gap, "Read *aloud*")
+        self.assertEqual(
+            parsed.render().markdown,
+            "Rich objects follow.\n\n**Quarterly Widgets**\n\n"
+            "| Quarter | Widgets |\n| --- | --- |\n| Q1 | 10 |\n| Q2 | 14 |\n\n"
+            "- Plan\n- Build\n- Ship\n\n"
+            "![tiny dot image](asset:0)\n\nRead _aloud_\n\n"
+            "After the objects.\n",
+        )
+        self.assertNotIn("ocr_gap", [d.code for d in parsed.diagnostics])
+
     def test_the_identity_is_the_configs(self):
         identity = almiladoc.Converter().identity
         self.assertRegex(identity.version, r"^\d+\.\d+\.\d+(-rc\.\d+)?$")
@@ -592,7 +624,8 @@ class ConfigTest(unittest.TestCase):
             repr(config),
             r"^Config\(limits=Limits\(max_entry_bytes=134217728, .*, max_work=536870912, "
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
-            r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER\)$",
+            r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
+            r"image_ocr=ImageOcr\.NONE\)$",
         )
 
     def test_limits_and_config_are_frozen_keyword_only_values(self):

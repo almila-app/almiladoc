@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use crate::model::Unit;
+use crate::model::{AssetId, Unit};
 
 /// A place in the document whose content awaits OCR.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -15,30 +15,27 @@ pub struct Gap {
     pub reasons: Vec<GapReason>,
 }
 
-/// An opaque name for one [`Gap`]: the unit it stands in and its place among that unit's gaps.
+/// An opaque name for one [`Gap`]: the unit it stands in, if the document has units, and its
+/// place among that unit's gaps, or the document's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct GapId {
-    unit: Unit,
+    unit: Option<Unit>,
     ordinal: NonZeroU32,
 }
 
 impl GapId {
-    #[cfg_attr(
-        not(any(feature = "pdf", test)),
-        expect(dead_code, reason = "only the PDF reader leaves gaps")
-    )]
-    pub(crate) const fn new(unit: Unit, ordinal: NonZeroU32) -> Self {
+    pub(crate) const fn new(unit: Option<Unit>, ordinal: NonZeroU32) -> Self {
         Self { unit, ordinal }
     }
 
-    /// The unit the gap stands in.
+    /// The unit the gap stands in, `None` in a document without units.
     #[must_use]
-    pub const fn unit(self) -> Unit {
+    pub const fn unit(self) -> Option<Unit> {
         self.unit
     }
 
-    /// Its one-based place among the unit's gaps.
+    /// Its one-based place among the unit's gaps, or the document's.
     #[must_use]
     pub const fn ordinal(self) -> NonZeroU32 {
         self.ordinal
@@ -56,6 +53,8 @@ impl GapId {
 pub enum OcrOrigin {
     /// The whole of this one-based PDF page.
     Page(NonZeroU32),
+    /// This embedded PNG or JPEG image, whose text follows the block that shows it.
+    Image(AssetId),
 }
 
 /// Why a page's own text does not stand for what it shows, or that the caller asked for its
@@ -105,7 +104,7 @@ mod tests {
     #[test]
     fn a_gap_id_names_its_unit_and_its_place_in_it() {
         let unit = Unit::new(UnitKind::Page, NonZeroU32::new(3).unwrap());
-        let id = GapId::new(unit, NonZeroU32::new(2).unwrap());
-        assert_eq!((id.unit(), id.ordinal().get()), (unit, 2));
+        let id = GapId::new(Some(unit), NonZeroU32::new(2).unwrap());
+        assert_eq!((id.unit(), id.ordinal().get()), (Some(unit), 2));
     }
 }

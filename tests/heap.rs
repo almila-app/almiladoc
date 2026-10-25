@@ -2,7 +2,7 @@
 //! input-controlled work a reader admits does not grow memory it never needs.
 #![expect(clippy::unwrap_used, reason = "test helpers fail by panicking")]
 
-use almiladoc::{Config, Converter, Format, Input, OnLoss};
+use almiladoc::{Config, Converter, Format, ImageOcr, Input, OnLoss};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 #[path = "common/word97.rs"]
@@ -21,8 +21,13 @@ fn exclusive() -> MutexGuard<'static, ()> {
 }
 
 fn converter() -> Converter {
+    converter_with(ImageOcr::None)
+}
+
+fn converter_with(image_ocr: ImageOcr) -> Converter {
     let mut config = Config::default();
     config.on_loss = OnLoss::Report;
+    config.image_ocr = image_ocr;
     Converter::new(config).unwrap()
 }
 
@@ -174,23 +179,28 @@ const TABLE_SLACK: usize = 64 << 10;
 
 #[test]
 fn a_table_of_empty_positions_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(String::new);
+    assert_table_heap(String::new, ImageOcr::None);
+}
+
+#[test]
+fn image_ocr_over_a_table_takes_no_heap_beyond_its_document_and_its_markdown() {
+    assert_table_heap(String::new, ImageOcr::All);
 }
 
 #[test]
 fn a_table_of_merged_positions_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(stacked_merges);
+    assert_table_heap(stacked_merges, ImageOcr::None);
 }
 
 #[test]
 fn a_table_of_one_merge_takes_no_heap_beyond_its_document_and_its_markdown() {
-    assert_table_heap(inner_merge);
+    assert_table_heap(inner_merge, ImageOcr::None);
 }
 
-fn assert_table_heap(merges: fn() -> String) {
+fn assert_table_heap(merges: fn() -> String, image_ocr: ImageOcr) {
     let _held = exclusive();
     let xlsx = &corner_cells_xlsx(&merges());
-    let converter = converter();
+    let converter = converter_with(image_ocr);
     converter.convert(Input::new(xlsx, Format::Excel)).unwrap();
     let document = parsed_heap(&converter, xlsx, Format::Excel);
     let (peak, markdown) = converted(&converter, xlsx, Format::Excel);

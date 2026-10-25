@@ -82,8 +82,8 @@ pub(crate) struct Conversion {
     /// Source units as `(kind, ordinal, start, end)`, with Unicode string offsets.
     #[pyo3(get)]
     units: Py<PyTuple>,
-    /// True when no content was lost and no page awaits OCR; only
-    /// `OnLoss.REPORT` returns a conversion for which it is false.
+    /// True when no content was lost and every gap was filled; under
+    /// `OnLoss.FAIL` only an image's gap not filled makes it false.
     #[pyo3(get)]
     is_complete: bool,
 }
@@ -112,8 +112,9 @@ impl Conversion {
     }
 }
 
-/// A gap as `(unit_kind, unit_ordinal, ordinal, page, reasons)`.
-type GapRow = (&'static str, u32, u32, Option<u32>, Vec<&'static str>);
+/// A gap as `(unit_kind, unit_ordinal, ordinal, page, asset, reasons)`.
+type GapRow =
+    (Option<&'static str>, Option<u32>, u32, Option<u32>, Option<usize>, Vec<&'static str>);
 
 /// What `Converter.inspect` reports of a PDF.
 #[pyclass(frozen, module = "almiladoc")]
@@ -149,8 +150,17 @@ impl Inspection {
 }
 
 /// A gap's row as `Parsed.gaps` gives it.
-type GapKey<'py> =
-    (String, Bound<'py, PyInt>, Bound<'py, PyInt>, Bound<'py, PyAny>, Bound<'py, PyAny>);
+type GapKey<'py> = (
+    Option<String>,
+    Option<Bound<'py, PyInt>>,
+    Bound<'py, PyInt>,
+    Bound<'py, PyAny>,
+    Bound<'py, PyAny>,
+    Bound<'py, PyAny>,
+);
+
+/// A gap's unit, as its kind's name and ordinal, and its ordinal.
+type GapName = (Option<String>, Option<u32>, u32);
 
 /// A parsed document, keeping the `Config` it was parsed under and what OCR
 /// gave its gaps: its model and diagnostics as JSON, the bytes of the assets
@@ -158,7 +168,7 @@ type GapKey<'py> =
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct Parsed {
     parsed: Mutex<almiladoc::Parsed>,
-    ids: HashMap<(String, u32, u32), GapId>,
+    ids: HashMap<GapName, GapId>,
 }
 
 impl Parsed {
@@ -166,8 +176,9 @@ impl Parsed {
         let ids = parsed
             .gaps()
             .map(|gap| {
-                let (unit, ordinal) = (gap.id.unit(), gap.id.ordinal().get());
-                ((unit.kind.as_str().to_owned(), unit.ordinal.get(), ordinal), gap.id)
+                let unit = gap.id.unit();
+                let kind = unit.map(|unit| unit.kind.as_str().to_owned());
+                ((kind, unit.map(|unit| unit.ordinal.get()), gap.id.ordinal().get()), gap.id)
             })
             .collect();
         Self { parsed: Mutex::new(parsed), ids }
@@ -179,8 +190,9 @@ impl Parsed {
 
     /// The id of the gap `key` names, an ordinal past `u32` naming none.
     fn gap_id(&self, key: GapKey<'_>) -> Result<GapId, GapError> {
-        let (kind, unit, ordinal, _, _) = key;
-        let (Ok(unit), Ok(ordinal)) = (unit.extract::<u32>(), ordinal.extract::<u32>()) else {
+        let (kind, unit, ordinal, _, _, _) = key;
+        let unit = unit.map(|unit| unit.extract::<u32>()).transpose();
+        let (Ok(unit), Ok(ordinal)) = (unit, ordinal.extract::<u32>()) else {
             return Err(GapError::UnknownGap);
         };
         self.ids.get(&(kind, unit, ordinal)).copied().ok_or(GapError::UnknownGap)
@@ -190,9 +202,9 @@ impl Parsed {
 #[pymethods]
 impl Parsed {
     /// Render the document to Markdown, as `Converter.convert` does, with
-    /// the parse's diagnostics and each filled gap's text in its place; a gap
-    /// not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and then a loss
-    /// `IncompleteError`.
+    /// the parse's diagnostics and each filled gap's text in its place; a
+    /// page's gap not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and
+    /// then a loss `IncompleteError`.
     fn render(&self, py: Python<'_>) -> PyResult<Conversion> {
         let parsed = self.lock(py);
         let parsed = &*parsed;
@@ -216,8 +228,9 @@ impl Parsed {
     }
 
     /// Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
-    /// `<!-- ocr-failed page N -->` in its place, and the diagnostics count
-    /// `ocr_failed` for it instead of `ocr_gap`. A gap no row names raises
+    /// `<!-- ocr-failed page N -->` in a page's place and nothing after an
+    /// image, and the diagnostics count `ocr_failed` for it instead of
+    /// `ocr_gap`. A gap no row names raises
     /// `KeyError`, and one filled or failed already `ValueError`.
     fn fail_gap(&self, py: Python<'_>, gap: GapKey<'_>) -> PyResult<()> {
         let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
@@ -247,21 +260,25 @@ impl Parsed {
     }
 
     /// Every gap of the document in document order, filled and failed ones
-    /// included, as `(unit_kind, unit_ordinal, ordinal, page, reasons)`: the
-    /// unit it stands in, its place among that unit's gaps, the 1-based PDF
-    /// page OCR reads to fill it, and why the page's own text does not serve.
+    /// included, as `(unit_kind, unit_ordinal, ordinal, page, asset, reasons)`:
+    /// the unit it stands in, both `None` in a document without units; its
+    /// place among that unit's gaps, or the document's; the 1-based PDF page
+    /// or the id of the image, an index of `assets`, OCR reads to fill it;
+    /// and why a page's own text does not serve.
     #[getter]
     fn gaps(&self, py: Python<'_>) -> Vec<GapRow> {
         self.lock(py)
             .gaps()
             .map(|gap| {
-                let page = match gap.origin {
-                    OcrOrigin::Page(page) => Some(page.get()),
-                    _ => None,
+                let (page, asset) = match gap.origin {
+                    OcrOrigin::Page(page) => (Some(page.get()), None),
+                    OcrOrigin::Image(asset) => (None, Some(asset.0)),
+                    _ => (None, None),
                 };
                 let unit = gap.id.unit();
                 let reasons = gap.reasons.iter().map(|reason| reason.as_str()).collect();
-                (unit.kind.as_str(), unit.ordinal.get(), gap.id.ordinal().get(), page, reasons)
+                let (kind, unit) = (unit.map(|u| u.kind.as_str()), unit.map(|u| u.ordinal.get()));
+                (kind, unit, gap.id.ordinal().get(), page, asset, reasons)
             })
             .collect()
     }
@@ -343,7 +360,8 @@ impl Converter {
     }
 
     /// Parse `data`, as `convert` takes it, into the document model; a PDF's
-    /// pages that await OCR are its `gaps`.
+    /// pages that await OCR and, under `ImageOcr.ALL`, each embedded PNG or
+    /// JPEG are its `gaps`.
     #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
     fn parse(
         &self,

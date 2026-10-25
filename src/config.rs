@@ -51,6 +51,8 @@ pub struct Config {
     pub on_loss: OnLoss,
     /// How images appear in Markdown.
     pub images: ImagePolicy,
+    /// Which images a parse leaves gaps after, for the caller's OCR.
+    pub image_ocr: ImageOcr,
 }
 
 impl Config {
@@ -102,6 +104,7 @@ impl Default for Config {
             threads: 1,
             on_loss: OnLoss::Fail,
             images: ImagePolicy::Placeholder,
+            image_ocr: ImageOcr::None,
         }
     }
 }
@@ -127,6 +130,30 @@ impl ImagePolicy {
             Self::Placeholder => "placeholder",
             Self::AltText => "alt_text",
             Self::Omit => "omit",
+        }
+    }
+}
+
+/// Which images a parse leaves a gap after, for the caller's OCR to fill with the text the
+/// image shows; the image itself still appears as [`ImagePolicy`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum ImageOcr {
+    /// No image.
+    #[default]
+    None,
+    /// Every embedded PNG or JPEG, judged by its bytes' signature; each other image counts
+    /// `image_not_ocred`.
+    All,
+}
+
+impl ImageOcr {
+    /// The setting's stable `snake_case` name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::All => "all",
         }
     }
 }

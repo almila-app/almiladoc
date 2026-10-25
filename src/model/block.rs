@@ -43,7 +43,7 @@ pub enum Block {
     Rule,
     /// A displayed formula, as LaTeX math without delimiters.
     Math(String),
-    /// Content that awaits OCR, occurring only in the document body.
+    /// Content that awaits OCR.
     Gap(Gap),
 }
 

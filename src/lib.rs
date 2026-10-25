@@ -36,7 +36,7 @@ mod pool;
 mod render;
 mod shared;
 
-pub use config::{Config, ConfigError, ImagePolicy, PageSelection};
+pub use config::{Config, ConfigError, ImageOcr, ImagePolicy, PageSelection};
 pub use converter::{Conversion, Converter, Input, Parsed, UnitSpan};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, LossClass, OnLoss, Region};
 pub use error::{ConvertError, PartName, UnsupportedKind};

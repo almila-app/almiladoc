@@ -447,7 +447,7 @@ fn the_identity_fingerprints_the_loss_policy() {
     assert_eq!(fail.identity().version, env!("CARGO_PKG_VERSION"));
     assert_eq!(
         fail.identity().config_fingerprint,
-        "64793a7a830129ecbef0c5e222bb22b493b88b9dde158117a8a41b78855b62e5"
+        "d1a451c320c6528d18924f27421c5855c58af1f0cd72c42cb6e77732f81e90fc"
     );
     assert_ne!(fail.identity(), report.identity());
     assert_eq!(fail.identity(), configured(|_| {}).identity());

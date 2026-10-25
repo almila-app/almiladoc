@@ -29,8 +29,8 @@ fn a_lossy_parse_serialises_under_fail_with_its_diagnostics() {
     assert_eq!(
         redacted(&parsed.to_json().unwrap()),
         concat!(
-            r#"{"schema_version":4,"#,
-            r#""identity":{"version":"[version]","config_fingerprint":"64793a7a830129ecbef0c5e222bb22b493b88b9dde158117a8a41b78855b62e5"},"#,
+            r#"{"schema_version":5,"#,
+            r#""identity":{"version":"[version]","config_fingerprint":"d1a451c320c6528d18924f27421c5855c58af1f0cd72c42cb6e77732f81e90fc"},"#,
             r#""document":{"blocks":[{"kind":"paragraph","value":[{"kind":"text","value":{"text":"a","#,
             r#""style":{"bold":false,"italic":false,"strike":false,"code":false,"position":"baseline"}}}]}],"#,
             r#""notes":[],"assets":[]},"#,

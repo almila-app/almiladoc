@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::Format;
-use crate::config::{Config, ConfigError, PageSelection};
+use crate::config::{Config, ConfigError, ImageOcr, PageSelection};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Diagnostics, OnLoss};
 use crate::error::{ConvertError, UnsupportedKind};
@@ -17,7 +17,7 @@ use crate::inspect::{Inspection, PageInspection};
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
 use crate::model::{Block, Document, Gap, GapId, OcrOrigin, Unit, UnitKind};
-use crate::ocr::{GapError, GapFill, GapFills, GapState, gaps};
+use crate::ocr::{GapError, GapFill, GapFills, GapState, gaps, leave_image_gaps};
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
 use crate::shared::markdown;
@@ -258,8 +258,10 @@ impl Converter {
     }
 
     fn parse_ctx<'a>(&'a self, cancel: Option<&'a CancelToken>) -> ParseCtx<'a> {
-        let parse_ctx =
-            ParseCtx::new(&self.config.limits).with_images(self.config.images).with_cancel(cancel);
+        let parse_ctx = ParseCtx::new(&self.config.limits)
+            .with_images(self.config.images)
+            .with_image_ocr(self.config.image_ocr)
+            .with_cancel(cancel);
         #[cfg(test)]
         let parse_ctx = parse_ctx.with_detection_counter(&self.detections);
         parse_ctx
@@ -450,7 +452,8 @@ impl Parsed {
 
     /// Every gap of the document in document order, the body's before the
     /// notes', filled and failed ones included: a PDF's pages whose own text
-    /// does not stand for what they show.
+    /// does not stand for what they show, and under [`ImageOcr::All`] each
+    /// embedded PNG or JPEG.
     ///
     /// ```
     /// # #[cfg(feature = "pdf")] {
@@ -522,8 +525,9 @@ impl Parsed {
     }
 
     /// Record that OCR of the gap `id` names failed: [`Parsed::render`]
-    /// writes `<!-- ocr-failed page N -->` in its place, and the diagnostics
-    /// count `ocr_failed` for it instead of `ocr_gap`.
+    /// writes `<!-- ocr-failed page N -->` in a page's place and nothing
+    /// after an image, and the diagnostics count `ocr_failed` for it instead
+    /// of `ocr_gap`.
     ///
     /// # Errors
     ///
@@ -562,8 +566,8 @@ impl Parsed {
     ///
     /// # Errors
     ///
-    /// Under [`OnLoss::Fail`], [`ConvertError::NeedsOcr`] when a gap is not
-    /// filled, else [`ConvertError::Incomplete`] when content was lost;
+    /// Under [`OnLoss::Fail`], [`ConvertError::NeedsOcr`] when a page's gap
+    /// is not filled, else [`ConvertError::Incomplete`] when content was lost;
     /// [`ConvertError::ResourceLimit`] when the document
     /// nests deeper than [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth),
     /// its Markdown passes [`Limits::max_output_bytes`](crate::Limits::max_output_bytes),
@@ -681,8 +685,12 @@ fn parse_document(
     bytes: &[u8],
     format: Format,
 ) -> Result<Document, ConvertError> {
-    within_nesting(parse_ctx, || Ok((formats::parse(parse_ctx, bytes, format)?, ())))
-        .map(|(document, ())| document)
+    let (mut document, ()) =
+        within_nesting(parse_ctx, || Ok((formats::parse(parse_ctx, bytes, format)?, ())))?;
+    if parse_ctx.image_ocr() == ImageOcr::All {
+        leave_image_gaps(parse_ctx, &mut document)?;
+    }
+    Ok(document)
 }
 
 fn within_nesting<T>(
@@ -718,8 +726,8 @@ fn report_of(
     Ok((diagnostics, ledger.spent()))
 }
 
-/// Under [`OnLoss::Fail`], refuse a document whose gaps are not all filled, naming every page
-/// that awaits OCR or whose OCR failed.
+/// Under [`OnLoss::Fail`], refuse a document whose page gaps are not all filled, naming every
+/// page that awaits OCR or whose OCR failed.
 fn refuse_gaps(on_loss: OnLoss, document: &Document, fills: &GapFills) -> Result<(), ConvertError> {
     if on_loss != OnLoss::Fail {
         return Ok(());
@@ -806,8 +814,8 @@ impl Conversion {
         &self.diagnostics
     }
 
-    /// True when no content was [`Lost`](crate::LossClass::Lost) and every gap was filled; only
-    /// [`OnLoss::Report`] returns a conversion for which it is false.
+    /// True when no content was [`Lost`](crate::LossClass::Lost) and every gap was filled; under
+    /// [`OnLoss::Fail`] only an image's gap not filled makes it false.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         !self.diagnostics.has_loss()
@@ -898,7 +906,7 @@ mod tests {
     fn page_gap(page: u32) -> Block {
         let page = NonZeroU32::new(page).unwrap();
         Block::Gap(Gap {
-            id: GapId::new(Unit::new(UnitKind::Page, page), NonZeroU32::MIN),
+            id: GapId::new(Some(Unit::new(UnitKind::Page, page)), NonZeroU32::MIN),
             origin: OcrOrigin::Page(page),
             reasons: Vec::new(),
         })
@@ -976,7 +984,7 @@ mod tests {
     fn a_fill_nests_in_its_gaps_container() {
         let document = Document { blocks: vec![page_gap(1)], ..Document::default() };
         let mut fills = GapFills::of(&document);
-        let id = GapId::new(Unit::new(UnitKind::Page, NonZeroU32::MIN), NonZeroU32::MIN);
+        let id = GapId::new(Some(Unit::new(UnitKind::Page, NonZeroU32::MIN)), NonZeroU32::MIN);
         fills.settle(id, GapState::Filled(quoted(4, "x")), &mut Diagnostics::default());
         check_nesting(&document, &fills, 4).unwrap();
         assert_eq!(
@@ -990,7 +998,7 @@ mod tests {
         let mut config = Config::default();
         config.limits.max_nesting_depth = 3;
         let mut parsed = parsed(vec![Block::BlockQuote(vec![page_gap(1)])], config);
-        let id = GapId::new(Unit::new(UnitKind::Page, NonZeroU32::MIN), NonZeroU32::MIN);
+        let id = GapId::new(Some(Unit::new(UnitKind::Page, NonZeroU32::MIN)), NonZeroU32::MIN);
         let fill = |text: &str| GapFill::Markdown(text.to_owned());
         let refused = parsed.fill_gap(id, fill("> > > a"));
         assert_matches!(refused, Err(GapError::Refused { limit: Limit::NestingDepth, .. }));

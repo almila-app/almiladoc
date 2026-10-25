@@ -52,7 +52,7 @@ pub(crate) fn read(
         let verdict =
             if parse_ctx.ocr_requested(unit.ordinal) { requested(verdict) } else { verdict };
         if let PageVerdict::NeedsOcr { reasons } = &verdict {
-            let id = GapId::new(unit, NonZeroU32::MIN);
+            let id = GapId::new(Some(unit), NonZeroU32::MIN);
             let origin = OcrOrigin::Page(unit.ordinal);
             document.blocks.push(Block::Gap(Gap { id, origin, reasons: reasons.clone() }));
         } else if let Some(read) = page {

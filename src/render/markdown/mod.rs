@@ -242,10 +242,10 @@ pub(crate) fn render_losses(
     .into_iter()
     .filter(|&(_, _, _, count)| count > 0)
     .collect();
-    losses.extend(doc.blocks.iter().filter_map(|block| match block {
-        Block::Gap(gap) => Some((DiagnosticCode::OcrGap, Region::Body, Some(gap.id.unit()), 1)),
-        _ => None,
-    }));
+    losses.extend(
+        crate::ocr::gaps(doc)
+            .map(|located| (DiagnosticCode::OcrGap, located.region, located.gap.id.unit(), 1)),
+    );
     losses.extend(
         body.images
             .into_iter()
@@ -630,7 +630,7 @@ fn framed<'t>(
     for block in &cell.blocks {
         match block {
             Block::Table(table) if inner.is_none() => inner = Some(table),
-            Block::Paragraph(_) if !shape::shows(block, rc, meter)? => {}
+            Block::Paragraph(_) | Block::Gap(_) if !shape::shows(block, rc, meter)? => {}
             _ => return Ok(None),
         }
     }
@@ -695,7 +695,7 @@ fn write_block(
     Ok(None)
 }
 
-/// Write a filled gap's fill in its place after the sibling list marked `last`, else its
+/// Write a filled gap's fill in its place after the sibling list marked `last`, else a page's
 /// marker.
 fn write_gap(
     gap: &Gap,
@@ -703,13 +703,13 @@ fn write_gap(
     sink: &mut Sink<'_>,
     last: Option<ListMark>,
 ) -> Result<Option<ListMark>, ConvertError> {
-    let OcrOrigin::Page(page) = gap.origin;
-    match rc.fills.state(gap.id) {
-        Some(GapState::Filled(blocks)) => return write_blocks(blocks, rc, sink, last),
-        Some(GapState::Failed) => sink.write(&format!("<!-- ocr-failed page {page} -->"))?,
-        Some(GapState::Unfilled) | None => {
-            sink.write(&format!("<!-- needs-ocr page {page} -->"))?;
-        }
+    let state = rc.fills.state(gap.id);
+    if let Some(GapState::Filled(blocks)) = state {
+        return write_blocks(blocks, rc, sink, last);
+    }
+    if let OcrOrigin::Page(page) = gap.origin {
+        let marker = if state == Some(&GapState::Failed) { "ocr-failed" } else { "needs-ocr" };
+        sink.write(&format!("<!-- {marker} page {page} -->"))?;
     }
     Ok(None)
 }

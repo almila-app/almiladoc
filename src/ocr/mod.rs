@@ -1,6 +1,7 @@
 //! What the caller's OCR gives a parsed document's gaps, and why a fill is not applied.
 
 mod fill;
+mod images;
 
 use std::fmt;
 
@@ -8,6 +9,7 @@ use crate::error::ConvertError;
 use crate::limits::Limit;
 
 pub(crate) use fill::{GapFills, GapState, gaps};
+pub(crate) use images::leave_image_gaps;
 
 /// What OCR read for one gap.
 #[derive(Clone, PartialEq, Eq)]

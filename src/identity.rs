@@ -33,8 +33,13 @@ impl EngineIdentity {
 }
 
 fn fingerprinted(config: &Config) -> String {
-    let Config { limits: _, threads: _, on_loss, images } = config;
-    format!("on_loss={};images={};", on_loss.as_str(), images.as_str())
+    let Config { limits: _, threads: _, on_loss, images, image_ocr } = config;
+    format!(
+        "on_loss={};images={};image_ocr={};",
+        on_loss.as_str(),
+        images.as_str(),
+        image_ocr.as_str()
+    )
 }
 
 #[cfg(test)]
@@ -48,7 +53,7 @@ mod tests {
         assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(
             identity.config_fingerprint,
-            "64793a7a830129ecbef0c5e222bb22b493b88b9dde158117a8a41b78855b62e5"
+            "d1a451c320c6528d18924f27421c5855c58af1f0cd72c42cb6e77732f81e90fc"
         );
     }
 
@@ -59,11 +64,13 @@ mod tests {
         assert_ne!(fail, report);
         assert_eq!(
             fingerprinted(&Config { on_loss: OnLoss::Report, ..Config::default() }),
-            "on_loss=report;images=placeholder;"
+            "on_loss=report;images=placeholder;image_ocr=none;"
         );
         for images in [crate::ImagePolicy::AltText, crate::ImagePolicy::Omit] {
             assert_ne!(EngineIdentity::of(&Config { images, ..Config::default() }), fail);
         }
+        let image_ocr = crate::ImageOcr::All;
+        assert_ne!(EngineIdentity::of(&Config { image_ocr, ..Config::default() }), fail);
         let mut resourced = Config { threads: 8, ..Config::default() };
         resourced.limits.max_work = 1;
         assert_eq!(EngineIdentity::of(&resourced), fail);

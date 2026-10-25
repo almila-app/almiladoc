@@ -20,6 +20,7 @@ __all__ = [
     "EncryptedError",
     "GapRefused",
     "Identity",
+    "ImageOcr",
     "ImagePolicy",
     "IncompleteError",
     "Inspection",
@@ -37,7 +38,7 @@ __all__ = [
 ]
 
 _OcrPages = Literal["all"] | collections.abc.Set[int] | None
-_GapRow = tuple[str, int, int, int | None, list[str]]
+_GapRow = tuple[str | None, int | None, int, int | None, int | None, list[str]]
 
 class GapRefused(ValueError):
     """A gap's fill crossed a limit that bounds one fill, and the document is
@@ -158,6 +159,16 @@ class ImagePolicy:
     OMIT: ClassVar[ImagePolicy]
 
 @final
+class ImageOcr:
+    """Which images a parse leaves a gap after for the caller's OCR: `NONE`,
+    or `ALL`, every embedded PNG or JPEG judged by its bytes, each other image
+    counting `image_not_ocred`. The image itself still appears as
+    `ImagePolicy` says."""
+
+    NONE: ClassVar[ImageOcr]
+    ALL: ClassVar[ImageOcr]
+
+@final
 class Limits:
     """The safety limits of one `Converter`, frozen; each crossing raises
     `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
@@ -248,9 +259,9 @@ class Limits:
 class Config:
     """The configuration of one `Converter`, frozen and keyword-only: its
     `Limits`, the threads each call runs on (1 to 64; no reader uses more
-    than one) and what a loss does. Omitted fields, and `None`,
-    take almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL` and
-    `ImagePolicy.PLACEHOLDER`.
+    than one), what a loss does, how images appear and which leave gaps for
+    OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
+    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER` and `ImageOcr.NONE`.
     A thread count out of range raises `ConfigError`."""
 
     def __new__(
@@ -260,6 +271,7 @@ class Config:
         threads: int = ...,
         on_loss: OnLoss | None = None,
         images: ImagePolicy | None = None,
+        image_ocr: ImageOcr | None = None,
     ) -> Config: ...
     @property
     def limits(self) -> Limits:
@@ -273,6 +285,9 @@ class Config:
     @property
     def images(self) -> ImagePolicy:
         """How images appear in Markdown."""
+    @property
+    def image_ocr(self) -> ImageOcr:
+        """Which images a parse leaves a gap after for OCR."""
 
 @final
 class CancelToken:
@@ -340,8 +355,8 @@ class Conversion:
         """Every `Diagnostic` of the conversion."""
     @property
     def is_complete(self) -> bool:
-        """True when no content was lost and no page awaits OCR; only
-        `OnLoss.REPORT` returns a conversion for which it is false."""
+        """True when no content was lost and every gap was filled; under
+        `OnLoss.FAIL` only an image's gap not filled makes it false."""
 
 @final
 class Parsed:
@@ -351,9 +366,9 @@ class Parsed:
 
     def render(self) -> Conversion:
         """Render the document to Markdown, as `Converter.convert` does, with
-        the parse's diagnostics and each filled gap's text in its place; a gap
-        not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and then a loss
-        `IncompleteError`."""
+        the parse's diagnostics and each filled gap's text in its place; a
+        page's gap not filled under `OnLoss.FAIL` raises `NeedsOcrError`, and
+        then a loss `IncompleteError`."""
     def fill_gap(self, gap: _GapRow, markdown: str) -> None:
         """Fill `gap`, a row of `gaps`, with the Markdown OCR read for it,
         plain text included, with the GIL released: raw HTML in it stays text,
@@ -364,8 +379,9 @@ class Parsed:
         `max_work` `ResourceLimitError`; each leaves the document as it was."""
     def fail_gap(self, gap: _GapRow) -> None:
         """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
-        `<!-- ocr-failed page N -->` in its place, and the diagnostics count
-        `ocr_failed` for it instead of `ocr_gap`. A gap no row names raises
+        `<!-- ocr-failed page N -->` in a page's place and nothing after an
+        image, and the diagnostics count `ocr_failed` for it instead of
+        `ocr_gap`. A gap no row names raises
         `KeyError`, and one filled or failed already `ValueError`."""
     @property
     def diagnostics(self) -> tuple[Diagnostic, ...]:
@@ -385,10 +401,11 @@ class Parsed:
     @property
     def gaps(self) -> list[_GapRow]:
         """Every gap of the document in document order, filled and failed
-        ones included, as `(unit_kind, unit_ordinal, ordinal, page, reasons)`:
-        the unit it stands in, its place among that unit's gaps, the 1-based
-        PDF page OCR reads to fill it, and why the page's own text does not
-        serve."""
+        ones included, as `(unit_kind, unit_ordinal, ordinal, page, asset,
+        reasons)`: the unit it stands in, both `None` in a document without
+        units; its place among that unit's gaps, or the document's; the
+        1-based PDF page or the id of the image, an index of `assets`, OCR
+        reads to fill it; and why a page's own text does not serve."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""
@@ -451,7 +468,8 @@ class Converter:
         ocr_pages: _OcrPages = None,
     ) -> Parsed:
         """Parse `data`, as `convert` takes it, into the document model; a PDF's
-        pages that await OCR are its `gaps`."""
+        pages that await OCR and, under `ImageOcr.ALL`, each embedded PNG or
+        JPEG are its `gaps`."""
     def inspect(
         self,
         data: Buffer,

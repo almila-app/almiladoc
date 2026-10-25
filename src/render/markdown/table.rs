@@ -208,7 +208,13 @@ fn cell_block_text(
                 push_math_span(tex, InlineContext::TableCell, out).map(|()| true)
             })
         }
-        Block::Rule | Block::UnitStart(_) | Block::Gap(_) => Ok(()),
+        Block::Gap(gap) => rc
+            .fills
+            .filled(gap)
+            .unwrap_or_default()
+            .iter()
+            .try_for_each(|block| cell_block_text(block, rc, out, parts)),
+        Block::Rule | Block::UnitStart(_) => Ok(()),
     }
 }
 

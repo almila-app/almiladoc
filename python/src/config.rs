@@ -57,6 +57,31 @@ impl ImagePolicy {
     }
 }
 
+/// Which images a parse leaves a gap after for the caller's OCR: `NONE`, or
+/// `ALL`, every embedded PNG or JPEG judged by its bytes, each other image
+/// counting `image_not_ocred`. The image itself still appears as
+/// `ImagePolicy` says.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct ImageOcr(almiladoc::ImageOcr);
+
+#[pymethods]
+impl ImageOcr {
+    #[classattr]
+    const NONE: Self = Self(almiladoc::ImageOcr::None);
+
+    #[classattr]
+    const ALL: Self = Self(almiladoc::ImageOcr::All);
+
+    fn __repr__(&self) -> &'static str {
+        match self.0 {
+            almiladoc::ImageOcr::None => "ImageOcr.NONE",
+            almiladoc::ImageOcr::All => "ImageOcr.ALL",
+            _ => "ImageOcr.<unknown>",
+        }
+    }
+}
+
 /// The safety limits of one `Converter`, frozen; each crossing raises
 /// `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
 /// than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
@@ -153,9 +178,9 @@ impl Hash for Limits {
 
 /// The configuration of one `Converter`, frozen and keyword-only: its
 /// `Limits`, the threads each call runs on (1 to 64; no reader uses more
-/// than one) and what a loss does. Omitted fields, and `None`,
-/// take almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL` and
-/// `ImagePolicy.PLACEHOLDER`.
+/// than one), what a loss does, how images appear and which leave gaps for
+/// OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
+/// 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER` and `ImageOcr.NONE`.
 /// A thread count out of range raises `ConfigError`.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq)]
@@ -164,13 +189,14 @@ pub(crate) struct Config(pub(crate) almiladoc::Config);
 #[pymethods]
 impl Config {
     #[new]
-    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None))]
+    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None))]
     fn new(
         py: Python<'_>,
         limits: Option<&Bound<'_, Limits>>,
         threads: usize,
         on_loss: Option<&Bound<'_, OnLoss>>,
         images: Option<&Bound<'_, ImagePolicy>>,
+        image_ocr: Option<&Bound<'_, ImageOcr>>,
     ) -> PyResult<Self> {
         let mut config = almiladoc::Config::default();
         if let Some(limits) = limits {
@@ -182,6 +208,9 @@ impl Config {
         }
         if let Some(images) = images {
             config.images = images.get().0;
+        }
+        if let Some(image_ocr) = image_ocr {
+            config.image_ocr = image_ocr.get().0;
         }
         config.validate().map_err(|e| config_error(py, &e))?;
         Ok(Self(config))
@@ -211,13 +240,20 @@ impl Config {
         ImagePolicy(self.0.images)
     }
 
+    /// Which images a parse leaves a gap after for OCR.
+    #[getter]
+    fn image_ocr(&self) -> ImageOcr {
+        ImageOcr(self.0.image_ocr)
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "Config(limits={}, threads={}, on_loss={}, images={})",
+            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={})",
             self.limits().__repr__(),
             self.0.threads,
             self.on_loss().__repr__(),
-            self.images().__repr__()
+            self.images().__repr__(),
+            self.image_ocr().__repr__()
         )
     }
 }
@@ -228,5 +264,6 @@ impl Hash for Config {
         self.0.threads.hash(state);
         self.0.on_loss.hash(state);
         self.0.images.hash(state);
+        self.0.image_ocr.hash(state);
     }
 }

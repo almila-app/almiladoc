@@ -25,7 +25,8 @@ Date: 2026-10-14, revised 2026-10-24
    call runs one engine on a subset, and a later one gets only what it left unfilled.
 4. **Images.** Under opt-in `ImageOcr::All` each embedded PNG or JPEG gains an `Image(AssetId)` gap
    after its innermost block, its request carrying the asset's bytes undecoded; other images count
-   `image_not_ocred`. Image text follows its block, `<br>`-joined in a cell.
+   `image_not_ocred`. Image text follows its block, `<br>`-joined in a cell; a gap not filled
+   writes nothing and raises no `NeedsOcr`, which names pages only.
 5. **Rendering.** A page gap's image is its crop box, an sRGB PNG unpdf paints from the parser
    `Parsed` keeps, so the page rendered is the one extracted, with no system font read. Pages render
    on the call's pool at the largest dpi up to the spec's that fits `max_pixels`, charged one work

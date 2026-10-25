@@ -7,18 +7,19 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
-use crate::config::{ConfigError, ImagePolicy, PageSelection};
+use crate::config::{ConfigError, ImageOcr, ImagePolicy, PageSelection};
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::{Limit, Limits};
-use crate::model::{GridLedger, Unit, UnitKind};
+use crate::model::{GridLedger, ImageOrigin, Unit, UnitKind};
 
 /// What one parse reads its configuration from, charges its work to and
 /// reports its losses to.
 pub(crate) struct ParseCtx<'a> {
     limits: &'a Limits,
     images: ImagePolicy,
+    image_ocr: ImageOcr,
     ocr_pages: PageSelection,
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
@@ -79,6 +80,7 @@ impl<'a> ParseCtx<'a> {
         Self {
             limits,
             images: ImagePolicy::Placeholder,
+            image_ocr: ImageOcr::None,
             ocr_pages: PageSelection::None,
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
@@ -106,6 +108,14 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn with_ocr_pages(self, ocr_pages: PageSelection) -> Self {
         Self { ocr_pages, ..self }
+    }
+
+    pub(crate) fn with_image_ocr(self, image_ocr: ImageOcr) -> Self {
+        Self { image_ocr, ..self }
+    }
+
+    pub(crate) fn image_ocr(&self) -> ImageOcr {
+        self.image_ocr
     }
 
     #[cfg_attr(
@@ -147,8 +157,8 @@ impl<'a> ParseCtx<'a> {
         self.emit(code, region);
     }
 
-    pub(crate) fn image_origin(&self, region: Region) -> crate::model::ImageOrigin {
-        crate::model::ImageOrigin::new(region, self.unit.get())
+    pub(crate) fn image_origin(&self, region: Region) -> ImageOrigin {
+        ImageOrigin::new(region, self.unit.get())
     }
 
     pub(crate) fn unplaced_image_code(&self) -> DiagnosticCode {
@@ -232,6 +242,12 @@ impl<'a> ParseCtx<'a> {
     /// Report one occurrence of `code` in `region`, in the current unit.
     pub(crate) fn emit(&self, code: DiagnosticCode, region: Region) {
         self.emit_count(code, region, 1);
+    }
+
+    /// Report one occurrence of `code` where `origin` places an image.
+    pub(crate) fn emit_at(&self, code: DiagnosticCode, origin: ImageOrigin) {
+        let _reports = self.scope(origin.unit);
+        self.emit(code, origin.region);
     }
 
     /// Report `count` occurrences of `code` in `region`, in the current unit.
@@ -531,10 +547,7 @@ mod tests {
     fn image_loss_policy_does_not_hide_unrelated_content_damage() {
         for images in [ImagePolicy::Placeholder, ImagePolicy::AltText, ImagePolicy::Omit] {
             let ctx = ParseCtx::default().with_images(images);
-            assert_eq!(
-                ctx.image_origin(Region::Note),
-                crate::model::ImageOrigin::new(Region::Note, None)
-            );
+            assert_eq!(ctx.image_origin(Region::Note), ImageOrigin::new(Region::Note, None));
             ctx.image_loss(ImageLoss::Unavailable, Region::Body);
             ctx.image_loss(ImageLoss::Unavailable, Region::Body);
             ctx.image_loss(ImageLoss::Unplaced, Region::Body);

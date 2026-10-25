@@ -4,7 +4,7 @@ use std::fmt;
 use std::slice;
 
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
-use crate::model::{Block, CellSlot, Document, Gap, GapId};
+use crate::model::{Block, Cell, CellSlot, Document, Gap, GapId, ListItem};
 use crate::ocr::GapError;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -69,7 +69,7 @@ impl GapFills {
     /// failed and leaving when it filled.
     pub(crate) fn settle(&mut self, id: GapId, state: GapState, diagnostics: &mut Diagnostics) {
         let Some(slot) = self.slots.get_mut(&id) else { return };
-        let unit = Some(id.unit().ordinal);
+        let unit = id.unit().map(|unit| unit.ordinal);
         diagnostics.remove(DiagnosticCode::OcrGap, slot.region, unit, 1);
         if state == GapState::Failed {
             diagnostics.add(DiagnosticCode::OcrFailed, slot.region, unit, 1);
@@ -121,7 +121,7 @@ impl GapFills {
 
 pub(crate) struct Located<'d> {
     pub(crate) gap: &'d Gap,
-    region: Region,
+    pub(crate) region: Region,
     depth: u64,
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn gaps(document: &Document) -> impl Iterator<Item = Located<'_>> {
     let body = std::iter::once((Region::Body, document.blocks.as_slice()));
     let notes = document.notes.iter().map(|note| (Region::Note, note.blocks.as_slice()));
     body.chain(notes).flat_map(|(region, blocks)| {
-        Walk { stack: vec![(blocks.iter(), 0)] }.map(move |(gap, depth)| Located {
+        Walk { stack: vec![(Frame::Blocks(blocks.iter()), 0)] }.map(move |(gap, depth)| Located {
             gap,
             region,
             depth,
@@ -138,8 +138,16 @@ pub(crate) fn gaps(document: &Document) -> impl Iterator<Item = Located<'_>> {
     })
 }
 
+/// Where a walk stands in one container: its blocks, a list's items or a table's cells, each
+/// entered only when reached, so the walk holds a frame per level of nesting.
+enum Frame<'d> {
+    Blocks(slice::Iter<'d, Block>),
+    Items(slice::Iter<'d, ListItem>),
+    Cells(Box<dyn Iterator<Item = &'d Cell> + 'd>),
+}
+
 struct Walk<'d> {
-    stack: Vec<(slice::Iter<'d, Block>, u64)>,
+    stack: Vec<(Frame<'d>, u64)>,
 }
 
 impl<'d> Iterator for Walk<'d> {
@@ -147,25 +155,31 @@ impl<'d> Iterator for Walk<'d> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (blocks, depth) = self.stack.last_mut()?;
+            let (frame, depth) = self.stack.last_mut()?;
             let depth = *depth;
-            let Some(block) = blocks.next() else {
-                self.stack.pop();
-                continue;
+            let entered = match frame {
+                Frame::Items(items) => items.next().map(|item| item.blocks.iter()),
+                Frame::Cells(cells) => cells.next().map(|cell| cell.blocks.iter()),
+                Frame::Blocks(blocks) => {
+                    let Some(block) = blocks.next() else {
+                        self.stack.pop();
+                        continue;
+                    };
+                    let inner = depth.saturating_add(1);
+                    let frame = match block {
+                        Block::Gap(gap) => return Some((gap, depth)),
+                        Block::BlockQuote(blocks) => Frame::Blocks(blocks.iter()),
+                        Block::List(list) => Frame::Items(list.items.iter()),
+                        Block::Table(table) => Frame::Cells(Box::new(table.origins())),
+                        _ => continue,
+                    };
+                    self.stack.push((frame, inner));
+                    continue;
+                }
             };
-            let inner = depth.saturating_add(1);
-            match block {
-                Block::Gap(gap) => return Some((gap, depth)),
-                Block::BlockQuote(blocks) => self.stack.push((blocks.iter(), inner)),
-                Block::List(list) => {
-                    self.stack
-                        .extend(list.items.iter().rev().map(|item| (item.blocks.iter(), inner)));
-                }
-                Block::Table(table) => {
-                    self.stack
-                        .extend(table.origins().rev().map(|cell| (cell.blocks.iter(), inner)));
-                }
-                _ => {}
+            match entered {
+                Some(blocks) => self.stack.push((Frame::Blocks(blocks), depth)),
+                None => _ = self.stack.pop(),
             }
         }
     }
@@ -177,13 +191,13 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Cell, Inline, List, ListItem, MarkerKind, Note, NoteKind, OcrOrigin, Table, Unit, UnitKind,
+        Inline, List, MarkerKind, Note, NoteKind, OcrOrigin, Table, Unit, UnitKind,
     };
 
     fn gap(page: u32) -> Block {
         let page = NonZeroU32::new(page).unwrap();
         Block::Gap(Gap {
-            id: GapId::new(Unit::new(UnitKind::Page, page), NonZeroU32::MIN),
+            id: GapId::new(Some(Unit::new(UnitKind::Page, page)), NonZeroU32::MIN),
             origin: OcrOrigin::Page(page),
             reasons: Vec::new(),
         })
@@ -210,7 +224,9 @@ mod tests {
             assets: Vec::new(),
         };
         let found: Vec<_> = gaps(&document)
-            .map(|located| (located.gap.id.unit().ordinal.get(), located.region, located.depth))
+            .map(|located| {
+                (located.gap.id.unit().unwrap().ordinal.get(), located.region, located.depth)
+            })
             .collect();
         let body = Region::Body;
         assert_eq!(
@@ -249,14 +265,16 @@ mod tests {
         let mut diagnostics = Diagnostics::default();
         for page in [1, 2, 3, 4, 7] {
             let id = GapId::new(
-                Unit::new(UnitKind::Page, NonZeroU32::new(page).unwrap()),
+                Some(Unit::new(UnitKind::Page, NonZeroU32::new(page).unwrap())),
                 NonZeroU32::MIN,
             );
             let fill = GapState::Filled(vec![para(&page.to_string()), Block::Rule]);
             fills.settle(id, fill, &mut diagnostics);
         }
-        let failed =
-            GapId::new(Unit::new(UnitKind::Page, NonZeroU32::new(6).unwrap()), NonZeroU32::MIN);
+        let failed = GapId::new(
+            Some(Unit::new(UnitKind::Page, NonZeroU32::new(6).unwrap())),
+            NonZeroU32::MIN,
+        );
         fills.settle(failed, GapState::Failed, &mut diagnostics);
         let filled = |page: &str| vec![para(page), Block::Rule];
         let expected = Document {
@@ -278,12 +296,15 @@ mod tests {
     fn a_gap_settles_once_and_moves_its_diagnostic() {
         let document = Document { blocks: vec![gap(1), gap(2)], ..Document::default() };
         let [one, two] = [1, 2].map(|page| {
-            GapId::new(Unit::new(UnitKind::Page, NonZeroU32::new(page).unwrap()), NonZeroU32::MIN)
+            GapId::new(
+                Some(Unit::new(UnitKind::Page, NonZeroU32::new(page).unwrap())),
+                NonZeroU32::MIN,
+            )
         });
         let mut fills = GapFills::of(&document);
         let mut diagnostics = Diagnostics::default();
         for id in [one, two] {
-            diagnostics.add(DiagnosticCode::OcrGap, Region::Body, Some(id.unit().ordinal), 1);
+            diagnostics.add(DiagnosticCode::OcrGap, Region::Body, id.unit().map(|u| u.ordinal), 1);
         }
         fills.settle(one, GapState::Failed, &mut diagnostics);
         fills.settle(two, GapState::Filled(Vec::new()), &mut diagnostics);
@@ -292,8 +313,10 @@ mod tests {
         assert_eq!(rows, [(DiagnosticCode::OcrFailed, Some(1))]);
         assert_eq!(fills.unsettled(one), Err(GapError::Settled));
         assert_eq!(fills.unsettled(two), Err(GapError::Settled));
-        let other =
-            GapId::new(Unit::new(UnitKind::Page, NonZeroU32::MIN), NonZeroU32::new(2).unwrap());
+        let other = GapId::new(
+            Some(Unit::new(UnitKind::Page, NonZeroU32::MIN)),
+            NonZeroU32::new(2).unwrap(),
+        );
         assert_eq!(fills.unsettled(other), Err(GapError::UnknownGap));
         assert_eq!(format!("{:?}", fills.state(two)), "Some(Filled(0 blocks))");
     }

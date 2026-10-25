@@ -92,12 +92,16 @@ diagnostic_codes! {
     ImageUnavailable = "image_unavailable", Lost;
     /// An asset reference stands in for image content.
     ImagePlaceholder = "image_placeholder", Deferred;
-    /// A page that awaits OCR: its marker stands where its text would be.
+    /// A gap that awaits OCR: a page's marker stands where its text would be, and an image's
+    /// text is missing after its block.
     OcrGap = "ocr_gap", Deferred;
-    /// A page whose OCR failed: its marker stands where its text would be.
+    /// A gap whose OCR failed: a page's marker stands where its text would be, and an image's
+    /// text is missing after its block.
     OcrFailed = "ocr_failed", Deferred;
     /// Image content dropped by the selected image policy.
     ImageOmitted = "image_omitted", Omitted;
+    /// An image, other than an embedded PNG or JPEG, that image OCR leaves without a gap.
+    ImageNotOcred = "image_not_ocred", Omitted;
     /// A picture the document shows that gets no place in the output.
     ImageUnplaced = "image_unplaced", Lost;
     /// An embedded object whose content is not converted.
@@ -383,7 +387,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const CODES: [(&str, LossClass); 44] = [
+    const CODES: [(&str, LossClass); 45] = [
         ("part_unreadable", LossClass::Lost),
         ("unit_unreadable", LossClass::Lost),
         ("cell_value_unreadable", LossClass::Lost),
@@ -398,6 +402,7 @@ mod tests {
         ("ocr_gap", LossClass::Deferred),
         ("ocr_failed", LossClass::Deferred),
         ("image_omitted", LossClass::Omitted),
+        ("image_not_ocred", LossClass::Omitted),
         ("image_unplaced", LossClass::Lost),
         ("embedded_object", LossClass::Lost),
         ("graphic_unread", LossClass::Lost),

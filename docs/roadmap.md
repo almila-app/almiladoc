@@ -54,7 +54,6 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W9 | ocr-images | |
 | W10 | ocr-engine | |
 | W11 | rasterizer | |
 | W12 | ocr-http | |
@@ -76,29 +75,6 @@ release follows W12.
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W9
-
-#### ocr-images: the caller's OCR fills picture gaps
-- **Goal:** the caller's OCR completes pictures in place (ADR 0002 decision 4).
-- **Scope:**
-  - `GapId`'s unit becomes `Option<Unit>`: the ordinal counts within its unit, or the document
-    without one (DOCX, ODT, RTF), `JSON_SCHEMA_VERSION` rising.
-  - `ImageOcr { None, All }` beside `ImagePolicy`: each PNG or JPEG, judged by signature, gains an
-    `OcrOrigin::Image(AssetId)` gap after its innermost block, in that block's container and region;
-    other images count `image_not_ocred` (`Omitted`); the image keeps its policy.
-  - A filled image gap renders after its block, `<br>`-joined in a cell; an unfilled or failed one
-    renders as under `ImageOcr::None`, a failed one counting `ocr_failed`.
-  - Python via `/change-core-api`: `ImageOcr`.
-- **Files:** new `src/ocr/images.rs`; `src/{model,render}/`, `src/{config,identity,lib}.rs`,
-  `src/formats/`, `tests/`, `python/`, `README.md`, `REUSE.toml`, `docs/support.md`.
-- **Tests:** generated DOCX: unit-less image gaps in a paragraph, list item, quote, note and cell
-  list in order and fill after their block; `Placeholder` gives `![alt](asset:N)` then the text;
-  reverse fills keep order; a cell `x` with an image filled `a b\n\nc` gives `x<br>a b<br>c`;
-  unfilled and failed ones render as `ImageOcr::None`; an unfilled one in a note counts `ocr_gap` in
-  Note; Python equals Rust.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 600 lines. **Tier:** T3.
 
 ### W10
 
@@ -132,7 +108,7 @@ release follows W12.
   - A cancel in `recognize` keeps earlier fills and refuses `render`; a panic gives `Internal`; a
     lowered `max_work` trips on image bytes; a request carries a raised `max_ocr_text_bytes`.
 - **Credit:** none.
-- **Depends on:** ocr-channel. **Size:** about 1000 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 1000 lines. **Tier:** T3.
 
 ### W11
 

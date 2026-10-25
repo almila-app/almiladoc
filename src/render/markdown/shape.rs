@@ -9,7 +9,7 @@ use std::ptr;
 
 use crate::ImagePolicy;
 use crate::error::ConvertError;
-use crate::model::{Block, CellSlot, Inline, List, Style};
+use crate::model::{Block, CellSlot, Inline, List, OcrOrigin, Style};
 use crate::render::markdown::escape::InlineContext;
 use crate::render::markdown::inline::{Label, Norm, normalize, render_inlines, url_label};
 use crate::render::markdown::sink::{Meter, Text};
@@ -135,7 +135,7 @@ pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bo
         Block::BlockQuote(blocks) => any(blocks, |b| shows(b, rc, meter))?,
         Block::Gap(gap) => match rc.fills.filled(gap) {
             Some(blocks) => any(blocks, |b| shows(b, rc, meter))?,
-            None => true,
+            None => matches!(gap.origin, OcrOrigin::Page(_)),
         },
         Block::CodeBlock { .. } | Block::Rule => true,
         Block::UnitStart(_) => false,
@@ -172,7 +172,10 @@ fn shows_in_cell(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool,
         Block::CodeBlock { text: source, .. } | Block::Math(source) => {
             Ok(!source.trim().is_empty())
         }
-        Block::Rule | Block::UnitStart(_) | Block::Gap(_) => Ok(false),
+        Block::Gap(gap) => {
+            any(rc.fills.filled(gap).unwrap_or_default(), |b| shows_in_cell(b, rc, meter))
+        }
+        Block::Rule | Block::UnitStart(_) => Ok(false),
     }
 }
 
@@ -192,13 +195,26 @@ pub(super) struct Shapes {
 pub(super) fn loose(list: &List, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     remembered(&rc.shapes.loose, ptr::from_ref(list), || {
         any(&list.items, |item| {
-            Ok(match item.blocks.as_slice() {
-                [] => false,
-                [only] => blank(only, rc, meter)?,
+            let mut placed = item.blocks.iter().flat_map(|block| placed(block, rc));
+            Ok(match (placed.next(), placed.next()) {
+                (None, _) => false,
+                (Some(only), None) => blank(only, rc, meter)?,
                 _ => true,
             })
         })
     })
+}
+
+/// What `block` writes in its place: a filled gap its fill, an image gap not filled nothing.
+fn placed<'d>(block: &'d Block, rc: &Ctx<'d>) -> &'d [Block] {
+    match block {
+        Block::Gap(gap) => match rc.fills.filled(gap) {
+            Some(blocks) => blocks,
+            None if matches!(gap.origin, OcrOrigin::Image(_)) => &[],
+            None => std::slice::from_ref(block),
+        },
+        _ => std::slice::from_ref(block),
+    }
 }
 
 fn blank_list(list: &List, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
