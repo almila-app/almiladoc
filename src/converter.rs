@@ -1,6 +1,7 @@
 //! The conversion API: a [`Converter`] built once from a [`Config`], and the
 //! calls that walk one [`Input`] on its per-call pool.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -17,7 +18,10 @@ use crate::inspect::{Inspection, PageInspection};
 use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
 use crate::model::{Block, Document, Gap, GapId, OcrOrigin, Unit, UnitKind};
-use crate::ocr::{GapError, GapFill, GapFills, GapState, gaps, leave_image_gaps};
+use crate::ocr::{
+    GapError, GapFill, GapFills, GapState, OcrEngine, OcrRequest, OcrSummary, Target, gaps,
+    image_of, leave_image_gaps, request,
+};
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
 use crate::shared::markdown;
@@ -187,6 +191,22 @@ impl Converter {
             let diagnostics = diagnostics_of(parse_ctx, &document, self.config.images)?;
             conclude(self.config.on_loss, rendered.markdown, rendered.units, diagnostics)
         })
+    }
+
+    /// Convert `input` with `engine` reading its gaps' images: [`Converter::parse`], then
+    /// [`Parsed::ocr`] over every gap, then [`Parsed::render`].
+    ///
+    /// # Errors
+    ///
+    /// As those three calls fail.
+    pub fn convert_with_ocr(
+        &self,
+        input: Input<'_>,
+        engine: &dyn OcrEngine,
+    ) -> Result<Conversion, ConvertError> {
+        let mut parsed = self.parse(input)?;
+        parsed.ocr(engine, None)?;
+        parsed.render()
     }
 
     /// Inspect a PDF without rendering it: its pages, each with the verdict
@@ -560,6 +580,60 @@ impl Parsed {
         Ok(())
     }
 
+    /// Run `engine` over the gaps `gaps` names, every gap when `None`, that are not yet filled
+    /// or failed and ask for an image, in document order and in batches of its
+    /// [`OcrEngine::batch_size`], all on one pool built from its [`Config`]. Each
+    /// [`OcrOutcome`](crate::OcrOutcome) fills or fails its gap as [`Parsed::fill_gap`] and
+    /// [`Parsed::fail_gap`] do: a fill a limit refuses fails its gap, a batch answered by the
+    /// wrong number of outcomes fails all of its gaps, and a batch with an unattempted gap is
+    /// the last, its unattempted gaps left for a later call.
+    ///
+    /// # Errors
+    ///
+    /// Each keeps what earlier batches settled. [`ConvertError::ResourceLimit`] when the
+    /// images and fills take the work past [`Limits::max_work`](crate::Limits::max_work);
+    /// [`ConvertError::Cancelled`] once the parse's token is cancelled, a batch whose
+    /// recognition saw the cancel settling nothing; [`ConvertError::Internal`] when the pool
+    /// cannot start or the engine or a fill panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{
+    ///     CancelToken, Config, Converter, Format, GapFill, ImageOcr, Input, OcrEngine,
+    ///     OcrOutcome, OcrRequest,
+    /// };
+    ///
+    /// struct Dots;
+    ///
+    /// impl OcrEngine for Dots {
+    ///     fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+    ///         requests.iter().map(|_| OcrOutcome::Fill(GapFill::Markdown("A dot".into()))).collect()
+    ///     }
+    /// }
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/docx/handmade-rich.docx");
+    /// let docx = std::fs::read(path)?;
+    /// let mut config = Config::default();
+    /// config.image_ocr = ImageOcr::All;
+    /// let mut parsed = Converter::new(config)?.parse(Input::new(&docx, Format::Docx))?;
+    /// let summary = parsed.ocr(&Dots, None)?;
+    /// assert_eq!((summary.filled, summary.failed, summary.unattempted), (1, 0, 0));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn ocr(
+        &mut self,
+        engine: &dyn OcrEngine,
+        gaps: Option<&[GapId]>,
+    ) -> Result<OcrSummary, ConvertError> {
+        self.refuse_cancelled()?;
+        let (config, cancel) = (Arc::clone(&self.config), self.cancel.clone().unwrap_or_default());
+        run_on_pool(&config, || {
+            let asking = self.asking(gaps);
+            crate::ocr::run(self, &asking, engine, &cancel)
+        })
+    }
+
     /// Render the document to Markdown on a pool built from its [`Config`],
     /// carrying the parse's diagnostics and charging its work on from the
     /// parse's, as [`Converter::convert`] does.
@@ -698,11 +772,46 @@ impl Parsed {
         self.fills.settle(id, GapState::Filled(blocks), &mut self.diagnostics);
     }
 
+    /// The unsettled gaps `listed` names, every one when `None`, that ask for an image, in
+    /// document order.
+    fn asking(&self, listed: Option<&[GapId]>) -> Vec<Gap> {
+        let listed: Option<BTreeSet<GapId>> = listed.map(|ids| ids.iter().copied().collect());
+        gaps(&self.document)
+            .map(|located| located.gap)
+            .filter(|gap| listed.as_ref().is_none_or(|listed| listed.contains(&gap.id)))
+            .filter(|gap| self.fills.unsettled(gap.id).is_ok())
+            .filter(|gap| image_of(gap, &self.document.assets).is_some())
+            .cloned()
+            .collect()
+    }
+
     fn on_pool<T: Send>(
         &self,
         work: impl FnOnce() -> Result<T, ConvertError> + Send,
     ) -> Result<T, ConvertError> {
         run_on_pool(&self.config, work)
+    }
+}
+
+impl Target for Parsed {
+    fn request(&mut self, gap: &Gap) -> Result<Option<OcrRequest>, ConvertError> {
+        let limits = &self.config.limits;
+        let ledger = Ledger::new(limits.max_work, self.cancel.as_ref()).starting_at(self.fuel);
+        let made = request(gap, &self.document.assets, &ledger, limits.max_ocr_text_bytes)?;
+        self.fuel = ledger.spent();
+        Ok(made)
+    }
+
+    fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
+        let depth = self.fills.unsettled(id)?;
+        let GapFill::Markdown(text) = fill;
+        let read = self.read_fill(depth, &text)?;
+        self.settle_fill(id, read);
+        Ok(())
+    }
+
+    fn fail(&mut self, id: GapId) -> Result<(), GapError> {
+        self.fail_gap(id)
     }
 }
 
@@ -872,7 +981,7 @@ impl Conversion {
 mod tests {
     use super::*;
     use crate::diagnostics::Region;
-    use crate::model::Inline;
+    use crate::model::{Asset, AssetId, Inline};
     use crate::shared::test_support::zip_package;
     use std::assert_matches;
     use std::sync::atomic::Ordering::Relaxed;
@@ -1524,5 +1633,28 @@ mod tests {
         let charged = working.resumed().and_then(|ledger| ledger.charge(0));
         assert_eq!(charged, Err(ConvertError::Cancelled));
         assert_eq!(working.read_fill(0, "a").err(), Some(ConvertError::Cancelled));
+    }
+
+    #[test]
+    fn a_cancel_refuses_an_ocr_call_and_stops_its_copies() {
+        struct Unread;
+        impl OcrEngine for Unread {
+            fn recognize(&self, _: &[OcrRequest], _: &CancelToken) -> Vec<crate::OcrOutcome> {
+                panic!("a cancelled call reads nothing")
+            }
+        }
+        let token = CancelToken::new();
+        token.cancel();
+        let mut empty = parsed(Vec::new(), Config::default());
+        empty.cancel = Some(token.clone());
+        assert_eq!(empty.ocr(&Unread, None), Err(ConvertError::Cancelled));
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let (media_type, origin_part) = ("image/png".into(), String::new());
+        let mut imaged = parsed(Vec::new(), Config::default());
+        imaged.document.assets.push(Asset { id: AssetId(0), media_type, origin_part, bytes: png });
+        imaged.cancel = Some(token);
+        let id = GapId::new(None, NonZeroU32::MIN);
+        let gap = Gap { id, origin: OcrOrigin::Image(AssetId(0)), reasons: Vec::new() };
+        assert_eq!(Target::request(&mut imaged, &gap), Err(ConvertError::Cancelled));
     }
 }

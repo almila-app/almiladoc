@@ -138,9 +138,18 @@ fn image_gaps(
 }
 
 fn ocrable(assets: &[Asset], id: AssetId) -> bool {
-    assets.get(id.0).is_some_and(|asset| {
-        asset.bytes.starts_with(PNG_SIGNATURE) || asset.bytes.starts_with(JPEG_SIGNATURE)
-    })
+    assets.get(id.0).is_some_and(|asset| media_type(&asset.bytes).is_some())
+}
+
+/// `image/png` or `image/jpeg` when `bytes` open with that format's signature.
+pub(crate) fn media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(PNG_SIGNATURE) {
+        Some("image/png")
+    } else if bytes.starts_with(JPEG_SIGNATURE) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

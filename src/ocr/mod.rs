@@ -1,15 +1,22 @@
 //! What the caller's OCR gives a parsed document's gaps, and why a fill is not applied.
 
+mod driver;
+mod engine;
 mod fill;
 mod images;
+mod request;
 
 use std::fmt;
 
 use crate::error::ConvertError;
 use crate::limits::Limit;
 
+pub(crate) use driver::{Target, run};
+pub use engine::{OcrEngine, OcrFailure, OcrOutcome, OcrSummary};
 pub(crate) use fill::{GapFills, GapState, gaps};
 pub(crate) use images::leave_image_gaps;
+pub use request::{OcrImage, OcrRequest};
+pub(crate) use request::{image_of, request};
 
 /// What OCR read for one gap.
 #[derive(Clone, PartialEq, Eq)]

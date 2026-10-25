@@ -26,6 +26,7 @@ mod json;
 mod limits;
 #[cfg(feature = "pdf")]
 mod ocr;
+mod ocr_engine;
 mod ocr_images;
 #[cfg(feature = "pdf")]
 mod pdf;

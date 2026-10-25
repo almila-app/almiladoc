@@ -46,7 +46,9 @@ pub use inspect::{Inspection, PageInspection, PageVerdict};
 pub use json::JSON_SCHEMA_VERSION;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
-pub use ocr::{GapError, GapFill};
+pub use ocr::{
+    GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrOutcome, OcrRequest, OcrSummary,
+};
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = {

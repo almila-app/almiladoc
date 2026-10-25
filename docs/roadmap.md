@@ -54,7 +54,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W10 | ocr-engine | |
+| W10 | ocr-requests | |
 | W11 | rasterizer | |
 | W12 | ocr-http | |
 
@@ -78,37 +78,21 @@ release follows W12.
 
 ### W10
 
-#### ocr-engine: an engine fills the gaps, in-process or across processes
-- **Goal:** an engine fills gaps in-process or from exported requests (ADR 0002 decisions 1-3, 12).
-- **Scope:** through `/change-core-api`:
-  - `src/ocr/engine.rs`: `OcrEngine: Send + Sync`, `batch_size()` (default 1) and
-    `recognize(&self, &[OcrRequest], &CancelToken) -> Vec<OcrOutcome>`; `#[non_exhaustive]`
-    `OcrOutcome { Fill(GapFill), Failed(OcrFailure), Unattempted(OcrFailure) }` and
-    `OcrFailure { status: Option<u16> }`.
-  - `src/ocr/request.rs`, owned and `#[non_exhaustive]`: `OcrRequest { gap, origin, reasons, image,
-    max_text_bytes }` (the parse's `max_ocr_text_bytes`) and `OcrImage { bytes: Arc<[u8]>,
-    media_type }` (PNG or JPEG); an image request copies its asset at one unit per 16 bytes.
-  - `Parsed::ocr_requests(&mut self, gaps: Option<&[GapId]>)`: the listed unfilled gaps' requests in
-    document order; page gaps yield none until the rasterizer.
-  - `Parsed::ocr(&mut self, &dyn OcrEngine, gaps) -> Result<OcrSummary, ConvertError>`: pooled
-    batches of `batch_size`, each outcome a `fill_gap` or `fail_gap`; an `Unattempted` stops later
-    batches; a `Refused` fill fails its gap, a wrong outcome count its batch.
-  - `Converter::convert_with_ocr(Input, &dyn OcrEngine)`; `ocr_requests` and `ocr` check the
-    `CancelToken` `Parsed` keeps.
-  - Python: `Parsed.ocr_requests` and a pickling `OcrRequest`; a Python OCR fills the gaps through
-    `fill_gap` and `fail_gap`, and Python takes no engine of its own.
-- **Files:** new `src/ocr/{engine,request,driver}.rs`, `python/src/ocr.rs`; `src/ocr/`, `tests/`,
-  `src/{converter,lib}.rs`, `python/`, `README.md`, `REUSE.toml`, ADR 0001, `CLAUDE.md`, `.claude/`.
-- **Tests:**
-  - A fake engine on the DOCX image fixtures: `ocr`, hand-run `ocr_requests` and `fill_gap`,
-    `convert_with_ocr` and a Python loop over unpickled requests agree.
-  - `batch_size` 3 over 7 gaps calls `recognize` with 3, 3 and 1 requests in order; a second batch
-    answering `Fill`, `Unattempted`, `Fill` fills 4 and 6, never requests 7, and a later call fills
-    5 and 7; 2 outcomes for 3 requests fail all 3; a 1 MiB + 1 byte fill fails its gap alone.
-  - A cancel in `recognize` keeps earlier fills and refuses `render`; a panic gives `Internal`; a
-    lowered `max_work` trips on image bytes; a request carries a raised `max_ocr_text_bytes`.
+#### ocr-requests: requests exported for an OCR run elsewhere
+- **Goal:** a parent process OCRs a child's exported gaps (ADR 0002 decisions 2 and 12).
+- **Scope:** `Parsed::ocr_requests(&mut self, gaps: Option<&[GapId]>)`: the listed unsettled gaps'
+  requests in document order, an id naming no unsettled gap passed over, each charged as
+  `Parsed::ocr` charges it. Through `/change-core-api`: `Parsed.ocr_requests(gaps=None)`,
+  releasing the GIL, and a frozen, pickling `OcrRequest` (`gap`, the exact `Parsed.gaps` row;
+  `image`; `media_type`; `max_text_bytes`), whose text comes back through
+  `fill_gap(request.gap, text)`; Python takes no engine of its own.
+- **Files:** new `python/src/ocr.rs`; `src/converter.rs`, `tests/`, `python/`, `README.md`,
+  `REUSE.toml`, `CLAUDE.md`, `.claude/`.
+- **Tests:** hand-run requests and `Parsed::ocr` agree, and a Python loop over unpickled requests
+  of the rich DOCX fixture renders what both do; a listed id or row naming no unsettled gap is
+  passed over; a lowered `max_work` trips on the copies.
 - **Credit:** none.
-- **Depends on:** none open. **Size:** about 1000 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 350 lines. **Tier:** T3.
 
 ### W11
 
@@ -148,7 +132,7 @@ release follows W12.
     trips before painting and at the PNG charge; `convert_with_ocr` equals the hand flow; Python's
     `dpi=300` reaches its requests; `pdf_raster` replays.
 - **Credit:** none.
-- **Depends on:** ocr-engine. **Size:** about 900 lines. **Tier:** T3.
+- **Depends on:** ocr-requests. **Size:** about 900 lines. **Tier:** T3.
 
 ### W12
 
