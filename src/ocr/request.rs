@@ -1,16 +1,17 @@
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use crate::error::ConvertError;
 use crate::formats::Source;
-use crate::ledger::Ledger;
+use crate::ledger::{CancelToken, Ledger};
 use crate::model::{Asset, Gap, GapId, GapReason, OcrOrigin};
-use crate::ocr::RasterSpec;
 use crate::ocr::images::media_type;
-use crate::ocr::raster::page_image;
+use crate::ocr::{RasterSpec, raster};
+use crate::pool::map_ordered;
 
 /// Bytes of image a request copies per unit of [`Limits::max_work`](crate::Limits::max_work).
-pub(crate) const BYTES_PER_UNIT: u64 = 16;
+const BYTES_PER_UNIT: u64 = 16;
 
 /// One gap's image for an [`OcrEngine`](crate::OcrEngine) to read, and how much text its
 /// fill may hold.
@@ -71,50 +72,86 @@ impl Inputs<'_> {
 }
 
 /// The image `gap` asks to be read, among `assets`: an embedded PNG or JPEG.
-pub(crate) fn image_of<'a>(gap: &Gap, assets: &'a [Asset]) -> Option<(&'a [u8], &'static str)> {
+fn image_of<'a>(gap: &Gap, assets: &'a [Asset]) -> Option<(&'a [u8], &'static str)> {
     let OcrOrigin::Image(id) = gap.origin else { return None };
     let bytes = assets.get(id.0)?.bytes.as_slice();
     Some((bytes, media_type(bytes)?))
 }
 
-/// The request for `gap`: an embedded image copied, or a page painted under `spec`, each byte
-/// charged to `ledger` at one unit per [`BYTES_PER_UNIT`]; `None` when it asks for no image
-/// or its page cannot be painted.
-pub(crate) fn request(
-    gap: &Gap,
+/// How a gap's image is had: an embedded one copied, or a page to paint at a dpi.
+enum Plan {
+    Image(OcrImage),
+    Page { page: NonZeroU32, dpi: u32 },
+}
+
+/// The request of each of `gaps` that asks for an image, in order, with how much of its page
+/// painting left out: embedded images copied, then pages painted under `spec` up to the
+/// pool's threads at once, each charged to `ledger` (a page's pixels before the pages are
+/// painted, every image's bytes at one unit per [`BYTES_PER_UNIT`]); a page unpdf cannot
+/// paint asks for none.
+pub(crate) fn requests(
+    gaps: &[Gap],
     inputs: Inputs<'_>,
     spec: &RasterSpec,
     ledger: &Ledger<'_>,
     max_text_bytes: u64,
-) -> Result<Option<OcrRequest>, ConvertError> {
-    let image = match gap.origin {
-        OcrOrigin::Page(page) => page_image(inputs.source, page, spec, ledger)?,
-        _ => match image_of(gap, inputs.assets) {
-            Some((bytes, media_type)) => {
-                ledger.charge(byte_units(bytes.len()))?;
-                Some(OcrImage { bytes: Arc::from(bytes), media_type, dpi: None })
+) -> Result<Vec<(OcrRequest, u64)>, ConvertError> {
+    let mut plans = Vec::with_capacity(gaps.len());
+    for gap in gaps {
+        let plan = match gap.origin {
+            OcrOrigin::Page(page) => {
+                raster::plan(inputs.source, page, spec, ledger)?.map(|dpi| Plan::Page { page, dpi })
             }
-            None => None,
-        },
-    };
-    Ok(image.map(|image| OcrRequest {
-        gap: gap.id,
-        origin: gap.origin,
-        reasons: gap.reasons.clone(),
-        image,
-        max_text_bytes,
-    }))
+            _ => embedded(gap, inputs.assets, ledger)?.map(Plan::Image),
+        };
+        plans.extend(plan.map(|plan| (gap, plan)));
+    }
+    let cancel = ledger.cancel();
+    let painted = map_ordered(&plans, |(_, plan)| match *plan {
+        Plan::Page { .. } if cancel.is_some_and(CancelToken::is_cancelled) => {
+            Err(ConvertError::Cancelled)
+        }
+        Plan::Page { page, dpi } => Ok(raster::paint(inputs.source, page, dpi)),
+        Plan::Image(_) => Ok(None),
+    });
+    let mut made = Vec::with_capacity(plans.len());
+    for ((gap, plan), painted) in plans.into_iter().zip(painted) {
+        let (image, unpainted) = match (plan, painted?) {
+            (Plan::Image(image), _) => (image, 0),
+            (Plan::Page { dpi, .. }, Some(painted)) => {
+                ledger.charge(byte_units(painted.png.len()))?;
+                let png = Arc::from(painted.png);
+                (
+                    OcrImage { bytes: png, media_type: "image/png", dpi: Some(dpi) },
+                    painted.unpainted,
+                )
+            }
+            (Plan::Page { .. }, None) => continue,
+        };
+        let (gap, origin, reasons) = (gap.id, gap.origin, gap.reasons.clone());
+        made.push((OcrRequest { gap, origin, reasons, image, max_text_bytes }, unpainted));
+    }
+    Ok(made)
+}
+
+/// `gap`'s embedded PNG or JPEG copied, its bytes charged to `ledger`.
+fn embedded(
+    gap: &Gap,
+    assets: &[Asset],
+    ledger: &Ledger<'_>,
+) -> Result<Option<OcrImage>, ConvertError> {
+    let Some((bytes, media_type)) = image_of(gap, assets) else { return Ok(None) };
+    ledger.charge(byte_units(bytes.len()))?;
+    Ok(Some(OcrImage { bytes: Arc::from(bytes), media_type, dpi: None }))
 }
 
 /// Units of work `len` bytes of image cost.
-pub(crate) fn byte_units(len: usize) -> u64 {
+fn byte_units(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX).div_ceil(BYTES_PER_UNIT)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-
     use super::*;
     use crate::limits::Limit;
     use crate::model::AssetId;
@@ -137,8 +174,10 @@ mod tests {
         assets: &[Asset],
         ledger: &Ledger<'_>,
     ) -> Result<Option<OcrRequest>, ConvertError> {
-        let source = Source::default();
-        request(gap, Inputs { assets, source: &source }, &RasterSpec::default(), ledger, 7)
+        let (source, gaps) = (Source::default(), [gap.clone()]);
+        let inputs = Inputs { assets, source: &source };
+        let made = requests(&gaps, inputs, &RasterSpec::default(), ledger, 7)?;
+        Ok(made.into_iter().next().map(|(request, _)| request))
     }
 
     #[test]

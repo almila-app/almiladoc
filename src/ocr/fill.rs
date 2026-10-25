@@ -29,6 +29,7 @@ struct Slot {
     region: Region,
     depth: u64,
     state: GapState,
+    unpainted: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,7 +41,8 @@ impl GapFills {
     pub(crate) fn of(document: &Document) -> Self {
         let mut slots = HashMap::new();
         for Located { gap, region, depth } in gaps(document) {
-            slots.entry(gap.id).or_insert(Slot { region, depth, state: GapState::Unfilled });
+            let slot = Slot { region, depth, state: GapState::Unfilled, unpainted: 0 };
+            slots.entry(gap.id).or_insert(slot);
         }
         Self { slots }
     }
@@ -65,14 +67,31 @@ impl GapFills {
         }
     }
 
+    /// Record that the image of gap `id`'s latest request left out `unpainted` items.
+    pub(crate) fn note_unpainted(&mut self, id: GapId, unpainted: u64) {
+        if let Some(slot) = self.slots.get_mut(&id) {
+            slot.unpainted = unpainted;
+        }
+    }
+
     /// Settle a gap as `state`, its `ocr_gap` in `diagnostics` becoming `ocr_failed` when it
-    /// failed and leaving when it filled.
+    /// failed and leaving when it filled, a fill reporting `raster_incomplete` for each item
+    /// its latest request's image left out.
     pub(crate) fn settle(&mut self, id: GapId, state: GapState, diagnostics: &mut Diagnostics) {
         let Some(slot) = self.slots.get_mut(&id) else { return };
         let unit = id.unit().map(|unit| unit.ordinal);
         diagnostics.remove(DiagnosticCode::OcrGap, slot.region, unit, 1);
-        if state == GapState::Failed {
-            diagnostics.add(DiagnosticCode::OcrFailed, slot.region, unit, 1);
+        match state {
+            GapState::Failed => diagnostics.add(DiagnosticCode::OcrFailed, slot.region, unit, 1),
+            GapState::Filled(_) => {
+                diagnostics.add(
+                    DiagnosticCode::RasterIncomplete,
+                    slot.region,
+                    unit,
+                    slot.unpainted,
+                );
+            }
+            GapState::Unfilled => {}
         }
         slot.state = state;
     }

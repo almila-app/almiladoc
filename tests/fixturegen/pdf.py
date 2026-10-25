@@ -1,3 +1,4 @@
+import base64
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
@@ -75,10 +76,25 @@ DOT = (
     b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
     b" /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream"
 )
+# A 16x24 gray JPEG ruled with ink lines, as a scanned page is (Pillow, quality 50).
+SCAN_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERX"
+    "RTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/wAALCAAYABABAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAgb/xAAhEAAA"
+    "BQQCAwAAAAAAAAAAAAAREhQVIQACEzEBBAVBUf/aAAgBAQAAPwCl8g8Z7W5DiLKg5jDz89AFDpvqmxa3J5PhOfUA"
+    "MbCn5B4z2tyHEWVBzGHn56AKHTfVNi1uTyfCc+oAY2FPyDxntbkOIsqDmMPPz0AUOm+qbFrcnk+E59QAxsK//9k="
+)
+JPEG_SCAN = (
+    b"<< /Type /XObject /Subtype /Image /Width 16 /Height 24 /ColorSpace /DeviceGray"
+    b" /BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n"
+    % len(SCAN_JPEG)
+    + SCAN_JPEG
+    + b"\nendstream"
+)
 TILES = 8
 XOBJECTS = {
     b"Im1": lambda: DOT,
     b"Scan": lambda: gray_image(306, 396, True),
+    b"Jpeg": lambda: JPEG_SCAN,
     b"Fig": lambda: gray_image(240, 200, False),
     b"ScanHi": lambda: gray_image(1224, 1584, True),
     b"FigHi": lambda: gray_image(1224, 1584, False),
@@ -318,6 +334,7 @@ VERDICT_CASES: dict[str, Case] = {
         (running_head(3) + text_lines(BODY), []),
     ],
     "image-only": [(FULL_SCAN, [b"Scan"])],
+    "jpeg-scan": [(b"q 612 0 0 792 0 0 cm /Jpeg Do Q\n", [b"Jpeg"])],
     "invisible-mode3-scan": [(FULL_SCAN + text_lines(BODY, mode=3), [b"Scan"])],
     "invisible-mode3-alone": [(text_lines(BODY, mode=3), [])],
     "invisible-clipped": [(CLIP_AWAY + text_lines(BODY) + b"Q\n", [])],
@@ -390,6 +407,31 @@ def ksc_page() -> bytes:
     return b"BT /F1 10 Tf 72 700 Td " + shows + b" ET"
 
 
+def mesh_shading_pdf() -> bytes:
+    """A page that paints two gray triangles of a free-form mesh shading (type 4) and no text."""
+    vertices = [
+        (0, 0, 0),
+        (255, 0, 128),
+        (0, 255, 255),
+        (255, 0, 128),
+        (255, 255, 0),
+        (0, 255, 255),
+    ]
+    data = b"".join(bytes([0, x, y, gray]) for x, y, gray in vertices)
+    return assemble(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+            b" /Resources << /Shading << /Sh1 5 0 R >> >> /Contents 4 0 R >>",
+            4: stream(b"/Sh1 sh"),
+            5: b"<< /ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8"
+            b" /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 612 0 792 0 1] /Length %d >>"
+            b"\nstream\n" % len(data) + data + b"\nendstream",
+        }
+    )
+
+
 def generate(out: Path) -> None:
     pdf = out / "pdf"
     write_file(pdf / "handmade-scanned.pdf", handmade_pdf([IMAGE_PAGE, IMAGE_PAGE]))
@@ -407,5 +449,6 @@ def generate(out: Path) -> None:
         pdf / "handmade-legacy-cmap.pdf",
         handmade_pdf([ksc_page()], font=KSC_FONT, extra=[KOREA1_CID_FONT, KOREA1_DESCRIPTOR]),
     )
+    write_file(pdf / "handmade-mesh-shading.pdf", mesh_shading_pdf())
     for name, pages in VERDICT_CASES.items():
         write_file(pdf / f"handmade-{name}.pdf", case_pdf(pages))

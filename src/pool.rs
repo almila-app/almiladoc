@@ -66,6 +66,20 @@ pub(crate) fn run_on_pool<T: Send>(
     )
 }
 
+/// `map` of each of `items`, in their order, up to the threads of the pool it is called in at
+/// once: called only inside the work [`run_on_pool`] runs, so none reaches rayon's global pool.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a batch's items fan out over the per-call pool its work runs on"
+)]
+pub(crate) fn map_ordered<T: Sync, R: Send>(
+    items: &[T],
+    map: impl Fn(&T) -> R + Sync + Send,
+) -> Vec<R> {
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    items.par_iter().map(map).collect()
+}
+
 fn run_in<T: Send>(
     pool: Result<ThreadPool, ThreadPoolBuildError>,
     work: impl FnOnce() -> Result<T, ConvertError> + Send,
@@ -121,6 +135,22 @@ mod tests {
         let mut frame = [0u8; FRAME];
         std::hint::black_box(&mut frame);
         frame.len() + fill_stack(frames - 1)
+    }
+
+    #[test]
+    fn mapped_items_keep_their_order_and_spread_over_the_pool() {
+        let items: Vec<u32> = (0..64).collect();
+        let mapped = run_on_pool(&threads(3), || {
+            Ok(map_ordered(&items, |&n| {
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(n % 3)));
+                (n * 2, rayon::current_thread_index())
+            }))
+        })
+        .unwrap();
+        let doubled: Vec<u32> = mapped.iter().map(|(n, _)| *n).collect();
+        assert_eq!(doubled, (0..64).map(|n| n * 2).collect::<Vec<_>>());
+        let workers: std::collections::BTreeSet<_> = mapped.iter().map(|(_, at)| *at).collect();
+        assert!(workers.iter().all(Option::is_some) && workers.len() > 1, "{workers:?}");
     }
 
     #[test]

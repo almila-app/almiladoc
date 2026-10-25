@@ -48,43 +48,26 @@ pub(crate) struct PdfSource {
     pub(crate) boxes: Vec<Option<PageBox>>,
 }
 
-/// A page's media box in points and its `/Rotate`, clockwise degrees.
+/// A page's media box in points.
 #[cfg(feature = "raster")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PageBox {
     pub(crate) width: f32,
     pub(crate) height: f32,
-    pub(crate) rotation: u16,
 }
 
 #[cfg(feature = "raster")]
 impl PdfSource {
-    /// The box of 1-based `page`, read again with no text for a page the parse could not read.
+    /// The media box of 1-based `page`; `None` for a page the parse could not read.
     pub(crate) fn page_box(&self, page: NonZeroU32) -> Option<PageBox> {
-        let index = usize::try_from(page.get() - 1).ok()?;
-        if let Some(parsed) = self.boxes.get(index)?.as_ref() {
-            return Some(*parsed);
-        }
-        let options = PageStreamOptions {
-            extract_text: false,
-            pages: PageSelection::Pages(vec![page.get()]),
-            ..sequential()
-        };
-        let mut found = None;
-        let _: Result<_, _> = self.parser.for_each_page(options, |event| {
-            if let ParseEvent::PageParsed(parsed) = event {
-                found = Some(PageBox::of(&parsed));
-            }
-            ControlFlow::Continue(())
-        });
-        found
+        *self.boxes.get(usize::try_from(page.get() - 1).ok()?)?
     }
 }
 
 #[cfg(feature = "raster")]
 impl PageBox {
     fn of(page: &Page) -> Self {
-        Self { width: page.width, height: page.height, rotation: page.rotation }
+        Self { width: page.width, height: page.height }
     }
 }
 

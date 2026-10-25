@@ -29,10 +29,11 @@ Date: 2026-10-14, revised 2026-10-24
    writes nothing and raises no `NeedsOcr`, which names pages only.
 5. **Rendering.** A page gap's image is its crop box, an sRGB PNG unpdf paints from the parser
    `Parsed` keeps, so the page rendered is the one extracted, with no system font read. Pages render
-   on the call's pool at the largest dpi up to the spec's that fits `max_pixels`, charged one work
-   unit per 128 pixels and per 16 PNG bytes; that cap and those charges alone bound painting, which
-   cancellation and `max_work` reach between pages. Unpainted text runs, images, inline images and
-   undecodable content streams report `raster_incomplete`; shadings and soft masks, none.
+   on the call's pool at the largest dpi up to the spec's at which its media box fits `max_pixels`,
+   charged one work unit per 128 of those pixels and per 16 PNG bytes; that cap and those charges
+   alone bound painting, which cancellation and `max_work` reach between pages. Unpainted text runs,
+   images, inline images and undecodable content streams report `raster_incomplete`; shadings and
+   soft masks, none.
 6. **Raster spec.** `RasterSpec` defaults to 150 dpi and MiMo-VL's cap of 12 845 056 pixels; it
    comes from the engine or the caller and stays outside `Config`, as it shapes requests, not fills.
 7. **`ocr-http`.** `OcrHttp` (feature `ocr-http`) posts to OpenAI-compatible `chat/completions` one
@@ -61,6 +62,8 @@ Date: 2026-10-14, revised 2026-10-24
   `windows-11-arm`. A PDF's `Parsed` holds unpdf's parser.
 - Glyphs a stand-in face lacks, annotation appearances and Lab or DeviceN colour paint wrong
   unreported.
+- A run unpdf cannot paint reports `raster_incomplete` even where the clip hides it or it lies off
+  the page, until unpdf counts only what a page shows (unpdf-clip).
 
 ## Alternatives considered
 

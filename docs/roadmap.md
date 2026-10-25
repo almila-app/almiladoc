@@ -54,7 +54,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W11 | raster-losses then raster-surfaces | |
+| W11 | raster-surfaces | |
 | W12 | ocr-http | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
@@ -65,35 +65,21 @@ release follows W12.
 ### W7
 
 #### unpdf-clip: take the unpdf release that counts only what the clip shows
-- **Goal:** a run the clip hides entirely reports no loss (iyulab/unpdf #21).
+- **Goal:** a run the clip hides entirely reports no loss (iyulab/unpdf #21), extracted or
+  painted.
 - **Scope:** move `unpdf` to the first release carrying upstream 2418af6 and 6dbc96c; a
   `tests/it/pdf.rs` case: readable text beside a run clipped away entirely (`q 0 0 10 10 re W n … Q`,
   drawn far outside) that holds one code its ToUnicode leaves out converts under `OnLoss::Fail` with
-  no diagnostic and gives only the readable text; the docs naming the version follow.
+  no diagnostic and gives only the readable text; the docs naming the version follow. Once unpdf's
+  `RasterGaps` also counts only runs a page shows (a pull request to open), a filled page whose
+  unpaintable run is clipped away or off the page reports no `raster_incomplete`, and ADR 0002's
+  consequence on it goes.
 - **Files:** `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `tests/it/pdf.rs`, `THIRD-PARTY-LICENSES`,
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
 
 ### W11
-
-#### raster-losses: pages painted at once, and what painting missed reported
-- **Goal:** a batch's pages paint in parallel, and a filled page reports what its image lacked
-  (ADR 0002 decision 5).
-- **Scope:**
-  - A new `pool::map_ordered` paints up to `threads` pages of one batch (one `ocr_requests` call)
-    at once, in order, the token checked per page; `Target` takes a batch's gaps, the pixels
-    charged serially before the pages fan out and the PNG bytes in page order after.
-  - Once a page gap is filled, unpdf's `RasterGaps` text runs, images, inline images and
-    undecodable content streams report `raster_incomplete` (`Lost`) in its unit, shadings and soft
-    masks nothing.
-- **Files:** `src/ocr/`, `src/{converter,diagnostics,pool}.rs`, `tests/`, fixtures,
-  `docs/support.md`, `REUSE.toml`.
-- **Tests:** under `ocr_pages: All`, `handmade-predefined-cmap.pdf` filled reports
-  `raster_incomplete` and fails `Incomplete` under `Fail`; a scanned JPEG page and a mesh-shading
-  page (new fixtures), filled, report none; PNGs are equal at 1 and 4 threads with a batch of 5.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 400 lines. **Tier:** T3.
 
 #### raster-surfaces: Python's raster spec, a fuzz target and the release smoke
 - **Goal:** Python callers choose the raster spec, and painting is fuzzed and smoke-tested.
@@ -105,7 +91,7 @@ release follows W12.
 - **Tests:** Python's `dpi=300` reaches its requests and a refused spec raises; `pdf_raster`
   replays.
 - **Credit:** none.
-- **Depends on:** raster-losses. **Size:** about 300 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 300 lines. **Tier:** T3.
 
 ### W12
 
@@ -230,6 +216,7 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
 | iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | on main |
 | iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
 | iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
+| iyulab/unpdf | to open | `RasterGaps` counts only the unpaintable runs a page shows (unpdf-clip) | to open |
 
 ## Maintainer steps
 

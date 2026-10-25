@@ -412,7 +412,9 @@ class Parsed:
     def diagnostics(self) -> tuple[Diagnostic, ...]:
         """What the parse could not carry into the document, and what
         rendering it drops, as a tuple of `Diagnostic`: `ocr_gap` for each gap
-        not yet filled or failed, and `ocr_failed` for each failed one."""
+        not yet filled or failed, `ocr_failed` for each failed one, and
+        `raster_incomplete` for what the image of a filled page's latest
+        request left out."""
     def to_json(self) -> str:
         """The document and its diagnostics as one JSON object,
         `{schema_version, identity, document, diagnostics}`, written with the
@@ -438,9 +440,10 @@ class Parsed:
         gap when `None`, that is not yet filled or failed and asks for an
         image, in document order, made with the GIL released: an OCR run
         elsewhere, in another process too, reads each and passes its text to
-        `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. A
-        page's gap asks for none yet, and a row naming no unsettled gap is
-        passed over. Each image is copied, and work past `max_work` raises
+        `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. An
+        embedded image is copied and a page painted as a PNG at up to 150 dpi,
+        a page that cannot be painted asking for none, and a row naming no
+        unsettled gap is passed over. Work past `max_work` raises
         `ResourceLimitError`."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the

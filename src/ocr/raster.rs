@@ -1,15 +1,10 @@
 use std::num::NonZeroU32;
 use std::ops::RangeInclusive;
-#[cfg(feature = "raster")]
-use std::sync::Arc;
 
 use crate::config::ConfigError;
 use crate::error::ConvertError;
 use crate::formats::Source;
 use crate::ledger::Ledger;
-use crate::ocr::OcrImage;
-#[cfg(feature = "raster")]
-use crate::ocr::request::byte_units;
 
 /// How large an image of a page an [`OcrEngine`](crate::OcrEngine) takes: the resolution a
 /// page is painted at, unless its pixels would pass `max_pixels`.
@@ -82,53 +77,59 @@ impl Default for RasterSpec {
 
 /// Pixels of a painted page per unit of [`Limits::max_work`](crate::Limits::max_work).
 #[cfg_attr(not(feature = "raster"), expect(dead_code, reason = "only painting charges pixels"))]
-pub(crate) const PIXELS_PER_UNIT: u64 = 128;
+const PIXELS_PER_UNIT: u64 = 128;
 
-/// 1-based `page` of `source` painted under `spec` as an RGB PNG: its pixels charged to
-/// `ledger` before it is painted and its PNG's bytes after; `None` when the source keeps no
-/// pages, or no dpi fits the page, or unpdf cannot paint it.
+/// The dpi 1-based `page` of `source` is painted at under `spec`, its pixels charged to
+/// `ledger`; `None` when the source keeps no pages or no dpi fits the page.
 #[cfg(feature = "raster")]
-pub(crate) fn page_image(
+pub(crate) fn plan(
     source: &Source,
     page: NonZeroU32,
     spec: &RasterSpec,
     ledger: &Ledger<'_>,
-) -> Result<Option<OcrImage>, ConvertError> {
+) -> Result<Option<u32>, ConvertError> {
     let Some(pdf) = source.pdf.as_ref() else { return Ok(None) };
     let Some(page_box) = pdf.page_box(page) else { return Ok(None) };
     let Some((dpi, pixels)) = spec.fit(page_box.width, page_box.height) else { return Ok(None) };
     ledger.charge(pixels.div_ceil(PIXELS_PER_UNIT))?;
-    let Some(png) = painting::paint(pdf, page, dpi) else { return Ok(None) };
-    ledger.charge(byte_units(png.len()))?;
-    Ok(Some(OcrImage { bytes: Arc::from(png), media_type: "image/png", dpi: Some(dpi) }))
+    Ok(Some(dpi))
 }
 
 #[cfg(not(feature = "raster"))]
 #[expect(clippy::unnecessary_wraps, reason = "the signature painting has")]
-pub(crate) fn page_image(
+pub(crate) fn plan(
     _: &Source,
     _: NonZeroU32,
     _: &RasterSpec,
     _: &Ledger<'_>,
-) -> Result<Option<OcrImage>, ConvertError> {
+) -> Result<Option<u32>, ConvertError> {
     Ok(None)
 }
 
+/// A page painted as an RGB PNG, and how many of its text runs, images, inline images and
+/// content streams the painting left out.
+pub(crate) struct Painted {
+    pub(crate) png: Vec<u8>,
+    pub(crate) unpainted: u64,
+}
+
+/// 1-based `page` of `source` painted at `dpi`, its crop box turned by its `/Rotate`; `None`
+/// when unpdf cannot paint it.
 #[cfg(feature = "raster")]
-mod painting {
-    use std::num::NonZeroU32;
-
+pub(crate) fn paint(source: &Source, page: NonZeroU32, dpi: u32) -> Option<Painted> {
     use unpdf::parser::raster::{PageRegion, RasterOptions};
+    let options =
+        RasterOptions { dpi: f32::from(u16::try_from(dpi).ok()?), region: PageRegion::Crop };
+    let painted = source.pdf.as_ref()?.parser.render_page(page.get(), &options).ok()?;
+    let gaps = painted.gaps;
+    let unpainted =
+        [gaps.text_runs, gaps.images, gaps.inline_images, gaps.undecodable_content_streams];
+    Some(Painted { png: painted.to_png(), unpainted: unpainted.into_iter().map(u64::from).sum() })
+}
 
-    use crate::formats::pdf::PdfSource;
-
-    /// 1-based `page` of `source` painted at `dpi` as an RGB PNG, its crop box turned by its
-    /// `/Rotate`; `None` when unpdf cannot paint it.
-    pub(super) fn paint(source: &PdfSource, page: NonZeroU32, dpi: u32) -> Option<Vec<u8>> {
-        let dpi = f32::from(u16::try_from(dpi).ok()?);
-        let options = RasterOptions { dpi, region: PageRegion::Crop };
-        Some(source.parser.render_page(page.get(), &options).ok()?.to_png())
-    }
+#[cfg(not(feature = "raster"))]
+pub(crate) fn paint(_: &Source, _: NonZeroU32, _: u32) -> Option<Painted> {
+    None
 }
 
 #[cfg(test)]

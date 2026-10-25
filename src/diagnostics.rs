@@ -98,6 +98,9 @@ diagnostic_codes! {
     /// A gap whose OCR failed: a page's marker stands where its text would be, and an image's
     /// text is missing after its block.
     OcrFailed = "ocr_failed", Deferred;
+    /// A text run, image, inline image or content stream that a filled page's painted image
+    /// left out.
+    RasterIncomplete = "raster_incomplete", Lost;
     /// Image content dropped by the selected image policy.
     ImageOmitted = "image_omitted", Omitted;
     /// An image, other than an embedded PNG or JPEG, that image OCR leaves without a gap.
@@ -387,7 +390,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const CODES: [(&str, LossClass); 45] = [
+    const CODES: [(&str, LossClass); 46] = [
         ("part_unreadable", LossClass::Lost),
         ("unit_unreadable", LossClass::Lost),
         ("cell_value_unreadable", LossClass::Lost),
@@ -401,6 +404,7 @@ mod tests {
         ("image_placeholder", LossClass::Deferred),
         ("ocr_gap", LossClass::Deferred),
         ("ocr_failed", LossClass::Deferred),
+        ("raster_incomplete", LossClass::Lost),
         ("image_omitted", LossClass::Omitted),
         ("image_not_ocred", LossClass::Omitted),
         ("image_unplaced", LossClass::Lost),

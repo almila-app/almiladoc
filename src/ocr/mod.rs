@@ -17,7 +17,7 @@ pub use engine::{OcrEngine, OcrFailure, OcrOutcome, OcrSummary};
 pub(crate) use fill::{GapFills, GapState, gaps};
 pub(crate) use images::leave_image_gaps;
 pub use raster::RasterSpec;
-pub(crate) use request::{Inputs, request};
+pub(crate) use request::{Inputs, requests};
 pub use request::{OcrImage, OcrRequest};
 
 /// What OCR read for one gap.

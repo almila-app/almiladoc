@@ -68,6 +68,11 @@ impl<'a> Ledger<'a> {
     pub(crate) fn spent(&self) -> u64 {
         self.spent.get()
     }
+
+    /// The token this ledger watches, if any.
+    pub(crate) fn cancel(&self) -> Option<&'a CancelToken> {
+        self.cancel
+    }
 }
 
 #[cfg(test)]

@@ -1,11 +1,11 @@
 //! A PDF page gap's request carries its page painted as a PNG under the engine's raster spec.
 
 use crate::pdf::write_pdf;
-use crate::support::{converter, fixture, limited, trips};
+use crate::support::{converter, fixture, limited, reported, trips};
 use almiladoc::model::OcrOrigin;
 use almiladoc::{
-    CancelToken, ConfigError, ConvertError, Converter, Format, GapFill, Input, Limit, OcrEngine,
-    OcrOutcome, OcrRequest, PageSelection, Parsed, RasterSpec,
+    CancelToken, ConfigError, ConvertError, Converter, DiagnosticCode, Format, GapFill, Input,
+    Limit, OcrEngine, OcrOutcome, OcrRequest, PageSelection, Parsed, RasterSpec, Region,
 };
 
 fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
@@ -195,4 +195,92 @@ fn a_page_s_pixels_are_charged_before_it_is_painted_and_its_png_after() {
         let refused = parsed.ocr_requests(&RasterSpec::default(), None);
         assert!(trips(&refused, Limit::Work, max), "{max}: {refused:?}");
     }
+}
+
+/// What filling every page of `bytes` reports beside its gaps, run by an engine and by hand.
+fn painting_losses(bytes: &[u8]) -> Vec<(DiagnosticCode, Region, Option<u32>, u64)> {
+    let input = || Input::new(bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
+    let engine = Pages { cancels: None, calls: std::sync::Mutex::default() };
+    let mut run = converter(1).parse(input()).unwrap();
+    run.ocr(&engine, None).unwrap();
+    let mut by_hand = converter(1).parse(input()).unwrap();
+    for request in by_hand.ocr_requests(&RasterSpec::default(), None).unwrap() {
+        by_hand.fill_gap(request.gap, GapFill::Markdown("page".into())).unwrap();
+    }
+    assert_eq!(reported(run.diagnostics()), reported(by_hand.diagnostics()));
+    let lost = reported(run.diagnostics());
+    let rendered = converter(1).convert_with_ocr(input(), &engine);
+    let incomplete = matches!(rendered, Err(ConvertError::Incomplete { .. }));
+    assert_eq!(incomplete, !lost.is_empty(), "{rendered:?}");
+    lost
+}
+
+/// A one-page PDF whose content stream is `contents`, over `resources`, with `extra` as objects
+/// 5 on.
+fn painted(resources: &str, contents: &str, extra: &[&str]) -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {resources} >> \
+             /Contents 4 0 R >>"
+        ),
+        contents.to_owned(),
+    ];
+    objects.extend(extra.iter().map(|object| (*object).to_owned()));
+    write_pdf(&objects)
+}
+
+fn plain(content: &str) -> String {
+    format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len())
+}
+
+const NOT_ZLIB: &str = "/Length 10 /Filter /FlateDecode >>\nstream\nnot zlib!!\nendstream";
+
+#[test]
+fn a_filled_page_reports_each_kind_its_painting_left_out() {
+    let lost = |count| vec![(DiagnosticCode::RasterIncomplete, Region::Body, Some(1), count)];
+    let undecodable = painted("", &format!("<< {NOT_ZLIB}"), &[]);
+    let jpeg = "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+        /BitsPerComponent 8 /Filter /DCTDecode /Length 10 >>\nstream\nnot a jpeg\nendstream";
+    let image =
+        painted("/XObject << /Im1 5 0 R >>", &plain("q 200 0 0 200 9 9 cm /Im1 Do Q"), &[jpeg]);
+    let inline = painted("", &plain("q 100 0 0 100 9 9 cm BI /W 1 /H ID x EI Q"), &[]);
+    let group = format!(
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] \
+         /Group << /S /Transparency /CS /DeviceGray >> {NOT_ZLIB}"
+    );
+    let masked = painted(
+        "/ExtGState << /G1 << /SMask << /Type /Mask /S /Luminosity /G 5 0 R >> >> >>",
+        &plain("/G1 gs 0 0 1 rg 100 100 200 200 re f"),
+        &[&group],
+    );
+    for (bytes, expected) in [
+        (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10)),
+        (undecodable, lost(1)),
+        (image, lost(1)),
+        (inline, lost(1)),
+        (masked, Vec::new()),
+        (fixture("pdf/handmade-jpeg-scan.pdf"), Vec::new()),
+        (fixture("pdf/handmade-mesh-shading.pdf"), Vec::new()),
+    ] {
+        assert_eq!(painting_losses(&bytes), expected);
+    }
+}
+
+#[test]
+fn a_fill_reports_its_latest_request_s_painting_and_a_failure_none() {
+    let bytes = fixture("pdf/handmade-predefined-cmap.pdf");
+    let default = RasterSpec::default();
+    let mut filled = every_page(&converter(1), &bytes);
+    let [request] = filled.ocr_requests(&default, None).unwrap().try_into().unwrap();
+    filled.ocr_requests(&default, None).unwrap();
+    filled.fill_gap(request.gap, GapFill::Markdown("page".into())).unwrap();
+    let lost = [(DiagnosticCode::RasterIncomplete, Region::Body, Some(1), 10)];
+    assert_eq!(reported(filled.diagnostics()), lost);
+    let mut failed = every_page(&converter(1), &bytes);
+    failed.ocr_requests(&default, None).unwrap();
+    failed.fail_gap(request.gap).unwrap();
+    let ocr_failed = [(DiagnosticCode::OcrFailed, Region::Body, Some(1), 1)];
+    assert_eq!(reported(failed.diagnostics()), ocr_failed);
 }

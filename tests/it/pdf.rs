@@ -20,6 +20,8 @@ const VERDICTS: &[(&str, &[&str])] = &[
     ("handmade-blank-state", &["no_text"]),
     ("handmade-header-only", &["text", "text", "text"]),
     ("handmade-image-only", &["needs_ocr image_backed"]),
+    ("handmade-jpeg-scan", &["needs_ocr image_backed"]),
+    ("handmade-mesh-shading", &["no_text"]),
     ("handmade-invisible-mode3-scan", &["needs_ocr invisible_text"]),
     ("handmade-invisible-mode3-alone", &["needs_ocr invisible_text"]),
     ("handmade-invisible-clipped", &["needs_ocr invisible_text"]),
