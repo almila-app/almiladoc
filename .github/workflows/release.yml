@@ -109,8 +109,8 @@ jobs:
       contents: read # checkout
     env:
       ARCH: x86_64
-      MANYLINUX: quay.io/pypa/manylinux_2_28_x86_64@sha256:076b19ef6e698f28649fa817c49d14443201e01da85240e8e52f93e8daa49bff # 2026.10.22-0
-      MUSLLINUX: quay.io/pypa/musllinux_1_2_x86_64@sha256:773cb7e73652e4596eba6a9d593b01278f86772641d6530a6660422d30e50f36 # 2026.10.22-0
+      MANYLINUX: quay.io/pypa/manylinux_2_28_x86_64@sha256:a57da7c5fcbdc2df58c0f95f10a6fd676e5ea98097d93e70d20db52c926db2b0 # latest on 2026-10-25
+      MUSLLINUX: quay.io/pypa/musllinux_1_2_x86_64@sha256:e60f3444339cad4d910c49672d5b7fc95a6506a0e8d9b3a895047d2ac74c501d # latest on 2026-10-25
     steps: &linux-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,8 +157,8 @@ jobs:
       contents: read # checkout
     env:
       ARCH: aarch64
-      MANYLINUX: quay.io/pypa/manylinux_2_28_aarch64@sha256:270a5e59af09f02dfc07fe4bb2cb2c5625c76d085cfa47f87dd93d9026eacc75 # 2026.10.22-0
-      MUSLLINUX: quay.io/pypa/musllinux_1_2_aarch64@sha256:98f93110a91c028291c902e55619154c5522c57ccecef1f9eedcc2f1177aad12 # 2026.10.22-0
+      MANYLINUX: quay.io/pypa/manylinux_2_28_aarch64@sha256:98f9eacf40f95fa2f890c646147c413c3dc93c130611bb18f9ee9e7c4be802a5 # latest on 2026-10-25
+      MUSLLINUX: quay.io/pypa/musllinux_1_2_aarch64@sha256:ca179b0544216e833eace179a63f91688ed8e8b0e817b98a82b551593e7bb5b5 # latest on 2026-10-25
     steps: *linux-steps
 
   macos-arm64:
