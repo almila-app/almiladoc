@@ -139,10 +139,29 @@ def advisory_ignores(root: Path) -> list[str]:
     return [entry if isinstance(entry, str) else entry["id"] for entry in entries]
 
 
-def clarifications(root: Path) -> dict[str, dict[str, str]]:
+class Clarified(NamedTuple):
+    """An about.toml clarification's checksum, over the text from `start` through `end` when
+    it names them, as cargo-about reads it, else over the whole file."""
+
+    checksum: str
+    start: str | None = None
+    end: str | None = None
+
+    def span(self, content: bytes) -> bytes | None:
+        begin = 0 if self.start is None else content.find(self.start.encode())
+        if begin < 0 or self.end is None:
+            return None if begin < 0 else content[begin:]
+        stop = content.find(self.end.encode(), begin)
+        return None if stop < 0 else content[begin : stop + len(self.end.encode())]
+
+
+def clarifications(root: Path) -> dict[str, dict[str, Clarified]]:
     config = tomllib.loads((root / "about.toml").read_text(encoding="utf-8"))
     return {
-        crate: {file["path"]: file["checksum"] for file in entry["clarify"].get("files", [])}
+        crate: {
+            file["path"]: Clarified(file["checksum"], file.get("start"), file.get("end"))
+            for file in entry["clarify"].get("files", [])
+        }
         for crate, entry in config.items()
         if isinstance(entry, dict) and "clarify" in entry
     }
@@ -320,19 +339,18 @@ def advisory_findings(ident: str, osv: dict, locked: set[str]) -> list[str]:
 
 
 def clarify_findings(
-    crate: str, release: str, pinned: dict[str, str], archive: bytes
+    crate: str, release: str, pinned: dict[str, Clarified], archive: bytes
 ) -> list[str]:
     found = []
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as crate_file:
         names = set(crate_file.getnames())
-        for path, checksum in sorted(pinned.items()):
+        for path, clarified in sorted(pinned.items()):
             member = f"{crate}-{release}/{path}"
-            digest = (
-                hashlib.sha256(crate_file.extractfile(member).read()).hexdigest()
-                if member in names
-                else "absent"
+            span = (
+                clarified.span(crate_file.extractfile(member).read()) if member in names else None
             )
-            if digest != checksum:
+            digest = "absent" if span is None else hashlib.sha256(span).hexdigest()
+            if digest != clarified.checksum:
                 found.append(f"about.toml {crate} {path}: {release} has sha256 {digest}")
     return found
 
@@ -484,9 +502,9 @@ def self_test() -> int:
         and "almiladoc-python" in locked_versions(ROOT)
         and len(clarified) > 0
         and all(
-            re.fullmatch(r"[0-9a-f]{64}", digest)
+            re.fullmatch(r"[0-9a-f]{64}", file.checksum)
             for files in clarified.values()
-            for digest in files.values()
+            for file in files.values()
         ),
         f"about.toml clarifications {clarified}",
     )
@@ -494,27 +512,45 @@ def self_test() -> int:
         r'checksum = "(\w+)"', (ROOT / "about.toml").read_text(encoding="utf-8")
     )
     expect(
-        sorted(digest for files in clarified.values() for digest in files.values())
+        sorted(file.checksum for files in clarified.values() for file in files.values())
         == sorted(pinned_sums),
         "every about.toml checksum",
     )
     packed = io.BytesIO()
     with tarfile.open(fileobj=packed, mode="w:gz") as crate_file:
-        info = tarfile.TarInfo("c-1.0.0/LICENSE")
-        info.size = 4
-        crate_file.addfile(info, io.BytesIO(b"text"))
+        for name, content in [("LICENSE", b"text"), ("data.rs", b"code /* (c) A. notice. */ x")]:
+            info = tarfile.TarInfo(f"c-1.0.0/{name}")
+            info.size = len(content)
+            crate_file.addfile(info, io.BytesIO(content))
     held = hashlib.sha256(b"text").hexdigest()
+    notice = hashlib.sha256(b"(c) A. notice.").hexdigest()
     expect(
-        clarify_findings("c", "1.0.0", {"LICENSE": held}, packed.getvalue()) == [],
-        "a held clarification",
+        clarify_findings(
+            "c",
+            "1.0.0",
+            {"LICENSE": Clarified(held), "data.rs": Clarified(notice, "(c)", "notice.")},
+            packed.getvalue(),
+        )
+        == [],
+        "a held clarification, of a whole file and of the span between its markers",
     )
     expect(
-        clarify_findings("c", "1.0.0", {"LICENSE": "0" * 64, "x/LICENSE": held}, packed.getvalue())
+        clarify_findings(
+            "c",
+            "1.0.0",
+            {
+                "LICENSE": Clarified("0" * 64),
+                "x/LICENSE": Clarified(held),
+                "data.rs": Clarified(notice, "(c)", "gone"),
+            },
+            packed.getvalue(),
+        )
         == [
             f"about.toml c LICENSE: 1.0.0 has sha256 {held}",
+            "about.toml c data.rs: 1.0.0 has sha256 absent",
             "about.toml c x/LICENSE: 1.0.0 has sha256 absent",
         ],
-        "a moved and a missing clarification",
+        "a moved and a missing clarification, and a span whose end marker is gone",
     )
     with tempfile.TemporaryDirectory() as directory:
         fake = Path(directory)
