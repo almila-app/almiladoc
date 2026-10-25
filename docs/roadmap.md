@@ -54,7 +54,6 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W10 | ocr-requests | |
 | W11 | rasterizer | |
 | W12 | ocr-http | |
 
@@ -75,24 +74,6 @@ release follows W12.
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W10
-
-#### ocr-requests: requests exported for an OCR run elsewhere
-- **Goal:** a parent process OCRs a child's exported gaps (ADR 0002 decisions 2 and 12).
-- **Scope:** `Parsed::ocr_requests(&mut self, gaps: Option<&[GapId]>)`: the listed unsettled gaps'
-  requests in document order, an id naming no unsettled gap passed over, each charged as
-  `Parsed::ocr` charges it. Through `/change-core-api`: `Parsed.ocr_requests(gaps=None)`,
-  releasing the GIL, and a frozen, pickling `OcrRequest` (`gap`, the exact `Parsed.gaps` row;
-  `image`; `media_type`; `max_text_bytes`), whose text comes back through
-  `fill_gap(request.gap, text)`; Python takes no engine of its own.
-- **Files:** new `python/src/ocr.rs`; `src/converter.rs`, `tests/`, `python/`, `README.md`,
-  `REUSE.toml`, `CLAUDE.md`, `.claude/`.
-- **Tests:** hand-run requests and `Parsed::ocr` agree, and a Python loop over unpickled requests
-  of the rich DOCX fixture renders what both do; a listed id or row naming no unsettled gap is
-  passed over; a lowered `max_work` trips on the copies.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 350 lines. **Tier:** T3.
 
 ### W11
 
@@ -132,7 +113,7 @@ release follows W12.
     trips before painting and at the PNG charge; `convert_with_ocr` equals the hand flow; Python's
     `dpi=300` reaches its requests; `pdf_raster` replays.
 - **Credit:** none.
-- **Depends on:** ocr-requests. **Size:** about 900 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 900 lines. **Tier:** T3.
 
 ### W12
 

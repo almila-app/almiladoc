@@ -580,6 +580,51 @@ impl Parsed {
         Ok(())
     }
 
+    /// The request for each gap `gaps` names, every gap when `None`, that is not yet filled or
+    /// failed and asks for an image, in document order, for an engine run elsewhere: its
+    /// results come back through [`Parsed::fill_gap`] and [`Parsed::fail_gap`]. A page's gap
+    /// asks for none yet, and an id that names no unsettled gap is passed over. Each image is
+    /// copied, charged on from the work charged so far at one unit per 16 bytes, on a pool
+    /// built from its [`Config`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConvertError::ResourceLimit`] when the copies take the work past
+    /// [`Limits::max_work`](crate::Limits::max_work); [`ConvertError::Cancelled`] once the
+    /// parse's token is cancelled; [`ConvertError::Internal`] when the pool cannot start.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, Converter, Format, GapFill, ImageOcr, Input};
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/docx/handmade-rich.docx");
+    /// let docx = std::fs::read(path)?;
+    /// let mut config = Config::default();
+    /// config.image_ocr = ImageOcr::All;
+    /// let mut parsed = Converter::new(config)?.parse(Input::new(&docx, Format::Docx))?;
+    /// for request in parsed.ocr_requests(None)? {
+    ///     assert_eq!(request.image.media_type, "image/png");
+    ///     parsed.fill_gap(request.gap, GapFill::Markdown("A dot".into()))?;
+    /// }
+    /// assert!(parsed.ocr_requests(None)?.is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn ocr_requests(
+        &mut self,
+        gaps: Option<&[GapId]>,
+    ) -> Result<Vec<OcrRequest>, ConvertError> {
+        self.refuse_cancelled()?;
+        let config = Arc::clone(&self.config);
+        run_on_pool(&config, || {
+            let mut requests = Vec::new();
+            for gap in self.asking(gaps) {
+                requests.extend(Target::request(self, &gap)?);
+            }
+            Ok(requests)
+        })
+    }
+
     /// Run `engine` over the gaps `gaps` names, every gap when `None`, that are not yet filled
     /// or failed and ask for an image, in document order and in batches of its
     /// [`OcrEngine::batch_size`], all on one pool built from its [`Config`]. Each
@@ -1648,6 +1693,7 @@ mod tests {
         let mut empty = parsed(Vec::new(), Config::default());
         empty.cancel = Some(token.clone());
         assert_eq!(empty.ocr(&Unread, None), Err(ConvertError::Cancelled));
+        assert_eq!(empty.ocr_requests(None), Err(ConvertError::Cancelled));
         let png = b"\x89PNG\r\n\x1a\n".to_vec();
         let (media_type, origin_part) = ("image/png".into(), String::new());
         let mut imaged = parsed(Vec::new(), Config::default());

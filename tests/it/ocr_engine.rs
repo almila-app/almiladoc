@@ -99,6 +99,18 @@ fn parsed(converter: &Converter, bytes: &[u8]) -> Parsed {
     converter.parse(Input::new(bytes, Format::Docx)).unwrap()
 }
 
+/// The least `max_work` under which `bytes` parse with image OCR and `passes` holds of the parse.
+fn least_work(bytes: &[u8], passes: &dyn Fn(&mut Parsed) -> bool) -> u64 {
+    let (mut low, mut high) = (0, 1 << 20);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let converter = image_ocr(|config| config.limits.max_work = mid);
+        let parsed = converter.parse(Input::new(bytes, Format::Docx));
+        if parsed.is_ok_and(|mut parsed| passes(&mut parsed)) { high = mid } else { low = mid + 1 }
+    }
+    low
+}
+
 fn summary(filled: usize, failed: usize, unattempted: usize) -> OcrSummary {
     let mut summary = OcrSummary::default();
     (summary.filled, summary.failed, summary.unattempted) = (filled, failed, unattempted);
@@ -205,22 +217,9 @@ fn an_engine_panic_is_internal() {
 #[test]
 fn each_request_charges_its_image_at_one_unit_per_sixteen_bytes() {
     let bytes = pictures(2, 4000);
-    let least = |passes: &dyn Fn(&Converter) -> bool| {
-        let (mut low, mut high) = (0, 1 << 20);
-        while low < high {
-            let mid = low + (high - low) / 2;
-            let converter = image_ocr(|config| config.limits.max_work = mid);
-            if passes(&converter) { high = mid } else { low = mid + 1 }
-        }
-        low
-    };
-    let parse = least(&|converter| converter.parse(Input::new(&bytes, Format::Docx)).is_ok());
-    let requests = least(&|converter| {
-        let failing = Scripted::new(2, &["LL"]);
-        converter
-            .parse(Input::new(&bytes, Format::Docx))
-            .is_ok_and(|mut p| p.ocr(&failing, None).is_ok())
-    });
+    let parse = least_work(&bytes, &|_| true);
+    let requests =
+        least_work(&bytes, &|parsed| parsed.ocr(&Scripted::new(2, &["LL"]), None).is_ok());
     assert_eq!(requests, parse + 2 * 4000_u64.div_ceil(16));
     let converter = image_ocr(|config| config.limits.max_work = requests - 1);
     let mut short = parsed(&converter, &bytes);
@@ -253,4 +252,39 @@ fn a_page_gap_asks_for_no_image_yet() {
     let mut parsed = configured(|_| {}).parse(Input::new(&pdf, Format::Pdf)).unwrap();
     let engine = Scripted::new(1, &[]);
     assert_eq!((parsed.ocr(&engine, None), engine.calls().len()), (Ok(summary(0, 0, 0)), 0));
+}
+
+#[test]
+fn hand_run_requests_and_fills_render_the_engine_s_reading() {
+    let converter = image_ocr(|config| config.on_loss = OnLoss::Report);
+    let rich = fixture("docx/handmade-rich.docx");
+    let mut by_hand = parsed(&converter, &rich);
+    for request in by_hand.ocr_requests(None).unwrap() {
+        by_hand.fill_gap(request.gap, GapFill::Markdown(read(&request))).unwrap();
+    }
+    assert_eq!(by_hand.ocr_requests(None), Ok(Vec::new()));
+    assert_eq!(by_hand.render().unwrap().markdown(), RICH_READ);
+}
+
+#[test]
+fn requests_pass_over_a_settled_gap_and_charge_their_copies() {
+    let bytes = pictures(2, 4000);
+    let converter = image_ocr(|config| config.limits.max_ocr_text_bytes = 3 << 20);
+    let mut parsed = parsed(&converter, &bytes);
+    let [one, two] = parsed.gaps().map(|gap| gap.id).collect::<Vec<_>>().try_into().unwrap();
+    let requests = parsed.ocr_requests(None).unwrap();
+    assert_eq!(
+        requests.iter().map(|r| (r.gap, r.max_text_bytes)).collect::<Vec<_>>(),
+        [(one, 3 << 20), (two, 3 << 20)]
+    );
+    parsed.fail_gap(one).unwrap();
+    assert_eq!(parsed.ocr_requests(Some(&[one, two])).unwrap(), requests[1..]);
+    let parse = least_work(&bytes, &|_| true);
+    let copied = least_work(&bytes, &|parsed| parsed.ocr_requests(None).is_ok());
+    assert_eq!(copied, parse + 2 * 4000_u64.div_ceil(16));
+    let cancelled = CancelToken::new();
+    let input = Input::new(&bytes, Format::Docx).with_cancel(cancelled.clone());
+    let mut parsed = image_ocr(|_| {}).parse(input).unwrap();
+    cancelled.cancel();
+    assert_eq!(parsed.ocr_requests(None), Err(ConvertError::Cancelled));
 }

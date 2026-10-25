@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import pickle
 import re
 import shutil
 import subprocess
@@ -590,6 +591,35 @@ class ConversionTest(unittest.TestCase):
         )
         self.assertNotIn("ocr_gap", [d.code for d in parsed.diagnostics])
 
+    def test_unpickled_requests_fill_their_gaps(self):
+        config = almiladoc.Config(
+            on_loss=almiladoc.OnLoss.REPORT, image_ocr=almiladoc.ImageOcr.ALL
+        )
+        parsed = almiladoc.Converter(config).parse(RICH.read_bytes())
+        (request,) = parsed.ocr_requests()
+        self.assertEqual(request.gap, parsed.gaps[0])
+        self.assertEqual((request.media_type, request.max_text_bytes), ("image/png", 1 << 20))
+        self.assertEqual(request.image, parsed.assets()[0][2])
+        self.assertEqual(
+            repr(request),
+            f'OcrRequest(gap={request.gap!r}, media_type="image/png", '
+            f"image=<{len(request.image)} bytes>, max_text_bytes=1048576)",
+        )
+        self.assertEqual(parsed.ocr_requests([("page", 1, 1, 1, None, [])]), [])
+        copy = pickle.loads(pickle.dumps(request))
+        fields = attrgetter("gap", "image", "media_type", "max_text_bytes")
+        self.assertEqual(fields(copy), fields(request))
+        parsed.fill_gap(copy.gap, f"OCR {copy.gap[2]}")
+        self.assertEqual(parsed.ocr_requests(), [])
+        self.assertEqual(
+            parsed.render().markdown,
+            "Rich objects follow.\n\n**Quarterly Widgets**\n\n"
+            "| Quarter | Widgets |\n| --- | --- |\n| Q1 | 10 |\n| Q2 | 14 |\n\n"
+            "- Plan\n- Build\n- Ship\n\n"
+            "![tiny dot image](asset:0)\n\nOCR 1\n\n"
+            "After the objects.\n",
+        )
+
     def test_the_identity_is_the_configs(self):
         identity = almiladoc.Converter().identity
         self.assertRegex(identity.version, r"^\d+\.\d+\.\d+(-rc\.\d+)?$")
@@ -867,12 +897,12 @@ class CancellationTest(unittest.TestCase):
                 call()
             self.assertEqual(caught.exception.code, "cancelled")
 
-    def test_a_parse_keeps_its_token_for_render_and_to_json(self):
+    def test_a_parse_keeps_its_token_for_its_later_work(self):
         token = almiladoc.CancelToken()
         parsed = almiladoc.Converter().parse(CSV.read_bytes(), "csv", cancel=token)
         self.assertEqual(parsed.render().markdown[:6], "| Kind")
         token.cancel()
-        for call in [parsed.render, parsed.to_json]:
+        for call in [parsed.render, parsed.to_json, parsed.ocr_requests]:
             with self.assertRaises(almiladoc.CancelledError) as caught:
                 call()
             self.assertEqual(caught.exception.code, "cancelled")

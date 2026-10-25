@@ -60,6 +60,7 @@ path = [
     "python/src/diagnostics.rs",
     "python/src/errors.rs",
     "python/src/input.rs",
+    "python/src/ocr.rs",
     "python/stubtest-allowlist.txt",
     "rust-toolchain.toml",
     "scripts/check_dist.py",

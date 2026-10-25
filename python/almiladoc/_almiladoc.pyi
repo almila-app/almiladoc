@@ -30,6 +30,7 @@ __all__ = [
     "MalformedError",
     "MissingPartError",
     "NeedsOcrError",
+    "OcrRequest",
     "OnLoss",
     "Parsed",
     "ResourceLimitError",
@@ -296,8 +297,8 @@ class CancelToken:
     def cancel(self) -> None:
         """Cancel every call holding this token, from any thread: each raises
         `CancelledError` at its next unit of work, a PDF's between its
-        pages, as do `render`, `to_json` and `fill_gap` on a `Parsed` a parse
-        holding it made."""
+        pages, as do `render`, `to_json`, `fill_gap` and `ocr_requests` on a
+        `Parsed` a parse holding it made."""
     @property
     def cancelled(self) -> bool:
         """True once `cancel` was called."""
@@ -360,6 +361,29 @@ class Conversion:
         `OnLoss.FAIL` only an image's gap not filled makes it false."""
 
 @final
+class OcrRequest:
+    """One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
+    `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
+    its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`; and
+    `max_text_bytes`, the most bytes of Markdown a fill of it takes."""
+
+    def __new__(
+        cls, gap: _GapRow, image: bytes, media_type: str, max_text_bytes: int
+    ) -> OcrRequest: ...
+    @property
+    def gap(self) -> _GapRow:
+        """The row of `Parsed.gaps` this request reads the image of."""
+    @property
+    def image(self) -> bytes:
+        """The image's PNG or JPEG bytes."""
+    @property
+    def media_type(self) -> str:
+        """`image/png` or `image/jpeg`."""
+    @property
+    def max_text_bytes(self) -> int:
+        """The most bytes of Markdown a fill of this gap takes."""
+
+@final
 class Parsed:
     """A parsed document, keeping the `Config` it was parsed under and what
     OCR gave its gaps: its model and diagnostics as JSON, the bytes of the
@@ -407,6 +431,17 @@ class Parsed:
         units; its place among that unit's gaps, or the document's; the
         1-based PDF page or the id of the image, an index of `assets`, OCR
         reads to fill it; and why a page's own text does not serve."""
+    def ocr_requests(
+        self, gaps: collections.abc.Sequence[_GapRow] | None = None
+    ) -> list[OcrRequest]:
+        """An `OcrRequest` for each gap of `gaps`, rows of `Parsed.gaps`, or every
+        gap when `None`, that is not yet filled or failed and asks for an
+        image, in document order, made with the GIL released: an OCR run
+        elsewhere, in another process too, reads each and passes its text to
+        `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. A
+        page's gap asks for none yet, and a row naming no unsettled gap is
+        passed over. Each image is copied, and work past `max_work` raises
+        `ResourceLimitError`."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""

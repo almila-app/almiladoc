@@ -5,6 +5,7 @@ mod converter;
 mod diagnostics;
 mod errors;
 mod input;
+mod ocr;
 
 use pyo3::prelude::*;
 
@@ -25,4 +26,6 @@ mod _almiladoc {
         InternalError, InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError,
         ResourceLimitError, UnsupportedError,
     };
+    #[pymodule_export]
+    use crate::ocr::OcrRequest;
 }

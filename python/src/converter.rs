@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use almiladoc::model::{GapId, OcrOrigin};
+use almiladoc::model::{GapId, GapReason, OcrOrigin};
 use almiladoc::{ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
 use crate::errors::{Failure, config_error, convert_error, gap_error};
 use crate::input::{Admission, buffer, read_file};
+use crate::ocr::OcrRequest;
 
 /// A flag any thread sets to cancel the calls it was passed to.
 #[pyclass(frozen, module = "almiladoc")]
@@ -30,8 +31,8 @@ impl CancelToken {
 
     /// Cancel every call holding this token, from any thread: each raises
     /// `CancelledError` at its next unit of work, a PDF's between its pages,
-    /// as do `render`, `to_json` and `fill_gap` on a `Parsed` a parse holding
-    /// it made.
+    /// as do `render`, `to_json`, `fill_gap` and `ocr_requests` on a `Parsed`
+    /// a parse holding it made.
     fn cancel(&self) {
         self.0.cancel();
     }
@@ -115,8 +116,21 @@ impl Conversion {
 }
 
 /// A gap as `(unit_kind, unit_ordinal, ordinal, page, asset, reasons)`.
-type GapRow =
+pub(crate) type GapRow =
     (Option<&'static str>, Option<u32>, u32, Option<u32>, Option<usize>, Vec<&'static str>);
+
+/// The row of the gap `id` names, which OCR reads `origin` to fill for `reasons`.
+fn gap_row(id: GapId, origin: OcrOrigin, reasons: &[GapReason]) -> GapRow {
+    let (page, asset) = match origin {
+        OcrOrigin::Page(page) => (Some(page.get()), None),
+        OcrOrigin::Image(asset) => (None, Some(asset.0)),
+        _ => (None, None),
+    };
+    let unit = id.unit();
+    let reasons = reasons.iter().map(|reason| reason.as_str()).collect();
+    let (kind, unit) = (unit.map(|u| u.kind.as_str()), unit.map(|u| u.ordinal.get()));
+    (kind, unit, id.ordinal().get(), page, asset, reasons)
+}
 
 /// What `Converter.inspect` reports of a PDF.
 #[pyclass(frozen, module = "almiladoc")]
@@ -269,18 +283,34 @@ impl Parsed {
     /// and why a page's own text does not serve.
     #[getter]
     fn gaps(&self, py: Python<'_>) -> Vec<GapRow> {
-        self.lock(py)
-            .gaps()
-            .map(|gap| {
-                let (page, asset) = match gap.origin {
-                    OcrOrigin::Page(page) => (Some(page.get()), None),
-                    OcrOrigin::Image(asset) => (None, Some(asset.0)),
-                    _ => (None, None),
-                };
-                let unit = gap.id.unit();
-                let reasons = gap.reasons.iter().map(|reason| reason.as_str()).collect();
-                let (kind, unit) = (unit.map(|u| u.kind.as_str()), unit.map(|u| u.ordinal.get()));
-                (kind, unit, gap.id.ordinal().get(), page, asset, reasons)
+        self.lock(py).gaps().map(|gap| gap_row(gap.id, gap.origin, &gap.reasons)).collect()
+    }
+
+    /// An `OcrRequest` for each gap of `gaps`, rows of `Parsed.gaps`, or every
+    /// gap when `None`, that is not yet filled or failed and asks for an
+    /// image, in document order, made with the GIL released: an OCR run
+    /// elsewhere, in another process too, reads each and passes its text to
+    /// `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. A
+    /// page's gap asks for none yet, and a row naming no unsettled gap is
+    /// passed over. Each image is copied, and work past `max_work` raises
+    /// `ResourceLimitError`.
+    #[pyo3(signature = (gaps = None))]
+    fn ocr_requests(
+        &self,
+        py: Python<'_>,
+        gaps: Option<Vec<GapKey<'_>>>,
+    ) -> PyResult<Vec<OcrRequest>> {
+        let ids: Option<Vec<GapId>> =
+            gaps.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect());
+        let mut parsed = self.lock(py);
+        let parsed: &mut almiladoc::Parsed = &mut parsed;
+        let requests =
+            py.detach(|| parsed.ocr_requests(ids.as_deref())).map_err(|e| convert_error(py, &e))?;
+        requests
+            .iter()
+            .map(|request| {
+                let row = gap_row(request.gap, request.origin, &request.reasons);
+                OcrRequest::of(py, row, request)
             })
             .collect()
     }
