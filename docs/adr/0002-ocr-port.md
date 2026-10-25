@@ -30,10 +30,10 @@ Date: 2026-10-14, revised 2026-10-24
 5. **Rendering.** A page gap's image is its crop box, an sRGB PNG unpdf paints from the parser
    `Parsed` keeps, so the page rendered is the one extracted, with no system font read. Pages render
    on the call's pool at the largest dpi up to the spec's at which its media box fits `max_pixels`,
-   charged one work unit per 128 of those pixels and per 16 PNG bytes; that cap and those charges
-   alone bound painting, which cancellation and `max_work` reach between pages. Unpainted text runs,
-   images, inline images and undecodable content streams report `raster_incomplete`; shadings and
-   soft masks, none.
+   charged one work unit per 128 of those pixels and per 16 PNG bytes, which cancellation and
+   `max_work` reach between pages; a page's own painting grows with its operations until each is
+   charged by the area it paints (raster-hook). Unpainted text runs, images, inline images and
+   undecodable content streams report `raster_incomplete`; shadings and soft masks, none.
 6. **Raster spec.** `RasterSpec` defaults to 150 dpi and MiMo-VL's cap of 12 845 056 pixels; it
    comes from the engine or the caller and stays outside `Config`, as it shapes requests, not fills.
 7. **`ocr-http`.** `OcrHttp` (feature `ocr-http`) posts to OpenAI-compatible `chat/completions` one

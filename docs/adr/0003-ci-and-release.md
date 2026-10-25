@@ -32,7 +32,7 @@ Date: 2026-10-14
 
 6. **Release.** `release.yml` runs on `v*` tag pushes, which alone publish, and rehearses on dispatch and weekly. Only publish jobs and `attest` hold `id-token: write`.
    - `guard`: advisories pass; on a tag push, the licensing FAQ exists, the annotated tag equals the workspace version, `rust-version` the toolchain minor, its commit on `main` with green `ci / required`, and `docs/release-dates.tsv` covers earlier final tags.
-   - `linux`: maturin `--zig` builds `manylinux_2_28` and `musllinux_1_2` wheels on native-arch Ubuntu runners. Smoke, in PyPA's matching digest-pinned image: CPython 3.11 and 3.15 tests, a CMap-needing PDF, the licence test; compressed wheels under 12 MB.
+   - `linux`: maturin `--zig` builds `manylinux_2_28` and `musllinux_1_2` wheels on native-arch Ubuntu runners. Smoke, in PyPA's matching digest-pinned image: CPython 3.11 and 3.15 tests, a CMap-needing PDF, a page painted to a PNG of the size its dpi gives, the licence test; compressed wheels under 12 MB.
    - `native`: `macos-26`, `macos-26-intel`, `windows-2025`, `windows-11-arm`; same smoke.
    - `sdist`, `crate`: both carry `$(LICENCE_SET)`; the sdist's own wheel is smoked. `attest` covers every file.
    - `publish-testpypi` (rc tags, environment `testpypi`) and `publish-pypi` (final tags, environment `pypi`): signed attestations, trusted publishing only.

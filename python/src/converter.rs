@@ -295,23 +295,33 @@ impl Parsed {
     /// image, in document order, made with the GIL released: an OCR run
     /// elsewhere, in another process too, reads each and passes its text to
     /// `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. An
-    /// embedded image is copied and a page painted as a PNG at up to 150 dpi,
-    /// a page that cannot be painted asking for none, and a row naming no
-    /// unsettled gap is passed over. Work past `max_work` raises
-    /// `ResourceLimitError`.
-    #[pyo3(signature = (gaps = None))]
+    /// embedded image is copied and a page painted as a PNG at the largest
+    /// dpi up to `dpi` at which its media box fits `max_pixels`, a page that
+    /// cannot be painted asking for none, and a row naming no unsettled gap is passed
+    /// over. A `dpi` outside 50 to 600 or `max_pixels` outside 1048576 to
+    /// 41943040 raises `ConfigError` with `limit` `raster`, an int that fits
+    /// neither `OverflowError`, and work past `max_work` `ResourceLimitError`.
+    #[pyo3(signature = (gaps = None, *, dpi = 150, max_pixels = 12_845_056))]
     fn ocr_requests(
         &self,
         py: Python<'_>,
         gaps: Option<Vec<GapKey<'_>>>,
+        dpi: u32,
+        max_pixels: u64,
     ) -> PyResult<Vec<OcrRequest>> {
+        let mut spec = RasterSpec::default();
+        (spec.dpi, spec.max_pixels) = (dpi, max_pixels);
         let ids: Option<Vec<GapId>> =
             gaps.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect());
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
-        let requests = py
-            .detach(|| parsed.ocr_requests(&RasterSpec::default(), ids.as_deref()))
-            .map_err(|e| convert_error(py, &e))?;
+        let requests =
+            py.detach(|| parsed.ocr_requests(&spec, ids.as_deref())).map_err(|e| match e {
+                ConvertError::InvalidConfig(error @ almiladoc::ConfigError::Raster) => {
+                    config_error(py, &error)
+                }
+                e => convert_error(py, &e),
+            })?;
         requests
             .iter()
             .map(|request| {

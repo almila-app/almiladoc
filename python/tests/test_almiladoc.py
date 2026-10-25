@@ -9,6 +9,7 @@ import os
 import pickle
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,12 @@ def probe(code, *args, address_space):
         check=True,
     )
     return [ast.literal_eval(line) for line in child.stdout.splitlines()]
+
+
+def png_size(png):
+    """The width and height a PNG's IHDR chunk declares."""
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and png[12:16] == b"IHDR", png[:16]
+    return struct.unpack(">II", png[16:24])
 
 
 def archive(parts):
@@ -603,11 +610,11 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(
             repr(request),
             f'OcrRequest(gap={request.gap!r}, media_type="image/png", '
-            f"image=<{len(request.image)} bytes>, max_text_bytes=1048576)",
+            f"image=<{len(request.image)} bytes>, max_text_bytes=1048576, dpi=None)",
         )
         self.assertEqual(parsed.ocr_requests([("page", 1, 1, 1, None, [])]), [])
         copy = pickle.loads(pickle.dumps(request))
-        fields = attrgetter("gap", "image", "media_type", "max_text_bytes")
+        fields = attrgetter("gap", "image", "media_type", "dpi", "max_text_bytes")
         self.assertEqual(fields(copy), fields(request))
         parsed.fill_gap(copy.gap, f"OCR {copy.gap[2]}")
         self.assertEqual(parsed.ocr_requests(), [])
@@ -619,6 +626,33 @@ class ConversionTest(unittest.TestCase):
             "![tiny dot image](asset:0)\n\nOCR 1\n\n"
             "After the objects.\n",
         )
+
+    def test_a_page_request_holds_its_page_painted_at_the_asked_dpi(self):
+        parsed = almiladoc.Converter().parse(MIXED.read_bytes())
+        painted = [
+            (request.gap[3], request.media_type, request.dpi, png_size(request.image))
+            for spec in [{}, {"dpi": 300}, {"dpi": 300, "max_pixels": 1 << 20}]
+            for request in parsed.ocr_requests(**spec)
+        ]
+        self.assertEqual(
+            painted,
+            [
+                (2, "image/png", 150, (1275, 1650)),
+                (2, "image/png", 300, (2550, 3300)),
+                (2, "image/png", 105, (893, 1155)),
+            ],
+        )
+        (request,) = parsed.ocr_requests(dpi=50)
+        copy = pickle.loads(pickle.dumps(request))
+        self.assertEqual((copy.dpi, copy.image, copy.gap), (50, request.image, request.gap))
+        for refused in [{"dpi": 49}, {"dpi": 601}, {"max_pixels": (1 << 20) - 1}]:
+            with self.assertRaises(almiladoc.ConfigError) as caught:
+                parsed.ocr_requests(**refused)
+            self.assertEqual(caught.exception.limit, "raster", refused)
+        for unfit in [{"dpi": -1}, {"max_pixels": 1 << 64}]:
+            with self.assertRaises(OverflowError):
+                parsed.ocr_requests(**unfit)
+        self.assertEqual(len(parsed.gaps), 1)
 
     def test_the_identity_is_the_configs(self):
         identity = almiladoc.Converter().identity

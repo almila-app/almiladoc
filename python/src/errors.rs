@@ -271,6 +271,7 @@ pub(crate) fn config_error(py: Python<'_>, error: &almiladoc::ConfigError) -> Py
             (limit.as_str(), Some(*ceiling), None)
         }
         almiladoc::ConfigError::Threads { max, .. } => ("threads", None, Some(*max)),
+        almiladoc::ConfigError::Raster => ("raster", None, None),
         _ => return raise(py, &ConvertError::Internal, error.to_string()),
     };
     let raised = ConfigError::new_err(error.to_string());

@@ -7,14 +7,16 @@ use crate::converter::GapRow;
 
 /// One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
 /// `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
-/// its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`; and
-/// `max_text_bytes`, the most bytes of Markdown a fill of it takes.
+/// its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`;
+/// `max_text_bytes`, the most bytes of Markdown a fill of it takes; and
+/// `dpi`, the resolution a page was painted at, `None` for an embedded image.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct OcrRequest {
     gap: Py<PyTuple>,
     image: Py<PyBytes>,
     media_type: String,
     max_text_bytes: u64,
+    dpi: Option<u32>,
 }
 
 impl OcrRequest {
@@ -28,6 +30,7 @@ impl OcrRequest {
             image: PyBytes::new(py, &request.image.bytes).unbind(),
             media_type: request.image.media_type.to_owned(),
             max_text_bytes: request.max_text_bytes,
+            dpi: request.image.dpi,
         })
     }
 }
@@ -35,13 +38,15 @@ impl OcrRequest {
 #[pymethods]
 impl OcrRequest {
     #[new]
+    #[pyo3(signature = (gap, image, media_type, max_text_bytes, dpi = None))]
     fn new(
         gap: Bound<'_, PyTuple>,
         image: Bound<'_, PyBytes>,
         media_type: String,
         max_text_bytes: u64,
+        dpi: Option<u32>,
     ) -> Self {
-        Self { gap: gap.unbind(), image: image.unbind(), media_type, max_text_bytes }
+        Self { gap: gap.unbind(), image: image.unbind(), media_type, max_text_bytes, dpi }
     }
 
     /// The row of `Parsed.gaps` this request reads the image of.
@@ -68,27 +73,34 @@ impl OcrRequest {
         self.max_text_bytes
     }
 
+    /// The resolution a page was painted at; `None` for an embedded image.
+    #[getter]
+    fn dpi(&self) -> Option<u32> {
+        self.dpi
+    }
+
     #[expect(
         clippy::type_complexity,
         reason = "pickle's reduce tuple of a class and its arguments"
     )]
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
-    ) -> (Bound<'py, PyType>, (Bound<'py, PyTuple>, Bound<'py, PyBytes>, String, u64)) {
+    ) -> (Bound<'py, PyType>, (Bound<'py, PyTuple>, Bound<'py, PyBytes>, String, u64, Option<u32>))
+    {
         let py = slf.py();
         let this = slf.get();
-        let arguments =
-            (this.gap(py), this.image(py), this.media_type.clone(), this.max_text_bytes);
-        (slf.get_type(), arguments)
+        let (media_type, max_text_bytes) = (this.media_type.clone(), this.max_text_bytes);
+        (slf.get_type(), (this.gap(py), this.image(py), media_type, max_text_bytes, this.dpi))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
-            "OcrRequest(gap={}, media_type={:?}, image=<{} bytes>, max_text_bytes={})",
+            "OcrRequest(gap={}, media_type={:?}, image=<{} bytes>, max_text_bytes={}, dpi={})",
             self.gap.bind(py).repr()?,
             self.media_type,
             self.image.bind(py).as_bytes().len(),
-            self.max_text_bytes
+            self.max_text_bytes,
+            self.dpi.map_or_else(|| "None".to_owned(), |dpi| dpi.to_string()),
         ))
     }
 }

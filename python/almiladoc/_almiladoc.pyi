@@ -50,10 +50,11 @@ class GapRefused(ValueError):
     `max_grid_slots`, which a smaller fill may pass."""
 
 class ConfigError(ValueError):
-    """A `Limits` or `Config` field is out of range."""
+    """A `Limits` or `Config` field, or a raster spec, is out of range."""
 
     limit: str
-    """The field: a limit's name such as `max_work`, or `threads`."""
+    """The field: a limit's name such as `max_work`, `threads`, or `raster`
+    for `Parsed.ocr_requests`'s `dpi` and `max_pixels`."""
     ceiling: int | None
     """The highest value the limit accepts, for a limit with a ceiling
     (`max_nesting_depth`); `None` otherwise."""
@@ -364,11 +365,17 @@ class Conversion:
 class OcrRequest:
     """One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
     `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
-    its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`; and
-    `max_text_bytes`, the most bytes of Markdown a fill of it takes."""
+    its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`;
+    `max_text_bytes`, the most bytes of Markdown a fill of it takes; and
+    `dpi`, the resolution a page was painted at, `None` for an embedded image."""
 
     def __new__(
-        cls, gap: _GapRow, image: bytes, media_type: str, max_text_bytes: int
+        cls,
+        gap: _GapRow,
+        image: bytes,
+        media_type: str,
+        max_text_bytes: int,
+        dpi: int | None = None,
     ) -> OcrRequest: ...
     @property
     def gap(self) -> _GapRow:
@@ -382,6 +389,9 @@ class OcrRequest:
     @property
     def max_text_bytes(self) -> int:
         """The most bytes of Markdown a fill of this gap takes."""
+    @property
+    def dpi(self) -> int | None:
+        """The resolution a page was painted at; `None` for an embedded image."""
 
 @final
 class Parsed:
@@ -434,17 +444,23 @@ class Parsed:
         1-based PDF page or the id of the image, an index of `assets`, OCR
         reads to fill it; and why a page's own text does not serve."""
     def ocr_requests(
-        self, gaps: collections.abc.Sequence[_GapRow] | None = None
+        self,
+        gaps: collections.abc.Sequence[_GapRow] | None = None,
+        *,
+        dpi: int = 150,
+        max_pixels: int = 12_845_056,
     ) -> list[OcrRequest]:
         """An `OcrRequest` for each gap of `gaps`, rows of `Parsed.gaps`, or every
         gap when `None`, that is not yet filled or failed and asks for an
         image, in document order, made with the GIL released: an OCR run
         elsewhere, in another process too, reads each and passes its text to
         `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. An
-        embedded image is copied and a page painted as a PNG at up to 150 dpi,
-        a page that cannot be painted asking for none, and a row naming no
-        unsettled gap is passed over. Work past `max_work` raises
-        `ResourceLimitError`."""
+        embedded image is copied and a page painted as a PNG at the largest
+        dpi up to `dpi` at which its media box fits `max_pixels`, a page that
+        cannot be painted asking for none, and a row naming no unsettled gap is passed
+        over. A `dpi` outside 50 to 600 or `max_pixels` outside 1048576 to
+        41943040 raises `ConfigError` with `limit` `raster`, an int that fits
+        neither `OverflowError`, and work past `max_work` `ResourceLimitError`."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""

@@ -54,8 +54,8 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W11 | raster-surfaces | |
 | W12 | ocr-http | |
+| W13 | raster-hook (on the unpdf release that carries a paint budget) | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
 release follows W12.
@@ -78,20 +78,6 @@ release follows W12.
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W11
-
-#### raster-surfaces: Python's raster spec, a fuzz target and the release smoke
-- **Goal:** Python callers choose the raster spec, and painting is fuzzed and smoke-tested.
-- **Scope:** Python via `/change-core-api`: `ocr_requests(gaps=None, *, dpi=150,
-  max_pixels=12_845_056)`, `OcrRequest.dpi` (pickled), `ConfigError` for a refused spec; fuzz
-  target `pdf_raster` paints every page under `ocr_pages: All` at 1 Mpx and a low dpi; release
-  smoke checks a page's PNG `IHDR`.
-- **Files:** `python/`, `fuzz/`, `.github/`, `README.md`, `REUSE.toml`, ADR 0003.
-- **Tests:** Python's `dpi=300` reaches its requests and a refused spec raises; `pdf_raster`
-  replays.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 300 lines. **Tier:** T3.
 
 ### W12
 
@@ -139,7 +125,27 @@ release follows W12.
     `recognize`; a self-signed server leaves its gaps; Python equals Rust, a child's pickled
     requests filled by the parent's `OcrHttp` included; `ocr_reply` replays.
 - **Credit:** none.
-- **Depends on:** raster-surfaces. **Size:** about 1150 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 1150 lines. **Tier:** T3.
+
+### W13
+
+#### raster-hook: each painting operation charged by the area it paints
+- **Goal:** `max_work` and a cancel bound a page's painting, not only its pixels (ADR 0002
+  decision 5). Measured: a 1845-byte page of 20 000 full-page fills paints in 6.6 s in release and
+  28.7 s under ASan, past libFuzzer's 10 s bound, its pixels charged once.
+- **Scope:** an unpdf pull request: `render_page` takes a budget that each painting operation
+  charges by the device pixels it covers and that stops the page early, counted in `RasterGaps`;
+  take its release and charge the budget through the ledger, its stop `ResourceLimit` or
+  `Cancelled`; fuzz target `pdf_raster` paints every page under `ocr_pages: All` at 1 Mpx and up to
+  50 dpi, twice, comparing the PNGs, seeded with the painting fixtures and the inline-image
+  regression. Counts of glyphs without an outline and of unpainted annotation appearances, if
+  unpdf gives them.
+- **Files:** `Cargo.*`, `fuzz/`, `src/ocr/`, `tests/`, ADR 0002, `REUSE.toml`.
+- **Tests:** the measured page trips `max_work` at its default and is cancelled within a page;
+  `pdf_raster` replays.
+- **Credit:** none.
+- **Depends on:** that unpdf release; the pull request is opened by the maintainer, as this
+  repository's sessions hold no fork of `iyulab/unpdf`. **Size:** about 200 lines. **Tier:** T3.
 
 ## Deferred
 
@@ -168,10 +174,6 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   caller whose engine returns only located lines.
 - **ocr-http-roots** (caller trust anchors and an explicit proxy for `OcrHttp`). Trigger: a caller
   behind a private CA or an explicit proxy.
-- **raster-hook** (painting charged per operation by the area it paints and cancelled inside a page,
-  and counts of glyphs without an outline and of unpainted annotation appearances; needs `unpdf`
-  changes). Trigger: a caller painting untrusted PDFs outside a memory-capped worker, or a measured
-  paint cost.
 - **ocr-local-pipeline** (offline OCR as a separate crate wrapping oar-ocr or ocrs, never in this one,
   ADR 0002 decision 8). Trigger: demand for offline OCR, the rten pool fixes and a scan corpus. It
   returns lines in reading order across columns, not the engine's row-first order: a two-column fixture
@@ -217,6 +219,7 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
 | iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
 | iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
 | iyulab/unpdf | to open | `RasterGaps` counts only the unpaintable runs a page shows (unpdf-clip) | to open |
+| iyulab/unpdf | to open | a paint budget each operation charges by the pixels it covers (raster-hook) | to open |
 
 ## Maintainer steps
 
