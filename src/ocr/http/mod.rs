@@ -15,7 +15,7 @@ use ureq::typestate::AgentScope;
 use crate::config::ConfigError;
 use crate::ledger::CancelToken;
 use crate::ocr::{GapFill, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, RasterSpec};
-use crate::pool::wait;
+use crate::pool::{fan_out, wait};
 
 /// How [`OcrHttp`] reaches an OpenAI-compatible vision server.
 ///
@@ -56,6 +56,8 @@ pub struct OcrHttpConfig {
     /// Attempts after the first for a request the server could not take yet, at most 10; 3 by
     /// default.
     pub retries: u32,
+    /// Requests in flight at once, 1 to 16; 1 by default. A batch holds twice as many.
+    pub concurrency: usize,
 }
 
 impl OcrHttpConfig {
@@ -63,6 +65,7 @@ impl OcrHttpConfig {
     pub const DEFAULT_PROMPT: &str = "Transcribe all text in this image as Markdown, keeping \
         its headings, lists and tables, and reply with the Markdown alone.";
     const MAX_RETRIES: u32 = 10;
+    const MAX_CONCURRENCY: usize = 16;
 
     /// The defaults for `model` behind `base_url`.
     #[must_use]
@@ -78,6 +81,7 @@ impl OcrHttpConfig {
             temperature: 0.0,
             raster: RasterSpec::default(),
             retries: 3,
+            concurrency: 1,
         }
     }
 }
@@ -95,6 +99,7 @@ impl fmt::Debug for OcrHttpConfig {
             .field("temperature", &self.temperature)
             .field("raster", &self.raster)
             .field("retries", &self.retries)
+            .field("concurrency", &self.concurrency)
             .finish()
     }
 }
@@ -112,17 +117,18 @@ impl fmt::Debug for Redacted<'_> {
 }
 
 /// An [`OcrEngine`] that asks an OpenAI-compatible vision server for each image's Markdown,
-/// one image per request.
+/// one image per request and up to its `concurrency` at once, on the calling thread and scoped
+/// ones that end before [`OcrEngine::recognize`] returns; once a request is left unattempted or
+/// the token is cancelled, the batch takes no further request, those taken keeping their outcome.
 ///
 /// Each request asks the server to answer before its body is sent (`Expect: 100-continue`),
 /// sending it after a second without an answer. A request the server could not take yet (a
 /// reset before its response, or 408, 429, 500, 502, 503 or 504) is retried after 0.5 s
 /// doubling to 30 s, or the `Retry-After` seconds up to 60 s, a cancel ending the wait. A
 /// request the server rejects (400, 413 or 422) or a reply that holds no Markdown fails its
-/// gap; any other failure leaves its gap and the rest of its batch unattempted. It follows no
-/// redirect, uses no proxy, verifies TLS against the Mozilla roots on rustls' process-wide
-/// provider or ring, and reads a reply body of under six times the request's `max_text_bytes`
-/// and 64 KiB.
+/// gap; any other failure leaves its gap unattempted. It follows no redirect, uses no proxy,
+/// verifies TLS against the Mozilla roots on rustls' process-wide provider or ring, and reads a
+/// reply body of under six times the request's `max_text_bytes` and 64 KiB.
 pub struct OcrHttp {
     agent: Agent,
     endpoint: Uri,
@@ -130,6 +136,7 @@ pub struct OcrHttp {
     template: wire::Template,
     raster: RasterSpec,
     retries: u32,
+    concurrency: usize,
 }
 
 impl fmt::Debug for OcrHttp {
@@ -139,6 +146,7 @@ impl fmt::Debug for OcrHttp {
             .field("authorized", &self.authorization.is_some())
             .field("raster", &self.raster)
             .field("retries", &self.retries)
+            .field("concurrency", &self.concurrency)
             .finish_non_exhaustive()
     }
 }
@@ -161,7 +169,7 @@ impl OcrHttp {
     /// or `https` with a host and no user, query or fragment, an empty `model`, `api_key` that
     /// is empty, holds anything but visible ASCII, or would go over `http` to a host other than
     /// loopback, `extra_body` naming a field the engine sets or reads, `max_tokens` of 0,
-    /// `temperature` outside 0 to 2, or `retries` above 10.
+    /// `temperature` outside 0 to 2, `retries` above 10, or `concurrency` outside 1 to 16.
     pub fn new(config: OcrHttpConfig) -> Result<Self, ConfigError> {
         config.raster.validate()?;
         let refuse = |field| ConfigError::OcrHttp { field };
@@ -189,6 +197,9 @@ impl OcrHttp {
         if config.retries > OcrHttpConfig::MAX_RETRIES {
             return Err(refuse("retries"));
         }
+        if !(1..=OcrHttpConfig::MAX_CONCURRENCY).contains(&config.concurrency) {
+            return Err(refuse("concurrency"));
+        }
         let mut fields = config.extra_body;
         fields.insert("model".into(), config.model.into());
         fields.insert("max_tokens".into(), config.max_tokens.into());
@@ -202,6 +213,7 @@ impl OcrHttp {
             template,
             raster: config.raster,
             retries: config.retries,
+            concurrency: config.concurrency,
         })
     }
 
@@ -268,7 +280,7 @@ impl OcrHttp {
 
 impl OcrEngine for OcrHttp {
     fn batch_size(&self) -> usize {
-        2
+        self.concurrency * 2
     }
 
     fn raster(&self) -> RasterSpec {
@@ -276,18 +288,16 @@ impl OcrEngine for OcrHttp {
     }
 
     fn recognize(&self, requests: &[OcrRequest], cancel: &CancelToken) -> Vec<OcrOutcome> {
-        let mut stopped = false;
-        requests
-            .iter()
-            .map(|request| {
-                if stopped || cancel.is_cancelled() {
-                    return OcrOutcome::Unattempted(OcrFailure::new(None));
-                }
-                let outcome = self.read(request, cancel);
-                stopped = matches!(outcome, OcrOutcome::Unattempted(_));
-                outcome
-            })
-            .collect()
+        let unattempted = || OcrOutcome::Unattempted(OcrFailure::new(None));
+        let read = fan_out(requests, self.concurrency, |request| {
+            if cancel.is_cancelled() {
+                return (unattempted(), true);
+            }
+            let outcome = self.read(request, cancel);
+            let stop = matches!(outcome, OcrOutcome::Unattempted(_));
+            (outcome, stop)
+        });
+        read.into_iter().map(|outcome| outcome.unwrap_or_else(unattempted)).collect()
     }
 }
 
@@ -438,6 +448,14 @@ mod tests {
         unknown.temperature = f32::NAN;
         let mut retries = config(base);
         retries.retries = 11;
+        let mut widest = config(base);
+        widest.concurrency = 16;
+        assert_eq!(refused(widest), None);
+        let concurrency = [0, 17].map(|concurrency| {
+            let mut refused = config(base);
+            refused.concurrency = concurrency;
+            (refused, "concurrency")
+        });
         for (config, field) in [
             (empty, "model"),
             (tokens, "max_tokens"),
@@ -447,6 +465,7 @@ mod tests {
         ]
         .into_iter()
         .chain(reserved.map(|config| (config, "extra_body")))
+        .chain(concurrency)
         {
             assert_eq!(refused(config), Some(field));
         }
@@ -473,10 +492,12 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_drops_a_proxy_follows_no_redirect_and_verifies_tls() {
+    fn the_agent_drops_a_proxy_follows_no_redirect_resolves_on_no_thread_and_verifies_tls() {
         let proxy = ureq::Proxy::new("http://127.0.0.1:1").unwrap();
         let config = configured(Agent::config_builder().proxy(Some(proxy))).build();
         assert!(config.proxy().is_none());
+        let timeouts = config.timeouts();
+        assert_eq!((timeouts.global, timeouts.per_call, timeouts.resolve), (None, None, None));
         assert_eq!(config.max_redirects(), 0);
         assert!(!config.http_status_as_error());
         let tls = config.tls_config();

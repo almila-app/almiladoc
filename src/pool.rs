@@ -1,4 +1,5 @@
-//! The per-call thread pool every walking call runs on.
+//! The per-call thread pool every walking call runs on, and the scoped threads a network
+//! engine's requests wait on.
 //!
 //! Each call builds its own pool of `Config::threads` threads, so no work
 //! reaches rayon's global pool or the caller's stack.
@@ -81,11 +82,14 @@ pub(crate) fn map_ordered<T: Sync, R: Send>(
 }
 
 #[cfg(feature = "ocr-http")]
-pub(crate) use network::wait;
+pub(crate) use network::{fan_out, wait};
 
-/// What a network engine's requests run on: the calling thread's waits, which a cancel ends.
+/// What a network engine's requests run on: scoped threads of their own, and waits a cancel
+/// ends.
 #[cfg(feature = "ocr-http")]
 mod network {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -109,9 +113,91 @@ mod network {
         }
     }
 
+    /// `work` of each of `items` on the calling thread and up to `workers - 1` scoped ones the OS
+    /// grants, taking items in order and none once a call asks to stop; an untaken item is `None`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "requests that wait on the network run on scoped threads of their own"
+    )]
+    pub(crate) fn fan_out<T: Sync, R: Send>(
+        items: &[T],
+        workers: usize,
+        work: impl Fn(&T) -> (R, bool) + Sync,
+    ) -> Vec<Option<R>> {
+        let (next, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let made = Mutex::new(Vec::with_capacity(items.len()));
+        let worker = || take(items, &next, &stop, &made, &work);
+        thread::scope(|scope| {
+            for _ in 1..workers.min(items.len()) {
+                if thread::Builder::new().spawn_scoped(scope, worker).is_err() {
+                    break;
+                }
+            }
+            worker();
+        });
+        let mut results: Vec<Option<R>> = items.iter().map(|_| None).collect();
+        for (index, result) in made.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            if let Some(slot) = results.get_mut(index) {
+                *slot = Some(result);
+            }
+        }
+        results
+    }
+
+    /// One worker's loop: take the next item until none is left or a call asks to stop.
+    fn take<T, R>(
+        items: &[T],
+        next: &AtomicUsize,
+        stop: &AtomicBool,
+        made: &Mutex<Vec<(usize, R)>>,
+        work: &impl Fn(&T) -> (R, bool),
+    ) {
+        while !stop.load(Ordering::Acquire) {
+            let index = next.fetch_add(1, Ordering::AcqRel);
+            let Some(item) = items.get(index) else { break };
+            let (result, halt) = work(item);
+            if halt {
+                stop.store(true, Ordering::Release);
+            }
+            made.lock().unwrap_or_else(PoisonError::into_inner).push((index, result));
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn fanned_out_work_runs_at_most_its_workers_at_once_and_keeps_order() {
+            let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let items: Vec<u32> = (0..12).collect();
+            let doubled = fan_out(&items, 3, |&n| {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(u64::from(12 - n) * 5));
+                running.fetch_sub(1, Ordering::SeqCst);
+                (n * 2, false)
+            });
+            assert_eq!(doubled, (0..12).map(|n| Some(n * 2)).collect::<Vec<_>>());
+            assert_eq!(most.load(Ordering::SeqCst), 3);
+            assert_eq!(fan_out(&[] as &[u32], 3, |&n| (n, false)), []);
+        }
+
+        #[test]
+        fn fanned_out_work_takes_no_item_after_one_asks_to_stop() {
+            let items: Vec<u32> = (0..6).collect();
+            let taken = fan_out(&items, 1, |&n| (n, n == 2));
+            assert_eq!(taken, [Some(0), Some(1), Some(2), None, None, None]);
+            let items: Vec<u32> = (0..12).collect();
+            let taken = fan_out(&items, 3, |&n| {
+                if n > 0 {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                (n, n == 0)
+            });
+            assert_eq!(taken[0], Some(0));
+            assert_eq!(taken[3..], [None; 9]);
+        }
 
         #[test]
         fn a_wait_ends_at_its_delay_or_at_a_cancel() {
