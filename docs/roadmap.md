@@ -54,7 +54,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W12 | ocr-http-fanout then ocr-http-python | |
+| W12 | ocr-http-python | |
 | W13 | raster-hook (on the unpdf release that carries a paint budget) | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
@@ -81,27 +81,10 @@ release follows W12.
 
 ### W12
 
-`OcrHttp` (feature `ocr-http`) posts one image per request on the caller's worker, two to a batch;
-what remains of ADR 0002 decision 7 is concurrency and Python. A proptest over any reply body
-stands for the `ocr_reply` fuzz target, as the parser is crate-private and serde_json reads it.
-
-#### ocr-http-fanout: `concurrency` requests in flight on scoped workers
-- **Goal:** a batch's requests go out `concurrency` at once without a thread outliving
-  `recognize`.
-- **Scope:** `OcrHttpConfig::concurrency` (1 by default, 1 to 16), `batch_size()` twice it;
-  `pool::fan_out` runs `min(concurrency, n)` scoped workers that take requests in order and stop
-  taking them once one is left unattempted or the token is cancelled; `scripts/ocr_live.py` runs the
-  five-page fixture against a live endpoint, logging method, path, status and gap.
-- **Files:** `src/ocr/http/`, `src/pool.rs`, `clippy.toml`, `Cargo.*`, `scripts/`, `tests/`,
-  `README.md`, `REUSE.toml`.
-- **Tests:** `concurrency` 3 keeps at most 3 in flight over a batch of 6; a cancel during a
-  stalled response attempts no later request of its batch; the process's threads number the same
-  before and after `recognize`; `concurrency` 0 and 17 are refused. Carried from `OcrHttp`'s
-  change: a loopback rustls server with a certificate made by the test leaves its gap unattempted
-  after one connection, and a dead `HTTPS_PROXY` and `SSL_CERT_FILE` set for a child test process
-  change no outcome.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 300 lines. **Tier:** T3.
+`OcrHttp` (feature `ocr-http`) posts `concurrency` requests at once on the calling thread and
+scoped ones; what remains of ADR 0002 decision 7 is Python. A proptest over any reply body stands
+for the `ocr_reply` fuzz target, as the parser is crate-private and serde_json reads it; the
+agent's `RootCerts::WebPki`, asserted by a unit test, leaves `SSL_CERT_FILE` nothing to change.
 
 #### ocr-http-python: Python fills gaps through `OcrHttp`, with no code
 - **Goal:** a base URL, a model and a key let a Python caller fill a parse's gaps, in-process or
@@ -118,12 +101,15 @@ stands for the `ocr_reply` fuzz target, as the parser is crate-private and serde
     `Parsed.ocr(engine)` with `OcrSummary`; `Converter.convert(…, ocr=None)` on the core's
     `convert_with_ocr`; `ConfigError` with `limit` naming a refused `OcrHttp` field.
   - No `repr`, error or log holds a key, a prompt, or a URL's user or query.
-- **Files:** `python/`, `src/`, `deny-offline.toml`, ADR 0003, `README.md`, `REUSE.toml`.
+  - `scripts/ocr_live.py` runs the five-page fixture through the binding's `OcrHttp` against a
+    live endpoint, logging method, path, status and gap.
+- **Files:** `python/`, `src/`, `scripts/`, `deny-offline.toml`, ADR 0003, `README.md`,
+  `REUSE.toml`.
 - **Tests:** against a loopback server: Python equals Rust on the rich DOCX fixture, a child's
   pickled requests filled by the parent's `OcrHttp` included; a refused field raises
   `ConfigError`; a cancel ends a retry wait.
 - **Credit:** none.
-- **Depends on:** ocr-http-fanout. **Size:** about 500 lines. **Tier:** T3.
+- **Depends on:** none open. **Size:** about 550 lines. **Tier:** T3.
 
 ### W13
 

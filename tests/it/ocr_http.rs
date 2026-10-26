@@ -1,5 +1,8 @@
 //! `OcrHttp` against a loopback server that answers each connection from a script.
-#![expect(clippy::disallowed_types, reason = "a loopback server stands in for the vision server")]
+#![expect(
+    clippy::disallowed_types,
+    reason = "a loopback server stands in for the vision server, and a child test process carries a proxy environment"
+)]
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -155,7 +158,7 @@ fn engine(base_url: &str, set: impl FnOnce(&mut OcrHttpConfig)) -> OcrHttp {
     OcrHttp::new(config).unwrap()
 }
 
-/// The rich DOCX fixture with its image a gap, and that image's request four times over.
+/// The rich DOCX fixture with its image a gap, and that image's request six times over.
 fn images(max_ocr_text_bytes: u64) -> (Parsed, Vec<OcrRequest>) {
     let converter = configured(|config| {
         config.image_ocr = ImageOcr::All;
@@ -165,7 +168,7 @@ fn images(max_ocr_text_bytes: u64) -> (Parsed, Vec<OcrRequest>) {
     let mut parsed =
         converter.parse(Input::new(&fixture("docx/handmade-rich.docx"), Format::Docx)).unwrap();
     let [request] = parsed.ocr_requests(&RasterSpec::default(), None).unwrap().try_into().unwrap();
-    (parsed, vec![request; 4])
+    (parsed, vec![request; 6])
 }
 
 fn one(engine: &OcrHttp, request: &OcrRequest) -> OcrOutcome {
@@ -243,7 +246,7 @@ fn a_reply_without_markdown_fails_its_gap_and_the_batch_goes_on() {
     ];
     let server = Server::start(answers);
     let outcomes = engine(&server.base_url, |_| {})
-        .recognize(&[&requests[..], &requests[..]].concat(), &CancelToken::new());
+        .recognize(&[&requests[..4], &requests[..4]].concat(), &CancelToken::new());
     let mut expected: Vec<_> =
         [200, 200, 200, 200, 400, 413, 422].map(|code| failed(Some(code))).into();
     expected.push(filled(&"a".repeat(cap - 200)));
@@ -330,7 +333,7 @@ fn an_unreachable_server_leaves_a_batch_of_four_unattempted_after_one_attempt() 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let closed = format!("http://{}/v1", listener.local_addr().unwrap());
     drop(listener);
-    let outcomes = engine(&closed, |_| {}).recognize(&requests, &CancelToken::new());
+    let outcomes = engine(&closed, |_| {}).recognize(&requests[..4], &CancelToken::new());
     assert_eq!(outcomes, vec![unattempted(None); 4]);
 }
 
@@ -351,4 +354,176 @@ fn a_cancel_ends_a_wait_before_a_retry() {
     assert_eq!(outcomes, [unattempted(Some(503)), unattempted(None)]);
     assert!(start.elapsed() < Duration::from_millis(400 + 100), "{:?}", start.elapsed());
     assert_eq!(server.finish().len(), 1);
+}
+
+/// A server that answers every connection with `reply("x")` after `stall`, on a thread each,
+/// counting connections and the most open at once.
+struct Stalling {
+    base_url: String,
+    counts: Arc<Mutex<(usize, usize, usize)>>,
+    stop: Arc<AtomicBool>,
+    serving: JoinHandle<()>,
+}
+
+/// Count `stream` in, wait `stall`, count it out and answer it.
+fn stall_and_serve(stream: &TcpStream, counts: &Mutex<(usize, usize, usize)>, stall: Duration) {
+    {
+        let mut counts = counts.lock().unwrap();
+        (counts.0, counts.1) = (counts.0 + 1, counts.1 + 1);
+        counts.2 = counts.2.max(counts.1);
+    }
+    thread::sleep(stall);
+    counts.lock().unwrap().1 -= 1;
+    serve(stream, reply("x"));
+}
+
+impl Stalling {
+    fn start(stall: Duration) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (counts, stop) = (Arc::new(Mutex::new((0, 0, 0))), Arc::new(AtomicBool::new(false)));
+        let (shared, stopped) = (Arc::clone(&counts), Arc::clone(&stop));
+        let serving = thread::spawn(move || {
+            thread::scope(|scope| {
+                while !stopped.load(Ordering::Relaxed) {
+                    let Ok((stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    let shared = Arc::clone(&shared);
+                    scope.spawn(move || stall_and_serve(&stream, &shared, stall));
+                }
+            });
+        });
+        Self { base_url, counts, stop, serving }
+    }
+
+    /// Connections served and the most open at once.
+    fn finish(self) -> (usize, usize) {
+        thread::sleep(Duration::from_millis(50));
+        self.stop.store(true, Ordering::Relaxed);
+        self.serving.join().unwrap();
+        let (served, _, most) = *self.counts.lock().unwrap();
+        (served, most)
+    }
+}
+
+#[test]
+fn a_batch_keeps_its_concurrency_in_flight() {
+    let (_, requests) = images(1 << 20);
+    let server = Stalling::start(Duration::from_millis(150));
+    let three = engine(&server.base_url, |config| config.concurrency = 3);
+    assert_eq!(three.batch_size(), 6);
+    let outcomes = three.recognize(&requests, &CancelToken::new());
+    assert_eq!(outcomes, vec![filled("x"); 6]);
+    assert_eq!(server.finish(), (6, 3));
+}
+
+#[test]
+fn a_cancel_during_a_stalled_response_attempts_no_later_request() {
+    let (_, requests) = images(1 << 20);
+    let server = Stalling::start(Duration::from_millis(400));
+    let engine = engine(&server.base_url, |_| {});
+    let cancel = CancelToken::new();
+    let start = Instant::now();
+    let outcomes = thread::scope(|scope| {
+        scope.spawn(|| {
+            thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+        });
+        engine.recognize(&requests[..2], &cancel)
+    });
+    assert!(start.elapsed() >= Duration::from_millis(400), "{:?}", start.elapsed());
+    assert_eq!(outcomes, [filled("x"), unattempted(None)]);
+    assert_eq!(server.finish(), (1, 1));
+}
+
+/// A self-signed leaf certificate for `localhost` and 127.0.0.1, and its P-256 key, made for
+/// this test alone.
+const TEST_CERTIFICATE: &str = "MIIBlzCCAT6gAwIBAgIUFtBbo2vzkNbNURHK5cD7G4OGBN8wCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAyNjE0MjQwNFoYDzIxMjYxMDAyMTQyNDA0WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAScHAB6OhX7qzE599KAWwj3OnEVtz+PJ8DJgtPPhxDcg4UOsP5zw3WcJrejnazkScXCZUheHTwCEvgZ3fTQk1yso2wwajAdBgNVHQ4EFgQU0wGBjld5606LRkEE6PRwRox8c60wHwYDVR0jBBgwFoAU0wGBjld5606LRkEE6PRwRox8c60wDAYDVR0TAQH/BAIwADAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDRwAwRAIgNRqqjhzfSrkcXkmvBs683jN66QW4PbSf+xfCk89TANYCIB2OjlMrLj3RGkm6W4nM+FRjMosWkK55/GO9iln4EBmn";
+const TEST_KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSTj+2rUJ2sipq927rIi6rz3ALuxB+/8pe2JmNGCgYKKhRANCAAScHAB6OhX7qzE599KAWwj3OnEVtz+PJ8DJgtPPhxDcg4UOsP5zw3WcJrejnazkScXCZUheHTwCEvgZ3fTQk1ys";
+
+#[test]
+fn a_server_whose_certificate_no_root_signs_leaves_its_gap_after_one_connection() {
+    use base64::Engine as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    let decode = |text| base64::engine::general_purpose::STANDARD.decode(text).unwrap();
+    let certificate = CertificateDer::from(decode(TEST_CERTIFICATE));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(decode(TEST_KEY)));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.clone()], key)
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certificate).unwrap();
+    let trusting = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (requests, tls) = (images(1 << 20).1, Arc::new(tls));
+    let (stop, deadline) =
+        (Arc::new(AtomicBool::new(false)), Instant::now() + Duration::from_secs(10));
+    let stopped = Arc::clone(&stop);
+    let serving = thread::spawn(move || {
+        let mut handshakes = Vec::new();
+        while !stopped.load(Ordering::Relaxed) && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut connection = rustls::ServerConnection::new(Arc::clone(&tls)).unwrap();
+            handshakes.push(connection.complete_io(&mut stream).is_ok());
+        }
+        handshakes
+    });
+    let name = ServerName::try_from("127.0.0.1").unwrap();
+    let mut client = rustls::ClientConnection::new(Arc::new(trusting), name).unwrap();
+    let mut stream = TcpStream::connect(address).unwrap();
+    while client.is_handshaking() {
+        client.complete_io(&mut stream).unwrap();
+    }
+    drop(stream);
+    let engine = engine(&format!("https://{address}/v1"), |config| config.retries = 1);
+    assert_eq!(one(&engine, &requests[0]), unattempted(None));
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!(serving.join().unwrap(), [true, false]);
+}
+
+/// Set by the parent of the child run of
+/// `a_proxy_in_the_environment_changes_no_outcome`.
+const PROXIED_CHILD: &str = "ALMILADOC_PROXIED_CHILD";
+
+#[test]
+fn a_proxy_in_the_environment_changes_no_outcome() {
+    if std::env::var_os(PROXIED_CHILD).is_some() {
+        let (_, requests) = images(1 << 20);
+        let server = Server::start(vec![reply("direct")]);
+        assert_eq!(one(&engine(&server.base_url, |_| {}), &requests[0]), filled("direct"));
+        assert_eq!(server.finish().len(), 1);
+        return;
+    }
+    let dead = "http://127.0.0.1:1";
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "ocr_http::a_proxy_in_the_environment_changes_no_outcome"])
+        .env(PROXIED_CHILD, "1")
+        .envs(
+            ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+                .map(|name| (name, dead)),
+        )
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+    let printed = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success() && printed.contains("1 passed"), "{printed}");
 }

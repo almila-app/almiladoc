@@ -52,6 +52,7 @@ dependencies = [
  "pulldown-cmark",
  "quick-xml",
  "rayon",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

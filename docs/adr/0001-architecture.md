@@ -1,7 +1,7 @@
 # 0001. Architecture
 
 Status: accepted
-Date: 2026-10-14
+Date: 2026-10-14, revised 2026-10-26
 
 ## Context
 
@@ -61,7 +61,7 @@ Date: 2026-10-14
 
 13. **PDF engine.** Limits and cancellation reach unpdf only between pages: inside a page its stream decoding keeps its own fixed ratio rule and takes no caller budget. The page count meets `max_pages` before any page is read; the consumer isolates PDF work in a memory-capped, recyclable worker.
 
-14. **No global state.** `clippy.toml` disallows, item by item, the std environment, filesystem, network, process and thread functions and types (`Path::canonicalize` included), rayon's `ThreadPoolBuilder`, global pool and parallel iterators, `thread_local!` and the once-cells, PyO3's `PyOnceLock`, `Interned` and `intern!` included; clippy takes no module path, so the architecture test bans `std::{env,fs,net,process,thread}` in non-test `src`. Only decision 3's pool, the binding's file read and exception module and test code use them: the pool and binding sites each under an item-level `#[expect]` with a reason, never an inner one; the integration tests under one reasoned crate `#![expect]`, and the fuzz harness through its manifest's allow. No panic hook; callers recycle the worker after `Internal`.
+14. **No global state.** `clippy.toml` disallows, item by item, the std environment, filesystem, network, process and thread functions and types (`Path::canonicalize` included), rayon's `ThreadPoolBuilder`, global pool and parallel iterators, `thread_local!` and the once-cells, PyO3's `PyOnceLock`, `Interned` and `intern!` included; clippy takes no module path, so the architecture test bans `std::{env,fs,net,process,thread}` in non-test `src`. Only decision 3's pool and ADR 0002 decision 7's request workers, the binding's file read and exception module and test code use them: the pool and binding sites each under an item-level `#[expect]` with a reason, never an inner one; the integration tests under one reasoned crate `#![expect]`, and the fuzz harness through its manifest's allow. No panic hook; callers recycle the worker after `Internal`.
 
 15. **Identity.**
     - Under the committed `Cargo.lock`, equal version, configuration, input and gap fills give byte-identical output across threads, calls and, except PDF, architectures; non-PDF code calls no platform floating-point function (https://doc.rust-lang.org/1.99.0/std/primitive.f64.html#method.powi).
