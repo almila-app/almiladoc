@@ -18,11 +18,11 @@ use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
 use crate::errors::{Failure, config_error, convert_error, gap_error};
 use crate::input::{Admission, buffer, read_file};
-use crate::ocr::OcrRequest;
+use crate::ocr::{OcrHttp, OcrRequest, OcrSummary};
 
 /// A flag any thread sets to cancel the calls it was passed to.
 #[pyclass(frozen, module = "almiladoc")]
-pub(crate) struct CancelToken(almiladoc::CancelToken);
+pub(crate) struct CancelToken(pub(crate) almiladoc::CancelToken);
 
 #[pymethods]
 impl CancelToken {
@@ -215,6 +215,11 @@ impl Parsed {
         };
         self.ids.get(&(kind, unit, ordinal)).copied().ok_or(GapError::UnknownGap)
     }
+
+    /// The ids of the gaps `rows` name, rows naming none passed over.
+    fn gap_ids(&self, rows: Option<Vec<GapKey<'_>>>) -> Option<Vec<GapId>> {
+        rows.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect())
+    }
 }
 
 #[pymethods]
@@ -311,8 +316,7 @@ impl Parsed {
     ) -> PyResult<Vec<OcrRequest>> {
         let mut spec = RasterSpec::default();
         (spec.dpi, spec.max_pixels) = (dpi, max_pixels);
-        let ids: Option<Vec<GapId>> =
-            gaps.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect());
+        let ids = self.gap_ids(gaps);
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
         let requests =
@@ -329,6 +333,29 @@ impl Parsed {
                 OcrRequest::of(py, row, request)
             })
             .collect()
+    }
+
+    /// Read the image of each gap of `gaps`, rows of `Parsed.gaps`, or of every
+    /// gap when `None`, that `ocr_requests` would ask for, through `engine`, with
+    /// the GIL released: in batches that fill or fail each gap as `fill_gap` and
+    /// `fail_gap` do, a fill a limit refuses failing its gap, until a batch
+    /// holds a gap the engine did not attempt, which stays for a later call.
+    /// Work past `max_work` raises `ResourceLimitError`, and a cancel of the
+    /// parse's token `CancelledError`, each keeping what earlier batches
+    /// settled.
+    #[pyo3(signature = (engine, gaps = None))]
+    fn ocr(
+        &self,
+        py: Python<'_>,
+        engine: &Bound<'_, OcrHttp>,
+        gaps: Option<Vec<GapKey<'_>>>,
+    ) -> PyResult<OcrSummary> {
+        let (engine, ids) = (&engine.get().0, self.gap_ids(gaps));
+        let mut parsed = self.lock(py);
+        let parsed: &mut almiladoc::Parsed = &mut parsed;
+        py.detach(|| parsed.ocr(engine, ids.as_deref()))
+            .map(OcrSummary::from)
+            .map_err(|e| convert_error(py, &e))
     }
 
     /// Every embedded asset as `(id, media_type, data)`, `id` being the
@@ -357,6 +384,9 @@ impl Parsed {
 /// page a gap with reason `caller_requested` whatever its text, discarded
 /// without loss; a page past the last raises `InvalidConfigError`, any other
 /// page outside 1 to 4294967295 `ValueError`, and any other format ignores it.
+///
+/// `ocr`, an `OcrHttp`, reads a conversion's gaps before it renders, as
+/// `parse`, `Parsed.ocr` and `Parsed.render` do in turn.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct Converter {
     inner: almiladoc::Converter,
@@ -385,7 +415,7 @@ impl Converter {
     /// `bytes` is read in place; any other buffer is copied once, after its
     /// length is checked against `max_input_bytes`. CSV carries no
     /// signature, so it has to be named.
-    #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
+    #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None, ocr = None))]
     fn convert(
         &self,
         py: Python<'_>,
@@ -393,15 +423,18 @@ impl Converter {
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
         ocr_pages: Option<&Bound<'_, PyAny>>,
+        ocr: Option<&Bound<'_, OcrHttp>>,
     ) -> PyResult<Conversion> {
         let format = format.map(parse_format).transpose()?;
         let ocr_pages = page_selection(ocr_pages)?;
-        let cancel = cancel.map(|token| &token.get().0);
+        let (cancel, engine) = (cancel.map(|token| &token.get().0), ocr.map(|ocr| &ocr.get().0));
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
         let converted = py
             .detach(|| {
-                self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::convert)
+                self.call(bytes, format, None, cancel, ocr_pages, |converter, input| {
+                    convert(converter, input, engine)
+                })
             })
             .map_err(|f| f.raise(py))?;
         Conversion::new(py, &converted)
@@ -478,7 +511,7 @@ impl Converter {
     /// against `max_input_bytes` before it is read, and a directory raises
     /// `OSError` unopened, as does a FIFO or device on Unix. Without a
     /// `format`, the content names it, else the path's extension does.
-    #[pyo3(signature = (path, format = None, *, cancel = None, ocr_pages = None))]
+    #[pyo3(signature = (path, format = None, *, cancel = None, ocr_pages = None, ocr = None))]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 extracts arguments by value, and a borrowed `&Path` would refuse the os.PathLike the stub accepts"
@@ -490,15 +523,18 @@ impl Converter {
         format: Option<&str>,
         cancel: Option<&Bound<'_, CancelToken>>,
         ocr_pages: Option<&Bound<'_, PyAny>>,
+        ocr: Option<&Bound<'_, OcrHttp>>,
     ) -> PyResult<Conversion> {
         let format = format.map(parse_format).transpose()?;
         let ocr_pages = page_selection(ocr_pages)?;
-        let cancel = cancel.map(|token| &token.get().0);
+        let (cancel, engine) = (cancel.map(|token| &token.get().0), ocr.map(|ocr| &ocr.get().0));
         let converted = py
             .detach(|| {
                 let data = read_file(&path, &self.admission(cancel))?;
                 let fallback = extension_format(&path);
-                self.call(&data, format, fallback, cancel, ocr_pages, almiladoc::Converter::convert)
+                self.call(&data, format, fallback, cancel, ocr_pages, |converter, input| {
+                    convert(converter, input, engine)
+                })
             })
             .map_err(|f| f.raise(py))?;
         Conversion::new(py, &converted)
@@ -566,6 +602,18 @@ fn page_selection(ocr_pages: Option<&Bound<'_, PyAny>>) -> PyResult<PageSelectio
         })
         .collect::<PyResult<BTreeSet<_>>>()
         .map(PageSelection::Pages)
+}
+
+/// `input` converted, `engine` reading its gaps' images when given.
+fn convert(
+    converter: &almiladoc::Converter,
+    input: Input<'_>,
+    engine: Option<&almiladoc::OcrHttp>,
+) -> Result<almiladoc::Conversion, ConvertError> {
+    match engine {
+        Some(engine) => converter.convert_with_ocr(input, engine),
+        None => converter.convert(input),
+    }
 }
 
 fn parse_format(name: &str) -> PyResult<Format> {

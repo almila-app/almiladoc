@@ -68,7 +68,9 @@ name = "almiladoc-python"
 version = "0.1.0-rc.1"
 dependencies = [
  "almiladoc",
+ "log",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

@@ -80,8 +80,8 @@ repository's own work is BUSL-1.1.
 - `ConvertError::code()` and `UnsupportedKind::as_str()` strings are snake_case public contract
   like the diagnostic codes: never rename one after the first release.
 - The model reaches Python only as `Parsed::to_json`; the binding reads `Format` through `FromStr`
-  and hand-mirrors `ConvertError`, `Config`, `Limits`, `OnLoss`, `OcrRequest` and the public calls
-  bar `Parsed::ocr` and `convert_with_ocr`; change any, or the JSON, through `/change-core-api`.
+  and hand-mirrors `ConvertError`, `Config`, `Limits`, `OnLoss`, `OcrRequest`, `OcrHttpConfig`, the
+  OCR outcomes and the public calls; change any, or the JSON, through `/change-core-api`.
 
 ## Commands
 

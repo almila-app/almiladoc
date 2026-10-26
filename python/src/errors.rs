@@ -26,10 +26,10 @@ pub(crate) mod exceptions {
         almiladoc,
         ConfigError,
         PyValueError,
-        "A `Limits` or `Config` field is out of range. `limit` names the field \
-         (`threads` for the thread count); `ceiling` is the highest value a \
-         limit with one accepts and `max` the most threads, each `None` where \
-         it does not apply."
+        "A `Limits`, `Config` or `OcrHttp` field is out of range. `limit` names \
+         the field (`threads` for the thread count); `ceiling` is the highest \
+         value a limit with one accepts and `max` the most threads, each `None` \
+         where it does not apply."
     );
 
     create_exception!(
@@ -272,9 +272,27 @@ pub(crate) fn config_error(py: Python<'_>, error: &almiladoc::ConfigError) -> Py
         }
         almiladoc::ConfigError::Threads { max, .. } => ("threads", None, Some(*max)),
         almiladoc::ConfigError::Raster => ("raster", None, None),
+        almiladoc::ConfigError::OcrHttp { field, .. } => (*field, None, None),
         _ => return raise(py, &ConvertError::Internal, error.to_string()),
     };
-    let raised = ConfigError::new_err(error.to_string());
+    refusal(py, error.to_string(), limit, ceiling, max)
+}
+
+/// The `ConfigError` for an `OcrHttp` field the binding refuses before the
+/// core reads it, with the message of the core's `ConfigError::OcrHttp`, which
+/// cannot be built outside it.
+pub(crate) fn ocr_http_refusal(py: Python<'_>, field: &'static str) -> PyErr {
+    refusal(py, format!("ocr-http refuses its {field}"), field, None, None)
+}
+
+fn refusal(
+    py: Python<'_>,
+    message: String,
+    limit: &str,
+    ceiling: Option<u64>,
+    max: Option<usize>,
+) -> PyErr {
+    let raised = ConfigError::new_err(message);
     let value = raised.value(py);
     let detail = value
         .setattr("limit", limit)

@@ -2,7 +2,7 @@
 # they stay in step with what the module actually exports.
 import collections.abc
 import os
-from typing import ClassVar, Literal, final
+from typing import Any, ClassVar, Literal, final
 
 from typing_extensions import Buffer
 
@@ -30,7 +30,10 @@ __all__ = [
     "MalformedError",
     "MissingPartError",
     "NeedsOcrError",
+    "OcrFailure",
+    "OcrHttp",
     "OcrRequest",
+    "OcrSummary",
     "OnLoss",
     "Parsed",
     "ResourceLimitError",
@@ -50,11 +53,13 @@ class GapRefused(ValueError):
     `max_grid_slots`, which a smaller fill may pass."""
 
 class ConfigError(ValueError):
-    """A `Limits` or `Config` field, or a raster spec, is out of range."""
+    """A `Limits`, `Config` or `OcrHttp` field, or a raster spec, is out of
+    range."""
 
     limit: str
-    """The field: a limit's name such as `max_work`, `threads`, or `raster`
-    for `Parsed.ocr_requests`'s `dpi` and `max_pixels`."""
+    """The field: a limit's name such as `max_work`, `threads`, an
+    `OcrHttp` argument such as `base_url`, or `raster` for the `dpi` and
+    `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`."""
     ceiling: int | None
     """The highest value the limit accepts, for a limit with a ceiling
     (`max_nesting_depth`); `None` otherwise."""
@@ -394,6 +399,79 @@ class OcrRequest:
         """The resolution a page was painted at; `None` for an embedded image."""
 
 @final
+class OcrHttp:
+    """Reads gaps' images through an OpenAI-compatible vision server, posting
+    each to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the
+    `ocr` of `Converter.convert`, or `recognize`. `api_key` goes only over
+    `https` or to loopback; `prompt`, `None` for the default, asks for each
+    image's Markdown, after the image when `image_first`; `extra_body` adds
+    JSON fields to each request; `max_tokens` and `temperature`, 0 to 2, set
+    the sampling; a page is painted as `Parsed.ocr_requests` paints it at
+    `dpi` and `max_pixels`; a request the server cannot take yet is tried up
+    to `retries` more times, at most 10; and `concurrency`, 1 to 16, requests
+    go out at once. A field out of range raises `ConfigError` naming it. No
+    socket opens before a request, no proxy is used and no redirect followed."""
+
+    def __new__(
+        cls,
+        base_url: str,
+        model: str,
+        *,
+        api_key: str | None = None,
+        prompt: str | None = None,
+        image_first: bool = True,
+        extra_body: dict[str, Any] | None = None,
+        max_tokens: int = 8192,
+        temperature: float = 0.0,
+        dpi: int = 150,
+        max_pixels: int = 12_845_056,
+        retries: int = 3,
+        concurrency: int = 1,
+    ) -> OcrHttp: ...
+    def recognize(
+        self,
+        requests: collections.abc.Sequence[OcrRequest],
+        *,
+        cancel: CancelToken | None = None,
+    ) -> list[str | OcrFailure]:
+        """The text the server reads for each of `requests`, in order, with the
+        GIL released once their images are copied: a `str` that fills its gap,
+        or an `OcrFailure`. Once one is not attempted or `cancel` is
+        cancelled, no later request is sent. A request whose image is not its
+        `media_type` raises `ValueError`."""
+
+@final
+class OcrFailure:
+    """Why OCR read no text for a request, which pickles: `attempted` false when
+    it was not tried, which leaves its gap for a later call, and true when it
+    failed, which fails its gap; `status`, the HTTP status of its last
+    attempt, if it had one."""
+
+    def __new__(cls, *, attempted: bool = True, status: int | None = None) -> OcrFailure: ...
+    def __getnewargs_ex__(self) -> tuple[tuple[()], dict[str, object]]: ...
+    @property
+    def attempted(self) -> bool:
+        """False when the request was not tried, true when it failed."""
+    @property
+    def status(self) -> int | None:
+        """The HTTP status of the last attempt, if it had one."""
+
+@final
+class OcrSummary:
+    """What one `Parsed.ocr` call did to the gaps it could request."""
+
+    @property
+    def filled(self) -> int:
+        """Gaps filled."""
+    @property
+    def failed(self) -> int:
+        """Gaps failed: the engine failed them, or a limit refused their fill."""
+    @property
+    def unattempted(self) -> int:
+        """Gaps left for a later call: the engine did not attempt them, or a
+        request before theirs was not attempted."""
+
+@final
 class Parsed:
     """A parsed document, keeping the `Config` it was parsed under and what
     OCR gave its gaps: its model and diagnostics as JSON, the bytes of the
@@ -461,6 +539,19 @@ class Parsed:
         over. A `dpi` outside 50 to 600 or `max_pixels` outside 1048576 to
         41943040 raises `ConfigError` with `limit` `raster`, an int that fits
         neither `OverflowError`, and work past `max_work` `ResourceLimitError`."""
+    def ocr(
+        self,
+        engine: OcrHttp,
+        gaps: collections.abc.Sequence[_GapRow] | None = None,
+    ) -> OcrSummary:
+        """Read the image of each gap of `gaps`, rows of `Parsed.gaps`, or of every
+        gap when `None`, that `ocr_requests` would ask for, through `engine`, with
+        the GIL released: in batches that fill or fail each gap as `fill_gap` and
+        `fail_gap` do, a fill a limit refuses failing its gap, until a batch
+        holds a gap the engine did not attempt, which stays for a later call.
+        Work past `max_work` raises `ResourceLimitError`, and a cancel of the
+        parse's token `CancelledError`, each keeping what earlier batches
+        settled."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names."""
@@ -496,7 +587,10 @@ class Converter:
     `ocr_pages`, `"all"` or a set of 1-based pages, makes each selected PDF
     page a gap with reason `caller_requested` whatever its text, discarded
     without loss; a page past the last raises `InvalidConfigError`, any other
-    page outside 1 to 4294967295 `ValueError`, and any other format ignores it."""
+    page outside 1 to 4294967295 `ValueError`, and any other format ignores it.
+
+    `ocr`, an `OcrHttp`, reads a conversion's gaps before it renders, as
+    `parse`, `Parsed.ocr` and `Parsed.render` do in turn."""
 
     def __new__(cls, config: Config | None = None) -> Converter: ...
     @property
@@ -509,6 +603,7 @@ class Converter:
         *,
         cancel: CancelToken | None = None,
         ocr_pages: _OcrPages = None,
+        ocr: OcrHttp | None = None,
     ) -> Conversion:
         """Convert `data`, `bytes` or any contiguous byte buffer, to Markdown.
         `bytes` is read in place; any other buffer is copied once, after its
@@ -549,6 +644,7 @@ class Converter:
         *,
         cancel: CancelToken | None = None,
         ocr_pages: _OcrPages = None,
+        ocr: OcrHttp | None = None,
     ) -> Conversion:
         """Convert the regular file at `path` to Markdown. Its size is checked
         against `max_input_bytes` before it is read, and a directory raises

@@ -133,7 +133,14 @@ policy: $(CARGO_DENY)
 	$(CARGO_DENY) --workspace --all-features --locked --config deny.toml check
 	$(call refresh_index,fuzz/Cargo.toml)
 	$(CARGO_DENY) --manifest-path fuzz/Cargo.toml --all-features --locked --config deny.toml check
-	$(CARGO_DENY) --locked --config deny-offline.toml check bans
+	$(CARGO_DENY) --manifest-path python/Cargo.toml --locked --config deny-offline.toml check bans
+	mkdir -p $(OUT)
+	$(CARGO) tree --locked -p almiladoc -e normal,build --target all --prefix none --format '{p}' > $(OUT)/default-graph.txt
+	banned=$$(sed -n 's/.*crate = "\([^"]*\)".*/\1/p' deny-offline.toml | paste -sd '|')
+	[ -n "$$banned" ] || { echo "deny-offline.toml names no crate"; exit 1; }
+	if grep -E "^($$banned) " $(OUT)/default-graph.txt; then
+	  echo "the default build reaches a crate deny-offline.toml bans"; exit 1
+	fi
 
 locks:
 	$(policy_env)

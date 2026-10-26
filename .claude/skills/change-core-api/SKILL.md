@@ -2,9 +2,10 @@
 name: change-core-api
 description: Change the public surface the Python binding mirrors - `Format`, a model type or
   field, `ConvertError` or its codes, `Config`, a `Limits` field, `OnLoss`, `Diagnostic`,
-  `OcrRequest` or a public `Converter` or `Parsed` call - and carry it into the binding. Use
-  before editing src/lib.rs, src/error.rs, src/config.rs, src/limits.rs, src/converter.rs,
-  src/diagnostics.rs, src/model/ or src/ocr/, or when the binding breaks after one.
+  `OcrRequest`, `OcrHttpConfig` or a public `Converter`, `Parsed` or `OcrHttp` call - and carry it
+  into the binding. Use before editing src/lib.rs, src/error.rs, src/config.rs, src/limits.rs,
+  src/converter.rs, src/diagnostics.rs, src/model/ or src/ocr/, or when the binding breaks after
+  one.
 ---
 
 # Change the core API
@@ -33,7 +34,9 @@ stub against the core.
    - `config.rs`: a `Limits` field joins the `limits!` list with its one-line doc; a `Config`
      field gets its keyword, getter, `__repr__` and `Hash` term; an `OnLoss` variant its
      `#[classattr]` and `__repr__` arm.
-   - `ocr.rs`: an `OcrRequest` field, as a getter and in `__reduce__`'s arguments.
+   - `ocr.rs`: an `OcrRequest` field, as a getter and in `__reduce__`'s arguments; an
+     `OcrHttpConfig` field, as an `OcrHttp` keyword; an `OcrSummary` field, as a getter; an
+     `OcrOutcome` or `GapFill` variant, as its arm in `answer`.
    - `converter.rs`: a public `Converter` or `Parsed` call, run detached; `input.rs` admits every
      input against `max_input_bytes` before it is copied or read. `diagnostics.rs`: a
      `Diagnostic` field's getter.

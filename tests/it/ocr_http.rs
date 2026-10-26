@@ -15,7 +15,7 @@ use crate::build::{docx_with, relationships};
 use crate::support::{configured, fixture};
 use almiladoc::{
     CancelToken, Format, GapFill, ImageOcr, Input, OcrEngine, OcrFailure, OcrHttp, OcrHttpConfig,
-    OcrOutcome, OcrRequest, OnLoss, Parsed, RasterSpec,
+    OcrImage, OcrOutcome, OcrRequest, OnLoss, Parsed, RasterSpec,
 };
 use serde_json::{Value, json};
 
@@ -312,6 +312,23 @@ fn a_retry_waits_its_backoff_or_retry_after_and_stops_at_its_count() {
     let once = engine(&server.base_url, |config| config.retries = 1);
     assert_eq!(one(&once, &requests[0]), unattempted(Some(504)));
     assert_eq!(server.finish().len(), 2);
+}
+
+#[test]
+fn images_outside_a_parse_read_under_their_own_text_limits() {
+    let (_, requests) = images(1 << 20);
+    let image = OcrImage::new(requests[0].image.bytes.to_vec(), None).unwrap();
+    assert_eq!(image, requests[0].image);
+    let jpeg = OcrImage::new(*b"\xff\xd8\xff\xe0", Some(150)).unwrap();
+    assert_eq!((jpeg.media_type, jpeg.dpi), ("image/jpeg", Some(150)));
+    assert_eq!(OcrImage::new(*b"GIF89a", None), None);
+    let long = "a".repeat(6 * 1024 + (64 << 10));
+    let server = Server::start(vec![reply(&long), reply(&long), Answer::Close]);
+    let images = [(1 << 20), 1024, 1024, 1024].map(|max| (image.clone(), max));
+    let outcomes = engine(&server.base_url, |config| config.retries = 0)
+        .recognize_images(&images, &CancelToken::new());
+    assert_eq!(outcomes, [filled(&long), failed(Some(200)), unattempted(None), unattempted(None)]);
+    assert_eq!(server.finish().len(), 3);
 }
 
 #[test]

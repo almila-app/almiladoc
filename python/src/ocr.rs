@@ -1,9 +1,14 @@
-//! `OcrRequest`: a gap's image exported for an OCR run elsewhere.
+//! `OcrRequest`, a gap's image exported for an OCR run elsewhere, and `OcrHttp`, the
+//! engine that reads it.
 
+use almiladoc::{GapFill, OcrHttpConfig, OcrImage, OcrOutcome};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyTuple, PyType};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple, PyType};
+use serde_json::{Map, Value};
 
-use crate::converter::GapRow;
+use crate::converter::{CancelToken, GapRow};
+use crate::errors::{config_error, ocr_http_refusal};
 
 /// One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
 /// `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
@@ -32,6 +37,15 @@ impl OcrRequest {
             max_text_bytes: request.max_text_bytes,
             dpi: request.image.dpi,
         })
+    }
+
+    /// This request's image and text limit, copied for an engine to read;
+    /// `ValueError` unless the image opens with the signature `media_type` names.
+    fn to_read(&self, py: Python<'_>) -> PyResult<(OcrImage, u64)> {
+        OcrImage::new(self.image.bind(py).as_bytes(), self.dpi)
+            .filter(|image| image.media_type == self.media_type)
+            .map(|image| (image, self.max_text_bytes))
+            .ok_or_else(|| PyValueError::new_err("an OcrRequest's image is not its media_type"))
     }
 }
 
@@ -102,5 +116,188 @@ impl OcrRequest {
             self.max_text_bytes,
             self.dpi.map_or_else(|| "None".to_owned(), |dpi| dpi.to_string()),
         ))
+    }
+}
+
+/// Reads gaps' images through an OpenAI-compatible vision server, posting
+/// each to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the
+/// `ocr` of `Converter.convert`, or `recognize`. `api_key` goes only over
+/// `https` or to loopback; `prompt`, `None` for the default, asks for each
+/// image's Markdown, after the image when `image_first`; `extra_body` adds
+/// JSON fields to each request; `max_tokens` and `temperature`, 0 to 2, set
+/// the sampling; a page is painted as `Parsed.ocr_requests` paints it at
+/// `dpi` and `max_pixels`; a request the server cannot take yet is tried up
+/// to `retries` more times, at most 10; and `concurrency`, 1 to 16, requests
+/// go out at once. A field out of range raises `ConfigError` naming it. No
+/// socket opens before a request, no proxy is used and no redirect followed.
+#[pyclass(frozen, module = "almiladoc")]
+pub(crate) struct OcrHttp(pub(crate) almiladoc::OcrHttp);
+
+#[pymethods]
+impl OcrHttp {
+    #[new]
+    #[pyo3(signature = (
+        base_url, model, *, api_key = None, prompt = None, image_first = true, extra_body = None,
+        max_tokens = 8192, temperature = 0.0, dpi = 150, max_pixels = 12_845_056, retries = 3,
+        concurrency = 1,
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each field of Rust's `OcrHttpConfig` is one argument"
+    )]
+    fn new(
+        py: Python<'_>,
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+        prompt: Option<String>,
+        image_first: bool,
+        extra_body: Option<&Bound<'_, PyDict>>,
+        max_tokens: u32,
+        temperature: f32,
+        dpi: u32,
+        max_pixels: u64,
+        retries: u32,
+        concurrency: usize,
+    ) -> PyResult<Self> {
+        let mut config = OcrHttpConfig::new(base_url, model);
+        config.api_key = api_key;
+        config.prompt = prompt.unwrap_or(config.prompt);
+        config.image_first = image_first;
+        if let Some(body) = extra_body {
+            config.extra_body =
+                json_object(py, body).ok_or_else(|| ocr_http_refusal(py, "extra_body"))?;
+        }
+        (config.max_tokens, config.temperature) = (max_tokens, temperature);
+        (config.raster.dpi, config.raster.max_pixels) = (dpi, max_pixels);
+        (config.retries, config.concurrency) = (retries, concurrency);
+        almiladoc::OcrHttp::new(config).map(Self).map_err(|e| config_error(py, &e))
+    }
+
+    /// The text the server reads for each of `requests`, in order, with the
+    /// GIL released once their images are copied: a `str` that fills its gap,
+    /// or an `OcrFailure`. Once one is not attempted or `cancel` is
+    /// cancelled, no later request is sent. A request whose image is not its
+    /// `media_type` raises `ValueError`.
+    #[pyo3(signature = (requests, *, cancel = None))]
+    fn recognize<'py>(
+        &self,
+        py: Python<'py>,
+        requests: Vec<Bound<'py, OcrRequest>>,
+        cancel: Option<&Bound<'py, CancelToken>>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let images = requests
+            .into_iter()
+            .map(|request| request.get().to_read(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        let cancel = cancel.map_or_else(almiladoc::CancelToken::new, |token| token.get().0.clone());
+        let outcomes = py.detach(|| self.0.recognize_images(&images, &cancel));
+        outcomes.into_iter().map(|outcome| answer(py, outcome)).collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
+/// `body` as a JSON object, `None` when JSON cannot hold it.
+fn json_object(py: Python<'_>, body: &Bound<'_, PyDict>) -> Option<Map<String, Value>> {
+    let options = PyDict::new(py);
+    options.set_item("allow_nan", false).ok()?;
+    let dumps = py.import("json").ok()?.getattr("dumps").ok()?;
+    let text: String = dumps.call((body,), Some(&options)).ok()?.extract().ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// What `recognize` gives for `outcome`.
+fn answer(py: Python<'_>, outcome: OcrOutcome) -> PyResult<Bound<'_, PyAny>> {
+    let failure = |attempted, failure: almiladoc::OcrFailure| {
+        Bound::new(py, OcrFailure { attempted, status: failure.status }).map(Bound::into_any)
+    };
+    match outcome {
+        OcrOutcome::Fill(GapFill::Markdown(text)) => Ok(PyString::new(py, &text).into_any()),
+        OcrOutcome::Unattempted(why) => failure(false, why),
+        OcrOutcome::Failed(why) => failure(true, why),
+        _ => failure(false, almiladoc::OcrFailure::default()),
+    }
+}
+
+/// Why OCR read no text for a request, which pickles: `attempted` false when
+/// it was not tried, which leaves its gap for a later call, and true when it
+/// failed, which fails its gap; `status`, the HTTP status of its last
+/// attempt, if it had one.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct OcrFailure {
+    attempted: bool,
+    status: Option<u16>,
+}
+
+#[pymethods]
+impl OcrFailure {
+    #[new]
+    #[pyo3(signature = (*, attempted = true, status = None))]
+    fn new(attempted: bool, status: Option<u16>) -> Self {
+        Self { attempted, status }
+    }
+
+    /// False when the request was not tried, true when it failed.
+    #[getter]
+    fn attempted(&self) -> bool {
+        self.attempted
+    }
+
+    /// The HTTP status of the last attempt, if it had one.
+    #[getter]
+    fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    fn __getnewargs_ex__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyTuple>, Bound<'py, PyDict>)> {
+        let arguments = PyDict::new(py);
+        arguments.set_item("attempted", self.attempted)?;
+        arguments.set_item("status", self.status)?;
+        Ok((PyTuple::empty(py), arguments))
+    }
+
+    fn __repr__(&self) -> String {
+        let attempted = if self.attempted { "True" } else { "False" };
+        let status = self.status.map_or_else(|| "None".to_owned(), |status| status.to_string());
+        format!("OcrFailure(attempted={attempted}, status={status})")
+    }
+}
+
+/// What one `Parsed.ocr` call did to the gaps it could request.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct OcrSummary {
+    /// Gaps filled.
+    #[pyo3(get)]
+    filled: usize,
+    /// Gaps failed: the engine failed them, or a limit refused their fill.
+    #[pyo3(get)]
+    failed: usize,
+    /// Gaps left for a later call: the engine did not attempt them, or a
+    /// request before theirs was not attempted.
+    #[pyo3(get)]
+    unattempted: usize,
+}
+
+impl From<almiladoc::OcrSummary> for OcrSummary {
+    fn from(summary: almiladoc::OcrSummary) -> Self {
+        Self { filled: summary.filled, failed: summary.failed, unattempted: summary.unattempted }
+    }
+}
+
+#[pymethods]
+impl OcrSummary {
+    fn __repr__(&self) -> String {
+        format!(
+            "OcrSummary(filled={}, failed={}, unattempted={})",
+            self.filled, self.failed, self.unattempted
+        )
     }
 }

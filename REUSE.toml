@@ -64,6 +64,7 @@ path = [
     "python/stubtest-allowlist.txt",
     "rust-toolchain.toml",
     "scripts/check_dist.py",
+    "scripts/ocr_live.py",
     "src/config.rs",
     "src/converter.rs",
     "src/ctx.rs",

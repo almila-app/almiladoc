@@ -13,7 +13,7 @@ targets = [
 [bans]
 multiple-versions = "allow"
 deny = [
-    { crate = "ureq", reason = "the default build makes no network call" },
+    { crate = "ureq", wrappers = ["almiladoc"], reason = "only the ocr-http feature makes a network call" },
     { crate = "hyper", reason = "the default build makes no network call" },
     { crate = "reqwest", reason = "the default build makes no network call" },
     { crate = "libloading", reason = "the default build loads no library at run time" },

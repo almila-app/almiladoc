@@ -54,11 +54,10 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W12 | ocr-http-python | |
 | W13 | raster-hook (on the unpdf release that carries a paint budget) | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
-release follows W12.
+release is next.
 
 ## Items
 
@@ -78,38 +77,6 @@ release follows W12.
   ADR 0001 decision 6.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W12
-
-`OcrHttp` (feature `ocr-http`) posts `concurrency` requests at once on the calling thread and
-scoped ones; what remains of ADR 0002 decision 7 is Python. A proptest over any reply body stands
-for the `ocr_reply` fuzz target, as the parser is crate-private and serde_json reads it; the
-agent's `RootCerts::WebPki`, asserted by a unit test, leaves `SSL_CERT_FILE` nothing to change.
-
-#### ocr-http-python: Python fills gaps through `OcrHttp`, with no code
-- **Goal:** a base URL, a model and a key let a Python caller fill a parse's gaps, in-process or
-  from a child's pickled requests.
-- **Scope:**
-  - `python/Cargo.toml` turns `ocr-http` on and takes `log` with `max_level_off`; ADR 0003
-    decision 2's `deny-offline.toml` then bans `ureq` from the default graph only, `make policy`
-    proving the binding's graph.
-  - Through `/change-core-api`: a public way to recognize an image without a `GapId` (the
-    binding cannot build an `OcrRequest`, which is `#[non_exhaustive]`); `OcrHttp(base_url, model,
-    *, api_key=None, …)` releasing the GIL and copying images before it does, with
-    `recognize(requests, *, cancel=None)` giving `str` or a pickling `OcrFailure(*,
-    attempted=True, status=None)` each, so a parent fills a child's exported requests;
-    `Parsed.ocr(engine)` with `OcrSummary`; `Converter.convert(…, ocr=None)` on the core's
-    `convert_with_ocr`; `ConfigError` with `limit` naming a refused `OcrHttp` field.
-  - No `repr`, error or log holds a key, a prompt, or a URL's user or query.
-  - `scripts/ocr_live.py` runs the five-page fixture through the binding's `OcrHttp` against a
-    live endpoint, logging method, path, status and gap.
-- **Files:** `python/`, `src/`, `scripts/`, `deny-offline.toml`, ADR 0003, `README.md`,
-  `REUSE.toml`.
-- **Tests:** against a loopback server: Python equals Rust on the rich DOCX fixture, a child's
-  pickled requests filled by the parent's `OcrHttp` included; a refused field raises
-  `ConfigError`; a cancel ends a retry wait.
-- **Credit:** none.
-- **Depends on:** none open. **Size:** about 550 lines. **Tier:** T3.
 
 ### W13
 
@@ -176,7 +143,7 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
   repository's maintainer open and answer its pull requests. If they stay unmerged, rten is forked
   and published under a new name.
 - **Consumer proof** (a change in the primary consumer's own repository). Trigger: the `almiladoc`
-  candidate wheel on TestPyPI (after W12) or on PyPI. It proves the consumer depends on that wheel
+  candidate wheel on TestPyPI or on PyPI. It proves the consumer depends on that wheel
   instead of the converter it replaces, a test asserts `importlib.metadata.version("almiladoc")`
   equals the candidate and that no import of that converter remains, and its suite is green. The
   first run certifies every format, PDF through the model and the OCR stack on the consumer's own
@@ -211,7 +178,7 @@ Asked only when the item that needs them is next.
 
 | Step | Needed by | When |
 |---|---|---|
-| An OpenAI-compatible endpoint serving the consumer's model: its base URL, model id and a key in a file outside every repository, for `scripts/ocr_live.py` on the five-page fixture; the key never reaches a log, CI or a commit | the first release | after W12, before the first candidate tag |
-| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | after W12, then as each tag is due |
+| An OpenAI-compatible endpoint serving the consumer's model: its base URL, model id and a key in a file outside every repository, for `scripts/ocr_live.py` on the five-page fixture; the key never reaches a log, CI or a commit | the first release | before the first candidate tag |
+| After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | as each tag is due |
 | Agree with the consumer the PDF-path scope, how it maps `Incomplete` and `Internal`, its two-phase transport, prompt and `concurrency` | consumer proof | when the proof starts |
 | A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline, ocr-lines | when either is next |

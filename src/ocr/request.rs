@@ -43,6 +43,28 @@ pub struct OcrImage {
     pub dpi: Option<u32>,
 }
 
+impl OcrImage {
+    /// The image `bytes` hold, painted at `dpi` if a page; `None` unless they open with the
+    /// PNG or JPEG signature.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::OcrImage;
+    ///
+    /// let image = OcrImage::new(*b"\xff\xd8\xff\xe0", None).ok_or("not an image")?;
+    /// assert_eq!(image.media_type, "image/jpeg");
+    /// assert_eq!(OcrImage::new(*b"GIF89a", None), None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn new(bytes: impl Into<Arc<[u8]>>, dpi: Option<u32>) -> Option<Self> {
+        let bytes = bytes.into();
+        let media_type = media_type(&bytes)?;
+        Some(Self { bytes, media_type, dpi })
+    }
+}
+
 impl fmt::Debug for OcrImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OcrImage")

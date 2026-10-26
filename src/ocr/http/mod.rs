@@ -14,7 +14,7 @@ use ureq::typestate::AgentScope;
 
 use crate::config::ConfigError;
 use crate::ledger::CancelToken;
-use crate::ocr::{GapFill, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, RasterSpec};
+use crate::ocr::{GapFill, OcrEngine, OcrFailure, OcrImage, OcrOutcome, OcrRequest, RasterSpec};
 use crate::pool::{fan_out, wait};
 
 /// How [`OcrHttp`] reaches an OpenAI-compatible vision server.
@@ -128,7 +128,9 @@ impl fmt::Debug for Redacted<'_> {
 /// request the server rejects (400, 413 or 422) or a reply that holds no Markdown fails its
 /// gap; any other failure leaves its gap unattempted. It follows no redirect, uses no proxy,
 /// verifies TLS against the Mozilla roots on rustls' process-wide provider or ring, and reads a
-/// reply body of under six times the request's `max_text_bytes` and 64 KiB.
+/// reply body of under six times the request's `max_text_bytes` and 64 KiB. ureq logs each
+/// request's head, the key included, at `log`'s trace level: a process whose logger keeps
+/// ureq's trace records the key.
 pub struct OcrHttp {
     agent: Agent,
     endpoint: Uri,
@@ -217,10 +219,53 @@ impl OcrHttp {
         })
     }
 
-    /// What the server made of `request`, after retries.
-    fn read(&self, request: &OcrRequest, cancel: &CancelToken) -> OcrOutcome {
-        let body = self.template.body(&request.image);
-        let cap = request.max_text_bytes.saturating_mul(6).saturating_add(64 << 10);
+    /// What the server makes of each of `images`, each with the most bytes of Markdown its fill
+    /// takes, read as [`OcrEngine::recognize`] reads requests: for images outside a parse, such
+    /// as the requests of a parse in another process.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{CancelToken, OcrFailure, OcrHttp, OcrHttpConfig, OcrImage, OcrOutcome};
+    ///
+    /// let engine = OcrHttp::new(OcrHttpConfig::new("http://127.0.0.1:1/v1", "vision-model"))?;
+    /// let image = OcrImage::new(*b"\xff\xd8\xff\xe0", None).ok_or("not an image")?;
+    /// let outcomes = engine.recognize_images(&[(image, 4096)], &CancelToken::new());
+    /// assert_eq!(outcomes, [OcrOutcome::Unattempted(OcrFailure::new(None))]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn recognize_images(
+        &self,
+        images: &[(OcrImage, u64)],
+        cancel: &CancelToken,
+    ) -> Vec<OcrOutcome> {
+        self.read_all(images, |(image, max_text_bytes)| (image, *max_text_bytes), cancel)
+    }
+
+    /// The outcome of each of `items`, whose image and text limit `part` gives.
+    fn read_all<T: Sync>(
+        &self,
+        items: &[T],
+        part: impl Fn(&T) -> (&OcrImage, u64) + Sync,
+        cancel: &CancelToken,
+    ) -> Vec<OcrOutcome> {
+        let unattempted = || OcrOutcome::Unattempted(OcrFailure::new(None));
+        let read = fan_out(items, self.concurrency, |item| {
+            if cancel.is_cancelled() {
+                return (unattempted(), true);
+            }
+            let (image, max_text_bytes) = part(item);
+            let outcome = self.read(image, max_text_bytes, cancel);
+            let stop = matches!(outcome, OcrOutcome::Unattempted(_));
+            (outcome, stop)
+        });
+        read.into_iter().map(|outcome| outcome.unwrap_or_else(unattempted)).collect()
+    }
+
+    /// What the server made of `image`, after retries.
+    fn read(&self, image: &OcrImage, max_text_bytes: u64, cancel: &CancelToken) -> OcrOutcome {
+        let body = self.template.body(image);
+        let cap = max_text_bytes.saturating_mul(6).saturating_add(64 << 10);
         let (mut status, mut pause) = (None, None);
         for attempt in 0..=self.retries {
             if let Some(delay) = pause.take()
@@ -288,16 +333,7 @@ impl OcrEngine for OcrHttp {
     }
 
     fn recognize(&self, requests: &[OcrRequest], cancel: &CancelToken) -> Vec<OcrOutcome> {
-        let unattempted = || OcrOutcome::Unattempted(OcrFailure::new(None));
-        let read = fan_out(requests, self.concurrency, |request| {
-            if cancel.is_cancelled() {
-                return (unattempted(), true);
-            }
-            let outcome = self.read(request, cancel);
-            let stop = matches!(outcome, OcrOutcome::Unattempted(_));
-            (outcome, stop)
-        });
-        read.into_iter().map(|outcome| outcome.unwrap_or_else(unattempted)).collect()
+        self.read_all(requests, |request| (&request.image, request.max_text_bytes), cancel)
     }
 }
 

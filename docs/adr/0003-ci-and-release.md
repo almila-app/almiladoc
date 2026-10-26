@@ -15,9 +15,9 @@ Date: 2026-10-14
 2. **Gates** are Makefile targets, `make ci` the pre-flight; jobs run on `ubuntu-26.04` unless named. `LICENCE_SET` is `LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES`.
    - `rust`: fmt, clippy, locked tests and docs, all features, `-D warnings`; snapshots byte-compared and never updated; proptest seeds fixed.
    - `rust-arm`: `make test` on `ubuntu-26.04-arm`, byte-comparing non-PDF snapshots only.
-   - `features`: clippy of `almiladoc` and its tests without default features (the binding asks for the defaults, so the workspace's clippy equals `make clippy`); each feature alone.
+   - `features`: clippy of `almiladoc` and its tests without default features (a workspace build takes the binding's features, so only `-p almiladoc` builds without them); each feature alone.
    - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `BUSL-1.1 AND MIT` metadata.
-   - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq`, `hyper`, `reqwest`, `libloading` and `rten` from the default and binding graphs; a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
+   - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq` but as `almiladoc`'s, which its `ocr-http` takes, and `hyper`, `reqwest`, `libloading` and `rten` from the binding's graph, and `cargo tree -p almiladoc` finds none of them in the default graph (cargo deny sees the binding's features in every workspace graph); a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
    - `dco`: `make dco`, which checks sign-offs, that no assistant is a commit's author or committer, and REUSE.toml's MIT-bearing annotations (ADR 0004); then `make setup`, the tracked agent setup's own check and its self-test.
    - `fuzz`: every target builds, with each declared feature; an empty seed directory fails; seeds and `fuzz/regressions/` replay once; the docs.rs build passes.
 
