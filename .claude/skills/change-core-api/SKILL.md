@@ -43,7 +43,8 @@ stub against the core.
    - `python/almiladoc/_almiladoc.pyi` and `__init__.py`: imports, `__all__`, and in
      `__init__.py` the `Format` Literal, which the stub imports. `make python` runs stubtest
      against the built module; the suite checks that stub and module export the same names and
-     that every public name has a docstring.
+     that every public name has a docstring. A pyo3 `Vec<T>` parameter takes only a sequence, so
+     the stub says `Sequence`; a core doc that narrows a claim narrows each docstring repeating it.
 3. A new format also needs its `Format::as_str` arm and its `Format::ALL` entry (the tests in
    `src/lib.rs` fail without either), `Format::from_extension`, a detection rule in
    `src/formats/detect.rs`, a fixture directory (`/add-fixture`), and a fuzz target with its

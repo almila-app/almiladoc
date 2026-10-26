@@ -39,11 +39,11 @@ the Waves table, then the section of the item you take).
 - The change that lands an item deletes its roadmap section and its place in the Waves table, and
   corrects any item it found wrong.
 
-**Commits:** `git commit -s`; a subject of at most 72 columns, a few-line body on what changed and
-why, every number in it measured, no gates or process narrative. The commit-msg hook refuses
-`claude` in any case and `llm`: call `CLAUDE.md` "the repository instructions" and `.claude/` "the
-agent setup". The final trailer block holds `Tier` and any `Co-authored-by`, and ends with
-`Signed-off-by`.
+**Commits:** `git commit -s`, on an amend that rewrites the message too; a subject of at most 72
+columns, a few-line body on what changed and why, every number in it measured, no gates or process
+narrative. The commit-msg hook refuses `claude` in any case and `llm`: call `CLAUDE.md` "the
+repository instructions" and `.claude/` "the agent setup". The final trailer block holds `Tier`
+and any `Co-authored-by`, and ends with `Signed-off-by`.
 
 **The owner:** report in Turkish; code, comments, documents and commits stay English, as compact as
 clarity allows. Your own changes wait for no approval from the owner (ADR 0004 decision 6).

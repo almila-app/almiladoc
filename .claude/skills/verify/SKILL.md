@@ -33,7 +33,10 @@ A gate runs the Makefile target CI runs wherever one exists (`make <target>` in 
 | commits on the branch, `dco.py`, `REUSE.toml`, `LICENSES/MIT.txt`, `uv.lock` | `make dco`: a sign-off, a subject of at most 72 columns alone on its line; no assistant named; nothing private; no existing file leaves an MIT-bearing annotation or any copyright line; each MIT-bearing annotation overrides; no file comes under `MIT` alone that was not |
 
 A `Makefile` change selects every make gate; `pyproject.toml` goes with `uv.lock`. `make dco`
-judges `origin/main..HEAD`, as a candidate's run does, whatever `--base` says.
+judges `origin/main..HEAD`, as a candidate's run does, whatever `--base` says. Before `make ci`,
+on a tree nothing edits, run `make clippy features`, the whole `it` suite and each changed gate
+script's own target, as each costs a whole run when it fails late; a mutant run restores and
+diffs the tree before any commit.
 
 Never weaken a gate to pass. NOT RUN is never a pass: a make target the host cannot run prints
 `NOT RUN <target>: <reason>`, and verify reports it so. When the change needs that gate, install

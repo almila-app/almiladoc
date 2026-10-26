@@ -14,7 +14,9 @@ is the primary consumer, a Python service that depends on the wheel.
   swaps in the default. An abuse input counts only when it trips its limit at default `Limits`; a
   lowered-limit test proves a charge site only. An item that starts enforcing a `Limits` field owns
   that field's rustdoc; one that commits an abuse fixture owns its row in `tests/it/limits.rs`.
-- **Size.** At most about 1500 hand-written changed lines; fixtures, snapshots, lockfiles and
+  Two mechanisms for one behaviour (an up-front refusal and an in-flight check) hide each other's
+  mutants, so each gets a test that alone kills its own.
+- **Size.** At most about 800 hand-written changed lines; fixtures, snapshots, lockfiles and
   generated text do not count. A larger item splits where its section says, else at its natural seam.
 - **One writer per file per wave.** Parallel items of a wave never edit the same file; serial items
   may. Union files: the two path lists of `REUSE.toml` and the `mod` lines of `tests/it/main.rs`. A

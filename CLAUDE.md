@@ -23,8 +23,9 @@ repository's own work is BUSL-1.1.
 
 - `docs/adr/`, the invariants below and the rules bind until a better method rewrites or deletes
   one in the change that departs from it, with its reason; legal duties and the owner's decisions
-  stay. ADR 0001 is the target design, reached in the order of its decision 19; the invariants
-  describe the code as it stands.
+  stay; a change to a gate rewrites the decision that states it, not only the lines citing it.
+  ADR 0001 is the target design, reached in the order of its decision 19; the invariants describe
+  the code as it stands.
 - `docs/roadmap.md` is the open work, in order, and says how the change landing an item updates it.
 - Every change lands as a candidate `land/owner/<slug>` (an accepted pull request as
   `land/owner/pr-<n>`) that `main` fast-forwards to once its `ci / required` passes (ADR 0004);
@@ -38,8 +39,10 @@ repository's own work is BUSL-1.1.
   is a `Block::Gap`; others map as usual, bar running heads and pictures (`image_omitted`).
 - Frontends resolve style cascades (tri-state `shared::delta::StyleDelta` into `Style`),
   numbering and list labels, relationships and fields. Note references and internal anchors stay
-  ids for the renderer, which alone decides Markdown syntax. Images retain their source locations
-  and asset bytes; the renderer applies `Config::images` to their output and loss reporting.
+  ids for the renderer, which alone decides Markdown syntax; a new `Block` variant, or one in a new
+  container, is checked against each renderer `match`, wildcard arms included. Images retain their
+  source locations and asset bytes; the renderer applies `Config::images` to their output and loss
+  reporting.
 - `Err` means no complete conversion was possible; recoverable quirks are repaired or skipped,
   and each skip is reported as `ParseCtx::emit(DiagnosticCode, Region)` in the current unit, by
   the `DiagnosticCode` in `src/diagnostics.rs` whose doc names that loss; the crate has no
@@ -97,11 +100,10 @@ cargo test --locked --test it -- --ignored      # ./samples/ sweep: fails when a
   runs them as the jobs behind `ci / required`. A target the host cannot run prints
   `NOT RUN <target>: <reason>` and exits 0, or 1 under `CI=true`.
 - Gate selection: `.claude/skills/verify/scripts/verify.py` (`/verify`). Fixtures and their
-  snapshots: `.claude/skills/add-fixture/scripts/fixtures.py` (`/add-fixture`).
+  snapshots: `.claude/skills/add-fixture/scripts/fixtures.py` (`/add-fixture`). Fuzzing, and
+  refreshing the tracked `fuzz/Cargo.lock` that `make locks` reproduces: `fuzz/README.md`.
 - Python tests run only through `make python`, against the wheel built from the sdist and
   installed per CPython; `python/almiladoc/` alone has no native module.
-- Fuzzing, and refreshing the tracked `fuzz/Cargo.lock` that `make locks` reproduces:
-  `fuzz/README.md`.
 
 ## Traps
 
@@ -111,10 +113,6 @@ cargo test --locked --test it -- --ignored      # ./samples/ sweep: fails when a
   so `make dco`'s licence guard (`.github/scripts/dco.py`) holds this. A file edited while its
   annotation is `MIT` joins the `BUSL-1.1 AND MIT` list, keeping its lines and adding the
   licensor's.
-- `git commit -s`: subject at most 72 columns, a few-line body on what changed and why, no gates or
-  process narrative; `Co-authored-by` goes in the final trailer block with `Tier`, `Signed-off-by`.
-- Never put `[tool.uv] required-version`, or any setting that binds every uv call, in
-  `pyproject.toml`: it breaks the maintainer's tooling run inside the checkout. Pin uv where the
-  gates run (the Makefile's `UV_VERSION`, `setup-uv`'s `version`).
-- `uses: $/.github/workflows/gates.yml` is GitHub's valid self-repository form for a reusable
-  workflow (GitHub changelog); keep it.
+- `git commit -s`, an amend that rewrites the message too: subject at most 72 columns, a few-line
+  body on what changed and why, no gates or process narrative; `Co-authored-by` goes in the final
+  trailer block with `Tier`, `Signed-off-by`.
