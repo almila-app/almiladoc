@@ -1,4 +1,5 @@
-"""Require every commit of a range to carry its author's Signed-off-by and a subject line alone;
+"""Require every commit of a range to carry its author's Signed-off-by and a subject line alone,
+and to name no assistant as its author or committer;
 every file REUSE.toml marked MIT at the merge base to keep an MIT-bearing annotation and every
 copyright line of it; every MIT-bearing annotation of the tree to override, and no file to come
 under an MIT-only one it did not have at the merge base."""
@@ -17,8 +18,10 @@ from pathlib import Path
 DEPENDABOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
 ISOLATED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
 SIGN_OFFS = "%(trailers:key=Signed-off-by,valueonly,separator=%x01)"
-FIELDS = f"%H%x00%an%x00%ae%x00{SIGN_OFFS}%x00%s%x00%B%x00"
+FIELDS = f"%H%x00%an%x00%ae%x00%cn%x00%ce%x00{SIGN_OFFS}%x00%s%x00%B%x00"
 SUBJECT_COLUMNS = 72
+# Bounded by letters only: `_` and digits separate words in logins and e-mail addresses.
+ASSISTANT = re.compile(r"(?<![^\W\d_])(claude|anthropic|llm)(?![^\W\d_])", re.IGNORECASE)
 
 
 def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
@@ -35,11 +38,11 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
 def check(root: Path, revisions: str, skip_dependabot: bool) -> list[str]:
     fields = git(root, "log", f"--format={FIELDS}", revisions).split("\0")
     problems = []
-    for start in range(0, len(fields) - 6, 6):
-        sha, name, email, trailers, subject = (
-            field.strip("\n") for field in fields[start : start + 5]
+    for start in range(0, len(fields) - 8, 8):
+        sha, name, email, committer, committer_email, trailers, subject = (
+            field.strip("\n") for field in fields[start : start + 7]
         )
-        first_line = fields[start + 5].split("\n", 1)[0].rstrip()
+        first_line = fields[start + 7].split("\n", 1)[0].rstrip()
         if skip_dependabot and (name, email) == DEPENDABOT:
             continue
         signed = {value.strip() for value in trailers.split("\x01") if value.strip()}
@@ -55,6 +58,14 @@ def check(root: Path, revisions: str, skip_dependabot: bool) -> list[str]:
             problems.append(
                 f"{sha[:12]} by {name} <{email}> has no subject alone on its first line"
             )
+        for role, who in (
+            ("author", f"{name} <{email}>"),
+            ("committer", f"{committer} <{committer_email}>"),
+        ):
+            if ASSISTANT.search(who):
+                problems.append(
+                    f"{sha[:12]} by {name} <{email}> names an assistant as its {role}: {who}"
+                )
     return problems
 
 
@@ -202,8 +213,16 @@ def self_test() -> int:
         (root / ".git" / "no-hooks").mkdir()
         env = {**os.environ, "GIT_COMMITTER_NAME": "C", "GIT_COMMITTER_EMAIL": "c@example.com"}
 
-        def commit(name: str, message: str, email: str = "", cleanup: str = "strip") -> None:
+        def commit(
+            name: str,
+            message: str,
+            email: str = "",
+            cleanup: str = "strip",
+            by: tuple[str, str] | None = None,
+        ) -> None:
             author = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email or f"{name}@example.com"}
+            if by:
+                author |= {"GIT_COMMITTER_NAME": by[0], "GIT_COMMITTER_EMAIL": by[1]}
             git(
                 root,
                 "-c",
@@ -240,6 +259,14 @@ def self_test() -> int:
         signed("Oz", "x" * SUBJECT_COLUMNS + "\nruns on", cleanup="verbatim")
         commit(DEPENDABOT[0], "Bump " + "x" * SUBJECT_COLUMNS, DEPENDABOT[1])
         commit(DEPENDABOT[0], "impostor", "Eve@example.com")
+        pat = "Signed-off-by: Pat <Pat@example.com>"
+        commit("Pat", f"committed by an assistant\n\n{pat}", by=("Bot", "bot@anthropic.example"))
+        commit("Claude", "authored by one\n\nSigned-off-by: Claude <Claude@example.com>")
+        sam = "Signed-off-by: Sam <llm_bot@example.com>"
+        commit("Sam", f"an address naming one\n\n{sam}", "llm_bot@example.com")
+        quinn = "Signed-off-by: Quinn Llmore <quinn@example.com>"
+        commit("Quinn Llmore", f"a name that only begins with one\n\n{quinn}", "quinn@example.com")
+        signed("Claudia", "a name that only begins with one")
         on_push = findings(check(root, f"{base}..HEAD", skip_dependabot=False))
         on_pull = findings(check(root, f"{base}..HEAD", skip_dependabot=True))
     unsigned = "lacks its author's Signed-off-by (git commit -s)"
@@ -259,6 +286,12 @@ def self_test() -> int:
             f"Oz <Oz@example.com> {long}",
             f"Oz <Oz@example.com> {joined}",
             f"{DEPENDABOT[0]} <Eve@example.com> {unsigned}",
+            "Pat <Pat@example.com> names an assistant as its committer: "
+            "Bot <bot@anthropic.example>",
+            "Claude <Claude@example.com> names an assistant as its author: "
+            "Claude <Claude@example.com>",
+            "Sam <llm_bot@example.com> names an assistant as its author: "
+            "Sam <llm_bot@example.com>",
         ]
     )
     bot = f"{DEPENDABOT[0]} <{DEPENDABOT[1]}>"

@@ -53,7 +53,7 @@ PY_FIXTURE = re.compile(r'\bFIXTURES\s*/\s*"([^"]+)"\s*/\s*"([^"]+)"')
 PY_FIXTURE_USE = re.compile(r"\bFIXTURES\b(?!\s*=)")
 NOT_RUN = re.compile(r"^NOT RUN (\S+): (.*)$", re.MULTILINE)
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
-COMMIT_VOICE = re.compile(r"\b(claude|llm|anthropic)\b", re.IGNORECASE)
+COMMIT_VOICE = re.compile(r"(?<![^\W\d_])(claude|llm|anthropic)(?![^\W\d_])", re.IGNORECASE)
 TAIL = 40
 
 

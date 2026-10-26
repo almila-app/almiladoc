@@ -18,7 +18,7 @@ Date: 2026-10-14
    - `features`: clippy of `almiladoc` and its tests without default features (the binding asks for the defaults, so the workspace's clippy equals `make clippy`); each feature alone.
    - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `BUSL-1.1 AND MIT` metadata.
    - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq`, `hyper`, `reqwest`, `libloading` and `rten` from the default and binding graphs; a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
-   - `dco`: `make dco`, sign-offs and REUSE.toml's MIT-bearing annotations (ADR 0004), and `make setup`, the tracked agent setup's own check and its self-test.
+   - `dco`: `make dco`, which checks sign-offs, that no assistant is a commit's author or committer, and REUSE.toml's MIT-bearing annotations (ADR 0004); then `make setup`, the tracked agent setup's own check and its self-test.
    - `fuzz`: every target builds, with each declared feature; an empty seed directory fails; seeds and `fuzz/regressions/` replay once; the docs.rs build passes.
 
 3. **Tools and caches.** `rust-toolchain.toml` pins the latest stable release; `rust-version` equals its minor. Cargo tools are sha256-pinned release binaries. Python tools, maturin and ziglang included, are locked `uv` groups. Workspace tests build at `opt-level = 1`, overflow checks and debug assertions on; `make test` also runs the recursion ceiling test at `opt-level = 0`, the dev profile the pool stack is sized for.
