@@ -29,7 +29,7 @@ Issues = "https://github.com/almila-app/almiladoc/issues"
 
 [dependency-groups]
 build = ["maturin==1.15.0"]
-policy = ["poetry-core==2.5.0", "pyyaml==6.0.3", "reuse==6.2.0", "ruff==0.17.1", "zizmor==1.31.1"]
+policy = ["poetry-core==2.5.0", "pyyaml==6.0.3", "reuse==6.2.0", "ruff==0.17.2", "zizmor==1.31.1"]
 test = ["mypy==2.4.0", "pytest==9.1.1"]
 zig = ["ziglang==0.17.0"]
 
