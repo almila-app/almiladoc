@@ -206,14 +206,18 @@ mod tests {
         let zip64 = with_zip64_end(data.clone(), 2);
         assert_eq!((inspected(&zip64, &Limits::DEFAULT), entries(&zip64)), (Ok(()), 2));
         over_count(&zip64, 1);
-        let mut on_this_disk = zip64;
-        let record = positions(&on_this_disk, ZIP64_END)[0];
-        on_this_disk[record + 24..record + 32].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(
-            (inspected(&on_this_disk, &Limits::DEFAULT), entries(&on_this_disk)),
-            (Ok(()), 2)
-        );
-        over_count(&on_this_disk, 1);
+        let record = positions(&zip64, ZIP64_END)[0];
+        for field in [24, 32] {
+            let mut counts_differ = zip64.clone();
+            counts_differ[record + field..record + field + 8].copy_from_slice(&0u64.to_le_bytes());
+            assert_matches!(
+                zip::ZipArchive::new(Cursor::new(counts_differ.as_slice())).err(),
+                Some(zip::result::ZipError::InvalidArchive(reason))
+                    if reason == "Multi-disk ZIP files are not supported",
+                "{field}"
+            );
+            over_count(&counts_differ, 1);
+        }
         limit_err(
             admit(&with_zip64_end(data, 100_001), &Limits::DEFAULT),
             Limit::EntryCount,
@@ -323,6 +327,10 @@ mod tests {
         let end = positions(&second, END)[0];
         let start = get_u32(&second, end + 16).unwrap() + u32::try_from(first.len()).unwrap();
         put_u32(&mut second, end + 16, start);
+        // zip falls back past a record whose directory fails to read only when that
+        // directory does not end where the record starts.
+        let size = get_u32(&second, end + 12).unwrap();
+        put_u32(&mut second, end + 12, size + 1);
         let data = [first, second].concat();
         assert_eq!(entries(&data), 200);
         over_count(&data, 50);

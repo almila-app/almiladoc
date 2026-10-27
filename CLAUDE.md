@@ -116,3 +116,5 @@ cargo test --locked --test it -- --ignored      # ./samples/ sweep: fails when a
 - `git commit -s`, an amend that rewrites the message too: subject at most 72 columns, a few-line
   body on what changed and why, no gates or process narrative; `Co-authored-by` goes in the final
   trailer block with `Tier`, `Signed-off-by`.
+- A dependency update can change an API no failing test reaches: adopting one reads upstream's
+  changes to every API of that crate `src/` calls.

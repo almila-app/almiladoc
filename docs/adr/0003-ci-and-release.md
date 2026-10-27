@@ -1,7 +1,7 @@
 # 0003. CI and release
 
 Status: accepted
-Date: 2026-10-14
+Date: 2026-10-14, revised 2026-10-27
 
 ## Context
 
@@ -55,6 +55,7 @@ Date: 2026-10-14
 
 - The first candidate owes every gate input: `THIRD-PARTY-LICENSES`, with cargo-about clarifications for Adobe's BSD-3-Clause CMaps (ADR 0001 decision 6), eight fuzz seeds, a tracked `fuzz/Cargo.lock`; schedules, the recipient key and a decryption drill; the first tag, the licensing FAQ.
 - New advisories red unrelated pull requests; schedules stop after 60 inactive days.
+- A Dependabot `cargo` pull request moving a crate in fuzz's graph fails `locks` and `licences`: it is a notice, adopted by decision 8's own commit.
 - Unexercised: zig musl builds, unguaranteed by maturin; CPython 3.11 on `windows-11-arm`, where setup-python's last arm64 build is 3.11.9 (https://github.com/actions/python-versions/blob/49858b91c92d27403416ee43117032e91d00ce24/versions-manifest.json#L10809-L10812); attestations; crates.io's exchange.
 
 ## Alternatives considered

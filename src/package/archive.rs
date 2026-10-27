@@ -80,9 +80,9 @@ pub(crate) struct Package<'a> {
     parse_ctx: &'a ParseCtx<'a>,
     kind: PackageKind,
     zip: zip::ZipArchive<Cursor<&'a [u8]>>,
-    /// Entry indices by ASCII-lowercased name, for OPC alone: its part names
+    /// Entry indices by stored name, ASCII-lowercased for OPC: its part names
     /// compare case-insensitively in ASCII (ECMA-376 Part 2).
-    folded: HashMap<Vec<u8>, usize>,
+    names: HashMap<Vec<u8>, usize>,
     /// Each entry's first read, which inflated once and counted what it
     /// inflated against `max_total_bytes`.
     cache: RefCell<HashMap<usize, FirstRead>>,
@@ -130,15 +130,12 @@ impl<'a> Package<'a> {
         kind: PackageKind,
         zip: zip::ZipArchive<Cursor<&'a [u8]>>,
     ) -> Result<Self, ConvertError> {
-        let folded = match kind {
-            PackageKind::Opc => folded_names(&zip)?,
-            PackageKind::Odf | PackageKind::Epub => HashMap::new(),
-        };
+        let names = entry_names(&zip, kind)?;
         Ok(Self {
             parse_ctx,
             kind,
             zip,
-            folded,
+            names,
             cache: RefCell::new(HashMap::new()),
             trees: RefCell::new(HashMap::new()),
             cached_nodes: Cell::new(0),
@@ -154,9 +151,10 @@ impl<'a> Package<'a> {
 
     fn index_of(&self, name: &str) -> Option<usize> {
         match self.kind {
-            PackageKind::Opc => self.folded.get(&name.as_bytes().to_ascii_lowercase()).copied(),
-            PackageKind::Odf | PackageKind::Epub => self.zip.index_for_name(name),
+            PackageKind::Opc => self.names.get(&name.as_bytes().to_ascii_lowercase()),
+            PackageKind::Odf | PackageKind::Epub => self.names.get(name.as_bytes()),
         }
+        .copied()
     }
 
     /// Read a part's bytes. `Ok(None)` means the part is absent (a valid
@@ -432,19 +430,24 @@ impl<'a> Package<'a> {
     }
 }
 
-fn folded_names(
+fn entry_names(
     zip: &zip::ZipArchive<Cursor<&[u8]>>,
+    kind: PackageKind,
 ) -> Result<HashMap<Vec<u8>, usize>, ConvertError> {
-    let mut folded = HashMap::with_capacity(zip.len());
+    let mut names = HashMap::with_capacity(zip.len());
     for index in 0..zip.len() {
         let entry = zip
             .by_index_data(index)
             .map_err(|_| ConvertError::malformed("unreadable entry name"))?;
-        if folded.insert(entry.name_raw().to_ascii_lowercase(), index).is_some() {
+        let name = match kind {
+            PackageKind::Opc => entry.name_raw().to_ascii_lowercase(),
+            PackageKind::Odf | PackageKind::Epub => entry.name_raw().to_vec(),
+        };
+        if names.insert(name, index).is_some() {
             return Err(ConvertError::malformed("entry names equal after case folding"));
         }
     }
-    Ok(folded)
+    Ok(names)
 }
 
 /// An entry opened raw and inflated here, so the bytes a deflate stream
@@ -1095,6 +1098,22 @@ mod tests {
             assert!(!pkg.has_part("word/Document.xml"), "{kind:?}");
             assert!(pkg.part("word/Document.xml").unwrap().is_none(), "{kind:?}");
             assert!(pkg.part("word/document.xml").unwrap().is_some(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_matches_only_the_bytes_an_entry_stores() {
+        let mut data = zip_package_with(&[("Pictures/X.png", b"x".as_slice())], stored());
+        for at in positions(&data, b"Pictures/X") {
+            data[at + 9] = 0x81;
+        }
+        let zip = zip::ZipArchive::new(Cursor::new(data.as_slice())).unwrap();
+        assert_eq!(zip.index_for_name("Pictures/ü.png"), Some(0));
+        let parse_ctx = ParseCtx::default();
+        for kind in KINDS {
+            let pkg = Package::open(&parse_ctx, &data, kind).unwrap();
+            assert!(!pkg.has_part("Pictures/ü.png"), "{kind:?}");
+            assert!(pkg.part("Pictures/ü.png").unwrap().is_none(), "{kind:?}");
         }
     }
 
