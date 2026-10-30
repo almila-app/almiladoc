@@ -1,4 +1,5 @@
-"""Require every commit of a range to carry its author's Signed-off-by and a subject line alone,
+"""Require the tree to track .github/signoff, the declaration that every commit is signed off;
+every commit of a range to carry its author's Signed-off-by and a subject line alone,
 and to name no assistant as its author or committer;
 every file REUSE.toml marked MIT at the merge base to keep an MIT-bearing annotation and every
 copyright line of it; every MIT-bearing annotation of the tree to override, and no file to come
@@ -22,6 +23,8 @@ ISOLATED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
 SIGN_OFFS = "%(trailers:key=Signed-off-by,valueonly,separator=%x01)"
 FIELDS = f"%H%x00%an%x00%ae%x00%cn%x00%ce%x00{SIGN_OFFS}%x00%s%x00%B%x00"
 SUBJECT_COLUMNS = 72
+SIGN_OFF_POLICY = ".github/signoff"
+UNDECLARED = f"{SIGN_OFF_POLICY} is absent: the tree must declare that every commit is signed off"
 # Bounded by letters only: `_` and digits separate words in logins and e-mail addresses.
 ASSISTANT = re.compile(r"(?<![^\W\d_])(claude|anthropic|llm)(?![^\W\d_])", re.IGNORECASE)
 
@@ -175,10 +178,18 @@ def refusal(was: Annotation | None, kept: Annotation | None) -> str | None:
     return f"its MIT-bearing annotation lost {', '.join(map(repr, lost))}" if lost else None
 
 
-def licences(root: Path, base: str, head: str) -> tuple[list[str], str]:
+def declares_sign_off(root: Path, tree: str) -> bool:
+    kind = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-t", f"{tree}:{SIGN_OFF_POLICY}"],
+        capture_output=True,
+        text=True,
+    )
+    return kind.stdout.strip() == "blob"
+
+
+def licences(root: Path, base: str, head: str, tree: str) -> tuple[list[str], str]:
     if not resolves(root, base):
         return [f"{base} does not resolve: the licence guard needs it and full history"], ""
-    tree = snapshot(root)
     now = annotations(git(root, "show", f"{tree}:REUSE.toml"))
     merge = merge_base(root, base, head)
     paths = files(root, tree)
@@ -309,7 +320,7 @@ def self_test() -> int:
         failures.append(f"a candidate range reported {sorted(on_push.elements())}")
     if on_pull != expected_pull:
         failures.append(f"a pull-request range reported {sorted(on_pull.elements())}")
-    failures += licence_self_test()
+    failures += licence_self_test() + declaration_self_test()
     for failure in failures:
         print(f"self-test: {failure}", file=sys.stderr)
     return 1 if failures else 0
@@ -430,7 +441,7 @@ def licence_self_test() -> list[str]:
         failures = []
         for label, (change, base, refused) in changes.items():
             change()
-            problems, _ = licences(root, base, "HEAD")
+            problems, _ = licences(root, base, "HEAD", snapshot(root))
             found = sorted(
                 problem.split(": ", 1)[0].split(" does not", 1)[0] for problem in problems
             )
@@ -438,6 +449,71 @@ def licence_self_test() -> list[str]:
                 failures.append(f"{label} refused {found}, expected {refused}")
             git(root, "reset", "-q", "--hard")
             git(root, "clean", "-q", "-fd")
+    return failures
+
+
+def declaration_self_test() -> list[str]:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        os.environ.update(HOME=directory, XDG_CONFIG_HOME=directory, GIT_CONFIG_NOSYSTEM="1")
+        git(root, "init", "-q")
+        text = LICENCE_BASE.replace('"own/*"', '".github/**", "own/*"')
+        (root / "REUSE.toml").write_text(text, encoding="utf-8")
+        git(root, "add", "-A")
+        identity = ("-c", "user.name=T", "-c", "user.email=t@example.com")
+        git(
+            root, *identity, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "x"
+        )
+        marker = root / SIGN_OFF_POLICY
+
+        def run() -> tuple[int, str]:
+            done = subprocess.run(
+                [sys.executable, "-I", "-B", __file__, "--base", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            return done.returncode, done.stderr.strip()
+
+        failures = []
+
+        def expect(label: str, wanted: tuple[int, str]) -> None:
+            if (found := run()) != wanted:
+                failures.append(f"{label} gave {found}, expected {wanted}")
+
+        expect(f"a tree without {SIGN_OFF_POLICY}", (1, UNDECLARED))
+        marker.parent.mkdir()
+        marker.touch()
+        expect(f"an empty {SIGN_OFF_POLICY}", (0, ""))
+        marker.write_text("any content\n", encoding="utf-8")
+        expect(f"a non-empty {SIGN_OFF_POLICY}", (0, ""))
+        marker.unlink()
+        marker.symlink_to("missing")
+        expect(f"a dangling symlink at {SIGN_OFF_POLICY}", (0, ""))
+        (root / "loose.txt").touch()
+        code, stderr = run()
+        if code != 1 or "loose.txt" not in stderr or UNDECLARED in stderr:
+            failures.append(f"a declared tree with a licence refusal: exit {code}, {stderr!r}")
+        (root / "loose.txt").unlink()
+        marker.unlink()
+        marker.mkdir()
+        (marker / "file").touch()
+        expect(f"a directory at {SIGN_OFF_POLICY}", (1, UNDECLARED))
+        blob = git(root, "hash-object", "-w", "REUSE.toml").strip()
+        index = {**os.environ, "GIT_INDEX_FILE": str(root / ".git" / "gitlink-index")}
+        for oid, declared in ((blob, True), ("1" * len(blob), False)):
+            git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{oid},{SIGN_OFF_POLICY}",
+                env=index,
+            )
+            if declares_sign_off(root, git(root, "write-tree", env=index).strip()) != declared:
+                failures.append(
+                    f"a gitlink to {oid} at {SIGN_OFF_POLICY} was not judged as the hub"
+                )
     return failures
 
 
@@ -457,8 +533,10 @@ def main() -> int:
     if not args.base:
         parser.error("--base is required")
     root = Path.cwd()
-    licence_problems, note = licences(root, args.base, args.head)
-    problems = licence_problems
+    tree = snapshot(root)
+    licence_problems, note = licences(root, args.base, args.head, tree)
+    problems = [] if declares_sign_off(root, tree) else [UNDECLARED]
+    problems += licence_problems
     if resolves(root, args.base):
         problems = check(root, f"{args.base}..{args.head}", args.pull_request) + problems
     for problem in problems:

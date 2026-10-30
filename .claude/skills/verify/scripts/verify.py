@@ -461,7 +461,12 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
             lambda c: (
                 c.commits
                 + c.touches(
-                    ".github/scripts/dco.py", "REUSE.toml", "LICENSES/MIT.txt", *UV, MAKEFILE
+                    ".github/scripts/dco.py",
+                    ".github/signoff",
+                    "REUSE.toml",
+                    "LICENSES/MIT.txt",
+                    *UV,
+                    MAKEFILE,
                 )
             ),
         ),
@@ -519,6 +524,7 @@ def self_test() -> int:
         "Makefile": every_path | make_gates | {"rust", "actions", "commits"},
         ".github/workflows/ci.yml": every_path | {"actions"},
         ".github/scripts/dco.py": every_path | {"actions", "commits"},
+        ".github/signoff": every_path | {"actions", "commits"},
         "REUSE.toml": every_path | {"commits"},
         "LICENSES/MIT.txt": every_path | {"python", "commits"},
         ".github/scripts/fuzz_campaign.py": every_path | {"actions", "fuzz"},
