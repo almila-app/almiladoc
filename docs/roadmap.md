@@ -56,8 +56,8 @@ table lands on its own, before the first wave whose files it shares.
 
 | Wave | Items | Placement |
 |---|---|---|
-| W7 | unpdf-clip (on the unpdf release that carries #21) | |
-| W13 | raster-hook (on the unpdf release that carries a paint budget) | |
+| W7 | unpdf-clip (on the unpdf release that fixes hidden raster gaps) | |
+| W13 | raster-hook | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
 release is next.
@@ -66,18 +66,13 @@ release is next.
 
 ### W7
 
-#### unpdf-clip: take the unpdf release that counts only what the clip shows
-- **Goal:** a run the clip hides entirely reports no loss (iyulab/unpdf #21), extracted or
-  painted.
-- **Scope:** move `unpdf` to the first release carrying upstream 2418af6 and 6dbc96c; a
-  `tests/it/pdf.rs` case: readable text beside a run clipped away entirely (`q 0 0 10 10 re W n … Q`,
-  drawn far outside) that holds one code its ToUnicode leaves out converts under `OnLoss::Fail` with
-  no diagnostic and gives only the readable text; the docs naming the version follow. Once unpdf's
-  `RasterGaps` also counts only runs a page shows (a pull request to open), a filled page whose
-  unpaintable run is clipped away or off the page reports no `raster_incomplete`, and ADR 0002's
-  consequence on it goes.
-- **Files:** `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `tests/it/pdf.rs`, `THIRD-PARTY-LICENSES`,
-  ADR 0001 decision 6.
+#### unpdf-clip: count only unpaintable runs the page shows
+- **Goal:** a filled page reports no loss for an unpaintable run hidden by its clip or page box.
+- **Scope:** take the unpdf release whose `RasterGaps` counts only runs a page shows. A filled page
+  whose unpaintable run is clipped away or off the page reports no `raster_incomplete`, and
+  ADR 0002's consequence on it goes.
+- **Files:** `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `tests/it/raster.rs`,
+  `THIRD-PARTY-LICENSES`, ADR 0001 decision 6, ADR 0002.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
 
@@ -87,10 +82,9 @@ release is next.
 - **Goal:** `max_work` and a cancel bound a page's painting, not only its pixels (ADR 0002
   decision 5). Measured: a 1845-byte page of 20 000 full-page fills paints in 6.6 s in release and
   28.7 s under ASan, past libFuzzer's 10 s bound, its pixels charged once.
-- **Scope:** an unpdf pull request: `render_page` takes a budget that each painting operation
-  charges by the device pixels it covers and that stops the page early, counted in `RasterGaps`;
-  take its release and charge the budget through the ledger, its stop `ResourceLimit` or
-  `Cancelled`; fuzz target `pdf_raster` paints every page under `ocr_pages: All` at 1 Mpx and up to
+- **Scope:** use unpdf's `render_page_with` and charge its paint budget through the ledger,
+  propagating `ResourceLimit` or `Cancelled` when it stops; fuzz target `pdf_raster` paints
+  every page under `ocr_pages: All` at 1 Mpx and up to
   50 dpi, twice, comparing the PNGs, seeded with the painting fixtures and the inline-image
   regression. Counts of glyphs without an outline and of unpainted annotation appearances, if
   unpdf gives them.
@@ -98,8 +92,7 @@ release is next.
 - **Tests:** the measured page trips `max_work` at its default and is cancelled within a page;
   `pdf_raster` replays.
 - **Credit:** none.
-- **Depends on:** that unpdf release; the pull request is opened by the maintainer, as this
-  repository's sessions hold no fork of `iyulab/unpdf`. **Size:** about 200 lines. **Tier:** T3.
+- **Depends on:** none. **Size:** about 200 lines. **Tier:** T3.
 
 ## Deferred
 
@@ -140,8 +133,8 @@ release; silent or declined, fall back as its bullet says. unpdf's pull requests
 start of each wave, rten's when ocr-local-pipeline is next. Check a pull request with
 `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
 
-- **unpdf** (ADR 0001 decision 6): unpdf 0.50.0 carries every pull request below but #21, which is
-  on its main for the next release; unpdf-clip takes that release.
+- **unpdf** (ADR 0001 decision 6): unpdf 0.51.0 carries every merged pull request below and
+  exposes the paint budget raster-hook needs; unpdf-clip awaits hidden raster gaps being excluded.
 - **rten** (dormant; gates only the deferred local OCR). rten's contribution policy has this
   repository's maintainer open and answer its pull requests. If they stay unmerged, rten is forked
   and published under a new name.
@@ -169,11 +162,11 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
 | iyulab/unpdf | issue [#18](https://github.com/iyulab/unpdf/issues/18) | the bundled Adobe CMap data's BSD-3-Clause notice | fixed in 0.49.0 |
 | iyulab/unpdf | [#19](https://github.com/iyulab/unpdf/pull/19) | the lines beside a column gutter counted by baseline (`handmade-legacy-cmap.pdf`) | merged |
 | iyulab/unpdf | [#20](https://github.com/iyulab/unpdf/pull/20) | codes a composite font's ToUnicode leaves out, read through its own data or counted (`undecoded_text_codes`) | in 0.50.0 |
-| iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | on main |
+| iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | in 0.51.0 |
 | iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
 | iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
 | iyulab/unpdf | to open | `RasterGaps` counts only the unpaintable runs a page shows (unpdf-clip) | to open |
-| iyulab/unpdf | to open | a paint budget each operation charges by the pixels it covers (raster-hook) | to open |
+| iyulab/unpdf | [#23](https://github.com/iyulab/unpdf/pull/23) | a paint budget each operation charges by the pixels it covers (raster-hook) | in 0.51.0 |
 
 ## Maintainer steps
 

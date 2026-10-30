@@ -1,6 +1,3 @@
-"""Prove that a policy gate stops when either policy environment sync fails, and runs its tool
-only after both succeed."""
-
 import os
 import subprocess
 import sys
@@ -9,17 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SYNC = "sync --locked --only-group policy --quiet"
-FIRST_SYNC = "--no-install-package reuse"
-SECOND_SYNC = "--no-build-isolation-package reuse"
-FAKE_UV = (
-    '#!/bin/sh\necho "$*" >> "$POLICY_ENV_LOG"\ncase "$*" in *"$POLICY_ENV_FAIL"*) exit 3;; esac\n'
-)
+FAKE_UV = '#!/bin/sh\necho "$*" >> "$POLICY_ENV_LOG"\nexit "$POLICY_ENV_STATUS"\n'
 FAKE_REUSE = '#!/bin/sh\ntouch "$POLICY_ENV_MARKER"\n'
-CASES = {
-    "the first sync fails": (FIRST_SYNC, False, (FIRST_SYNC,)),
-    "the second sync fails": (SECOND_SYNC, False, (FIRST_SYNC, SECOND_SYNC)),
-    "both syncs succeed": ("no sync matches this", True, (FIRST_SYNC, SECOND_SYNC)),
-}
+CASES = {"sync fails": (3, False), "sync succeeds": (0, True)}
+
 MAKE_VARIABLES = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "CARGO_TARGET_DIR")
 
 
@@ -30,7 +20,7 @@ def executable(path: Path, text: str) -> Path:
     return path
 
 
-def run_case(directory: Path, fail_on: str) -> tuple[int, list[str], bool]:
+def run_case(directory: Path, sync_status: int) -> tuple[int, list[str], bool]:
     uv = executable(directory / "uv", FAKE_UV)
     executable(directory / "make" / "policy" / "bin" / "reuse", FAKE_REUSE)
     log, marker = directory / "syncs.log", directory / "reuse.ran"
@@ -38,7 +28,7 @@ def run_case(directory: Path, fail_on: str) -> tuple[int, list[str], bool]:
     env |= {
         "POLICY_ENV_LOG": str(log),
         "POLICY_ENV_MARKER": str(marker),
-        "POLICY_ENV_FAIL": fail_on,
+        "POLICY_ENV_STATUS": str(sync_status),
     }
     status = subprocess.run(
         ["make", "-s", "-C", str(ROOT), "reuse", f"UV={uv}", f"CARGO_TARGET_DIR={directory}"],
@@ -53,12 +43,12 @@ def run_case(directory: Path, fail_on: str) -> tuple[int, list[str], bool]:
 
 def main() -> int:
     failures = []
-    for name, (fail_on, passes, expected) in CASES.items():
+    for name, (sync_status, passes) in CASES.items():
         with tempfile.TemporaryDirectory() as directory:
-            status, syncs, ran = run_case(Path(directory), fail_on)
+            status, syncs, ran = run_case(Path(directory), sync_status)
         if (status == 0) != passes:
             failures.append(f"{name}: make reuse exited {status}")
-        wanted = [f"{SYNC} {flags}" for flags in expected]
+        wanted = [SYNC]
         if syncs != wanted:
             failures.append(f"{name}: the syncs ran were {syncs}, not {wanted}")
         if ran != passes:

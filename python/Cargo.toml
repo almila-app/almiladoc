@@ -20,6 +20,6 @@ workspace = true
 [dependencies]
 almiladoc = { path = "..", features = ["ocr-http", "serde"] }
 # Compiles out every log record, ureq's trace of each request's key included.
-log = { version = "0.4.34", features = ["max_level_off"] }
+log = { version = "0.4.35", features = ["max_level_off"] }
 pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 serde_json = "1.0.154"

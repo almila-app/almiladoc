@@ -654,16 +654,23 @@ fn a_garbled_run_beside_readable_text_is_lost_and_fails_incomplete() {
     assert_eq!(reported.markdown(), "Readable text\n");
 }
 
-/// One page of `before`, the codes `left_out` and `after`, in a composite font whose `ToUnicode`
-/// maps every character of the text and none of those codes.
-fn partly_mapped_pdf(before: &str, left_out: &[u16], after: &str) -> Vec<u8> {
+fn partly_mapped_pdf(before: &str, left_out: &[u16], after: &str, clip: Option<&str>) -> Vec<u8> {
     let mut chars: Vec<char> = before.chars().chain(after.chars()).collect();
     chars.sort_unstable();
     chars.dedup();
     let code = |c: char| chars.iter().position(|d| *d == c).unwrap() + 1;
     let hex = |text: &str| text.chars().map(|c| format!("{:04X}", code(c))).collect::<String>();
     let codes: String = left_out.iter().map(|code| format!("{code:04X}")).collect();
-    let content = format!("BT /F1 12 Tf 20 700 Td <{}{codes}{}> Tj ET", hex(before), hex(after));
+    let content = match clip {
+        None => format!("BT /F1 12 Tf 20 700 Td <{}{codes}{}> Tj ET", hex(before), hex(after)),
+        Some(clip) => format!(
+            "BT /F1 12 Tf 20 700 Td <{}{}> Tj ET\n\
+             q {clip} BT /F1 12 Tf 20 600 Td <{}{codes}> Tj ET Q",
+            hex(before),
+            hex(after),
+            hex(before)
+        ),
+    };
     let mut cmap = format!(
         "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /T def \
          1 begincodespacerange <0000> <FFFF> endcodespacerange\n{} beginbfchar\n",
@@ -694,11 +701,11 @@ fn partly_mapped_pdf(before: &str, left_out: &[u16], after: &str) -> Vec<u8> {
 #[test]
 fn a_code_a_composite_font_leaves_out_beside_codes_it_maps_is_garbled_font_encoding() {
     let (before, after) = ("The board approved the plan ", "after a long review.");
-    let mapped = partly_mapped_pdf(before, &[], after);
+    let mapped = partly_mapped_pdf(before, &[], after, None);
     let conversion = converter(1).convert(Input::new(&mapped, Format::Pdf)).unwrap();
     assert_eq!(conversion.markdown(), format!("{before}{after}\n"));
     for (left_out, after) in [(&[0x0200][..], after), (&[0x0200, 0x0300], after), (&[0x0200], "")] {
-        let bytes = partly_mapped_pdf(before, left_out, after);
+        let bytes = partly_mapped_pdf(before, left_out, after, None);
         let Err(ConvertError::Incomplete { diagnostics, .. }) =
             converter(1).convert(Input::new(&bytes, Format::Pdf))
         else {
@@ -714,5 +721,23 @@ fn a_code_a_composite_font_leaves_out_beside_codes_it_maps_is_garbled_font_encod
         let reported = reporting().convert(Input::new(&bytes, Format::Pdf)).unwrap();
         let text = format!("{before}{after}");
         assert_eq!(reported.markdown(), format!("{}\n", text.trim_end()), "{left_out:?}");
+    }
+}
+
+#[test]
+fn unreadable_codes_and_runs_hidden_by_the_clip_or_page_report_no_loss() {
+    for clip in ["0 0 10 10 re W n", "1 0 0 1 1000 0 cm"] {
+        let content = format!(
+            "BT /F1 12 Tf 72 700 Td (Readable text) Tj ET\n\
+             q {clip} BT /F2 12 Tf 72 600 Td <0102030405060708> Tj ET Q"
+        );
+        let suppressed = pdf(&content);
+        let partly_mapped = partly_mapped_pdf("Readable text", &[0x0200], "", Some(clip));
+        for bytes in [suppressed, partly_mapped] {
+            let converted = converter(1).convert(Input::new(&bytes, Format::Pdf)).unwrap();
+            assert_eq!(converted.markdown(), "Readable text\n", "{clip}");
+            assert_eq!(converted.diagnostics().iter().count(), 0, "{clip}");
+            assert_eq!(verdicts(&bytes), ["text"], "{clip}");
+        }
     }
 }

@@ -5,7 +5,7 @@ SHELL := bash
 MAKEFLAGS += --no-builtin-rules
 
 CARGO ?= cargo
-UV_VERSION := 0.13.5
+UV_VERSION := 0.13.6
 UV := uv tool run uv@$(UV_VERSION)
 PYTHONS ?= 3.11 3.15
 LICENCE_SET := LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES
@@ -19,9 +19,9 @@ HOST_ARCH := $(if $(filter Linux,$(shell uname -s)),$(shell uname -m))
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DENY_SHA256_x86_64 := 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 CARGO_DENY_SHA256_aarch64 := 995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d
-CARGO_ABOUT_VERSION := 0.9.2
-CARGO_ABOUT_SHA256_x86_64 := 9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af
-CARGO_ABOUT_SHA256_aarch64 := af5169282fb6f84e13471493f405437e43ac517744c9ae12fbe2cdf0a6f0e5a8
+CARGO_ABOUT_VERSION := 0.9.3
+CARGO_ABOUT_SHA256_x86_64 := 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
+CARGO_ABOUT_SHA256_aarch64 := eb4d9ff6ebd2518152a8308729431a04b3836e71d2bd5ead7aea69f91a71162e
 CARGO_FUZZ_VERSION := 0.13.2
 CARGO_FUZZ_SHA256_x86_64 := b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
 AGE_VERSION := 1.3.2
@@ -46,8 +46,7 @@ need_tool = if [ ! -x $(1) ]; then $(call not_run,no pinned $(notdir $(1)) binar
 refresh_index = $(CARGO) update --quiet --dry-run --manifest-path $(1)
 need = if ! command -v $(1) >/dev/null; then $(call not_run,$(1) is not installed); exit 0; fi
 policy_sync = UV_PROJECT_ENVIRONMENT=$(POLICY) $(UV) sync --locked --only-group policy --quiet
-# reuse ships only an sdist for these Pythons, so it builds against the group's locked poetry-core.
-policy_env = $(call need,$(firstword $(UV))); $(policy_sync) --no-install-package reuse; $(policy_sync) --no-build-isolation-package reuse
+policy_env = $(call need,$(firstword $(UV))); $(policy_sync)
 
 # fetch(url, sha256, members): an archive's binaries, installed beside $@ only once its sha256 matches.
 define fetch
