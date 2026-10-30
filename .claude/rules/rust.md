@@ -5,7 +5,7 @@ paths:
 
 # Rust
 
-This file adds code shape and refactor safety to the invariants in `CLAUDE.md`.
+This file adds code shape and refactor safety to the invariants in `AGENTS.md`.
 
 Default to no comment: names, types and tests carry intent. A `//` comment is allowed only for
 a trap the code cannot show, an external constraint cited (`[MS-DOC] 2.9.336`, a producer's
@@ -28,13 +28,13 @@ line fixes or deletes the comment.
   string unless it holds `"` or `\`, and parentheses around a shift beside `|` or `&`.
 - Visibility is the narrowest that compiles; a module with children is `name/mod.rs`.
 - Two or more `bool` parameters become an enum or a struct.
-- A refactor never moves, merges, splits, reorders or resizes a `charge`, `emit`, `emit_count`
+- A pure refactor never moves, merges, splits, reorders or resizes a `charge`, `emit`, `emit_count`
   or byte count, never turns a guarded `get(..)` into `[]`, and never turns an argument that
   charges, emits or fails lazy or eager (`unwrap_or(f())` and `unwrap_or_else(f)`).
 - A refactor pins the behaviour it touches with rows in an existing case table, and closes a gap
   that predates it only where the change could break that path.
-- Past `CLAUDE.md`'s fatal-error rule, an error is swallowed without the `is_fatal()` arm only
+- Past `AGENTS.md`'s fatal-error rule, an error is swallowed without the `is_fatal()` arm only
   where the callee returns no fatal variant (`path::resolve` returns only `Malformed`).
 
-Clippy's workspace lints and `clippy.toml` hold what `-D warnings` can check; `/verify` adds
+Clippy's workspace lints and `clippy.toml` hold what `-D warnings` can check; `verify.py` adds
 only its policy lints, on changed lines. A `clippy.toml` threshold binds only a lint that is on.

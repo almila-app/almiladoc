@@ -11,12 +11,12 @@ import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
-INSTRUCTIONS = "CLAUDE.md"
+INSTRUCTIONS = ("AGENTS.md", "CLAUDE.md")
+OVERRIDE = "AGENTS.override.md"
 SETUP_DIR = ".claude"
 LOCAL_FILES = (
     "CLAUDE.local.md",
     ".worktreeinclude",
-    "AGENTS.md",
     ".mcp.json",
     ".claude/settings.local.json",
     ".claude/worktrees",
@@ -85,7 +85,7 @@ def instruction_files(root: Path) -> list[Path]:
         "-o",
         "--exclude-per-directory=.gitignore",
         "--",
-        f":(glob)**/{INSTRUCTIONS}",
+        *(f":(glob)**/{name}" for name in INSTRUCTIONS),
     )
     return [
         root / path
@@ -108,6 +108,18 @@ def setup_files(root: Path) -> list[Path]:
             and rel(root, path) not in LOCAL_FILES
         ]
     return found
+
+
+def entrypoint_problems(root: Path) -> list[str]:
+    shared, adapter = (root / name for name in INSTRUCTIONS)
+    problems = []
+    if not shared.is_file() or not shared.read_text(encoding="utf-8").strip():
+        problems.append("AGENTS.md: missing shared instructions")
+    if not adapter.is_file() or adapter.read_text(encoding="utf-8").strip() != "@AGENTS.md":
+        problems.append("CLAUDE.md: must contain only @AGENTS.md")
+    if (root / OVERRIDE).exists():
+        problems.append(f"{OVERRIDE}: shadows AGENTS.md, which Codex loads in its place")
+    return problems
 
 
 def tracked_ignored_files(root: Path) -> list[str]:
@@ -329,6 +341,7 @@ def leak_problems(root: Path) -> list[str]:
 
 
 CHECKS = (
+    entrypoint_problems,
     tracked_ignored_files,
     ignored_setup_files,
     untracked_setup_files,
@@ -352,6 +365,7 @@ paths:
 
 | File | Ceiling |
 |---|---|
+| `**/AGENTS.md` | 5 lines |
 | `**/CLAUDE.md` | 5 lines |
 | `.claude/rules/*.md` | 20 lines |
 | `.claude/skills/*/SKILL.md` | 20 lines |
@@ -360,7 +374,7 @@ paths:
 """
 GOOD_SKILL = "---\nname: verify\ndescription: Pick gates.\n---\n\nRun `{script}`.\n"
 SCRIPT = ".claude/skills/verify/scripts/run.py"
-GOOD_AGENT = "---\nname: reviewer\ndescription: Review.\nmodel: opus\n---\n\nReview it.\n"
+GOOD_AGENT = "---\nname: reviewer\ndescription: Review.\nmodel: inherit\n---\n\nReview it.\n"
 
 
 LOCAL_IGNORE = "".join(f"{name}\n" for name in LOCAL_FILES)
@@ -378,7 +392,8 @@ def seed(root: Path) -> None:
     files = {
         ".gitignore": LOCAL_IGNORE,
         "README.md": "# demo\n",
-        "CLAUDE.md": "# demo\n",
+        "AGENTS.md": "# demo\n",
+        "CLAUDE.md": "@AGENTS.md\n",
         STYLE: GOOD_STYLE,
         ".claude/skills/verify/SKILL.md": GOOD_SKILL.format(script=SCRIPT),
         SCRIPT: "",
@@ -438,6 +453,20 @@ def self_test() -> int:
 
 def self_test_cases() -> tuple[list[str], int]:
     defects = {
+        "AGENTS.md: missing shared instructions": lambda r: (r / "AGENTS.md").unlink(),
+        "missing shared instructions": write("AGENTS.md", "\n"),
+        "CLAUDE.md: must contain only @AGENTS.md": lambda r: (r / "CLAUDE.md").unlink(),
+        "must contain only @AGENTS.md": write("CLAUDE.md", "Read AGENTS.md.\n"),
+        "must contain only": write("CLAUDE.md", "@AGENTS.md\n\nDuplicated instructions.\n"),
+        "AGENTS.override.md: shadows AGENTS.md": write("AGENTS.override.md", "# mine\n"),
+        "AGENTS.md: ignored by .gitignore": write(".gitignore", LOCAL_IGNORE + "AGENTS.md\n"),
+        "AGENTS.md: not tracked": lambda r: git(r, "rm", "-q", "--cached", "AGENTS.md"),
+        "AGENTS.md: 6 lines, budget 5": write("AGENTS.md", "x\n" * 6),
+        "AGENTS.md:1: 101 columns": write("AGENTS.md", "x" * 101 + "\n"),
+        "AGENTS.md:1: home path": write("AGENTS.md", f"see {HOME}/x\n"),
+        "docs/AGENTS.md: not tracked": write("docs/AGENTS.md", "# docs\n"),
+        "docs/AGENTS.md:1: home path": write("docs/AGENTS.md", f"see {HOME}/x\n"),
+        "docs/AGENTS.md: 6 lines, budget 5": write("docs/AGENTS.md", "x\n" * 6),
         "CLAUDE.local.md: tracked although .gitignore ignores it": lambda r: (
             write("CLAUDE.local.md", "notes\n")(r),
             git(r, "add", "-f", "CLAUDE.local.md"),
@@ -465,7 +494,7 @@ def self_test_cases() -> tuple[list[str], int]:
             ".claude/skills/verify/SKILL.md", GOOD_SKILL.format(script="scripts/run.py")
         ),
         "no model chosen": write(
-            ".claude/agents/reviewer.md", GOOD_AGENT.replace("model: opus\n", "")
+            ".claude/agents/reviewer.md", GOOD_AGENT.replace("model: inherit\n", "")
         ),
         "CLAUDE.md:1: home path": write("CLAUDE.md", f"see {HOME}/x\n"),
         "CLAUDE.md:1: IP address": write("CLAUDE.md", f"host {PRIVATE_IP}\n"),
@@ -487,9 +516,9 @@ def self_test_cases() -> tuple[list[str], int]:
             write(".gitignore", LOCAL_IGNORE.replace("CLAUDE.local.md\n", ""))(r),
             write(".git/info/exclude", "CLAUDE.local.md\n")(r),
         ),
-        "AGENTS.md: local, yet not ignored by the repository's": lambda r: (
-            write(".gitignore", LOCAL_IGNORE.replace("AGENTS.md\n", ""))(r),
-            write(f"{XDG}/git/ignore", "AGENTS.md\n")(r),
+        ".mcp.json: local, yet not ignored by the repository's": lambda r: (
+            write(".gitignore", LOCAL_IGNORE.replace(".mcp.json\n", ""))(r),
+            write(f"{XDG}/git/ignore", ".mcp.json\n")(r),
         ),
         f"{SCRIPT}: has a --self-test that `make setup` never runs": write(SCRIPT, TESTED),
         "run.py: has a --self-test that `make setup` never": lambda r: (
@@ -529,20 +558,27 @@ def self_test_cases() -> tuple[list[str], int]:
     benign = "UTF-16, SHA-256, ECMA-376, RUSTSEC-2000-0000, BUSL-1.1, v0.15.0, E402, padding\n"
     local_facts = f"build host {HOME} at {PRIVATE_IP}\n"
     unreported = {
-        "CLAUDE.md": benign,
+        "AGENTS.md": benign,
         "CLAUDE.local.md": local_facts,
         ".claude/settings.local.json": local_facts,
         ".claude/worktrees/w/CLAUDE.md": local_facts,
+        ".claude/worktrees/w/AGENTS.md": local_facts,
     }
     for name, text in unreported.items():
         if found := tree_with(write(name, text)):
             failures.append(f"{name} wrongly reported: {found}")
     foreign = {
-        ".git/info/exclude": write(".git/info/exclude", "CLAUDE.md\n.claude\n"),
-        "$XDG_CONFIG_HOME/git/ignore": write(f"{XDG}/git/ignore", "CLAUDE.md\n.claude\n"),
+        ".git/info/exclude": write(".git/info/exclude", "AGENTS.md\nCLAUDE.md\n.claude\n"),
+        "$XDG_CONFIG_HOME/git/ignore": write(
+            f"{XDG}/git/ignore", "AGENTS.md\nCLAUDE.md\n.claude\n"
+        ),
         "an ignored target/CLAUDE.md": lambda r: (
             write(".gitignore", LOCAL_IGNORE + "/target\n")(r),
             write("target/dep/CLAUDE.md", f"see {HOME}/x\n" * 6)(r),
+        ),
+        "an ignored target/AGENTS.md": lambda r: (
+            write(".gitignore", LOCAL_IGNORE + "/target\n")(r),
+            write("target/dep/AGENTS.md", f"see {HOME}/x\n" * 6)(r),
         ),
         "a script whose self-test `make setup` runs": lambda r: (
             write(SCRIPT, TESTED)(r),

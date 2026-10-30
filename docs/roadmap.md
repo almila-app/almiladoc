@@ -37,9 +37,10 @@ is the primary consumer, a Python service that depends on the wheel.
   `LossClass`. No public diagnostic code ships before a site emits it: a model type, field, limit or
   code arrives in the item that first emits it, never earlier, and model additions are additive on
   `#[non_exhaustive]` types.
-- **Refactors.** Byte-identical: Markdown, snapshots, diagnostics, errors, charges, the public API and
-  the binding. A cleanup that would change one is skipped and becomes a defect item; a test keeps every
-  case and every mutant it kills, and a verbose one becomes a table, never weaker.
+- **Refactors.** Pure refactors preserve Markdown, snapshots, diagnostics, errors, charges, the public
+  API and the binding. Necessary behavior changes have explicit acceptance and regression tests;
+  they are not disguised as cleanup or deferred solely to preserve the old design. Tests keep their
+  cases and the defects they catch; a verbose test becomes a table without weakening it.
 - **Tier.** The change's risk for its `Tier` trailer (ADR 0004 decision 9): T0 mechanical (a
   lockfile), T1 prose that decides nothing or a new test, T2 ordinary code, T3 a public contract, a
   gate or the design.

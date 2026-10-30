@@ -32,8 +32,8 @@ published with the repository: never a confidential document.
    A failed run restores the pre-run fixtures and accepted snapshots while keeping raw proposals.
 4. Read every new snapshot: it is the expected output, so a wrong one bakes in a bug.
 5. Declare each new fixture and snapshot, and each fixture and snapshot you changed, in REUSE.toml
-   (CLAUDE.md, Traps), then stage only those files, the generator and REUSE.toml. Never rename
-   a fixture `python/tests/` opens by name; `/verify` runs `make python` when one of them or its
+   (AGENTS.md, Traps), then stage only those files, the generator and REUSE.toml. Never rename
+   a fixture `python/tests/` opens by name; `verify` runs `make python` when one of them or its
    snapshot changes.
 
 `fixtures.py check` regenerates into a scratch copy and fails on any fixture whose content

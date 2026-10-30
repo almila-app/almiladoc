@@ -19,6 +19,7 @@ path = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
+    "AGENTS.md",
     "CLAUDE.md",
     ".claude/**",
     ".github/ISSUE_TEMPLATE/**",

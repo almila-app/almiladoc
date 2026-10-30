@@ -47,7 +47,7 @@ stub against the core.
      the stub says `Sequence`; a core doc that narrows a claim narrows each docstring repeating it.
 3. A new format also needs its `Format::as_str` arm and its `Format::ALL` entry (the tests in
    `src/lib.rs` fail without either), `Format::from_extension`, a detection rule in
-   `src/formats/detect.rs`, a fixture directory (`/add-fixture`), and a fuzz target with its
+   `src/formats/detect.rs`, a fixture directory (`add-fixture`), and a fuzz target with its
    `[[bin]]` in `fuzz/Cargo.toml`, seeds in `fuzz/seeds/<target>/` and a
    `fuzz/regressions/<target>/` directory: `make fuzz` fails without either.
 4. Update README.md where it lists formats, error variants, exception classes or the Python API;
@@ -55,4 +55,4 @@ stub against the core.
 5. Run `.claude/skills/change-core-api/scripts/mirror_drift.py` over the working tree: it names
    each format name the `Format` Literal lacks, each exception the binding never spells, each
    `Limits` field the binding or stub never names, and each `code()` or
-   `UnsupportedKind::as_str` string that is not snake_case. Then `/verify`.
+   `UnsupportedKind::as_str` string that is not snake_case. Then use the `verify` workflow.

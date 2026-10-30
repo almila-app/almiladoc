@@ -10,10 +10,9 @@ paths:
 
 # Documents
 
-Write only what a reader needs for the next correct action. One fact has one owner; link to it,
-never copy it. A change that invalidates a document corrects it in the same change, and touching
-a document deletes what has gone stale in it. Instruction files (CLAUDE.md, `.claude/`) carry no
-dates, ticket ids, incident history, session reports or status, which issues and git keep.
+Write compact English only for a concrete next action. Link to a fact's owner instead of copying it.
+Add docs only for essential guidance absent from code or existing docs; update stale docs with code.
+Agent instructions carry no dates, tickets, incident history, reports or status; use issues and git.
 
 | Fact | Owner |
 |---|---|
@@ -22,7 +21,7 @@ dates, ticket ids, incident history, session reports or status, which issues and
 | decisions | `docs/adr/` |
 | open work, in order; what each reader leaves out, per format | `docs/roadmap.md`; `docs/support.md` |
 | licence of each file | NOTICE, REUSE.toml |
-| invariants, commands and traps for agents | CLAUDE.md |
+| invariants, commands and traps for agents | AGENTS.md |
 | a file type's conventions | a rule in `.claude/rules/` scoped to it |
 | a recurring procedure; gate selection | its skill; `.claude/skills/verify/` |
 
@@ -30,7 +29,8 @@ dates, ticket ids, incident history, session reports or status, which issues and
 
 | File | Ceiling |
 |---|---|
-| `**/CLAUDE.md` | 120 lines |
+| `**/AGENTS.md` | 120 lines |
+| `**/CLAUDE.md` | 5 lines |
 | `.claude/rules/*.md` | 40 lines |
 | `.claude/skills/*/SKILL.md` | 80 lines |
 | `.claude/agents/*.md` | 60 lines |

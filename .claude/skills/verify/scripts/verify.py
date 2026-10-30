@@ -421,6 +421,7 @@ def self_test() -> int:
         ".github/scripts/fuzz_campaign.py": every_path | {"actions", "fuzz"},
         "THIRD-PARTY-LICENSES": every_path | {"licences"},
         "docs/adr/0001-architecture.md": every_path,
+        "AGENTS.md": every_path,
         "CLAUDE.md": every_path,
         ".claude/skills/verify/scripts/check_setup.py": every_path,
     }

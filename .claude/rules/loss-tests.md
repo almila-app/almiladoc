@@ -34,4 +34,4 @@ paths:
   `is_ok()` or `is_err()` alone.
 - A builder closure two tests use becomes a module `fn`; a case table holds one case per row,
   and a test body outside it fits in 60 lines.
-- A refactor changes no snapshot, fixture, asserted count or charge figure.
+- A pure refactor changes no snapshot, fixture, asserted count or charge figure.
