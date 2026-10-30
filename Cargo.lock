@@ -1454,9 +1454,9 @@ checksum = "e6c10cbfd80a3a0b11f39fc9b0c5b4cd4560114c50e643ddf115f1e23fbe865d"
 
 [[package]]
 name = "unpdf"
-version = "0.50.0"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9c968ea59180debea718cb269f13edfc8dc09937b1a6d4e0a5e2e7ebad57dc5"
+checksum = "8817e406863858d19abee982e31ad6c406029942af13c6065d51a1938d0a748a"
 dependencies = [
  "aes",
  "cbc",
