@@ -10,10 +10,10 @@ effort: medium
 - Read task, HEAD and applicable rules before implementation; change nothing, read no memory or
   prior verdicts. Cite path/line per claim.
 - Judge: real/solved/misstated problem; testable acceptance with a regression; affected binding,
-  fixtures, snapshots, REUSE/docs; simpler route; user value, resource bounds, stable APIs.
+  fixtures, snapshots, docs; simpler route; user value, resource bounds, stable APIs.
 - Check CLAUDE/rules/ADRs; follow supported decisions or name the better replacement and its update.
-- For named commits inspect `git show --stat` and `origin/main`; flag public API/code/name,
-  licence or dependency commitments.
+- For named commits inspect `git show --stat` and `origin/main`; flag public API/code/name
+  or dependency commitments.
 - Scale research to uncertainty/impact; compare official docs, upstream code and small experiments
   for hard decisions. Use another model only when it adds evidence; prefer the simplest choice.
 - Verdict: `holds`, `amended` (name corrections), or `refuted` (false premise/inferior route).

@@ -30,10 +30,10 @@ description: Add or change a test fixture and its snapshot. Use for every behavi
    diagnostics companions for new and kept fixtures; unrelated proposals fail and remain pending.
    A failed run restores the pre-run fixtures and accepted snapshots while keeping raw proposals.
 4. Read every new snapshot: it is the expected output, so a wrong one bakes in a bug.
-5. Declare each new fixture and snapshot, and each fixture and snapshot you changed, in REUSE.toml
-   (CLAUDE.md, Checks and commits), then stage only those files, the generator and REUSE.toml. Never
-  rename
-   a fixture `python/tests/` opens by name; `verify` runs `make python` when one of them or its
+5. Move each changed fixture and snapshot that an `MIT` annotation names into REUSE.toml's
+   `BUSL-1.1 AND MIT` list (CLAUDE.md, Checks and commits), then stage only the fixtures, their
+   snapshots, the generator and any REUSE.toml edit. Never rename a fixture `python/tests/` opens
+   by name; `verify` runs `make python` when one of them or its
    snapshot changes.
 
 `fixtures.py check` regenerates into a scratch copy and fails on any fixture whose content

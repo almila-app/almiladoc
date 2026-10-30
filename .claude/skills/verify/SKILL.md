@@ -19,7 +19,7 @@ description: Select and run the repository's verification gates for the current 
   `python` (`test_docs.py`).
 - Exit: 0 pass, 1 fail, 3 unavailable. NOT RUN never passes; install missing tools and rerun.
   `make tools` fetches pins; fuzz toolchain: `fuzz/rust-toolchain.toml`; final CI: ADR 0004.
-- Isolate mutants or restore/diff before commit; `make licences` may rewrite notices before failing,
-  so read-only reviewers use dry-run/manual read-only gates. Actions without GH_TOKEN run offline.
+- Isolate mutants or restore/diff before commit; read-only reviewers use dry-run/manual
+  read-only gates. Actions without GH_TOKEN run offline.
 - Report executed results and every NOT RUN/reason; excluded checks: CI rust-arm, LibreOffice/pandoc
   regeneration, fuzz campaigns and samples sweep without `samples/` when relevant.

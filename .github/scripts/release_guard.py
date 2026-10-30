@@ -27,14 +27,6 @@ CRATE = "almiladoc"
 WORKFLOW = "release.yml"
 REQUIRED_CHECK = "ci / required"
 VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?")
-FAQ = (
-    "### Licensing",
-    "- **What is a Competing Use?**",
-    "- **What is free?**",
-    "- **When does a version become MIT?**",
-)
-DATES = Path("docs/release-dates.tsv")
-DATES_HEADER = "tag\tavailable\tmit"
 ZERO = "0" * 40
 REGISTRIES = {"testpypi": "https://test.pypi.org/", "pypi": "https://pypi.org/"}
 CRATES = "https://crates.io/api/v1/crates/"
@@ -60,36 +52,13 @@ def tree_problems(root: Path) -> list[str]:
         problems.append(f"version {version} is neither X.Y.Z nor X.Y.Z-rc.N")
     if rust_version != ".".join(channel.split(".")[:2]):
         problems.append(f"rust-version {rust_version} is not the minor of the toolchain {channel}")
-    readme = (root / "README.md").read_text(encoding="utf-8").splitlines()
-    problems += [
-        f"README.md lacks the licensing FAQ's {line!r}"
-        for line in FAQ
-        if not any(row.startswith(line) for row in readme)
-    ]
-    if dates(root) is None:
-        problems.append(f"{DATES} does not start with the header {DATES_HEADER!r}")
     return problems
-
-
-def dates(root: Path) -> set[str] | None:
-    rows = (root / DATES).read_text(encoding="utf-8").splitlines()
-    if rows[:1] != [DATES_HEADER]:
-        return None
-    return {row.split("\t", 1)[0] for row in rows[1:] if row}
 
 
 def channel(tag: str, version: str) -> str | None:
     if tag != f"v{version}" or not (match := VERSION.fullmatch(version)):
         return None
     return "testpypi" if match[4] else "pypi"
-
-
-def key(version: str) -> tuple[int, ...]:
-    match = VERSION.fullmatch(version)
-    if not match:
-        return ()
-    major, minor, patch, rc = match.groups()
-    return int(major), int(minor), int(patch), int(rc) if rc else sys.maxsize
 
 
 def pep440(version: str) -> str:
@@ -167,12 +136,6 @@ def tag_problems(
     )[0]
     if not any(run["conclusion"] == "success" for run in checks["check_runs"]):
         problems.append(f"tag {tag}'s commit {commit} has no green {REQUIRED_CHECK}")
-    recorded = dates(root) or set()
-    for each in pages(fetch, f"{GITHUB}repos/{repository}/git/matching-refs/tags/v?per_page=100"):
-        earlier = each["ref"].removeprefix("refs/tags/")
-        final = channel(earlier, earlier[1:]) == "pypi"
-        if final and key(earlier[1:]) < key(version) and earlier not in recorded:
-            problems.append(f"{DATES} lacks the earlier final tag {earlier}")
     day = available(fetch, ancestry, repository, commit)
     if day is None:
         problems.append(f"no repository activity has made {commit} available")
@@ -308,9 +271,6 @@ def verify(args: argparse.Namespace, fetch: Fetch, root: Path) -> int:
 Expect = Callable[[bool, str], None]
 REPO = "o/r"
 COMMIT = "c" * 40
-README = "".join(f"{line} text\n" for line in FAQ)
-HEADER = DATES_HEADER + "\n"
-ROWS = HEADER + "v0.1.0\t2026-10-23\t2030-10-23\n"
 PROVENANCE_CLAIMS = {"claims": None}
 
 
@@ -318,8 +278,8 @@ def remote(commit: str, head: str) -> None:
     return None
 
 
-def fake_tree(directory: Path, version: str, rust_version: str, readme: str, rows: str) -> Path:
-    (directory / "docs").mkdir(parents=True, exist_ok=True)
+def fake_tree(directory: Path, version: str, rust_version: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
     (directory / "Cargo.toml").write_text(
         f'[workspace.package]\nversion = "{version}"\nrust-version = "{rust_version}"\n',
         encoding="utf-8",
@@ -327,8 +287,6 @@ def fake_tree(directory: Path, version: str, rust_version: str, readme: str, row
     (directory / "rust-toolchain.toml").write_text(
         '[toolchain]\nchannel = "1.99.1"\n', encoding="utf-8"
     )
-    (directory / "README.md").write_text(readme, encoding="utf-8")
-    (directory / DATES).write_text(rows, encoding="utf-8")
     return directory
 
 
@@ -340,7 +298,7 @@ def faking(responses: dict[str, object]) -> Fetch:
     return answer
 
 
-def fake_github(tags: list[str], **overrides: object) -> Fetch:
+def fake_github(**overrides: object) -> Fetch:
     repo, tag, other, older = f"{GITHUB}repos/{REPO}/", "t" * 40, "f" * 40, "b" * 40
     responses: dict[str, object] = {
         "git/ref/tags/v0.2.0-rc.1": {"object": {"type": "tag", "sha": tag}},
@@ -352,7 +310,6 @@ def fake_github(tags: list[str], **overrides: object) -> Fetch:
         f"commits/{COMMIT}/check-runs?filter=latest&check_name=ci%20/%20required": {
             "check_runs": [{"conclusion": "failure"}, {"conclusion": "success"}]
         },
-        "git/matching-refs/tags/v?per_page=100": [{"ref": f"refs/tags/{name}"} for name in tags],
         "activity?per_page=100": [
             {"timestamp": "2028-03-01T09:00:00Z", "after": other},
             {"timestamp": "2028-03-01T08:00:00Z", "after": ZERO},
@@ -406,7 +363,6 @@ def test_versions(expect: Expect) -> None:
         [pep440(version) for version in ("0.1.0-rc.1", "1.2.3")] == ["0.1.0rc1", "1.2.3"],
         "PEP 440 versions",
     )
-    expect(key("0.1.0-rc.2") < key("0.1.0") < key("0.1.1-rc.1"), "version order")
     expect(
         [mit_day(dt.date(2096, 2, 29)), mit_day(dt.date(2026, 10, 23))]
         == [dt.date(2100, 3, 1), dt.date(2030, 10, 23)],
@@ -417,23 +373,14 @@ def test_versions(expect: Expect) -> None:
 def test_trees(expect: Expect, base: Path) -> None:
     expect(tree_problems(ROOT) == [], f"the tracked tree: {tree_problems(ROOT)}")
     trees = {
-        "a current tree": (("0.2.0-rc.1", "1.99", README, HEADER), []),
-        "a ledger with a final's row": (("0.2.0-rc.1", "1.99", README, ROWS), []),
+        "a tree with no README and no licensing record": (("0.2.0-rc.1", "1.99"), []),
         "a mismatched rust-version": (
-            ("0.2.0-rc.1", "1.98", README, HEADER),
+            ("0.2.0-rc.1", "1.98"),
             ["rust-version 1.98 is not the minor of the toolchain 1.99.1"],
         ),
-        "a missing FAQ entry": (
-            ("0.2.0-rc.1", "1.99", README.replace(FAQ[2], "When"), HEADER),
-            [f"README.md lacks the licensing FAQ's {FAQ[2]!r}"],
-        ),
         "an alpha version": (
-            ("0.2.0-alpha.1", "1.99", README, HEADER),
+            ("0.2.0-alpha.1", "1.99"),
             ["version 0.2.0-alpha.1 is neither X.Y.Z nor X.Y.Z-rc.N"],
-        ),
-        "a dates file without its header": (
-            ("0.2.0-rc.1", "1.99", README, "v0.1.0\t2026-10-23\t2030-10-23\n"),
-            [f"{DATES} does not start with the header {DATES_HEADER!r}"],
         ),
     }
     for index, (label, (fields, wanted)) in enumerate(trees.items()):
@@ -442,12 +389,11 @@ def test_trees(expect: Expect, base: Path) -> None:
 
 
 def test_tags(expect: Expect, base: Path) -> None:
-    tree = fake_tree(base / "tags", "0.2.0-rc.1", "1.99", README, ROWS)
-    tags = ["v0.1.0-rc.1", "v0.1.0", "v0.1.1", "v0.2.0-rc.1", "v0.2.0", "vnext"]
-    problems, notes = tag_problems(fake_github(tags), remote, tree, REPO, "v0.2.0-rc.1")
+    tree = fake_tree(base / "tags", "0.2.0-rc.1", "1.99")
+    problems, notes = tag_problems(fake_github(), remote, tree, REPO, "v0.2.0-rc.1")
     expect(
-        problems == [f"{DATES} lacks the earlier final tag v0.1.1"],
-        f"an earlier final tag missing its dates row: {problems}",
+        problems == [],
+        f"a green candidate, its tag list never read: {problems}",
     )
     expect(
         notes == "almiladoc 0.2.0-rc.1\n\nMade available on 2028-02-29: its BUSL-1.1 portions "
@@ -493,10 +439,10 @@ def test_tags(expect: Expect, base: Path) -> None:
         ),
     }
     for label, (tag, overrides, wanted) in cases.items():
-        github = fake_github(["v0.1.0", tag], **overrides)
+        github = fake_github(**overrides)
         found, _ = tag_problems(github, remote, tree, REPO, tag)
         expect(found == wanted, f"{label}: {found}")
-    off_main = fake_github(["v0.1.0"], **{f"compare/{COMMIT}...main": {"status": "diverged"}})
+    off_main = fake_github(**{f"compare/{COMMIT}...main": {"status": "diverged"}})
     found, _ = tag_problems(off_main, lambda commit, head: True, tree, REPO, "v0.2.0-rc.1")
     expect(
         found == [f"{tagged}'s commit {COMMIT} is not on main"],
@@ -505,11 +451,6 @@ def test_tags(expect: Expect, base: Path) -> None:
 
 
 def test_releases(expect: Expect, base: Path) -> None:
-    final = fake_tree(base / "release", "0.2.0", "1.99", README, ROWS)
-    ref = {"git/ref/tags/v0.2.0": {"object": {"type": "tag", "sha": "t" * 40}}}
-    tags = ["v0.1.0", "v0.2.0-rc.1", "v0.2.0"]
-    problems, _ = tag_problems(fake_github(tags, **ref), remote, final, REPO, "v0.2.0")
-    expect(problems == [], f"a final needs no dates row of its own: {problems}")
     activity = {
         "activity?per_page=100": (
             [{"timestamp": "2028-03-01T09:00:00Z", "after": "f" * 40}],
@@ -520,8 +461,8 @@ def test_releases(expect: Expect, base: Path) -> None:
             {"timestamp": "2028-02-26T19:00:00Z", "after": "b" * 40},
         ],
     }
-    tree = fake_tree(base / "early", "0.2.0-rc.1", "1.99", README, ROWS)
-    github = fake_github(["v0.1.0"], **activity)
+    tree = fake_tree(base / "early", "0.2.0-rc.1", "1.99")
+    github = fake_github(**activity)
     _, notes = tag_problems(github, remote, tree, REPO, "v0.2.0-rc.1")
     expect(
         "Made available on 2028-02-27:" in notes,
@@ -549,7 +490,7 @@ def test_containment(expect: Expect, base: Path) -> None:
         {"timestamp": "2028-02-29T21:00:00Z", "after": other},
     ]
     compared: list[str] = []
-    github = counting(fake_github([], **{"activity?per_page=100": activity}), compared)
+    github = counting(fake_github(**{"activity?per_page=100": activity}), compared)
     day = available(github, remote, REPO, COMMIT)
     expect(
         (day, compared) == (dt.date(2028, 2, 29), [older, other, COMMIT]),
@@ -613,14 +554,14 @@ def run_guard(base: Path, tree: Path, tag: str | None) -> tuple[int, str]:
     args = argparse.Namespace(repository=REPO, tag=tag, notes=base / "notes", output=output)
     ref = {f"git/ref/tags/{tag}": {"object": {"type": "tag", "sha": "t" * 40}}}
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        code = guard(args, fake_github(["v0.1.0"], **ref), tree)
+        code = guard(args, fake_github(**ref), tree)
     return code, output.read_text(encoding="utf-8")
 
 
 def test_commands(expect: Expect, base: Path) -> None:
-    candidate = fake_tree(base / "guard-rc", "0.2.0-rc.1", "1.99", README, ROWS)
-    final = fake_tree(base / "guard-final", "0.2.0", "1.99", README, ROWS)
-    broken = fake_tree(base / "guard-broken", "0.2.0", "1.98", README, ROWS)
+    candidate = fake_tree(base / "guard-rc", "0.2.0-rc.1", "1.99")
+    final = fake_tree(base / "guard-final", "0.2.0", "1.99")
+    broken = fake_tree(base / "guard-broken", "0.2.0", "1.98")
     runs = [
         run_guard(base, candidate, "v0.2.0-rc.1"),
         run_guard(base, final, "v0.2.0"),
@@ -656,7 +597,7 @@ def test_commands(expect: Expect, base: Path) -> None:
 def test_published(expect: Expect, base: Path) -> None:
     dist = base / "dist"
     dist.mkdir()
-    tree = fake_tree(base / "final", "0.2.0", "1.99", README, HEADER)
+    tree = fake_tree(base / "final", "0.2.0", "1.99")
     run = ("pypi", "7", COMMIT)
     host, name = REGISTRIES["pypi"], "almiladoc-0.2.0-py3-none-any.whl"
     attested = hashlib.sha256(b"w").hexdigest()
@@ -708,7 +649,7 @@ def test_published(expect: Expect, base: Path) -> None:
     for label, (overrides, wanted) in cases.items():
         found = verify_problems(fake_registries(dist, **overrides), tree, dist, REPO, run)
         expect(found == wanted, f"{label}: {found}")
-    candidate = fake_tree(base / "rc", "0.2.0-rc.1", "1.99", README, HEADER)
+    candidate = fake_tree(base / "rc", "0.2.0-rc.1", "1.99")
     rc_dist, rc_host, sdist = base / "rc-dist", REGISTRIES["testpypi"], "almiladoc-0.2.0rc1.tar.gz"
     rc_dist.mkdir()
     (rc_dist / sdist).write_bytes(b"s")

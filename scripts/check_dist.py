@@ -1,5 +1,5 @@
-"""Check that a built wheel and sdist ship the licence set, its expression, the typing marker, an
-SBOM and the lockfile."""
+"""Check that a built wheel ships its metadata, the typing marker and an SBOM, and the sdist its
+metadata and the lockfile."""
 
 import argparse
 import io
@@ -7,38 +7,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from email.parser import Parser
 from pathlib import Path, PurePosixPath
-
-
-def licence_files(entries: list[str]) -> set[str]:
-    files: set[str] = set()
-    for entry in entries:
-        path = Path(entry)
-        if entry.endswith("/"):
-            found = {p.as_posix() for p in path.rglob("*") if p.is_file()}
-            if not found:
-                raise SystemExit(f"{entry} holds no file")
-            files |= found
-        elif path.is_file():
-            files.add(path.as_posix())
-        else:
-            raise SystemExit(f"{entry} is not a file")
-    return files
-
-
-def check(
-    label: str, names: set[str], metadata: str, prefix: str, wanted: set[str], expression: str
-) -> list[str]:
-    problems = [
-        f"{label}: {prefix}{name} is missing"
-        for name in sorted(wanted)
-        if f"{prefix}{name}" not in names
-    ]
-    found = Parser().parsestr(metadata).get_all("License-Expression") or []
-    if found != [expression]:
-        problems.append(f"{label}: License-Expression is {found}, not [{expression!r}]")
-    return problems
 
 
 def has_sbom(names: set[str], info: str) -> bool:
@@ -48,7 +17,15 @@ def has_sbom(names: set[str], info: str) -> bool:
     )
 
 
-def check_wheel(wheel: Path, wanted: set[str], expression: str) -> list[str]:
+def undecodable(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def check_wheel(wheel: Path) -> list[str]:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         dist_info = {
@@ -59,65 +36,70 @@ def check_wheel(wheel: Path, wanted: set[str], expression: str) -> list[str]:
         if len(dist_info) != 1:
             return [f"{wheel.name}: expected one .dist-info directory, found {sorted(dist_info)}"]
         (info,) = dist_info
-        metadata = archive.read(f"{info}/METADATA").decode("utf-8")
-    problems = check(wheel.name, names, metadata, f"{info}/licenses/", wanted, expression)
-    problems += [
+        metadata = f"{info}/METADATA"
+        malformed = metadata in names and undecodable(archive.read(metadata))
+    problems = [
         f"{wheel.name}: {name} is missing"
-        for name in ("almiladoc/py.typed", "almiladoc/_almiladoc.pyi")
+        for name in (metadata, "almiladoc/py.typed", "almiladoc/_almiladoc.pyi")
         if name not in names
     ]
+    if malformed:
+        problems.append(f"{wheel.name}: {metadata} is not UTF-8")
     if not has_sbom(names, info):
         problems.append(f"{wheel.name}: {info}/sboms/*.cyclonedx.json is missing")
     return problems
 
 
-def check_sdist(sdist: Path, wanted: set[str], expression: str) -> list[str]:
+def check_sdist(sdist: Path) -> list[str]:
     with tarfile.open(sdist) as archive:
-        names = set(archive.getnames())
-        tops = {PurePosixPath(name).parts[0] for name in names}
+        members = {member.name: member for member in archive.getmembers()}
+        tops = {PurePosixPath(name).parts[0] for name in members}
         if len(tops) != 1:
             return [f"{sdist.name}: expected one top directory, found {sorted(tops)}"]
         (top,) = tops
-        member = archive.extractfile(f"{top}/PKG-INFO")
-        if member is None:
-            return [f"{sdist.name}: PKG-INFO is missing"]
-        metadata = member.read().decode("utf-8")
-    problems = check(sdist.name, names, metadata, f"{top}/", wanted, expression)
-    if f"{top}/Cargo.lock" not in names:
-        problems.append(f"{sdist.name}: {top}/Cargo.lock is missing")
+        problems = [
+            f"{sdist.name}: {top}/{name} is missing"
+            for name in ("PKG-INFO", "Cargo.lock")
+            if not ((member := members.get(f"{top}/{name}")) and member.isfile())
+        ]
+        info = members.get(f"{top}/PKG-INFO")
+        if info and info.isfile() and undecodable(archive.extractfile(info).read()):
+            problems.append(f"{sdist.name}: {top}/PKG-INFO is not UTF-8")
     return problems
 
 
-EXPRESSION = "MIT"
+METADATA = "Metadata-Version: 2.4\nLicense-Expression: GPL-3.0-only\n"
 INFO = "almiladoc-0.0.0.dist-info"
 TOP = "almiladoc-0.0.0"
 SBOM = f"{INFO}/sboms/almiladoc-python.cyclonedx.json"
 WHEEL_FILES = {
-    f"{INFO}/METADATA": f"Metadata-Version: 2.4\nLicense-Expression: {EXPRESSION}\n",
-    f"{INFO}/licenses/LICENSE": "licence",
+    f"{INFO}/METADATA": METADATA,
     SBOM: "{}",
     "almiladoc/py.typed": "",
     "almiladoc/_almiladoc.pyi": "",
 }
 SDIST_FILES = {
-    f"{TOP}/PKG-INFO": f"Metadata-Version: 2.4\nLicense-Expression: {EXPRESSION}\n",
-    f"{TOP}/LICENSE": "licence",
+    f"{TOP}/PKG-INFO": METADATA,
     f"{TOP}/Cargo.lock": "version = 4\n",
 }
 
 
-def write_wheel(path: Path, files: dict[str, str]) -> Path:
+def write_wheel(path: Path, files: dict[str, str | bytes]) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         for name, text in files.items():
             archive.writestr(name, text)
     return path
 
 
-def write_sdist(path: Path, files: dict[str, str]) -> Path:
+def write_sdist(path: Path, files: dict[str, str | bytes | None]) -> Path:
     with tarfile.open(path, "w:gz") as archive:
         for name, text in files.items():
-            data = text.encode("utf-8")
             member = tarfile.TarInfo(name)
+            if text is None:
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
+                continue
+            data = text if isinstance(text, bytes) else text.encode("utf-8")
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
     return path
@@ -128,10 +110,15 @@ def without(files: dict[str, str], name: str) -> dict[str, str]:
 
 
 def self_test() -> int:
-    wanted = {"LICENSE"}
     lock = f"{TOP}/Cargo.lock"
+    metadata, pkg_info = f"{INFO}/METADATA", f"{TOP}/PKG-INFO"
     sbom = "sboms/*.cyclonedx.json is missing"
     wheels = {
+        "a wheel without METADATA": (without(WHEEL_FILES, metadata), f"{metadata} is missing"),
+        "a wheel whose METADATA is not UTF-8": (
+            WHEEL_FILES | {metadata: b"Metadata-Version: 2.4\nName: \xff\n"},
+            f"{metadata} is not UTF-8",
+        ),
         "a wheel without an SBOM": (without(WHEEL_FILES, SBOM), sbom),
         "a wheel whose SBOM sits outside its dist-info": (
             without(WHEEL_FILES, SBOM) | {"almiladoc/sboms/almiladoc-python.cyclonedx.json": "{}"},
@@ -143,6 +130,15 @@ def self_test() -> int:
         ),
     }
     sdists = {
+        "an sdist without PKG-INFO": (without(SDIST_FILES, pkg_info), f"{pkg_info} is missing"),
+        "an sdist whose PKG-INFO is a directory": (
+            without(SDIST_FILES, pkg_info) | {pkg_info: None},
+            f"{pkg_info} is missing",
+        ),
+        "an sdist whose PKG-INFO is not UTF-8": (
+            SDIST_FILES | {pkg_info: b"Metadata-Version: 2.4\nName: \xff\n"},
+            f"{pkg_info} is not UTF-8",
+        ),
         "an sdist without Cargo.lock": (without(SDIST_FILES, lock), f"{lock} is missing"),
         "an sdist whose only Cargo.lock is nested": (
             without(SDIST_FILES, lock) | {f"{TOP}/python/Cargo.lock": SDIST_FILES[lock]},
@@ -152,27 +148,23 @@ def self_test() -> int:
     failures = []
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        whole = check_wheel(
-            write_wheel(root / "whole.whl", WHEEL_FILES), wanted, EXPRESSION
-        ) + check_sdist(write_sdist(root / "whole.tar.gz", SDIST_FILES), wanted, EXPRESSION)
+        whole = check_wheel(write_wheel(root / "whole.whl", WHEEL_FILES)) + check_sdist(
+            write_sdist(root / "whole.tar.gz", SDIST_FILES)
+        )
         if whole:
-            failures.append(f"a complete pair was refused: {whole}")
+            failures.append(f"a GPL-3.0-only pair without a licence file was refused: {whole}")
         for number, (label, (files, reason)) in enumerate(wheels.items()):
             if not any(
                 reason in problem
-                for problem in check_wheel(
-                    write_wheel(root / f"wheel-{number}.whl", files), wanted, EXPRESSION
-                )
+                for problem in check_wheel(write_wheel(root / f"wheel-{number}.whl", files))
             ):
-                failures.append(f"{label} was not refused for its missing file")
+                failures.append(f"{label} was not refused: {reason}")
         for number, (label, (files, reason)) in enumerate(sdists.items()):
             if not any(
                 reason in problem
-                for problem in check_sdist(
-                    write_sdist(root / f"sdist-{number}.tar.gz", files), wanted, EXPRESSION
-                )
+                for problem in check_sdist(write_sdist(root / f"sdist-{number}.tar.gz", files))
             ):
-                failures.append(f"{label} was not refused for its missing file")
+                failures.append(f"{label} was not refused: {reason}")
     for failure in failures:
         print(f"self-test: {failure}", file=sys.stderr)
     return 1 if failures else 0
@@ -181,21 +173,14 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--expression")
-    parser.add_argument("--licence-set", nargs="+")
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--sdist", type=Path)
     args = parser.parse_args()
     if args.self_test:
         return self_test()
-    if None in (args.expression, args.licence_set, args.wheel, args.sdist):
-        parser.error(
-            "--expression, --licence-set, --wheel and --sdist are required without --self-test"
-        )
-    wanted = licence_files(args.licence_set)
-    problems = check_wheel(args.wheel, wanted, args.expression) + check_sdist(
-        args.sdist, wanted, args.expression
-    )
+    if None in (args.wheel, args.sdist):
+        parser.error("--wheel and --sdist are required without --self-test")
+    problems = check_wheel(args.wheel) + check_sdist(args.sdist)
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0

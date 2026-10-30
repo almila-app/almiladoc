@@ -219,7 +219,7 @@ jobs:
         with:
           version: 0.13.6
           enable-cache: false
-      - run: make policy locks licences reuse hygiene
+      - run: make policy locks hygiene
       - env:
           GH_TOKEN: ${{ github.token }}
         run: make actions

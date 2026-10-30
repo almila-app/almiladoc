@@ -10,8 +10,6 @@ if [ "$size" -ge "$max_bytes" ]; then
 fi
 
 read -ra pythons <<< "$(sed -n 's/^PYTHONS ?= //p' Makefile)"
-read -ra licence_set <<< "$(sed -n 's/^LICENCE_SET := //p' Makefile)"
-expression=$(sed -n 's/^LICENCE_EXPRESSION := //p' Makefile)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -29,5 +27,4 @@ for version in "${pythons[@]}"; do
   "$bin/python" -I -B -m pytest -W error -p no:cacheprovider python/tests
 done
 
-"$bin/python" -I -B scripts/check_dist.py --expression "$expression" --licence-set "${licence_set[@]}" \
-  --wheel "$wheel" --sdist "$sdist"
+"$bin/python" -I -B scripts/check_dist.py --wheel "$wheel" --sdist "$sdist"

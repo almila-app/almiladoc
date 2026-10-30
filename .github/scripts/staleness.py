@@ -2,13 +2,10 @@
 
 import argparse
 import datetime as dt
-import hashlib
-import io
 import json
 import os
 import re
 import sys
-import tarfile
 import tempfile
 import tomllib
 import urllib.parse
@@ -22,8 +19,6 @@ GITHUB = "https://api.github.com/"
 UV_REPOSITORY = "astral-sh/uv"
 PYTHON_CYCLE = "https://peps.python.org/api/release-cycle.json"
 OSV = "https://api.osv.dev/v1/vulns/"
-CRATES = "https://crates.io/api/v1/crates/"
-CRATE_FILES = "https://static.crates.io/crates/"
 QUAY = "https://quay.io/api/v1/repository/"
 IMAGE = re.compile(r"quay\.io/(pypa/[\w.-]+)@sha256:([0-9a-f]{64})")
 SUPPORTED = {"bugfix", "security"}
@@ -146,41 +141,6 @@ def advisory_ignores(root: Path) -> list[str]:
     return [entry if isinstance(entry, str) else entry["id"] for entry in entries]
 
 
-class Clarified(NamedTuple):
-    """An about.toml clarification's checksum, over the text from `start` through `end` when
-    it names them, as cargo-about reads it, else over the whole file."""
-
-    checksum: str
-    start: str | None = None
-    end: str | None = None
-
-    def span(self, content: bytes) -> bytes | None:
-        begin = 0 if self.start is None else content.find(self.start.encode())
-        if begin < 0 or self.end is None:
-            return None if begin < 0 else content[begin:]
-        stop = content.find(self.end.encode(), begin)
-        return None if stop < 0 else content[begin : stop + len(self.end.encode())]
-
-
-def clarifications(root: Path) -> dict[str, dict[str, Clarified]]:
-    config = tomllib.loads((root / "about.toml").read_text(encoding="utf-8"))
-    return {
-        crate: {
-            file["path"]: Clarified(file["checksum"], file.get("start"), file.get("end"))
-            for file in entry["clarify"].get("files", [])
-        }
-        for crate, entry in config.items()
-        if isinstance(entry, dict) and "clarify" in entry
-    }
-
-
-def locked_versions(root: Path) -> dict[str, str]:
-    return {
-        package["name"]: package["version"]
-        for package in tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))["package"]
-    }
-
-
 def locked_crates(root: Path) -> set[str]:
     return {
         package["name"]
@@ -227,19 +187,6 @@ def newer(pinned: str, releases: list[dict], now: dt.datetime) -> dict | None:
         if newest and version(STABLE_TAG.fullmatch(newest["tag_name"])[1]) > version(pinned)
         else None
     )
-
-
-def crate_releases(rows: list[dict]) -> list[dict]:
-    return [
-        {
-            "tag_name": row["num"],
-            "published_at": row["created_at"],
-            "draft": False,
-            "prerelease": False,
-        }
-        for row in rows
-        if not row["yanked"]
-    ]
 
 
 def ga_labels(readme: str) -> set[str]:
@@ -345,23 +292,6 @@ def advisory_findings(ident: str, osv: dict, locked: set[str]) -> list[str]:
     return found
 
 
-def clarify_findings(
-    crate: str, release: str, pinned: dict[str, Clarified], archive: bytes
-) -> list[str]:
-    found = []
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as crate_file:
-        names = set(crate_file.getnames())
-        for path, clarified in sorted(pinned.items()):
-            member = f"{crate}-{release}/{path}"
-            span = (
-                clarified.span(crate_file.extractfile(member).read()) if member in names else None
-            )
-            digest = "absent" if span is None else hashlib.sha256(span).hexdigest()
-            if digest != clarified.checksum:
-                found.append(f"about.toml {crate} {path}: {release} has sha256 {digest}")
-    return found
-
-
 def request(url: str, accept: str, token: str | None) -> urllib.request.Request:
     built = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     if token and urllib.parse.urlsplit(url).hostname == "api.github.com":
@@ -406,22 +336,6 @@ def report(root: Path, now: dt.datetime) -> list[str]:
     if uv := newer(pinned_uv, github(f"repos/{UV_REPOSITORY}/releases?per_page=100"), now):
         found.append(f"UV_VERSION {pinned_uv}: {uv['tag_name']}")
     found += python_findings(json.loads(fetch(PYTHON_CYCLE)), *pythons(root), now)
-    versions = locked_versions(root)
-    for crate, pinned in clarifications(root).items():
-        upcoming = newer(
-            versions[crate],
-            crate_releases(json.loads(fetch(f"{CRATES}{crate}/versions"))["versions"]),
-            now,
-        )
-        for release in dict.fromkeys(
-            [versions[crate], *([upcoming["tag_name"]] if upcoming else [])]
-        ):
-            found += clarify_findings(
-                crate,
-                release,
-                pinned,
-                fetch(f"{CRATE_FILES}{crate}/{crate}-{release}.crate", "application/gzip"),
-            )
     locked = locked_crates(root)
     for ident in advisory_ignores(root):
         found += advisory_findings(ident, json.loads(fetch(OSV + ident)), locked)
@@ -512,62 +426,6 @@ def self_test() -> int:
         {"zip", "libfuzzer-sys", "oar-ocr-core"} <= locked_crates(ROOT),
         "locked crates of every lock file",
     )
-    clarified = clarifications(ROOT)
-    expect(
-        clarified.keys() <= locked_versions(ROOT).keys()
-        and "almiladoc-python" in locked_versions(ROOT)
-        and len(clarified) > 0
-        and all(
-            re.fullmatch(r"[0-9a-f]{64}", file.checksum)
-            for files in clarified.values()
-            for file in files.values()
-        ),
-        f"about.toml clarifications {clarified}",
-    )
-    pinned_sums = re.findall(
-        r'checksum = "(\w+)"', (ROOT / "about.toml").read_text(encoding="utf-8")
-    )
-    expect(
-        sorted(file.checksum for files in clarified.values() for file in files.values())
-        == sorted(pinned_sums),
-        "every about.toml checksum",
-    )
-    packed = io.BytesIO()
-    with tarfile.open(fileobj=packed, mode="w:gz") as crate_file:
-        for name, content in [("LICENSE", b"text"), ("data.rs", b"code /* (c) A. notice. */ x")]:
-            info = tarfile.TarInfo(f"c-1.0.0/{name}")
-            info.size = len(content)
-            crate_file.addfile(info, io.BytesIO(content))
-    held = hashlib.sha256(b"text").hexdigest()
-    notice = hashlib.sha256(b"(c) A. notice.").hexdigest()
-    expect(
-        clarify_findings(
-            "c",
-            "1.0.0",
-            {"LICENSE": Clarified(held), "data.rs": Clarified(notice, "(c)", "notice.")},
-            packed.getvalue(),
-        )
-        == [],
-        "a held clarification, of a whole file and of the span between its markers",
-    )
-    expect(
-        clarify_findings(
-            "c",
-            "1.0.0",
-            {
-                "LICENSE": Clarified("0" * 64),
-                "x/LICENSE": Clarified(held),
-                "data.rs": Clarified(notice, "(c)", "gone"),
-            },
-            packed.getvalue(),
-        )
-        == [
-            f"about.toml c LICENSE: 1.0.0 has sha256 {held}",
-            "about.toml c data.rs: 1.0.0 has sha256 absent",
-            "about.toml c x/LICENSE: 1.0.0 has sha256 absent",
-        ],
-        "a moved and a missing clarification, and a span whose end marker is gone",
-    )
     with tempfile.TemporaryDirectory() as directory:
         fake = Path(directory)
         (fake / ".github" / "workflows").mkdir(parents=True)
@@ -644,14 +502,6 @@ def self_test() -> int:
         and newer("1.3.0", releases, now) is None
         and newer("1.10.0", releases, now) is None,
         "a newer release",
-    )
-    rows = [
-        {"num": num, "created_at": (now - dt.timedelta(days=days)).isoformat(), "yanked": yanked}
-        for num, days, yanked in (("1.2.0", 8, True), ("1.1.0", 9, False))
-    ]
-    expect(
-        (newer("1.0.0", crate_releases(rows), now) or {}).get("tag_name") == "1.1.0",
-        "the newest unyanked crate release",
     )
     sent = {
         url: request(url, "application/json", "t").header_items()

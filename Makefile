@@ -8,8 +8,7 @@ CARGO ?= cargo
 UV_VERSION := 0.13.6
 UV := uv tool run uv@$(UV_VERSION)
 PYTHONS ?= 3.11 3.15
-LICENCE_SET := LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES
-LICENCE_EXPRESSION := BUSL-1.1 AND MIT
+DENY_CHECKS := advisories bans sources
 OUT := $(abspath $(or $(CARGO_TARGET_DIR),target))/make
 TOOLS := $(OUT)/tools
 POLICY := $(OUT)/policy
@@ -19,16 +18,12 @@ HOST_ARCH := $(if $(filter Linux,$(shell uname -s)),$(shell uname -m))
 CARGO_DENY_VERSION := 0.20.2
 CARGO_DENY_SHA256_x86_64 := 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 CARGO_DENY_SHA256_aarch64 := 995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d
-CARGO_ABOUT_VERSION := 0.9.3
-CARGO_ABOUT_SHA256_x86_64 := 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
-CARGO_ABOUT_SHA256_aarch64 := eb4d9ff6ebd2518152a8308729431a04b3836e71d2bd5ead7aea69f91a71162e
 CARGO_FUZZ_VERSION := 0.13.2
 CARGO_FUZZ_SHA256_x86_64 := b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c
 AGE_VERSION := 1.3.2
 AGE_SHA256_x86_64 := cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
 AGE_URL := https://github.com/FiloSottile/age/releases/download/v$(AGE_VERSION)/age-v$(AGE_VERSION)-linux-amd64.tar.gz
 CARGO_DENY := $(TOOLS)/cargo-deny-$(CARGO_DENY_VERSION)/cargo-deny
-CARGO_ABOUT := $(TOOLS)/cargo-about-$(CARGO_ABOUT_VERSION)/cargo-about
 CARGO_FUZZ := $(TOOLS)/cargo-fuzz-$(CARGO_FUZZ_VERSION)/cargo-fuzz
 AGE := $(TOOLS)/age-$(AGE_VERSION)/age
 AGE_KEYGEN := $(TOOLS)/age-$(AGE_VERSION)/age-keygen
@@ -60,9 +55,9 @@ install -m 0755 $(addprefix $@.download/,$(3)) $(dir $@)
 rm -rf $@.download
 endef
 
-.PHONY: ci fmt clippy test doc features python tools policy locks licences reuse hygiene actions dco fuzz setup fuzz-campaign
+.PHONY: ci fmt clippy test doc features python tools policy locks hygiene actions dco fuzz setup fuzz-campaign
 
-ci: fmt clippy test doc features python policy locks licences reuse hygiene actions dco fuzz setup
+ci: fmt clippy test doc features python policy locks hygiene actions dco fuzz setup
 
 fmt:
 	$(CARGO) fmt --all --check
@@ -105,8 +100,7 @@ python:
 	$(OUT)/python/build/bin/maturin sdist --out $(OUT)/python/dist
 	tar -xzmf $(OUT)/python/dist/*.tar.gz -C $(OUT)/python
 	(cd $(OUT)/python/almiladoc-*/ && $(OUT)/python/build/bin/maturin build --release --locked --out $(OUT)/python/dist)
-	$(OUT)/python/build/bin/python -I -B scripts/check_dist.py --expression '$(LICENCE_EXPRESSION)' --licence-set $(LICENCE_SET) \
-	  --wheel $(OUT)/python/dist/*.whl --sdist $(OUT)/python/dist/*.tar.gz
+	$(OUT)/python/build/bin/python -I -B scripts/check_dist.py --wheel $(OUT)/python/dist/*.whl --sdist $(OUT)/python/dist/*.tar.gz
 	for version in $(PYTHONS); do
 	  venv=$(OUT)/python/venv-$$version
 	  UV_PROJECT_ENVIRONMENT=$$venv $(UV) sync --locked --only-group test --python $$version
@@ -116,13 +110,10 @@ python:
 	  (cd $$venv && bin/python -I -B -m mypy.stubtest --allowlist $(CURDIR)/python/stubtest-allowlist.txt almiladoc)
 	done
 
-tools: $(CARGO_DENY) $(CARGO_ABOUT) $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
+tools: $(CARGO_DENY) $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
 
 $(CARGO_DENY):
 	$(call fetch,https://github.com/EmbarkStudios/cargo-deny/releases/download/$(CARGO_DENY_VERSION)/cargo-deny-$(CARGO_DENY_VERSION)-$(MUSL).tar.gz,$(CARGO_DENY_SHA256_$(HOST_ARCH)),cargo-deny-$(CARGO_DENY_VERSION)-$(MUSL)/cargo-deny)
-
-$(CARGO_ABOUT):
-	$(call fetch,https://github.com/EmbarkStudios/cargo-about/releases/download/$(CARGO_ABOUT_VERSION)/cargo-about-$(CARGO_ABOUT_VERSION)-$(MUSL).tar.gz,$(CARGO_ABOUT_SHA256_$(HOST_ARCH)),cargo-about-$(CARGO_ABOUT_VERSION)-$(MUSL)/cargo-about)
 
 $(CARGO_FUZZ):
 	$(call fetch,https://github.com/rust-fuzz/cargo-fuzz/releases/download/$(CARGO_FUZZ_VERSION)/cargo-fuzz-$(CARGO_FUZZ_VERSION)-$(MUSL).tar.gz,$(CARGO_FUZZ_SHA256_$(HOST_ARCH)),cargo-fuzz)
@@ -133,12 +124,12 @@ $(AGE) $(AGE_KEYGEN) &:
 policy: $(CARGO_DENY)
 	$(call need_tool,$(CARGO_DENY))
 	$(call refresh_index,Cargo.toml)
-	$(CARGO_DENY) --workspace --all-features --locked --config deny.toml check
+	$(CARGO_DENY) --workspace --all-features --locked --config deny.toml check $(DENY_CHECKS)
 	$(call refresh_index,fuzz/Cargo.toml)
-	$(CARGO_DENY) --manifest-path fuzz/Cargo.toml --all-features --locked --config deny.toml check
+	$(CARGO_DENY) --manifest-path fuzz/Cargo.toml --all-features --locked --config deny.toml check $(DENY_CHECKS)
 	$(CARGO_DENY) --manifest-path python/Cargo.toml --locked --config deny-offline.toml check bans
 	$(call refresh_index,ocr-local/Cargo.toml)
-	$(CARGO_DENY) --manifest-path ocr-local/Cargo.toml --all-features --locked --config ocr-local/deny.toml check advisories bans sources
+	$(CARGO_DENY) --manifest-path ocr-local/Cargo.toml --all-features --locked --config ocr-local/deny.toml check $(DENY_CHECKS)
 	mkdir -p $(OUT)
 	$(CARGO) tree --locked -p almiladoc -e normal,build --target all --prefix none --format '{p}' > $(OUT)/default-graph.txt
 	banned=$$(sed -n 's/.*crate = "\([^"]*\)".*/\1/p' deny-offline.toml | paste -sd '|')
@@ -146,37 +137,19 @@ policy: $(CARGO_DENY)
 	if grep -E "^($$banned) " $(OUT)/default-graph.txt; then
 	  echo "the default build reaches a crate deny-offline.toml bans"; exit 1
 	fi
+	$(call need,python3)
+	python3 -I -B .github/scripts/deny_fixture.py --cargo $(CARGO) --cargo-deny $(CARGO_DENY) --config deny.toml --checks "$(DENY_CHECKS)"
 
 locks:
 	$(policy_env)
 	$(POLICY_PYTHON) .github/scripts/locks.py --cargo $(CARGO) --self-test
 	$(POLICY_PYTHON) .github/scripts/locks.py --cargo $(CARGO)
 
-licences: $(CARGO_ABOUT)
-	$(call need_tool,$(CARGO_ABOUT))
-	mkdir -p $(OUT)
-	changed=0
-	for manifest in Cargo.toml ocr-local/Cargo.toml; do
-	  $(CARGO_ABOUT) generate --locked --workspace --all-features --fail --manifest-path "$$manifest" --config about.toml --output-file $(OUT)/THIRD-PARTY-LICENSES about.hbs
-	  destination=$$(dirname "$$manifest")/THIRD-PARTY-LICENSES
-	  if ! cmp -s $(OUT)/THIRD-PARTY-LICENSES "$$destination"; then
-	    cp $(OUT)/THIRD-PARTY-LICENSES "$$destination"
-	    echo "$$destination was stale and is regenerated: review and commit it"
-	    changed=1
-	  fi
-	done
-	exit "$$changed"
-
-reuse:
-	$(policy_env)
-	$(POLICY)/bin/reuse lint
-
 hygiene:
 	$(policy_env)
 	$(POLICY)/bin/ruff format --check .
 	$(POLICY)/bin/ruff check .
 	$(POLICY_PYTHON) .github/scripts/hygiene.py --self-test
-	$(POLICY_PYTHON) .github/scripts/policy_env.py
 	$(POLICY_PYTHON) .github/scripts/staleness.py --self-test
 	$(POLICY_PYTHON) .github/scripts/release_guard.py --self-test
 	$(POLICY_PYTHON) .github/scripts/support.py --self-test

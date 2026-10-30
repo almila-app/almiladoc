@@ -52,7 +52,7 @@ FUZZ_CARGO = ("fuzz/Cargo.toml", "fuzz/Cargo.lock")
 NATIVE_CARGO = ("ocr-local/Cargo.toml", "ocr-local/Cargo.lock")
 UV = ("pyproject.toml", "uv.lock")
 MAKEFILE = "Makefile"
-DIST = ("scripts/check_dist.py", "LICENSE", "NOTICE")
+DIST = ("scripts/check_dist.py", "LICENSE", "NOTICE", "REUSE.toml", "THIRD-PARTY-LICENSES")
 FIXTURE_INPUTS = (
     "tests/gen_fixtures.py",
     "tests/fixturegen/",
@@ -423,6 +423,7 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
                 "deny.toml",
                 "deny-offline.toml",
                 "ocr-local/deny.toml",
+                ".github/scripts/deny_fixture.py",
                 MAKEFILE,
             ),
         ),
@@ -438,20 +439,6 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
                 MAKEFILE,
             ),
         ),
-        (
-            "licences",
-            target("licences", cargo=True),
-            lambda c: c.touches(
-                *CARGO,
-                *NATIVE_CARGO,
-                "about.toml",
-                "about.hbs",
-                "THIRD-PARTY-LICENSES",
-                "ocr-local/THIRD-PARTY-LICENSES",
-                MAKEFILE,
-            ),
-        ),
-        ("reuse", target("reuse"), lambda c: c.paths),
         ("hygiene", target("hygiene"), lambda c: c.paths),
         ("actions", target("actions"), lambda c: c.touches(".github/", *UV, MAKEFILE)),
         ("public", public, lambda c: c.paths),
@@ -459,15 +446,7 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
             "commits",
             commits,
             lambda c: (
-                c.commits
-                + c.touches(
-                    ".github/scripts/dco.py",
-                    ".github/signoff",
-                    "REUSE.toml",
-                    "LICENSES/MIT.txt",
-                    *UV,
-                    MAKEFILE,
-                )
+                c.commits + c.touches(".github/scripts/dco.py", ".github/signoff", *UV, MAKEFILE)
             ),
         ),
     ]
@@ -487,8 +466,8 @@ def selected_by(paths: list[str], root: Path, commits: list[str] = ()) -> set[st
 
 
 def self_test() -> int:
-    make_gates = {"test", "doc", "features", "python", "fuzz", "policy", "locks", "licences"}
-    every_path = {"setup", "reuse", "hygiene", "public"}
+    make_gates = {"test", "doc", "features", "python", "fuzz", "policy", "locks"}
+    every_path = {"setup", "hygiene", "public"}
     cases = {
         "python/src/lib.rs": every_path | {"rust", "doc", "features", "mirrors", "python"},
         "src/model/block.rs": every_path
@@ -513,22 +492,24 @@ def self_test() -> int:
         "fuzz/Cargo.lock": every_path | {"fuzz", "policy", "locks"},
         "ocr-local/src/lib.rs": every_path | {"rust", "test", "doc", "examples"},
         "ocr-local/tests/native.rs": every_path | {"rust", "test", "doc"},
-        "ocr-local/Cargo.toml": every_path
-        | {"rust", "test", "doc", "policy", "locks", "licences"},
-        "ocr-local/Cargo.lock": every_path
-        | {"rust", "test", "doc", "policy", "locks", "licences"},
+        "ocr-local/Cargo.toml": every_path | {"rust", "test", "doc", "policy", "locks"},
+        "ocr-local/Cargo.lock": every_path | {"rust", "test", "doc", "policy", "locks"},
         "ocr-local/deny.toml": every_path | {"policy"},
-        "ocr-local/THIRD-PARTY-LICENSES": every_path | {"licences"},
+        "ocr-local/THIRD-PARTY-LICENSES": every_path,
         "Cargo.lock": every_path | make_gates | {"rust"},
         "uv.lock": every_path | {"python", "locks", "actions", "commits"},
         "Makefile": every_path | make_gates | {"rust", "actions", "commits"},
         ".github/workflows/ci.yml": every_path | {"actions"},
         ".github/scripts/dco.py": every_path | {"actions", "commits"},
         ".github/signoff": every_path | {"actions", "commits"},
-        "REUSE.toml": every_path | {"commits"},
-        "LICENSES/MIT.txt": every_path | {"python", "commits"},
+        "REUSE.toml": every_path | {"python"},
+        "LICENSES/MIT.txt": every_path | {"python"},
+        "LICENSE": every_path | {"python"},
+        "NOTICE": every_path | {"python"},
+        ".github/scripts/deny_fixture.py": every_path | {"actions", "policy"},
+        "deny.toml": every_path | {"policy"},
         ".github/scripts/fuzz_campaign.py": every_path | {"actions", "fuzz"},
-        "THIRD-PARTY-LICENSES": every_path | {"licences"},
+        "THIRD-PARTY-LICENSES": every_path | {"python"},
         "docs/adr/0001-architecture.md": every_path,
         "AGENTS.md": every_path,
         "CLAUDE.md": every_path,

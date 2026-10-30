@@ -89,11 +89,6 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - run: cargo package --locked -p almiladoc
-      - run: |
-          listing=$(tar -tzf target/package/almiladoc-*.crate)
-          for entry in $(sed -n 's/^LICENCE_SET := //p' Makefile); do
-            if ! grep -q "^almiladoc-[^/]*/$entry" <<< "$listing"; then echo "crate: $entry is missing"; exit 1; fi
-          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: crate

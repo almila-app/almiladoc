@@ -86,9 +86,10 @@
 - `.claude/skills/verify/scripts/verify.py` owns check selection; Python tests use only `make
   python`
   against sdist-built wheels, never the unbuilt local source. Fuzz/locks: `fuzz/README.md`.
-- File licensing: `NOTICE`/`REUSE.toml`; new files join BUSL-1.1. Edited MIT files join
-  `BUSL-1.1 AND MIT`, retaining every copyright line and adding the licensor's; MIT-bearing
-  annotations retain `precedence = "override"`. `make dco` catches expressions `reuse lint` misses.
+- File licensing: `NOTICE`/`REUSE.toml`, whose `**` is BUSL-1.1, so a new file needs no entry.
+  Edited MIT files join `BUSL-1.1 AND MIT`, retaining every copyright line and adding the
+  licensor's; a moved or copied MIT-bearing file takes its annotation path and copyright lines;
+  MIT-bearing annotations retain `precedence = "override"`. No check holds these.
 - `git commit -s`; subject ≤72 columns; brief engineering body, no gates/process narrative.
-  `Co-authored-by`, `Tier`, `Signed-off-by` share the final trailer block; message rewrites sign
-  too.
+  `Co-authored-by`, `Tier`, `Licence-note`, `Signed-off-by` share the final trailer block;
+  message rewrites sign too.
