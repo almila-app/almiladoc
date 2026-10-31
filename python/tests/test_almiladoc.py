@@ -320,6 +320,31 @@ class ConversionTest(unittest.TestCase):
             with self.subTest(bounds=bounds), self.assertRaises(ValueError):
                 almiladoc.OcrLine("private", bounds)
 
+    def test_partial_headings_and_gutter_footers_keep_column_reading_order(self):
+        line = almiladoc.OcrLine
+        self.assertEqual(line.BOX_BYTES, 32)
+        body = [
+            line("L1", (0.05, 0.10, 0.45, 0.14)),
+            line("L2", (0.05, 0.20, 0.45, 0.24)),
+            line("R1", (0.55, 0.10, 0.95, 0.14)),
+            line("R2", (0.55, 0.20, 0.95, 0.24)),
+        ]
+        for before, after, expected in [
+            ([line("Title", (0.3, 0.02, 0.7, 0.06))], [], "Title L1 L2 R1 R2"),
+            ([line("Heading", (0.051, 0.02, 0.949, 0.06))], [], "Heading L1 L2 R1 R2"),
+            ([], [line("7", (0.48, 0.30, 0.52, 0.34))], "L1 L2 R1 R2 7"),
+        ]:
+            lines = before + body + after
+            for ordered in (lines, list(reversed(lines)), lines[1:] + lines[:1]):
+                with self.subTest(expected=expected):
+                    parsed = almiladoc.Converter().parse(MIXED.read_bytes())
+                    (gap,) = parsed.gaps
+                    parsed.fill_gap_lines(gap, ordered)
+                    self.assertEqual(
+                        " ".join(parsed.render().markdown.split()),
+                        "Text on the first page " + expected,
+                    )
+
     def test_located_line_admission_is_atomic_and_precedes_sequence_access(self):
         class Unread(Sequence):
             def __len__(self):

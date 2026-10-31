@@ -450,6 +450,59 @@ mod tests {
     }
 
     #[test]
+    fn final_order_breaks_paragraphs_on_upward_or_disjoint_transitions() {
+        let last = [0.05, 0.20, 0.45, 0.24];
+        for (next, expected) in [
+            ([0.05, 0.10, 0.45, 0.14], vec!["a", "b"]),
+            ([0.55, 0.25, 0.95, 0.29], vec!["a", "b"]),
+            ([0.00, 0.25, 0.04, 0.29], vec!["a", "b"]),
+            ([0.05, 0.31, 0.45, 0.35], vec!["a", "b"]),
+            ([0.10, 0.25, 0.40, 0.29], vec!["a b"]),
+            (last, vec!["a b"]),
+        ] {
+            let lines = [line("a", last), line("b", next)];
+            let mut retained = 64;
+            let actual = paragraphs(
+                &ParseCtx::default(),
+                &lines,
+                vec![(0, false), (1, false)],
+                &mut retained,
+            )
+            .unwrap();
+            assert_eq!(paragraph_text(actual), expected);
+        }
+    }
+
+    #[test]
+    fn section_scans_copies_and_final_order_are_charged_and_cancellable() {
+        let lines = [
+            line("H", [0.3, 0.02, 0.7, 0.06]),
+            line("L1", [0.05, 0.10, 0.45, 0.14]),
+            line("R1", [0.55, 0.10, 0.95, 0.14]),
+            line("L2", [0.05, 0.20, 0.45, 0.24]),
+            line("R2", [0.55, 0.20, 0.95, 0.24]),
+        ];
+        for max in [24, 25] {
+            let limits = Limits { max_work: max, ..Limits::default() };
+            assert_eq!(
+                section_cut(&ParseCtx::new(&limits), &lines, &[0, 1, 2, 3, 4]),
+                if max == 24 { Err(ConvertError::limit(Limit::Work, max)) } else { Ok(Some(1)) },
+            );
+        }
+        let limits = Limits { max_work: 44, ..Limits::default() };
+        assert_eq!(
+            blocks(&ParseCtx::new(&limits), &[line("a", [0.0, 0.0, 1.0, 0.1])]),
+            Err(ConvertError::limit(Limit::Work, 44)),
+        );
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            section_cut(&ParseCtx::default().with_cancel(Some(&cancel)), &lines, &[0, 1, 2, 3, 4]),
+            Err(ConvertError::Cancelled),
+        );
+    }
+
+    #[test]
     fn text_is_literal_nfc_and_geometric_ties_keep_input_order() {
         let bounds = [0.1, 0.1, 0.9, 0.15];
         let lines = [line("# *e\u{301}* [x](javascript:y) <b>", bounds)];
