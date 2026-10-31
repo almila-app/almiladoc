@@ -364,6 +364,7 @@ path = [
     "python/almiladoc/_almiladoc.pyi",
     "python/src/lib.rs",
     "python/tests/test_almiladoc.py",
+    "python/tests/test_ocr_live.py",
     "src/error.rs",
     "src/formats/detect.rs",
     "src/formats/doc/lists.rs",

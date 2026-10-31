@@ -113,9 +113,8 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
   candidate wheel on TestPyPI or on PyPI. It proves the consumer depends on that wheel
   instead of the converter it replaces, a test asserts `importlib.metadata.version("almiladoc")`
   equals the candidate and that no import of that converter remains, and its suite is green. The
-  first run certifies every format, PDF through the model and the OCR stack on the consumer's own
-  endpoint included, and the `RasterSpec` and `temperature` defaults follow what it measures there
-  before the first final tag; each later 0.x minor reruns it, and 1.0 needs it green on the 1.0
+  first run certifies every format and PDF through the model. The owner accepts the existing Xiaomi
+  endpoint and settings without another live run before the first final tag; each later 0.x minor reruns it, and 1.0 needs it green on the 1.0
   candidate.
 
 | Repository | Pull request | Serves | State |
@@ -145,7 +144,6 @@ Asked only when the item that needs them is next.
 
 | Step | Needed by | When |
 |---|---|---|
-| An OpenAI-compatible endpoint serving the consumer's model: its base URL, model id and a key in a file outside every repository, for `scripts/ocr_live.py` on the five-page fixture; the key never reaches a log, CI or a commit | the first release | before the first candidate tag |
 | After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | as each tag is due |
 | Agree with the consumer the PDF-path scope, how it maps `Incomplete` and `Internal`, its two-phase transport, prompt and `concurrency` | consumer proof | when the proof starts |
 | A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline | when it is next |

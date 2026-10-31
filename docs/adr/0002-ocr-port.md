@@ -60,7 +60,8 @@ Date: 2026-10-14, revised 2026-10-26
     and `fill_gap`. No error, diagnostic or `Debug` holds OCR text, a response body, a key, a
     prompt or a URL's userinfo or query; ureq's trace log holds the key, so the binding compiles
     `log` out. Sockets exist only in `src/ocr/http/`.
-13. **Tests.** Engines run as fakes and `ocr-http` on loopback, then live before the first release.
+13. **Tests.** Engines run as fakes and `ocr-http` on loopback. The owner accepts the consumer's
+    existing Xiaomi endpoint without another live run before the first release.
 
 ## Consequences
 
