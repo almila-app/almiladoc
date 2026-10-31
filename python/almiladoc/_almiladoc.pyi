@@ -601,7 +601,8 @@ class Parsed:
         settled."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
-        index an image's `asset` source names."""
+        index an image's `asset` source names: body, stored notes, then headers
+        and footers in first-reference order, followed by unreferenced payloads."""
 
 @final
 class Inspection:

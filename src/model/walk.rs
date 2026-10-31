@@ -1,5 +1,156 @@
-use super::{Block, Cell, CellSlot, Document, Gap, Inline, Table};
+use super::{
+    AssetId, Block, Cell, CellSlot, Document, Gap, ImageSource, Inline, ListItem, OcrOrigin, Table,
+};
 use crate::limits::{Limit, LimitExceeded};
+use std::slice::IterMut;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetPhase {
+    Main,
+    Side,
+}
+
+enum AssetNode<'d> {
+    Blocks(IterMut<'d, Block>, bool),
+    Inlines(IterMut<'d, Inline>),
+    Items(IterMut<'d, ListItem>, bool),
+    Rows(IterMut<'d, Vec<CellSlot>>, bool),
+    Slots(IterMut<'d, CellSlot>, bool),
+}
+
+pub(crate) fn visit_asset_ids<E: From<LimitExceeded>>(
+    document: &mut Document,
+    phase: AssetPhase,
+    mut charge: impl FnMut(u64) -> Result<(), E>,
+    mut visit: impl FnMut(&mut AssetId) -> Result<(), E>,
+) -> Result<(), E> {
+    asset_blocks(&mut document.blocks, phase, &mut charge, &mut visit)?;
+    for note in &mut document.notes {
+        charge(1)?;
+        asset_blocks(&mut note.blocks, phase, &mut charge, &mut visit)?;
+    }
+    Ok(())
+}
+
+fn asset_blocks<E: From<LimitExceeded>>(
+    blocks: &mut [Block],
+    phase: AssetPhase,
+    charge: &mut impl FnMut(u64) -> Result<(), E>,
+    visit: &mut impl FnMut(&mut AssetId) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut pending = Vec::new();
+    push_asset_node(&mut pending, AssetNode::Blocks(blocks.iter_mut(), false), charge)?;
+    while let Some(node) = pending.pop() {
+        charge(1)?;
+        asset_node(node, phase, &mut pending, charge, visit)?;
+    }
+    Ok(())
+}
+
+fn asset_node<'d, E: From<LimitExceeded>>(
+    node: AssetNode<'d>,
+    phase: AssetPhase,
+    pending: &mut Vec<AssetNode<'d>>,
+    charge: &mut impl FnMut(u64) -> Result<(), E>,
+    visit: &mut impl FnMut(&mut AssetId) -> Result<(), E>,
+) -> Result<(), E> {
+    match node {
+        AssetNode::Blocks(mut blocks, side) => {
+            if let Some(block) = blocks.next() {
+                push_asset_node(pending, AssetNode::Blocks(blocks, side), charge)?;
+                asset_block(block, phase, side, pending, charge, visit)?;
+            }
+        }
+        AssetNode::Inlines(mut inlines) => {
+            if let Some(inline) = inlines.next() {
+                push_asset_node(pending, AssetNode::Inlines(inlines), charge)?;
+                match inline {
+                    Inline::Image { source: ImageSource::Asset(id), .. } => visit(id)?,
+                    Inline::Link { content, .. } => {
+                        push_asset_node(pending, AssetNode::Inlines(content.iter_mut()), charge)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        AssetNode::Items(mut items, side) => {
+            if let Some(item) = items.next() {
+                push_asset_node(pending, AssetNode::Items(items, side), charge)?;
+                push_asset_node(pending, AssetNode::Blocks(item.blocks.iter_mut(), side), charge)?;
+            }
+        }
+        AssetNode::Rows(mut rows, side) => {
+            if let Some(row) = rows.next() {
+                push_asset_node(pending, AssetNode::Rows(rows, side), charge)?;
+                push_asset_node(pending, AssetNode::Slots(row.iter_mut(), side), charge)?;
+            }
+        }
+        AssetNode::Slots(mut slots, side) => {
+            if let Some(slot) = slots.next() {
+                push_asset_node(pending, AssetNode::Slots(slots, side), charge)?;
+                if let CellSlot::Origin(cell) = slot {
+                    push_asset_node(
+                        pending,
+                        AssetNode::Blocks(cell.blocks.iter_mut(), side),
+                        charge,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn asset_block<'d, E: From<LimitExceeded>>(
+    block: &'d mut Block,
+    phase: AssetPhase,
+    side: bool,
+    pending: &mut Vec<AssetNode<'d>>,
+    charge: &mut impl FnMut(u64) -> Result<(), E>,
+    visit: &mut impl FnMut(&mut AssetId) -> Result<(), E>,
+) -> Result<(), E> {
+    let active = (phase == AssetPhase::Side) == side;
+    match block {
+        Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } if active => {
+            push_asset_node(pending, AssetNode::Inlines(inlines.iter_mut()), charge)?;
+        }
+        Block::List(list) => {
+            push_asset_node(pending, AssetNode::Items(list.items.iter_mut(), side), charge)?;
+        }
+        Block::Table(table) => {
+            push_asset_node(pending, AssetNode::Rows(table.grid.iter_mut(), side), charge)?;
+        }
+        Block::BlockQuote(blocks) => {
+            push_asset_node(pending, AssetNode::Blocks(blocks.iter_mut(), side), charge)?;
+        }
+        Block::HeaderFooter(value) if phase == AssetPhase::Side => {
+            if let Some(content) = &mut value.content {
+                push_asset_node(pending, AssetNode::Blocks(content.iter_mut(), true), charge)?;
+            }
+        }
+        Block::Gap(Gap { origin: OcrOrigin::Image(id), .. }) if active => visit(id)?,
+        Block::Paragraph(_)
+        | Block::Heading { .. }
+        | Block::HeaderFooter(_)
+        | Block::Gap(_)
+        | Block::CodeBlock { .. }
+        | Block::Rule
+        | Block::Math(_)
+        | Block::UnitStart(_) => {}
+    }
+    Ok(())
+}
+
+fn push_asset_node<'d, E: From<LimitExceeded>>(
+    pending: &mut Vec<AssetNode<'d>>,
+    node: AssetNode<'d>,
+    charge: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    charge(1)?;
+    pending.try_reserve(1).map_err(|_| LimitExceeded { limit: Limit::Allocation, max: 0 })?;
+    pending.push(node);
+    Ok(())
+}
 
 /// A slice of the model one iterative walk has yet to visit.
 pub(crate) enum Node<'d> {

@@ -29,7 +29,7 @@ pub use style::{Style, VerticalPosition};
 pub use table::{Cell, CellSlot, Table};
 pub use unit::{Region, Unit, UnitKind};
 
-pub(crate) use walk::{Node, check_nesting, children};
+pub(crate) use walk::{AssetPhase, Node, check_nesting, children, visit_asset_ids};
 
 pub(crate) use table::{Cover, GridBuilder, GridLedger, Span, Sweep};
 
@@ -44,7 +44,8 @@ pub struct Document {
     /// Note bodies, in the order the document defines them. Text refers to
     /// them by id through [`Inline::NoteRef`].
     pub notes: Vec<Note>,
-    /// Every embedded asset, indexed by [`AssetId`].
+    /// Embedded assets indexed by [`AssetId`], in first-reference order across body, stored
+    /// notes, then headers and footers; unreferenced payloads follow in source retention order.
     pub assets: Vec<Asset>,
     /// Source-declared descriptive values; absent metadata is omitted from JSON.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]

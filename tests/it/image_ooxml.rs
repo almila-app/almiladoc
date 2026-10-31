@@ -240,10 +240,10 @@ fn object_outcome(
 #[test]
 fn an_object_shows_its_preview_and_keeps_its_payload_unreferenced() {
     use DiagnosticCode::{EmbeddedObject, ImageOmitted, ImagePlaceholder, ImageUnavailable};
-    let paired = Some(("Sales table", "![Sales table](asset:1)", ImagePlaceholder));
+    let paired = Some(("Sales table", "![Sales table](asset:0)", ImagePlaceholder));
     let missing = Some(("Sales table", "\\[Sales table\\]", ImageUnavailable));
     let stand_in = Some(("Sales table", "\\[Sales table\\]", ImagePlaceholder));
-    let undescribed = Some(("Image", "![Image](asset:1)", ImagePlaceholder));
+    let undescribed = Some(("Image", "![Image](asset:0)", ImagePlaceholder));
     let cases = [
         ("a paired preview", Format::Docx, docx_object(Some("png"), "Sales table", ""), paired),
         ("a preview without alt", Format::Docx, docx_object(Some("png"), "", ""), undescribed),
@@ -305,7 +305,7 @@ fn a_hidden_object_keeps_and_shows_nothing() {
     ];
     for (format, bytes) in visible {
         let shown = (
-            "![Sales table](asset:1)".to_string(),
+            "![Sales table](asset:0)".to_string(),
             vec![(ImagePlaceholder, 1), (EmbeddedObject, 1)],
             1,
         );
@@ -457,7 +457,7 @@ fn an_object_shows_only_the_picture_its_shape_id_names() {
         codes.retain(|&(_, count)| count > 0);
         codes.sort();
         let markdown =
-            if preview.is_some() { "![Sales table](asset:1)" } else { "\\[Sales table\\]" };
+            if preview.is_some() { "![Sales table](asset:0)" } else { "\\[Sales table\\]" };
         let expected = (markdown.to_string(), codes, 1);
         assert_eq!(object_outcome(format, &bytes, ImagePolicy::Placeholder), expected, "{case}");
         let shown: Vec<Vec<u8>> = preview.into_iter().map(<[u8]>::to_vec).collect();
@@ -945,21 +945,21 @@ fn an_object_preview_is_labelled_by_the_alt_of_its_paired_shape() {
             "a paired preview",
             object(&[shape("s1", "An object alt", Some("png"))], s1, ""),
             "An object alt",
-            "![An object alt](asset:1)",
+            "![An object alt](asset:0)",
             0,
         ),
         (
             "a shape alt over the drawing description",
             object(&[shape("s1", "An object alt", Some("png"))], s1, "Sales table"),
             "An object alt",
-            "![An object alt](asset:1)",
+            "![An object alt](asset:0)",
             0,
         ),
         (
             "a blank alt under the drawing description",
             object(&[shape("s1", " ", Some("png"))], s1, "Sales table"),
             "Sales table",
-            "![Sales table](asset:1)",
+            "![Sales table](asset:0)",
             0,
         ),
         (
@@ -970,7 +970,7 @@ fn an_object_preview_is_labelled_by_the_alt_of_its_paired_shape() {
                 "",
             ),
             "An object alt",
-            "![An object alt](asset:1)",
+            "![An object alt](asset:0)",
             1,
         ),
         (
@@ -981,14 +981,14 @@ fn an_object_preview_is_labelled_by_the_alt_of_its_paired_shape() {
                 "",
             ),
             "An object alt",
-            "![An object alt](asset:1)",
+            "![An object alt](asset:0)",
             1,
         ),
         (
             "a paired preview held in a rect",
             object(&[rect("s1", "An object alt", Some("png"))], s1, ""),
             "An object alt",
-            "![An object alt](asset:1)",
+            "![An object alt](asset:0)",
             0,
         ),
         (
@@ -1099,14 +1099,14 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         format!("{}{}", vml_picture("shape", "s2", "two"), vml_picture("shape", "s1", "png"));
     let two_previews =
         format!("{}{}", vml_picture("shape", "s1", "png"), vml_picture("shape", "s2", "two"));
-    let (asset_0, asset_1) = ("![Sales table](asset:0)", "![Sales table](asset:1)");
+    let preview = "![Sales table](asset:0)";
     let stand_in = "\\[Sales table\\]";
     let png: &[&[u8]] = &[b"png"];
     let cases: Vec<HeldCase<'_>> = vec![
         (
             "an embedded object over its drawing",
             object(&format!("{}{}", drawn("png"), embed(""))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1114,7 +1114,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a linked object over its drawing",
             object(&format!("{}{}", drawn("png"), link("ole", ""))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1122,7 +1122,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a linked object of an external target",
             object(&format!("{}{}", drawn("png"), link("linked", ""))),
-            asset_0,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder],
             0,
             png,
@@ -1130,7 +1130,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an embedded object whose shape id names a VML shape",
             object(&format!("{}{}{}", drawn("two"), vml_picture("shape", "s1", "png"), embed(s1))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1143,7 +1143,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
                 vml_picture("shape", "s1", "png"),
                 link("ole", s1)
             )),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1151,7 +1151,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an object whose shape id follows a decoy shape",
             object(&format!("{decoy_first}{}", embed(s1))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1159,7 +1159,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an object whose shape id names none",
             object(&format!("{}{}", drawn("png"), embed(r#"w:shapeId="s9""#))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1167,7 +1167,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an object whose shape holds no picture",
             object(&format!("{}{}{}", drawn("png"), shape_alt("s1", "Empty alt", None), embed(s1))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1180,7 +1180,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
                 drawn("png"),
                 embed(r#"w:shapeid="s1""#)
             )),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1193,7 +1193,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
                 drawn("png"),
                 embed("")
             )),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1201,7 +1201,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an object labelled by the alt of the shape its shape id names",
             object(&format!("{}{}", shape_alt("s1", "Shape alt", Some("png")), embed(s1))),
-            "![Shape alt](asset:1)",
+            "![Shape alt](asset:0)",
             vec![EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1222,7 +1222,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an object beside two drawings",
             object(&format!("{}{}{}", drawn("png"), drawn("two"), embed(""))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, ImagePlaceholder, ImageUnplaced],
             1,
             png,
@@ -1243,7 +1243,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "the preview of an object that is not read",
             object(&format!("{two_previews}{}{}", embed(s1), embed(s2))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, EmbeddedObject, ImagePlaceholder],
             1,
             png,
@@ -1251,7 +1251,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a control over its shape",
             object(&format!("{decoy_first}{}", control(r#"w:shapeid="s1""#))),
-            asset_0,
+            preview,
             vec![FormControlUnread, ImagePlaceholder, ImageUnplaced],
             0,
             png,
@@ -1259,7 +1259,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a control in a pict",
             pict(&format!("{decoy_first}{}", control(r#"w:shapeid="s1""#))),
-            asset_0,
+            preview,
             vec![FormControlUnread, ImagePlaceholder, ImageUnplaced],
             0,
             png,
@@ -1288,7 +1288,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a control beside its drawing",
             object(&format!("{}{}", drawn("png"), control(""))),
-            asset_0,
+            preview,
             vec![FormControlUnread, ImagePlaceholder],
             0,
             png,
@@ -1296,7 +1296,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "the preview of a control that is not read",
             object(&format!("{two_previews}{}{}", embed(s1), control(r#"w:shapeid="s2""#))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, FormControlUnread, ImagePlaceholder],
             1,
             png,
@@ -1304,7 +1304,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a control beside an embedded object",
             object(&format!("{}{}{}", drawn("png"), control(""), embed(""))),
-            asset_0,
+            preview,
             vec![FormControlUnread, EmbeddedObject, ImagePlaceholder],
             0,
             png,
@@ -1312,7 +1312,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "an embedded object beside a control",
             object(&format!("{}{}{}", drawn("png"), embed(""), control(""))),
-            asset_1,
+            preview,
             vec![EmbeddedObject, FormControlUnread, ImagePlaceholder],
             1,
             png,
@@ -1320,7 +1320,7 @@ fn an_iso_object_a_control_and_a_movie_report_their_loss_beside_their_preview() 
         (
             "a movie beside its drawing",
             object(&format!("{}{movie}", drawn("png"))),
-            asset_0,
+            preview,
             vec![GraphicUnread, ImagePlaceholder],
             0,
             png,

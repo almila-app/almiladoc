@@ -913,6 +913,7 @@ fn parse_document(
     if parse_ctx.image_ocr() == ImageOcr::All {
         leave_image_gaps(parse_ctx, &mut document)?;
     }
+    crate::shared::assets::order_assets(parse_ctx, &mut document)?;
     Ok((document, source))
 }
 
@@ -1107,6 +1108,111 @@ mod tests {
     fn unreadable_notes_docx() -> Vec<u8> {
         let notes = format!("<w:footnotes {W}><w:footnote w:id=\"2\">");
         docx("<w:p><w:r><w:t>kept</w:t></w:r></w:p>", &[("word/footnotes.xml", &notes)])
+    }
+
+    fn assert_asset_order(bytes: &[u8], format: Format, parts: &[(&str, &[u8])]) {
+        for image_ocr in [ImageOcr::None, ImageOcr::All] {
+            let config = Config { image_ocr, on_loss: OnLoss::Report, ..Config::default() };
+            let mut parsed =
+                Converter::new(config).unwrap().parse(Input::new(bytes, format)).unwrap();
+            let assets = &parsed.document().assets;
+            assert_eq!(assets.len(), parts.len());
+            for (index, (asset, (part, bytes))) in assets.iter().zip(parts).enumerate() {
+                assert_eq!(asset.id, AssetId(index));
+                assert_eq!(asset.origin_part, *part);
+                assert_eq!(asset.bytes, *bytes);
+            }
+            let requests = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
+            let expected: Vec<_> = parts
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, bytes))| {
+                    image_ocr == ImageOcr::All && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                })
+                .collect();
+            assert_eq!(requests.len(), expected.len());
+            for ((request, gap), (index, (_, bytes))) in
+                requests.iter().zip(parsed.gaps()).zip(expected)
+            {
+                assert_eq!(request.origin, OcrOrigin::Image(AssetId(index)));
+                assert_eq!(request.image.bytes.as_ref(), *bytes);
+                assert_eq!(request.gap, gap.id);
+            }
+        }
+    }
+
+    const PREVIEW: &[u8] = b"\x89PNG\r\n\x1a\npreview";
+
+    fn embedded_object_docx() -> Vec<u8> {
+        let document = format!(
+            r#"<w:document {W}
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+            <w:body><w:p><w:r><w:object>
+            <v:shape id="s1"><v:imagedata r:id="img"/></v:shape>
+            <o:OLEObject ShapeID="s1" r:id="ole"/>
+            </w:object></w:r></w:p></w:body></w:document>"#
+        );
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/p.png"/>
+            <Relationship Id="ole" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/o.bin"/>
+            </Relationships>"#;
+        zip_package(&[
+            ("word/document.xml", document.as_bytes()),
+            ("word/_rels/document.xml.rels", rels.as_bytes()),
+            ("word/media/p.png", PREVIEW),
+            ("word/embeddings/o.bin", b"payload"),
+        ])
+    }
+
+    #[test]
+    fn embedded_object_previews_precede_unreferenced_payloads() {
+        assert_asset_order(
+            &embedded_object_docx(),
+            Format::Docx,
+            &[("word/media/p.png", PREVIEW), ("word/embeddings/o.bin", b"payload")],
+        );
+    }
+
+    #[test]
+    fn parsing_keeps_asset_ordering_on_the_input_ledger() {
+        let bytes = embedded_object_docx();
+        let frontend = ParseCtx::default();
+        formats::parse_keeping(&frontend, &bytes, Format::Docx).unwrap();
+        let work = frontend.ledger().spent() + 24;
+        for max in [work, work - 1] {
+            let limits = crate::Limits { max_work: max, ..crate::Limits::default() };
+            let ctx = ParseCtx::new(&limits);
+            let expected =
+                if max == work { Ok(()) } else { Err(ConvertError::limit(Limit::Work, max)) };
+            assert_eq!(parse_document(&ctx, &bytes, Format::Docx).map(|_| ()), expected);
+            assert_eq!(ctx.ledger().spent(), work);
+        }
+    }
+
+    #[test]
+    fn body_assets_precede_images_read_earlier_inside_notes() {
+        let content = r#"<office:document-content
+            xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+            xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+            xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+            xmlns:xlink="http://www.w3.org/1999/xlink">
+            <office:body><office:text><text:p><text:note text:id="n">
+            <text:note-body><text:p><draw:frame><draw:image xlink:href="Pictures/n.png"/>
+            </draw:frame></text:p></text:note-body></text:note>
+            <draw:frame><draw:image xlink:href="Pictures/b.png"/></draw:frame>
+            </text:p></office:text></office:body></office:document-content>"#;
+        let image: &[u8] = b"\x89PNG\r\n\x1a\nbody";
+        let bytes = zip_package(&[
+            ("content.xml", content.as_bytes()),
+            ("Pictures/n.png", b"\x89PNG\r\n\x1a\nnote"),
+            ("Pictures/b.png", image),
+        ]);
+        assert_asset_order(
+            &bytes,
+            Format::Odt,
+            &[("Pictures/b.png", image), ("Pictures/n.png", b"\x89PNG\r\n\x1a\nnote")],
+        );
     }
 
     fn quoted(levels: usize, text: &str) -> Vec<Block> {

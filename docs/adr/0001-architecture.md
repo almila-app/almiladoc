@@ -25,6 +25,7 @@ Date: 2026-10-14, revised 2026-10-26
 4. **Inspect** takes a PDF and reports container facts, diagnostics and 1-based page units, each `Text`, `Blank` (`no_text`) or `NeedsOcr { reasons }`; any other format is `Unsupported`.
 
 5. **Model.**
+   - Asset ids freeze after parsing in first-reference order: body, stored note definitions, then headers and footers. Unreferenced payloads follow in retention order; image sources and OCR origins share the mapping without changing payloads or gap ids.
    - The model carries resolved superscript and subscript position and typed unit milestones. Anchor targets have a document-scoped id and optional destination unit; only that unit being unread suppresses a missing-anchor loss. Readable empty units keep their original ordinals and zero-length output spans; hidden sheets and unreadable units have no milestone, bar a PPT slide whose slide-list text outlives its lost container.
    - `Block::Gap` awaits OCR under an opaque `GapId` of an optional unit plus an ordinal within it, or within the document without one; `Parsed::gaps()` walks every container in document order and yields each gap's id, `OcrOrigin` and reason.
    - The caller returns outcomes through ADR 0002's channel under the kept `Limits`: `fill_gap` takes a gap and its `GapFill`; `fail_gap` records `ocr_failed`.

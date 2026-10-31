@@ -88,8 +88,8 @@ pub struct Limits {
     /// deterministically: XML events, RTF tokens, CSS rules an element's tag
     /// or classes name, KiB decompressed from an archive, records and cells
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
-    /// style and numbering resolution, omitted print text bytes, grid
-    /// positions counted against
+    /// style and numbering resolution, omitted print text bytes,
+    /// asset references and reindexing, grid positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, metadata text bytes serialized to JSON (each
     /// empty value costing one), 64 bytes of Markdown or JSON written, the
@@ -100,9 +100,8 @@ pub struct Limits {
     /// step's work as unpdf prices it, rounded up, and 16 bytes of its PNG
     /// after. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
-    /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
-    /// linear at that rate: a 256 MiB RTF of one hex picture charges
-    /// 268 435 410 units and the costliest test-corpus document 7 239. Work
+    /// byte of [`Limits::max_input_bytes`], admits ordinary large inputs,
+    /// including a 256 MiB RTF containing one hex picture. Work
     /// that grows faster than the input crosses it: a PPT of 65 hyperlinks
     /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging its
     /// range read and its label compared, asks 545 259 782.

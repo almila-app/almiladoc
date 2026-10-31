@@ -85,9 +85,8 @@ release is next.
   Reject and hidden-structure output policies. Reject retains deleted text, drops inserted text and
   rejoins paragraphs whose mark a revision removes. Omit counts existing references without reading
   side parts. Side anchors and references stay isolated from body resolution.
-- **Order:** assign assets in first-reference order across body, notes, side content and comments,
-  preserving unreferenced payloads; carry that mapping into image OCR origins. Complete rich-story
-  traversal and rendering before adopting rich producers. XLS print text can land first.
+- **Order:** complete rich-story traversal and rendering before adopting rich producers. Comments
+  join asset first-reference ordering after headers and footers. XLS print text can land first.
 - **Size:** separate shared prerequisites and each source frontend. **Tier:** T3.
 
 ## External tracks
