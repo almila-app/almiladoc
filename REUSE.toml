@@ -91,6 +91,7 @@ path = [
     "src/model/gap.rs",
     "src/model/header_footer.rs",
     "src/formats/sheet/headers.rs",
+    "src/formats/sheet/xls_print.rs",
     "src/model/unit.rs",
     "src/ocr/driver.rs",
     "src/ocr/engine.rs",

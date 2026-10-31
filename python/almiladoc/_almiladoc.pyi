@@ -308,7 +308,7 @@ class Config:
 
     @property
     def headers_footers(self) -> HeaderFooterPolicy:
-        """Whether XLSX and XLSB print headers and footers appear."""
+        """Whether supported print headers and footers appear."""
 
 @final
 class CancelToken:

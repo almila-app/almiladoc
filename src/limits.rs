@@ -65,8 +65,8 @@ pub struct Limits {
     /// Bytes of embedded assets one document retains: they are kept in
     /// memory with the document.
     pub max_asset_total_bytes: u64,
-    /// Nesting depth of binary record containers: their traversal needs
-    /// memory in proportion.
+    /// Nesting depth of binary record containers and BIFF8 XLS custom worksheet
+    /// views: their traversal needs memory in proportion.
     pub max_record_depth: u64,
     /// Binary records visited in one record stream: each costs time even
     /// when it yields nothing.
@@ -88,7 +88,8 @@ pub struct Limits {
     /// deterministically: XML events, RTF tokens, CSS rules an element's tag
     /// or classes name, KiB decompressed from an archive, records and cells
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
-    /// style and numbering resolution, omitted print text bytes,
+    /// style and numbering resolution, omitted print text bytes, BIFF8 XLS
+    /// records under header/footer Emit, emitted spreadsheet print text copies,
     /// asset references and reindexing, grid positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, metadata text bytes serialized to JSON (each

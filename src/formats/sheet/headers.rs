@@ -48,6 +48,107 @@ pub(super) enum BinaryPrintText<'a> {
     Utf16(Option<&'a [u8]>),
 }
 
+#[derive(Default)]
+pub(super) struct PartialPrintSettings {
+    slots: [Option<PrintSlot>; 6],
+    comparisons: [Option<DefaultComparison>; 6],
+    conflicts: [bool; 2],
+}
+
+enum DefaultComparison {
+    Retained,
+    Alternative(PrintSlot),
+}
+
+impl PartialPrintSettings {
+    pub(super) fn absorb(
+        &mut self,
+        ctx: &ParseCtx<'_>,
+        side: Side,
+        variant: Variant,
+        field: BinaryPrintText<'_>,
+    ) -> Result<(), ConvertError> {
+        ctx.charge(FIELDS.len() as u64)?;
+        let index = FIELDS
+            .iter()
+            .position(|(_, field_side, field_variant, _)| {
+                *field_side == side && *field_variant == variant
+            })
+            .ok_or(ConvertError::Internal)?;
+        self.conflicts[side_index(side)] |= matches!(field, BinaryPrintText::Unread);
+        let extra = binary_slot(ctx, side, variant, field)?;
+        let kept = self.slots.get_mut(index).ok_or(ConvertError::Internal)?;
+        if let Some(kept) = kept {
+            let pending = self.comparisons.get_mut(index).ok_or(ConvertError::Internal)?;
+            self.conflicts[side_index(side)] |= overlapping(ctx, kept, extra, pending)?;
+        } else {
+            *kept = Some(extra);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(self, ctx: &ParseCtx<'_>) -> Result<PrintSettings, ConvertError> {
+        let mut result = PrintSettings::empty(ctx)?;
+        for (target, kept) in result.slots.iter_mut().zip(self.slots) {
+            ctx.charge(1)?;
+            if let Some(kept) = kept {
+                *target = kept;
+            }
+        }
+        let mut conflicts = self.conflicts;
+        for (index, pending) in self.comparisons.into_iter().enumerate() {
+            ctx.charge(1)?;
+            let Some(pending) = pending else { continue };
+            let kept = result.slots.get(index).ok_or(ConvertError::Internal)?;
+            let default = default_slot(ctx, &result, kept.state.value.region)?;
+            let compared = match &pending {
+                DefaultComparison::Retained => kept,
+                DefaultComparison::Alternative(value) => value,
+            };
+            conflicts[side_index(kept.state.value.region)] |= !same_slot(ctx, default, compared)?;
+        }
+        result.conflicts = conflicts.map(u64::from);
+        Ok(result)
+    }
+}
+
+fn overlapping(
+    ctx: &ParseCtx<'_>,
+    kept: &PrintSlot,
+    extra: PrintSlot,
+    pending: &mut Option<DefaultComparison>,
+) -> Result<bool, ConvertError> {
+    if !kept.known() || !extra.known() {
+        return same_slot(ctx, kept, &extra).map(|same| !same);
+    }
+    match (kept.state.value.content.is_none(), extra.state.value.content.is_none()) {
+        (false, false) | (true, true) => same_slot(ctx, kept, &extra).map(|same| !same),
+        (false, true) => {
+            *pending = Some(DefaultComparison::Retained);
+            Ok(false)
+        }
+        (true, false) => match pending {
+            Some(DefaultComparison::Alternative(previous)) => {
+                same_slot(ctx, previous, &extra).map(|same| !same)
+            }
+            None => {
+                *pending = Some(DefaultComparison::Alternative(extra));
+                Ok(false)
+            }
+            Some(DefaultComparison::Retained) => Err(ConvertError::Internal),
+        },
+    }
+}
+
+fn same_slot(
+    ctx: &ParseCtx<'_>,
+    left: &PrintSlot,
+    right: &PrintSlot,
+) -> Result<bool, ConvertError> {
+    let same = left.state.same_content(&right.state, |work| ctx.charge(work))?;
+    Ok(same && left.known() && right.known())
+}
+
 impl PrintSettings {
     pub(super) fn empty(ctx: &ParseCtx<'_>) -> Result<Self, ConvertError> {
         use BinaryPrintText::{Inherit, Utf16};
@@ -85,6 +186,10 @@ impl PrintSettings {
 }
 
 impl PrintSlot {
+    fn known(&self) -> bool {
+        self.state.certainty == Certainty::Known && !self.selector_uncertain && !self.unread_content
+    }
+
     fn report(&mut self, code: DiagnosticCode) {
         if matches!(code, DiagnosticCode::UnresolvedEntity | DiagnosticCode::InvalidEncoding) {
             self.state.certainty = Certainty::Uncertain;

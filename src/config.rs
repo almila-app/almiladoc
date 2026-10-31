@@ -53,7 +53,7 @@ pub struct Config {
     pub images: ImagePolicy,
     /// Which images a parse leaves gaps after, for the caller's OCR.
     pub image_ocr: ImageOcr,
-    /// Whether XLSX and XLSB print headers and footers appear; other readers still omit them.
+    /// Whether supported print headers and footers appear.
     pub headers_footers: HeaderFooterPolicy,
 }
 

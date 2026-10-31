@@ -11,6 +11,7 @@ use super::grid::{
     SheetLink, UnreadFormats, build_table, format_as_text, render_number, resolve_format,
 };
 use super::numfmt::NumberFormat;
+use super::xls_print::{FOOTER, HEADER, HEADER_FOOTER, PrintRecords};
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -25,7 +26,7 @@ use crate::shared::officeart;
 use crate::shared::text::clean_text;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
-use std::ops::RangeInclusive;
+use std::ops::{Bound, RangeInclusive};
 use std::rc::Rc;
 
 // Record types ([MS-XLS] 2.3.2), BIFF5-BIFF8 numbering.
@@ -55,9 +56,6 @@ const MSODRAWING: u16 = 0x00EC;
 const OBJ: u16 = 0x005D;
 const TXO: u16 = 0x01B6;
 const NOTE: u16 = 0x001C;
-const HEADER: u16 = 0x0014;
-const FOOTER: u16 = 0x0015;
-const HEADER_FOOTER: u16 = 0x089C;
 const HLINK: u16 = 0x01B8;
 
 // [MS-XLS] 2.4.126: the ifmt a FORMAT record can declare.
@@ -82,6 +80,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let shown = globals.sheets.iter().filter(|s| matches!(s, Listed::Shown(_))).count();
     let mut doc = Document::default();
     let mut failed = 0usize;
+    let mut previous = HashMap::new();
     for (position, listed) in globals.sheets.iter().enumerate() {
         let unit = parse_ctx.begin_unit(UnitKind::Sheet, position)?;
         let sheet = match listed {
@@ -95,15 +94,18 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
                 continue;
             }
         };
-        let Some(content) = read_sheet(&data, &globals, sheet.offset, &mut records)? else {
+        let Some(mut content) = read_sheet(&data, &globals, sheet.offset, &mut records)? else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             failed += 1;
             continue;
         };
         doc.blocks.push(Block::UnitStart(unit.unit().model()));
-        let Some(table) = build_table(parse_ctx, content)? else {
+        let start = doc.blocks.len();
+        super::headers::append(parse_ctx, &mut doc, &mut previous, &mut content)?;
+        let table = build_table(parse_ctx, content)?;
+        if table.is_none() && doc.blocks.len() == start {
             continue;
-        };
+        }
         if shown > 1 {
             if sheet.name_loss.invalid {
                 parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Body);
@@ -111,9 +113,11 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
             if sheet.name_loss.assumed {
                 parse_ctx.emit(DiagnosticCode::EncodingAssumed, Region::Body);
             }
-            doc.blocks.push(Block::heading(2, vec![Inline::plain(sheet.name.clone())]));
+            doc.blocks.insert(start, Block::heading(2, vec![Inline::plain(sheet.name.clone())]));
         }
-        doc.blocks.push(Block::Table(table));
+        if let Some(table) = table {
+            doc.blocks.push(Block::Table(table));
+        }
     }
     if shown > 0 && failed == shown {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
@@ -159,11 +163,18 @@ struct RecordCount<'c> {
     max: u64,
     /// Where the stream was found cut, so the cut reports once.
     cut_at: Option<usize>,
+    meter_print: bool,
 }
 
 impl<'c> RecordCount<'c> {
     fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
-        Self { parse_ctx, seen: 0, max: parse_ctx.limits().max_records, cut_at: None }
+        Self {
+            parse_ctx,
+            seen: 0,
+            max: parse_ctx.limits().max_records,
+            cut_at: None,
+            meter_print: false,
+        }
     }
 
     /// Reports a substream that stopped at `pos` without its EOF, unless
@@ -192,6 +203,9 @@ impl<'c> RecordCount<'c> {
         self.seen += 1;
         if self.seen > self.max {
             return Err(ConvertError::limit(Limit::Records, self.max));
+        }
+        if self.meter_print {
+            self.parse_ctx.charge(1)?;
         }
         Ok(())
     }
@@ -265,13 +279,13 @@ impl Substream {
 /// fields never straddle a segment boundary, but may start exactly on one;
 /// only string character data crosses boundaries, and the string readers
 /// handle the repeated option-flags byte themselves.
-struct SegReader<'a> {
+pub(super) struct SegReader<'a> {
     later: std::slice::Iter<'a, &'a [u8]>,
     current: ByteReader<'a>,
 }
 
 impl<'a> SegReader<'a> {
-    fn new(segs: &'a [&'a [u8]]) -> Self {
+    pub(super) fn new(segs: &'a [&'a [u8]]) -> Self {
         let mut later = segs.iter();
         let current = ByteReader::new(later.next().copied().unwrap_or_default());
         Self { later, current }
@@ -298,7 +312,7 @@ impl<'a> SegReader<'a> {
     }
 
     /// `n` bytes from within one segment.
-    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(super) fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
         self.normalize();
         self.current.take(n)
     }
@@ -308,7 +322,7 @@ impl<'a> SegReader<'a> {
         self.current.u8()
     }
 
-    fn u16(&mut self) -> Option<u16> {
+    pub(super) fn u16(&mut self) -> Option<u16> {
         self.normalize();
         self.current.u16()
     }
@@ -369,13 +383,51 @@ fn read_biff8_string(
     length: LengthPrefix,
     runs: Runs,
 ) -> Option<(String, bool)> {
+    let mut units = Vec::new();
+    read_biff8_chunks(r, length, runs, |chunk| {
+        match chunk {
+            StringChunk::UnitCount(_) => {}
+            StringChunk::Characters { bytes, wide: true } => units.extend(utf16le_units(bytes)),
+            StringChunk::Characters { bytes, wide: false } => {
+                units.extend(bytes.iter().map(|&byte| u16::from(byte)));
+            }
+        }
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap_or_else(|never| match never {})?;
+    Some(decode_utf16(units))
+}
+
+enum StringChunk<'a> {
+    UnitCount(usize),
+    Characters { bytes: &'a [u8], wide: bool },
+}
+
+fn read_biff8_chunks<E>(
+    r: &mut SegReader<'_>,
+    length: LengthPrefix,
+    runs: Runs,
+    mut retain: impl FnMut(StringChunk<'_>) -> Result<(), E>,
+) -> Result<Option<()>, E> {
+    let result = biff8_chunks(r, length, runs, &mut retain);
+    result.transpose()
+}
+
+fn biff8_chunks<E>(
+    r: &mut SegReader<'_>,
+    length: LengthPrefix,
+    runs: Runs,
+    retain: &mut impl FnMut(StringChunk<'_>) -> Result<(), E>,
+) -> Option<Result<(), E>> {
     let cch = length.read(r)?;
+    if let Err(error) = retain(StringChunk::UnitCount(cch)) {
+        return Some(Err(error));
+    }
     let flags = r.u8()?;
     let mut wide = flags & 0x01 != 0;
     let rich = runs == Runs::Rich;
     let runs = if rich && flags & 0x08 != 0 { usize::from(r.u16()?) } else { 0 };
     let ext = if rich && flags & 0x04 != 0 { usize::try_from(r.u32()?).ok()? } else { 0 };
-    let mut units: Vec<u16> = Vec::new();
     let mut remaining = cch;
     while remaining > 0 {
         if r.in_seg() == 0 {
@@ -389,17 +441,64 @@ fn read_biff8_string(
             return None;
         }
         let bytes = r.bytes(take * unit)?;
-        if wide {
-            units.extend(utf16le_units(bytes));
-        } else {
-            units.extend(bytes.iter().map(|&b| u16::from(b)));
+        if let Err(error) = retain(StringChunk::Characters { bytes, wide }) {
+            return Some(Err(error));
         }
         remaining -= take;
     }
     // A truncated trailer loses only the strings after this one; the reader
     // then runs dry and the caller stops.
     let _: Option<()> = r.skip(runs * 4).and_then(|()| r.skip(ext));
-    Some(decode_utf16(units))
+    Some(Ok(()))
+}
+
+pub(super) enum PrintString {
+    Utf16(Vec<u8>),
+    InvalidLength,
+    BrokenFraming,
+}
+
+pub(super) fn read_print_string(
+    ctx: &ParseCtx<'_>,
+    reader: &mut SegReader<'_>,
+    expected: Option<u16>,
+    selected: bool,
+) -> Result<PrintString, ConvertError> {
+    let mut count = None;
+    let mut accepted = false;
+    let mut text = Vec::new();
+    let complete = read_biff8_chunks(reader, LengthPrefix::U16, Runs::Plain, |chunk| {
+        match chunk {
+            StringChunk::UnitCount(length) => {
+                count = Some(length);
+                accepted = length <= super::headers::MAX_BINARY_PRINT_UNITS
+                    && expected.is_none_or(|expected| usize::from(expected) == length);
+            }
+            StringChunk::Characters { bytes, wide } => {
+                ctx.charge(bytes.len() as u64)?;
+                if accepted && selected {
+                    let length = if wide { bytes.len() } else { bytes.len().saturating_mul(2) };
+                    ctx.charge(length as u64)?;
+                    text.try_reserve(length)
+                        .map_err(|_| ConvertError::limit(Limit::Allocation, length as u64))?;
+                    if wide {
+                        text.extend_from_slice(bytes);
+                    } else {
+                        text.extend(bytes.iter().flat_map(|byte| u16::from(*byte).to_le_bytes()));
+                    }
+                }
+            }
+        }
+        Ok::<(), ConvertError>(())
+    })?;
+    if complete.is_none() {
+        return Ok(if expected.is_none() && count == Some(0) {
+            PrintString::Utf16(Vec::new())
+        } else {
+            PrintString::BrokenFraming
+        });
+    }
+    Ok(if accepted { PrintString::Utf16(text) } else { PrintString::InvalidLength })
 }
 
 /// A BIFF5/BIFF7 byte string (no flags byte), decoded per the workbook's
@@ -662,6 +761,12 @@ fn read_sheet(
     offset: usize,
     records: &mut RecordCount<'_>,
 ) -> Result<Option<SheetContent>, ConvertError> {
+    let data = globals
+        .starts
+        .range((Bound::Excluded(offset), Bound::Unbounded))
+        .next()
+        .and_then(|&end| data.get(..end))
+        .unwrap_or(data);
     let Some((rec_type, body, pos)) = record_at(data, offset) else {
         return Ok(None);
     };
@@ -669,8 +774,12 @@ fn read_sheet(
         return Ok(None);
     }
     let mut sheet = SheetReader::new(records.parse_ctx, globals);
+    records.meter_print = sheet.print.is_some();
     let mut walk = Substream::after_bof(pos);
     while let Some((rec_type, body)) = walk.next(data, &globals.starts, records)? {
+        if let Some(print) = &mut sheet.print {
+            print.observe(records.parse_ctx, rec_type, body)?;
+        }
         match rec_type {
             ROW => sheet.row(body),
             COLINFO => sheet.colinfo(body),
@@ -683,7 +792,9 @@ fn read_sheet(
             FORMULA => sheet.formula(body)?,
             OBJ if globals.biff8 => sheet.object(body)?,
             NOTE => records.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
-            HEADER | FOOTER | HEADER_FOOTER => sheet.header_footer(rec_type, body),
+            HEADER | FOOTER | HEADER_FOOTER => {
+                sheet.read_print_record(data, rec_type, body, &mut walk, records)?;
+            }
             HLINK => sheet.link(body),
             LABEL | RSTRING | TXO | STRING => {
                 let segs = walk.continued(data, body, &globals.starts, records)?;
@@ -700,12 +811,12 @@ fn read_sheet(
             _ => {}
         }
     }
-    walk.finish(records);
-    Ok(Some(sheet.out))
+    sheet.finish(data, walk, records).map(Some)
 }
 
 /// The walk state of one worksheet substream, with one method per record family.
 struct SheetReader<'g, 'p> {
+    print: Option<PrintRecords>,
     parse_ctx: &'p ParseCtx<'p>,
     globals: &'g Globals,
     out: SheetContent,
@@ -719,13 +830,35 @@ struct SheetReader<'g, 'p> {
 }
 
 impl<'g, 'p> SheetReader<'g, 'p> {
+    fn finish(
+        mut self,
+        data: &[u8],
+        walk: Substream,
+        records: &RecordCount<'_>,
+    ) -> Result<SheetContent, ConvertError> {
+        if !walk.ended
+            && walk.depth == 1
+            && let Some(print) = &mut self.print
+            && let Some(record) = get_u16(data, walk.pos)
+        {
+            print.unread_record(self.parse_ctx, record)?;
+        }
+        walk.finish(records);
+        if let Some(print) = self.print.take() {
+            print.finish(self.parse_ctx, &mut self.out)?;
+        }
+        Ok(self.out)
+    }
+
     fn new(parse_ctx: &'p ParseCtx<'p>, globals: &'g Globals) -> Self {
         let out = SheetContent::on(
             BIFF8_GRID,
             parse_ctx.grid_slots_left(),
             parse_ctx.limits().max_grid_slots,
         );
-        Self { parse_ctx, globals, out, pending: None, shape: None, text_of: None }
+        let print =
+            (globals.biff8 && parse_ctx.headers_footers_requested()).then(PrintRecords::default);
+        Self { print, parse_ctx, globals, out, pending: None, shape: None, text_of: None }
     }
 
     fn row(&mut self, body: &[u8]) {
@@ -911,7 +1044,27 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         Ok(())
     }
 
-    fn header_footer(&mut self, rec_type: u16, body: &[u8]) {
+    fn read_print_record(
+        &mut self,
+        data: &[u8],
+        rec_type: u16,
+        body: &[u8],
+        walk: &mut Substream,
+        records: &mut RecordCount<'_>,
+    ) -> Result<(), ConvertError> {
+        let Some(print) = &mut self.print else {
+            self.omit_header_footer(rec_type, body);
+            return Ok(());
+        };
+        let segments = if print.eligible() {
+            walk.continued(data, body, &self.globals.starts, records)?
+        } else {
+            Vec::new()
+        };
+        print.read(self.parse_ctx, rec_type, &segments)
+    }
+
+    fn omit_header_footer(&mut self, rec_type: u16, body: &[u8]) {
         for region in header_footer_regions(rec_type, body, self.globals.biff8) {
             self.out.omit_header_footer(region);
         }
@@ -1278,8 +1431,11 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
 mod tests {
     use super::super::test_support::{Reported, first_table, in_unit, origin, reported, texts};
     use super::*;
+    use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
     use crate::shared::officeart::record;
     use crate::shared::test_support::unit_starts;
+    use Side::{Footer, Header};
+    use Variant::{Default, Even, First};
     use std::assert_matches;
     use std::io::Write;
 
@@ -1477,6 +1633,248 @@ mod tests {
 
     fn grid(wb: &Wb) -> Vec<Vec<String>> {
         texts(first_table(&parse(&ParseCtx::default(), &wb.build()).unwrap()))
+    }
+
+    fn emit_print(wb: &Wb) -> (Document, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let doc = parse(&ctx, &wb.build()).unwrap();
+        (doc, reported(ctx))
+    }
+
+    type PrintValue = (Side, Variant, Option<String>);
+
+    fn print_values(doc: &Document) -> Vec<PrintValue> {
+        doc.blocks
+            .iter()
+            .filter_map(|block| {
+                let Block::HeaderFooter(value) = block else { return None };
+                let text = value.content.as_ref().map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| {
+                            let Block::Paragraph(inlines) = block else {
+                                panic!("unexpected print block: {block:?}")
+                            };
+                            crate::model::inlines_to_plain_text(inlines)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+                Some((value.region, value.variant, text))
+            })
+            .collect()
+    }
+
+    fn print_value(side: Side, variant: Variant, text: &str) -> PrintValue {
+        (side, variant, Some(text.into()))
+    }
+
+    fn print_pair(header: &str, footer: &str) -> [PrintValue; 2] {
+        [print_value(Header, Default, header), (Footer, Default, Some(footer.into()))]
+    }
+
+    fn raw_print_overrides(flags: u16, counts: [u16; 4], strings: &[u8], guid: u8) -> Vec<u8> {
+        rec(
+            HEADER_FOOTER,
+            &[
+                le16(&[HEADER_FOOTER, 0]),
+                vec![0; 8],
+                vec![guid; 16],
+                le16(&[flags]),
+                le16(&counts),
+                strings.to_vec(),
+            ]
+            .concat(),
+        )
+    }
+
+    fn print_overrides(flags: u16, strings: [&str; 4], guid: u8) -> Vec<u8> {
+        assert!(strings.iter().all(|text| text.is_ascii()));
+        let counts = strings.map(|text| text.len() as u16);
+        let payload: Vec<_> =
+            strings.into_iter().filter(|text| !text.is_empty()).flat_map(ustr).collect();
+        raw_print_overrides(flags, counts, &payload, guid)
+    }
+
+    fn print_view_begin() -> Vec<u8> {
+        let mut body = vec![0; 64];
+        body[0] = 1;
+        body[16..18].copy_from_slice(&1u16.to_le_bytes());
+        body[20..24].copy_from_slice(&100u32.to_le_bytes());
+        body[28] = 3;
+        rec(0x01AA, &body)
+    }
+
+    fn print_unread(regions: &[Region]) -> Vec<Reported> {
+        regions.iter().map(|&region| (DiagnosticCode::BlockUnread, region, Some(1), 1)).collect()
+    }
+
+    #[test]
+    fn separate_default_print_records_keep_their_own_sides_in_either_order() {
+        let header = rec(HEADER, &ustr("&LLeft&CCenter&RRight"));
+        let footer = rec(FOOTER, &ustr("&CBottom"));
+        for records in [[header.clone(), footer.clone()], [footer, header]] {
+            assert_eq!(
+                print_values(&emit_print(&one_sheet(records.concat())).0),
+                print_pair("Left\nCenter\nRight", "Bottom"),
+            );
+        }
+    }
+
+    #[test]
+    fn print_flags_select_distinct_variants_and_clear_before_inheriting() {
+        let defaults = [rec(HEADER, &ustr("H")), rec(FOOTER, &ustr("F"))].concat();
+        for flags in [0, 1, 2, 3, 12] {
+            let body =
+                [print_overrides(flags, ["EH", "EF", "FH", "FF"], 0), defaults.clone()].concat();
+            let (doc, reports) = emit_print(&one_sheet(body));
+            let mut expected = Vec::new();
+            for (side, default, first, even) in
+                [(Header, "H", "FH", "EH"), (Footer, "F", "FF", "EF")]
+            {
+                expected.push((side, Default, Some(default.into())));
+                if flags & 2 != 0 {
+                    expected.push((side, First, Some(first.into())));
+                }
+                if flags & 1 != 0 {
+                    expected.push((side, Even, Some(even.into())));
+                }
+            }
+            assert_eq!(print_values(&doc), expected, "{flags}");
+            assert_eq!(reports, []);
+        }
+        let wb = Wb {
+            sheets: vec![
+                ("set", 0, print_overrides(3, ["E", "T", "F", "B"], 0)),
+                ("clear", 0, print_overrides(3, [""; 4], 0)),
+                ("inherit", 0, Vec::new()),
+            ],
+            ..Wb::default()
+        };
+        let (doc, reports) = emit_print(&wb);
+        let values = print_values(&doc);
+        assert_eq!(values.len(), 12);
+        for (_, variant, text) in &values[4..8] {
+            assert_ne!(*variant, Default);
+            assert_eq!(*text, Some(String::new()));
+        }
+        for (_, _, text) in &values[8..] {
+            assert_eq!(*text, None);
+        }
+        assert_eq!(reports, []);
+    }
+
+    #[test]
+    fn print_scopes_and_view_guids_never_select_decoys() {
+        let defaults = [rec(HEADER, &ustr("H")), rec(FOOTER, &ustr("F"))].concat();
+        let end = rec(0x01AB, &[1, 0]);
+        let decoy =
+            [rec(HEADER, &ustr("&P")), rec(FOOTER, &ustr("&G")), print_overrides(3, ["X"; 4], 0)]
+                .concat();
+        let custom = [print_view_begin(), decoy.clone(), end.clone()].concat();
+        let nested = [bof(0x0020, 0x0600), decoy, rec(EOF_REC, &[])].concat();
+        for ignored in [custom, nested, print_overrides(3, ["X"; 4], 1)] {
+            for body in [[ignored.clone(), defaults.clone()], [defaults.clone(), ignored]] {
+                let (doc, reports) = emit_print(&one_sheet(body.concat()));
+                assert_eq!(print_values(&doc), print_pair("H", "F"));
+                assert_eq!(reports, []);
+            }
+        }
+        let body =
+            [print_view_begin(), print_view_begin(), rec(HEADER, &ustr("discarded")), end].concat();
+        let (doc, reports) = emit_print(&one_sheet(body));
+        assert_eq!(print_values(&doc), []);
+        assert_eq!(reports, []);
+    }
+
+    #[test]
+    fn print_duplicates_resolve_inheritance_after_defaults_and_keep_first_damage() {
+        let active = print_overrides(3, ["H", "F", "H", "F"], 0);
+        let inherit = print_overrides(0, ["unused"; 4], 0);
+        for pair in [[active.clone(), inherit.clone()], [inherit, active]] {
+            for header in ["H", "different"] {
+                let body =
+                    [pair.concat(), rec(HEADER, &ustr(header)), rec(FOOTER, &ustr("F"))].concat();
+                let (doc, reports) = emit_print(&one_sheet(body));
+                assert_eq!(print_values(&doc)[0], print_value(Header, Default, header));
+                assert_eq!(
+                    reports,
+                    if header == "H" { vec![] } else { print_unread(&[Region::Header]) }
+                );
+            }
+        }
+        for extra in [ustr("same"), ustr("&P"), [le16(&[1]), vec![1], le16(&[0xD800])].concat()] {
+            let (doc, reports) =
+                emit_print(&one_sheet([rec(HEADER, &ustr("same")), rec(HEADER, &extra)].concat()));
+            assert_eq!(print_values(&doc), [print_value(Header, Default, "same")]);
+            assert_eq!(
+                reports,
+                if extra == ustr("same") { vec![] } else { print_unread(&[Region::Header]) }
+            );
+        }
+    }
+
+    #[test]
+    fn print_records_cannot_read_the_next_sheets_bytes() {
+        for (kind, side, region) in
+            [(HEADER, Header, Region::Header), (FOOTER, Footer, Region::Footer)]
+        {
+            for (tail, expected, unread) in [
+                (le16(&[kind, 5, 1]), "", true),
+                ([rec(kind, &[2, 0, 0, b'A']), le16(&[CONTINUE, 3])].concat(), "", true),
+                (rec(kind, &ustr("complete")), "complete", false),
+                ([rec(kind, &[2, 0, 0, b'A']), rec(CONTINUE, &[0, b'B'])].concat(), "AB", false),
+            ] {
+                let (doc, reports) = emit_print(&two_sheets([cells("a"), tail].concat(), 0));
+                assert_eq!(tables_of(&doc), [vec![vec!["a"; 3]], vec![vec!["b"; 3]]]);
+                assert_eq!(
+                    print_values(&doc),
+                    [print_value(side, Default, expected), print_value(side, Default, "")]
+                );
+                let mut expected_reports = vec![in_unit(DiagnosticCode::TruncatedRecords, 1, 1)];
+                if unread {
+                    expected_reports.extend(print_unread(&[region]));
+                }
+                assert_eq!(reports.len(), expected_reports.len());
+                for report in expected_reports {
+                    assert!(reports.contains(&report), "{reports:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn print_view_depth_uses_the_caller_limit_only_under_emit() {
+        use crate::limits::Limits;
+        for max in [1, Limits::DEFAULT.max_record_depth, Limits::DEFAULT.max_record_depth + 1] {
+            let limits = Limits { max_record_depth: max, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let body = print_view_begin().repeat(max as usize);
+            assert_eq!(parse(&ctx, &one_sheet(body.clone()).build()).unwrap().blocks.len(), 1);
+            let body = [body, print_view_begin()].concat();
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            assert_eq!(
+                parse(&ctx, &one_sheet(body.clone()).build()),
+                Err(ConvertError::limit(Limit::RecordDepth, max))
+            );
+            assert_eq!(
+                parse(&ParseCtx::new(&limits), &one_sheet(body).build()).unwrap().blocks.len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn print_string_propagates_cancellation() {
+        let token = crate::CancelToken::default();
+        token.cancel();
+        let ctx = ParseCtx::default().with_cancel(Some(&token));
+        let string = ustr("H");
+        let segments = [string.as_slice()];
+        assert_eq!(
+            read_print_string(&ctx, &mut SegReader::new(&segments), None, true).map(drop),
+            Err(ConvertError::Cancelled)
+        );
     }
 
     #[test]

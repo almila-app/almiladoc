@@ -270,7 +270,7 @@ impl Config {
         ImageOcr(self.0.image_ocr)
     }
 
-    /// Whether XLSX and XLSB print headers and footers appear.
+    /// Whether supported print headers and footers appear.
     #[getter]
     fn headers_footers(&self) -> HeaderFooterPolicy {
         HeaderFooterPolicy(self.0.headers_footers)

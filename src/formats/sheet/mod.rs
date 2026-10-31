@@ -18,6 +18,11 @@ mod xls;
     clippy::indexing_slicing,
     reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
 )]
+mod xls_print;
+#[deny(
+    clippy::indexing_slicing,
+    reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
+)]
 mod xlsb;
 mod xlsx;
 
