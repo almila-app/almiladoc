@@ -1,0 +1,7 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+|  |
+| --- |
+| Cell |

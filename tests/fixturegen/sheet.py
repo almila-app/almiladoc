@@ -247,6 +247,10 @@ BOUNDSHEET = 0x0085
 XF = 0x00E0
 LABEL = 0x0204
 USES_ELFS = 0x0160
+HEADER = 0x0014
+FOOTER = 0x0015
+HEADER_FOOTER = 0x089C
+WINDOW2 = 0x023E
 
 GLOBALS_SUBSTREAM = 0x0005
 WORKSHEET_SUBSTREAM = 0x0010
@@ -298,6 +302,30 @@ def trailing_space_xls(out: Path) -> None:
     write_xls(out / "xls" / "handmade-trailing-space.xls", cells + biff_label(65535, 255, " "))
 
 
+def biff_print_string(text: str) -> bytes:
+    encoded = text.encode("utf-16le")
+    return struct.pack("<HB", len(encoded) // 2, 1) + encoded
+
+
+def print_xls(out: Path) -> None:
+    texts = ["Even header", "Even footer", "First header", "First footer"]
+    counts = [len(text.encode("utf-16le")) // 2 for text in texts]
+    variants = (
+        struct.pack("<HH", HEADER_FOOTER, 0)
+        + bytes(24)
+        + struct.pack("<5H", 3, *counts)
+        + b"".join(biff_print_string(text) for text in texts)
+    )
+    records = (
+        biff_rec(FOOTER, biff_print_string("Bottom _x0041_"))
+        + biff_rec(HEADER, biff_print_string("&LLeft&CPage &P&RRight"))
+        + biff_label(0, 0, "Cell")
+        + biff_rec(WINDOW2, bytes(18))
+        + biff_rec(HEADER_FOOTER, variants)
+    )
+    write_xls(out / "xls" / "handmade-print.xls", records)
+
+
 def malformed(out: Path) -> None:
     write_xls(out / "malformed" / "nosheet--errors.xls", b"", sheets=False)
     write_xls(
@@ -324,5 +352,6 @@ def generate(out: Path) -> None:
     trailing_space_xlsx(out)
     trailing_space_xlsb(out)
     trailing_space_xls(out)
+    print_xls(out)
     malformed(out)
     abuse(out)

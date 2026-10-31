@@ -830,6 +830,48 @@ class ConversionTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_xls_print_policy_reaches_the_model_and_markdown(self):
+        source = (FIXTURES / "xls" / "handmade-print.xls").read_bytes()
+        engine = almiladoc.Converter(
+            almiladoc.Config(headers_footers=almiladoc.HeaderFooterPolicy.EMIT)
+        )
+        parsed = engine.parse(source)
+        values = [
+            block["value"]
+            for block in json.loads(parsed.to_json())["document"]["blocks"]
+            if block["kind"] == "header_footer"
+        ]
+        self.assertEqual(
+            [
+                (
+                    value["region"],
+                    value["variant"],
+                    [paragraph["value"][0]["value"]["text"] for paragraph in value["content"]],
+                )
+                for value in values
+            ],
+            [
+                ("header", "default", ["Left", "Page {page}", "Right"]),
+                ("header", "first", ["First header"]),
+                ("header", "even", ["Even header"]),
+                ("footer", "default", ["Bottom _x0041_"]),
+                ("footer", "first", ["First footer"]),
+                ("footer", "even", ["Even footer"]),
+            ],
+        )
+        conversion = parsed.render()
+        self.assertEqual(
+            re.findall(r"</a>(Header|Footer) \((default|first|even)\):", conversion.markdown),
+            [(value["region"].title(), value["variant"]) for value in values],
+        )
+        self.assertEqual(
+            [(item.code, item.region, item.unit, item.count) for item in conversion.diagnostics],
+            [("field_token", "header", 1, 1)],
+        )
+        self.assertEqual(
+            almiladoc.Converter().convert(source).markdown, "|  |\n| --- |\n| Cell |\n"
+        )
+
     def test_header_footer_policy_is_frozen_and_fingerprinted(self):
         omitted = almiladoc.Config()
         emitted = almiladoc.Config(headers_footers=almiladoc.HeaderFooterPolicy.EMIT)

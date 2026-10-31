@@ -1,0 +1,7 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+header_omitted omitted header unit=1 count=3
+footer_omitted omitted footer unit=1 count=3
+under fail: complete
