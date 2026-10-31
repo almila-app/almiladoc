@@ -326,7 +326,11 @@ fn block_bytes(blocks: &[Block]) -> u64 {
             Block::BlockQuote(blocks) => block_bytes(blocks),
             Block::CodeBlock { lang, text } => optional_bytes(lang.as_deref()) + text_bytes(text),
             Block::Math(tex) => text_bytes(tex),
-            Block::Table(_) | Block::Rule | Block::UnitStart(_) | Block::Gap(_) => 0,
+            Block::Table(_)
+            | Block::Rule
+            | Block::UnitStart(_)
+            | Block::Gap(_)
+            | Block::HeaderFooter(_) => 0,
         })
         .sum()
 }

@@ -350,17 +350,35 @@ fn copy_with(
     elem: &Element,
     mut child: impl FnMut(&Element) -> Result<Option<Element>, ConvertError>,
 ) -> Result<Element, ConvertError> {
+    elem.validate_text_damage(parse_ctx)?;
     let mut children = Vec::with_capacity(elem.children.len());
-    for node in &elem.children {
+    let mut text_damage = Vec::new();
+    let mut damage = elem.text_damage().iter().peekable();
+    for (at, node) in elem.children.iter().enumerate() {
         match node {
-            Node::Text(text) => children.push(Node::Text(copied(parse_ctx, text)?)),
+            Node::Text(text) => {
+                let index = children.len();
+                children.push(Node::Text(copied(parse_ctx, text)?));
+                while let Some((owner, span)) = damage.peek()
+                    && *owner == at
+                {
+                    parse_ctx.charge(1)?;
+                    text_damage.push((index, span.clone()));
+                    damage.next();
+                }
+            }
             Node::Elem(inner) => children.extend(child(inner)?.map(Node::Elem)),
         }
     }
     let mut attrs = Vec::with_capacity(elem.attrs.len());
     for a in &elem.attrs {
         let local = copied(parse_ctx, &a.local)?;
-        attrs.push(Attr { ns: a.ns.clone(), local, value: copied(parse_ctx, &a.value)? });
+        attrs.push(Attr {
+            ns: a.ns.clone(),
+            local,
+            value: copied(parse_ctx, &a.value)?,
+            unresolved: a.unresolved,
+        });
     }
     let local = copied(parse_ctx, &elem.local)?;
     Ok(Element {
@@ -369,6 +387,7 @@ fn copy_with(
         attrs,
         children,
         unresolved_text: elem.unresolved_text,
+        text_damage: (!text_damage.is_empty()).then(|| Box::new(text_damage)),
     })
 }
 
@@ -2472,5 +2491,56 @@ mod tests {
             "text, then attribute, then name"
         );
         assert_eq!(copy.children, [Node::Text("tt".into()), Node::Text("u".into())]);
+    }
+
+    #[test]
+    fn filtered_subtree_copies_remap_sparse_text_provenance() {
+        let xml = format!(
+            "<w:a xmlns:w=\"{W}\">é&first;<w:skip>&nested;</w:skip>漢&second;</w:a>",
+            W = ns::W
+        );
+        let root = parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe).unwrap();
+        let source = root.child_elems().next().unwrap();
+        let copy = copy_with(&ParseCtx::default(), source, |_| Ok(None)).unwrap();
+        assert_eq!(source.text_damage(), [(0, 2..9), (2, 3..11)]);
+        assert_eq!(copy.text_damage(), [(0, 2..9), (1, 3..11)]);
+        assert_eq!(
+            copy.direct_text(&ParseCtx::default()).unwrap(),
+            ("é&first;漢&second;".into(), vec![2..9, 12..20])
+        );
+        let paid = ParseCtx::default();
+        copy_with(&paid, source, |_| Ok(None)).unwrap();
+        assert_eq!(paid.fuel(), 25);
+        let limits = Limits { max_work: 24, ..Limits::default() };
+        assert_eq!(
+            copy_with(&ParseCtx::new(&limits), source, |_| Ok(None)),
+            Err(ConvertError::limit(Limit::Work, 24))
+        );
+        let limits = Limits { max_work: 1, ..Limits::default() };
+        assert_eq!(
+            copy_with(&ParseCtx::new(&limits), source, |_| Ok(None)),
+            Err(ConvertError::limit(Limit::Work, 1))
+        );
+        let mut invalid = copy;
+        invalid.text_damage.as_mut().unwrap()[0].1 = 1..2;
+        assert_eq!(
+            copy_with(&ParseCtx::default(), &invalid, |_| Ok(None)),
+            Err(ConvertError::Internal)
+        );
+    }
+
+    #[test]
+    fn subtree_copies_keep_attribute_damage_and_empty_text_provenance() {
+        let root = parse_xml(
+            &ParseCtx::default(),
+            b"<a bad='&unknown;' literal='&amp;unknown;'>text</a>",
+            Role::Probe,
+        )
+        .unwrap();
+        let source = root.child_elems().next().unwrap();
+        let copy = copy_with(&ParseCtx::default(), source, |_| Ok(None)).unwrap();
+        assert_eq!(copy.attrs, source.attrs);
+        assert_eq!(copy.attrs.iter().map(|a| a.unresolved).collect::<Vec<_>>(), [true, false]);
+        assert!(copy.text_damage.is_none());
     }
 }

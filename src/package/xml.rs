@@ -12,6 +12,7 @@ use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 /// Well-known namespace URIs.
@@ -75,6 +76,8 @@ impl Node {
     }
 }
 
+type TextDamage = Vec<(usize, Range<usize>)>;
+
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Element {
     /// Resolved namespace URI (interned); `None` for unqualified names.
@@ -83,6 +86,8 @@ pub(crate) struct Element {
     pub attrs: Vec<Attr>,
     pub children: Vec<Node>,
     pub unresolved_text: bool,
+    /// Ordered `children` indices and node-local UTF-8 byte ranges of unresolved references.
+    pub text_damage: Option<Box<TextDamage>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,6 +95,7 @@ pub(crate) struct Attr {
     pub ns: Option<Rc<str>>,
     pub local: String,
     pub value: String,
+    pub unresolved: bool,
 }
 
 impl Element {
@@ -210,6 +216,57 @@ impl Element {
             }
         }
         Ok(text)
+    }
+
+    pub(crate) fn validate_text_damage(&self, ctx: &ParseCtx<'_>) -> Result<(), ConvertError> {
+        ctx.charge(0)?;
+        let mut previous = None;
+        for (child, span) in self.text_damage() {
+            ctx.charge(1)?;
+            let Some(Node::Text(text)) = self.children.get(*child) else {
+                return Err(ConvertError::Internal);
+            };
+            if span.is_empty()
+                || text.get(span.clone()).is_none()
+                || previous.is_some_and(|(before, end)| {
+                    *child < before || (*child == before && span.start < end)
+                })
+            {
+                return Err(ConvertError::Internal);
+            }
+            previous = Some((*child, span.end));
+        }
+        Ok(())
+    }
+
+    /// Direct text concatenated beside one UTF-8 byte range per unresolved reference.
+    pub(crate) fn direct_text(
+        &self,
+        ctx: &ParseCtx<'_>,
+    ) -> Result<(String, Vec<Range<usize>>), ConvertError> {
+        self.validate_text_damage(ctx)?;
+        let (mut text, mut unresolved) = (String::new(), Vec::new());
+        let mut damage = self.text_damage().iter().peekable();
+        for (at, node) in self.children.iter().enumerate() {
+            ctx.charge(1)?;
+            if let Node::Text(value) = node {
+                ctx.charge(value.len() as u64)?;
+                let offset = text.len();
+                text.push_str(value);
+                while let Some((child, span)) = damage.peek()
+                    && *child == at
+                {
+                    ctx.charge(1)?;
+                    unresolved.push(offset + span.start..offset + span.end);
+                    damage.next();
+                }
+            }
+        }
+        Ok((text, unresolved))
+    }
+
+    pub(crate) fn text_damage(&self) -> &[(usize, Range<usize>)] {
+        self.text_damage.as_deref().map_or(&[], Vec::as_slice)
     }
 
     /// Concatenated text of all descendant text nodes.
@@ -419,7 +476,7 @@ pub(crate) fn parse(
                     .ok_or_else(|| ConvertError::malformed("mismatched end tag"))?;
                 tree.close(elem, sink)?;
             }
-            Event::Text(e) => tree.text(e.into_inner(), sink, limits.max_xml_nodes)?,
+            Event::Text(e) => tree.text(e.into_inner(), false, sink, parse_ctx)?,
             Event::GeneralRef(e) => {
                 let mut reference = Marks::default();
                 let text = reference_text(dialect, &e, &mut reference);
@@ -427,9 +484,9 @@ pub(crate) fn parse(
                     reference.unresolved && sink.reports_unresolved(&tree.stack, None);
                 tree.stack.last_mut().unwrap_or(&mut tree.root).unresolved_text |=
                     reference.unresolved;
-                tree.text(text, sink, limits.max_xml_nodes)?;
+                tree.text(text, reference.unresolved, sink, parse_ctx)?;
             }
-            Event::CData(e) => tree.text(e.into_inner(), sink, limits.max_xml_nodes)?,
+            Event::CData(e) => tree.text(e.into_inner(), false, sink, parse_ctx)?,
             Event::Eof => break,
             Event::PI(_) | Event::Decl(_) | Event::DocType(_) | Event::Comment(_) => {}
         }
@@ -480,17 +537,30 @@ impl Tree {
     fn text(
         &mut self,
         text: Cow<'_, str>,
+        unresolved: bool,
         sink: &dyn NodeSink,
-        max: u64,
+        ctx: &ParseCtx<'_>,
     ) -> Result<(), ConvertError> {
         if text.is_empty() || sink.takes(&self.stack) {
             return Ok(());
         }
-        self.bump(max)?;
-        let siblings = self.siblings();
-        match siblings.last_mut() {
-            Some(Node::Text(prev)) => prev.push_str(&text),
-            _ => siblings.push(Node::Text(text.into_owned())),
+        self.bump(ctx.limits().max_xml_nodes)?;
+        if unresolved {
+            ctx.charge(1)?;
+        }
+        let owner = self.stack.last_mut().unwrap_or(&mut self.root);
+        let len = text.len();
+        let (child, offset) = if let Some(Node::Text(prev)) = owner.children.last_mut() {
+            let offset = prev.len();
+            prev.push_str(&text);
+            (owner.children.len() - 1, offset)
+        } else {
+            let child = owner.children.len();
+            owner.children.push(Node::Text(text.into_owned()));
+            (child, 0)
+        };
+        if unresolved {
+            owner.text_damage.get_or_insert_with(Box::default).push((child, offset..offset + len));
         }
         Ok(())
     }
@@ -694,12 +764,19 @@ fn start_to_element(
         }
         let (res, alocal) = reader.resolver().resolve_attribute(attr.key);
         let ans = bound(interner, &res, dialect, marks)?;
-        let value = attribute_value(attr, dialect, marks)?;
+        let mut damage = Marks::default();
+        let value = attribute_value(attr, dialect, &mut damage)?;
+        marks.unresolved |= damage.unresolved;
         let ns = ans.map(|namespace| {
             names.push(namespace.name);
             namespace.dom
         });
-        attrs.push(Attr { ns, local: alocal.as_ref().to_owned(), value });
+        attrs.push(Attr {
+            ns,
+            local: alocal.as_ref().to_owned(),
+            value,
+            unresolved: damage.unresolved,
+        });
     }
     check_expanded_names(&names, &attrs)?;
     // `mc:Choice/@Requires` holds prefixes in the element's lexical scope; resolve
@@ -723,7 +800,14 @@ fn start_to_element(
             .collect::<Vec<_>>()
             .join(" ");
     }
-    Ok(Element { ns, local, attrs, children: Vec::new(), unresolved_text: false })
+    Ok(Element {
+        ns,
+        local,
+        attrs,
+        children: Vec::new(),
+        unresolved_text: false,
+        text_damage: None,
+    })
 }
 
 /// A name's interned namespace, `None` for an unprefixed name outside any
@@ -838,6 +922,10 @@ mod tests {
         }
     }
 
+    fn one_span(span: Range<usize>) -> Vec<Range<usize>> {
+        std::iter::once(span).collect()
+    }
+
     #[test]
     fn suppressed_aggregate_text_damage_keeps_element_provenance() {
         struct Quiet;
@@ -863,6 +951,161 @@ mod tests {
                 outer.child_elems().next().unwrap().unresolved_text
             ),
             (false, true, true)
+        );
+        assert_eq!(
+            outer.child_elems().next().unwrap().direct_text(&ParseCtx::default()).unwrap(),
+            ("&unknown;".into(), one_span(0..9))
+        );
+    }
+
+    #[test]
+    fn sparse_faults_stay_on_direct_owners_through_two_descendant_levels() {
+        let parsed = parse(
+            &ParseCtx::default(),
+            b"<a>A<b>B<c>C&c;</c>D&b;</b>E&a;</a>",
+            Dialect::Xml,
+            &mut WholeTree,
+        )
+        .unwrap();
+        let a = parsed.root.child_elems().next().unwrap();
+        let b = a.child_elems().next().unwrap();
+        let c = b.child_elems().next().unwrap();
+        for (element, expected) in [(a, "AE&a;"), (b, "BD&b;"), (c, "C&c;")] {
+            let start = expected.find('&').unwrap();
+            assert_eq!(
+                element.direct_text(&ParseCtx::default()).unwrap(),
+                (expected.into(), one_span(start..expected.len())),
+            );
+            assert_eq!(element.text_damage().len(), 1);
+            assert!(element.unresolved_text);
+        }
+        assert_eq!(parsed.root.text_damage(), []);
+        assert_eq!(a.checked_text(&ParseCtx::default()).unwrap(), "ABC&c;D&b;E&a;");
+        assert!(parsed.marks.unresolved);
+    }
+
+    #[test]
+    fn reference_free_elements_keep_one_word_without_provenance_allocation() {
+        let parsed =
+            parse(&ParseCtx::default(), b"<r>plain&amp;<c/></r>", Dialect::Xml, &mut WholeTree)
+                .unwrap();
+        for element in std::iter::once(&parsed.root).chain(parsed.root.descendant_elems()) {
+            assert!(element.text_damage.is_none());
+            assert_eq!(size_of_val(&element.text_damage), size_of::<usize>());
+        }
+        assert_eq!(
+            size_of::<Element>(),
+            size_of::<Option<Rc<str>>>() + 3 * size_of::<Vec<()>>() + 2 * size_of::<usize>(),
+        );
+        assert_eq!(
+            size_of::<Attr>(),
+            size_of::<Option<Rc<str>>>() + 2 * size_of::<String>() + size_of::<usize>(),
+        );
+    }
+
+    #[test]
+    fn attribute_damage_names_only_the_attribute_that_decoded_it() {
+        let xml = br#"<r first="&unknown;" escaped="&amp;unknown;" clean="yes" numeric="&#65;">plain</r>"#;
+        let parsed = parse(&ParseCtx::default(), xml, Dialect::Xml, &mut WholeTree).unwrap();
+        let item = parsed.root.child_elems().next().unwrap();
+        assert_eq!(
+            item.attrs
+                .iter()
+                .map(|a| (a.local.as_str(), a.value.as_str(), a.unresolved))
+                .collect::<Vec<_>>(),
+            [
+                ("first", "&unknown;", true),
+                ("escaped", "&unknown;", false),
+                ("clean", "yes", false),
+                ("numeric", "A", false)
+            ],
+        );
+        assert!(parsed.marks.unresolved);
+        assert!(!item.unresolved_text);
+        assert!(item.text_damage.is_none());
+    }
+
+    #[test]
+    fn merged_text_uses_utf8_offsets_without_confusing_escaped_literals() {
+        for (xml, text, spans) in [
+            ("<r>é&ş;漢&two;</r>", "é&ş;漢&two;", vec![2..6, 9..14]),
+            (
+                "<r>A&amp;&one;<![CDATA[&two;]]>&amp;three;</r>",
+                "A&&one;&two;&three;",
+                one_span(2..7),
+            ),
+            ("<r>&unknown;</r>", "&unknown;", one_span(0..9)),
+            ("<r>&amp;unknown;</r>", "&unknown;", vec![]),
+            ("<r><![CDATA[&unknown;]]></r>", "&unknown;", vec![]),
+            ("<r>&#38;unknown;</r>", "&unknown;", vec![]),
+            ("<r>&lt;&#65;&#x1F642;&gt;</r>", "<A🙂>", vec![]),
+            ("<r a=\"&unknown;\">plain</r>", "plain", vec![]),
+            ("<r>&#0;</r>", "&#0;", one_span(0..4)),
+        ] {
+            let parsed =
+                parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xml, &mut WholeTree).unwrap();
+            let item = parsed.root.child_elems().next().unwrap();
+            assert_eq!(item.children.len(), 1);
+            assert_eq!(item.direct_text(&ParseCtx::default()).unwrap(), (text.into(), spans));
+        }
+    }
+
+    #[test]
+    fn malformed_sparse_provenance_is_fatal_internal_damage() {
+        let mut item = Element {
+            children: vec![
+                Node::Text("é漢".into()),
+                Node::Elem(Element::default()),
+                Node::Text("q".into()),
+            ],
+            ..Element::default()
+        };
+        for damage in [
+            vec![(3, 0..2)],
+            vec![(1, 0..2)],
+            vec![(0, 0..0)],
+            vec![(0, Range { start: 2, end: 1 })],
+            vec![(0, 0..6)],
+            vec![(0, 1..2)],
+            vec![(0, 0..1)],
+            vec![(0, 2..5), (0, 0..2)],
+            vec![(0, 0..5), (0, 2..5)],
+            vec![(2, 0..1), (0, 0..2)],
+        ] {
+            item.text_damage = Some(Box::new(damage));
+            assert_eq!(item.direct_text(&ParseCtx::default()), Err(ConvertError::Internal));
+        }
+    }
+
+    #[test]
+    fn sparse_tracking_validation_copies_and_projection_are_charged() {
+        let parsed = parse(
+            &ParseCtx::default(),
+            "<r>é&one;<b/>漢&two;</r>".as_bytes(),
+            Dialect::Xml,
+            &mut WholeTree,
+        )
+        .unwrap();
+        let item = parsed.root.child_elems().next().unwrap();
+        let ctx = ParseCtx::default();
+        assert_eq!(item.direct_text(&ctx).unwrap(), ("é&one;漢&two;".into(), vec![2..7, 10..15]));
+        assert_eq!(ctx.fuel(), 22);
+        let limits = Limits { max_work: 21, ..Limits::default() };
+        assert_eq!(
+            item.direct_text(&ParseCtx::new(&limits)),
+            Err(ConvertError::limit(Limit::Work, 21))
+        );
+        let limits = Limits { max_work: 4, ..Limits::default() };
+        assert_eq!(
+            parse(&ParseCtx::new(&limits), b"<r>&one;</r>", Dialect::Xml, &mut WholeTree)
+                .map(|_| ()),
+            Err(ConvertError::limit(Limit::Work, 4)),
+        );
+        let token = crate::CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            item.direct_text(&ParseCtx::default().with_cancel(Some(&token))),
+            Err(ConvertError::Cancelled),
         );
     }
 
@@ -1691,6 +1934,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(index, attribute)| Attr {
+                        unresolved: false,
                         ns: attribute.prefix.map(|at| namespace(scope[at])),
                         local: format!("{}{index}", LOCALS[index % LOCALS.len()]),
                         value: attribute.value.iter().map(|piece| piece.shown(true)).collect(),
@@ -1709,6 +1953,7 @@ mod tests {
                     attrs,
                     children,
                     unresolved_text: false,
+                    text_damage: None,
                 }
             }
         }
@@ -1908,6 +2153,7 @@ mod tests {
                     let root = document.child_elems().next().unwrap();
                     let expected = Element {
                         unresolved_text: false,
+                        text_damage: None,
                         ns: None,
                         local: "root".into(),
                         attrs: Vec::new(),
