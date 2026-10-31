@@ -88,7 +88,8 @@ pub struct Limits {
     /// deterministically: XML events, RTF tokens, CSS rules an element's tag
     /// or classes name, KiB decompressed from an archive, records and cells
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
-    /// style and numbering resolution, grid positions counted against
+    /// style and numbering resolution, omitted print text bytes, grid
+    /// positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, metadata text bytes serialized to JSON (each
     /// empty value costing one), 64 bytes of Markdown or JSON written, the

@@ -18,7 +18,7 @@ use crate::package::archive::Role;
 use crate::package::relationships::{
     Relationships, read_rels, rel_target_path, rel_type, rels_part_for,
 };
-use crate::package::xml::{Element, NodeSink, ns};
+use crate::package::xml::{Element, Node, NodeSink, ns};
 use crate::package::{Package, path};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
@@ -91,7 +91,9 @@ pub(super) fn parse(
                 .find(ns::SML, "drawing")
                 .and_then(|d| d.attr_qualified(ns::R, "id"))
                 .map(str::to_string);
-            Ok(Some((read_sheet(worksheet, rows.content), drawing)))
+            let mut content = read_sheet(worksheet, rows.content);
+            omit_headers(parse_ctx, worksheet, &mut content)?;
+            Ok(Some((content, drawing)))
         },
         |&name| name.to_string(),
     )
@@ -478,6 +480,12 @@ impl<'s> SheetRows<'s> {
 }
 
 impl NodeSink for SheetRows<'_> {
+    fn reports_unresolved(&self, ancestors: &[Element], current: Option<&Element>) -> bool {
+        let mut scope = ancestors.iter().chain(current);
+        !matches!((scope.next(), scope.next()), (Some(worksheet), Some(side))
+            if worksheet.is(ns::SML, "worksheet") && side.is(ns::SML, "headerFooter"))
+    }
+
     fn takes(&self, ancestors: &[Element]) -> bool {
         matches!(ancestors, [worksheet, sheet_data]
             if worksheet.is(ns::SML, "worksheet") && sheet_data.is(ns::SML, "sheetData"))
@@ -521,17 +529,37 @@ fn read_sheet(worksheet: &Element, mut out: SheetContent) -> SheetContent {
             out.links.push(SheetLink { range, target: LinkTarget::Related(id.to_string()) });
         }
     }
-    for item in worksheet.find_all(ns::SML, "headerFooter").flat_map(Element::child_elems) {
-        let region = match item.local.as_str() {
-            "oddHeader" | "evenHeader" | "firstHeader" => Region::Header,
-            "oddFooter" | "evenFooter" | "firstFooter" => Region::Footer,
-            _ => continue,
-        };
-        if !item.text().trim().is_empty() {
-            out.omit_header_footer(region);
+    out
+}
+
+fn omit_headers(
+    ctx: &ParseCtx<'_>,
+    sheet: &Element,
+    out: &mut SheetContent,
+) -> Result<(), ConvertError> {
+    ctx.charge(sheet.children.len() as u64)?;
+    for settings in sheet.find_all(ns::SML, "headerFooter") {
+        ctx.charge(settings.children.len() as u64)?;
+        for item in settings.child_elems() {
+            let region = match item.local.as_str() {
+                "oddHeader" | "evenHeader" | "firstHeader" => Region::Header,
+                "oddFooter" | "evenFooter" | "firstFooter" => Region::Footer,
+                _ => continue,
+            };
+            for node in &item.children {
+                ctx.charge(1)?;
+                if let Node::Text(text) = node {
+                    ctx.charge(text.len() as u64)?;
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                }
+                out.omit_header_footer(region);
+                break;
+            }
         }
     }
-    out
+    Ok(())
 }
 
 /// A cell's rendered text, per its `t` type and resolved number format, and
@@ -1762,6 +1790,124 @@ mod tests {
             CONTROL.to_string(),
         ]
         .concat()
+    }
+
+    #[test]
+    fn omitted_print_scalars_charge_utf8_and_propagate_cancellation() {
+        use crate::package::xml::{self, Dialect, WholeTree};
+        let source = format!(
+            "<worksheet xmlns=\"{SML}\"><headerFooter><oddHeader>é</oddHeader></headerFooter></worksheet>"
+        );
+        let parsed =
+            xml::parse(&ParseCtx::default(), source.as_bytes(), Dialect::Xml, &mut WholeTree)
+                .unwrap();
+        let sheet = parsed.root.child_elems().next().unwrap();
+        let ctx = ParseCtx::default();
+        let mut out = SheetContent::on(OOXML_GRID, 1, 1);
+        omit_headers(&ctx, sheet, &mut out).unwrap();
+        assert_eq!(ctx.fuel(), 5);
+        let limits = crate::Limits { max_work: 4, ..crate::Limits::default() };
+        assert_eq!(
+            omit_headers(&ParseCtx::new(&limits), sheet, &mut out),
+            Err(ConvertError::limit(Limit::Work, 4))
+        );
+        let token = crate::CancelToken::default();
+        token.cancel();
+        assert_eq!(
+            omit_headers(&ParseCtx::default().with_cancel(Some(&token)), sheet, &mut out),
+            Err(ConvertError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn omitted_print_text_never_reports_body_damage() {
+        for local in
+            ["oddHeader", "firstHeader", "evenHeader", "oddFooter", "firstFooter", "evenFooter"]
+        {
+            let body = format!(
+                "<headerFooter differentFirst=\"&unknown;\"><{local} style=\"&bad;\">&unknown;</{local}></headerFooter>"
+            );
+            let losses: Vec<_> = diagnose(&one_sheet(&body))
+                .into_iter()
+                .filter(|d| d.0 == DiagnosticCode::UnresolvedEntity)
+                .collect();
+            assert_eq!(losses, [], "{local}");
+        }
+        let empty = one_sheet("<headerFooter differentFirst=\"&unknown;\"/>");
+        assert_eq!(
+            diagnose(&empty)
+                .into_iter()
+                .filter(|d| d.0 == DiagnosticCode::UnresolvedEntity)
+                .collect::<Vec<_>>(),
+            []
+        );
+    }
+
+    #[test]
+    fn omitted_print_foreign_scalars_and_nested_content_remain_reported() {
+        for body in [
+            r#"<headerFooter xmlns:x="urn:foreign"><x:oddHeader>Title &unknown;</x:oddHeader></headerFooter>"#,
+            "<headerFooter><oddHeader><x/></oddHeader></headerFooter>",
+            "<headerFooter><oddHeader><x>nested text</x></oddHeader></headerFooter>",
+        ] {
+            assert_eq!(
+                diagnose(&one_sheet(body)),
+                [(DiagnosticCode::HeaderOmitted, Region::Header, Some(1), 1)],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_print_filter_keeps_displayed_and_attribute_damage() {
+        let shown = "<sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>shown &unknown;</t></is></c></row></sheetData>";
+        let shared = "<si><t>shared &unknown;</t></si>";
+        let used = "<sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row></sheetData>";
+        let linked = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>www.example.org</t></is></c></row></sheetData><hyperlinks><hyperlink ref="A1" r:id="target"/></hyperlinks>"#;
+        let rels = r#"<Relationship Id="target" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.org/&unknown;" TargetMode="External"/>"#;
+        let damaged_drawing = drawing(&sp(
+            "",
+            "<xdr:txBody><a:p><a:r><a:t>drawn &unknown;</a:t></a:r></a:p></xdr:txBody>",
+        ));
+        let drawing_rels = format!(
+            r#"<Relationship Id="rId1" Type="{DRAWING_REL}" Target="../drawings/drawing.xml"/>"#
+        );
+        let mixed = format!("{shown}<headerFooter><oddHeader>&unknown;</oddHeader></headerFooter>");
+        let cases = [
+            ("inline text", one_sheet(shown)),
+            ("body before omitted text", one_sheet(&mixed)),
+            (
+                "sheet-name attribute",
+                Wb {
+                    sheets: vec![("shown &unknown;", "", used), ("second", "", used)],
+                    shared: Some("<si><t>plain</t></si>"),
+                    ..Wb::default()
+                },
+            ),
+            ("shared text", Wb { shared: Some(shared), ..one_sheet(used) }),
+            ("link target", Wb { sheet_rels: Some(rels), ..one_sheet(linked) }),
+        ];
+        for (label, wb) in cases {
+            let loss: u64 = diagnose(&wb)
+                .into_iter()
+                .filter(|d| d.0 == DiagnosticCode::UnresolvedEntity)
+                .map(|d| d.3)
+                .sum();
+            assert_eq!(loss, 1, "{label}");
+        }
+        let drawing = drawing_wb(
+            &drawing_rels,
+            r#"<drawing r:id="rId1"/>"#,
+            vec![("xl/drawings/drawing.xml", &damaged_drawing)],
+        );
+        assert_eq!(
+            diagnose(&drawing)
+                .into_iter()
+                .filter(|d| d.0 == DiagnosticCode::GraphicUnread)
+                .map(|d| d.3)
+                .sum::<u64>(),
+            1
+        );
     }
 
     #[test]

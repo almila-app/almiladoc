@@ -319,6 +319,13 @@ pub(crate) trait NodeSink {
     /// the tree for the sink.
     fn takes(&self, ancestors: &[Element]) -> bool;
 
+    /// Whether this reference sets the part mark. `current` adds an attribute-owning
+    /// start tag; `None` selects ancestor text.
+    /// Suppression leaves `Element::unresolved_text` intact.
+    fn reports_unresolved(&self, _ancestors: &[Element], _current: Option<&Element>) -> bool {
+        true
+    }
+
     /// Receive a closed element the sink takes under `ancestors`; text it
     /// takes is dropped, and an error ends the parse.
     fn take(&mut self, ancestors: &[Element], elem: Element) -> Result<(), ConvertError>;
@@ -390,12 +397,19 @@ pub(crate) fn parse(
             Event::Start(e) => {
                 check_start_tag(&e)?;
                 tree.open(limits)?;
-                tree.stack.push(start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?);
+                let mut attributes = Marks::default();
+                let elem = start_to_element(&e, &reader, &mut interner, dialect, &mut attributes)?;
+                marks.unresolved |=
+                    attributes.unresolved && sink.reports_unresolved(&tree.stack, Some(&elem));
+                tree.stack.push(elem);
             }
             Event::Empty(e) => {
                 check_start_tag(&e)?;
                 tree.open(limits)?;
-                let elem = start_to_element(&e, &reader, &mut interner, dialect, &mut marks)?;
+                let mut attributes = Marks::default();
+                let elem = start_to_element(&e, &reader, &mut interner, dialect, &mut attributes)?;
+                marks.unresolved |=
+                    attributes.unresolved && sink.reports_unresolved(&tree.stack, Some(&elem));
                 tree.close(elem, sink)?;
             }
             Event::End(_) => {
@@ -409,7 +423,8 @@ pub(crate) fn parse(
             Event::GeneralRef(e) => {
                 let mut reference = Marks::default();
                 let text = reference_text(dialect, &e, &mut reference);
-                marks.unresolved |= reference.unresolved;
+                marks.unresolved |=
+                    reference.unresolved && sink.reports_unresolved(&tree.stack, None);
                 tree.stack.last_mut().unwrap_or(&mut tree.root).unresolved_text |=
                     reference.unresolved;
                 tree.text(text, sink, limits.max_xml_nodes)?;
@@ -821,6 +836,34 @@ mod tests {
             self.0.push(elem.text());
             Ok(())
         }
+    }
+
+    #[test]
+    fn suppressed_aggregate_text_damage_keeps_element_provenance() {
+        struct Quiet;
+        impl NodeSink for Quiet {
+            fn takes(&self, _: &[Element]) -> bool {
+                false
+            }
+            fn take(&mut self, _: &[Element], _: Element) -> Result<(), ConvertError> {
+                Ok(())
+            }
+            fn reports_unresolved(&self, _: &[Element], _: Option<&Element>) -> bool {
+                false
+            }
+        }
+        let parsed =
+            parse(&ParseCtx::default(), b"<r><h>&unknown;</h></r>", Dialect::Xml, &mut Quiet)
+                .unwrap();
+        let outer = parsed.root.child_elems().next().unwrap();
+        assert_eq!(
+            (
+                parsed.marks.unresolved,
+                outer.unresolved_text,
+                outer.child_elems().next().unwrap().unresolved_text
+            ),
+            (false, true, true)
+        );
     }
 
     #[test]
