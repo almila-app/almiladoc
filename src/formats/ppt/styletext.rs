@@ -123,6 +123,47 @@ pub(super) struct StyleRuns {
     pub chars: Vec<CharProps>,
 }
 
+pub(super) struct StyleCursor<'a> {
+    chars: &'a [CharProps],
+    paragraphs: &'a [ParaProps],
+    char_left: usize,
+    para_left: usize,
+}
+
+impl<'a> StyleCursor<'a> {
+    pub(super) fn new(runs: &'a StyleRuns) -> Self {
+        Self {
+            chars: &runs.chars,
+            paragraphs: &runs.paragraphs,
+            char_left: runs.chars.first().map_or(usize::MAX, |r| r.count),
+            para_left: runs.paragraphs.first().map_or(usize::MAX, |r| r.count),
+        }
+    }
+
+    pub(super) fn current(&self) -> (Option<CharStyle>, ParaProps) {
+        (self.chars.first().map(|r| r.style), self.paragraphs.first().copied().unwrap_or_default())
+    }
+
+    pub(super) fn advance(&mut self, scalar: char) {
+        fn consume<T>(
+            runs: &mut &[T],
+            left: &mut usize,
+            width: usize,
+            count: impl Fn(&T) -> usize,
+        ) {
+            *left = left.saturating_sub(width);
+            if *left == 0 {
+                *runs = runs.get(1..).unwrap_or_default();
+                *left = runs.first().map_or(usize::MAX, count);
+            }
+        }
+
+        let width = scalar.len_utf16();
+        consume(&mut self.chars, &mut self.char_left, width, |r| r.count);
+        consume(&mut self.paragraphs, &mut self.para_left, width, |r| r.count);
+    }
+}
+
 /// Parse a `StyleTextPropAtom` body for text of `text_len` UTF-16 units, and
 /// whether its runs cover the text and every one parsed.
 pub(super) fn parse_style_text(body: &[u8], text_len: usize) -> (StyleRuns, bool) {

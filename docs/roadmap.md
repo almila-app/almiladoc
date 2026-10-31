@@ -92,10 +92,6 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   reads. A `Reject` revision policy keeps deleted text and drops inserted text, joining paragraphs whose
   mark a revision removes. The first step writes the
   grammar down as an ADR 0001 amendment.
-- **legacy-tables** (one run cursor in PPT's `paragraphs`, which reads character and paragraph runs
-  through two). Trigger: a change in that code that needs it; a readability-only restructure risks a
-  silent change. A per-axis merge enum for `CellProp` was judged and dropped: RTF allows all four
-  combinations of the two bools.
 - **document-meta** (document title, author and dates). Trigger: the consumer needs them; `DocumentMeta`
   lands with that producer (ADR 0001 decision 5).
 - **ocr-lines** (`GapFill::Lines`: located lines grouped into paragraphs in the crate). Trigger: a

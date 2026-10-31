@@ -30,7 +30,7 @@ use records as rt;
 use side::{Defaults, Kind, PageFacts, Shown};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
-use styletext::{MasterLevel, StyleRuns, TextType};
+use styletext::{MasterLevel, StyleCursor, StyleRuns, TextType};
 
 /// The slide that owns a notes page: its `NotesAtom`'s `slideIdRef`, 0 for none.
 fn notes_owner(notes: &[u8]) -> Option<u32> {
@@ -1282,21 +1282,16 @@ impl<'c> Extractor<'c> {
             };
         let slot = |font_ref: Option<u16>| font_ref.map_or(Slot::Inherit, |r| fonts.slot(r));
 
-        let mut char_runs = styles.chars.iter();
-        let mut char_run = char_runs.next();
-        let mut char_left = char_run.map_or(usize::MAX, |r| r.count);
-        let mut para_runs = styles.paragraphs.iter();
-        let mut para_run = para_runs.next();
-        let mut para_left = para_run.map_or(usize::MAX, |r| r.count);
+        let mut runs = StyleCursor::new(styles);
 
         let mut paragraphs = Vec::new();
         let mut inlines = Vec::new();
         let mut run_text = String::new();
         let mut run_key = (Style::PLAIN, Route::default());
         for c in source.chars() {
-            let para = para_run.copied().unwrap_or_default();
+            let (chars, para) = runs.current();
             let d = level_at(levels, para.depth);
-            let chars = char_run.map_or(d.chars, |r| r.style.or(d.chars));
+            let chars = chars.map_or(d.chars, |style| style.or(d.chars));
             let style = chars.delta.resolve();
             let route = Slots { latin: slot(chars.font), symbol: slot(chars.symbol_font) }.route();
             if matches!(c, '\r' | '\u{b}') || (style, route) != run_key {
@@ -1310,21 +1305,11 @@ impl<'c> Extractor<'c> {
                     run_text.push(c);
                 }
             }
-            let width = c.len_utf16();
-            char_left = char_left.saturating_sub(width);
-            if char_left == 0 {
-                char_run = char_runs.next();
-                char_left = char_run.map_or(usize::MAX, |r| r.count);
-            }
-            para_left = para_left.saturating_sub(width);
-            if para_left == 0 {
-                para_run = para_runs.next();
-                para_left = para_run.map_or(usize::MAX, |r| r.count);
-            }
+            runs.advance(c);
         }
         close_run(&mut run_text, run_key, &mut inlines);
         if !inlines.is_empty() {
-            let para = para_run.copied().unwrap_or_default();
+            let (_, para) = runs.current();
             paragraphs.push((inlines, para.depth, para.bullet));
         }
         paragraphs
@@ -2745,6 +2730,160 @@ mod tests {
         let line =
             vec![text("\u{1F600}", true), text("b", false), Inline::LineBreak, text("c", false)];
         assert_eq!(blocks[1], Block::Paragraph(line));
+    }
+
+    fn boundary_text(value: &str, bits: u8) -> Inline {
+        Inline::Text {
+            text: value.to_owned(),
+            style: Style { bold: bits & 1 != 0, italic: bits & 2 != 0, ..Style::PLAIN },
+        }
+    }
+
+    fn assert_run_boundaries(
+        case: &str,
+        source: &str,
+        paragraphs: &[(usize, u16, Option<bool>)],
+        chars: &[(usize, u8)],
+        expected: &[(Vec<Inline>, u16, Option<bool>)],
+    ) {
+        let runs = StyleRuns {
+            paragraphs: paragraphs
+                .iter()
+                .map(|&(count, depth, bullet)| styletext::ParaProps { count, depth, bullet })
+                .collect(),
+            chars: chars
+                .iter()
+                .map(|&(count, bits)| styletext::CharProps {
+                    count,
+                    style: styletext::CharStyle {
+                        delta: StyleDelta {
+                            bold: Some(bits & 1 != 0),
+                            italic: Some(bits & 2 != 0),
+                            ..StyleDelta::default()
+                        },
+                        ..styletext::CharStyle::default()
+                    },
+                })
+                .collect(),
+        };
+        let ctx = ParseCtx::default();
+        assert_eq!(
+            Extractor::new(&ctx).paragraphs(source, &runs, &[]).as_slice(),
+            expected,
+            "{case}"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            Vec::<Reported>::new(),
+            "{case}"
+        );
+    }
+
+    #[test]
+    fn character_and_paragraph_runs_keep_independent_utf16_boundaries() {
+        let cases = [
+            (
+                "independent boundaries",
+                "abc\r",
+                &[(2, 1, Some(true)), (3, 2, Some(false))][..],
+                &[(1, 1), (3, 2), (1, 0)][..],
+                vec![(vec![boundary_text("a", 1), boundary_text("bc", 2)], 2, Some(false))],
+            ),
+            (
+                "astral width",
+                "\u{1f600}a\rb",
+                &[(3, 1, Some(true)), (4, 2, Some(false))],
+                &[(2, 1), (4, 2)],
+                vec![
+                    (vec![boundary_text("\u{1f600}", 1), boundary_text("a", 2)], 2, Some(false)),
+                    (vec![boundary_text("b", 2)], 2, Some(false)),
+                ],
+            ),
+            (
+                "astral overrun",
+                "\u{1f600}ab",
+                &[(1, 1, Some(true)), (1, 2, Some(false)), (4, 3, None)],
+                &[(1, 1), (1, 2), (3, 0)],
+                vec![(
+                    vec![
+                        boundary_text("\u{1f600}", 1),
+                        boundary_text("a", 2),
+                        boundary_text("b", 0),
+                    ],
+                    3,
+                    None,
+                )],
+            ),
+        ];
+        for (case, source, paragraphs, chars, expected) in cases {
+            assert_run_boundaries(case, source, paragraphs, chars, &expected);
+        }
+    }
+
+    #[test]
+    fn empty_and_exhausted_runs_preserve_their_fallbacks() {
+        let cases = [
+            (
+                "initial empty runs",
+                "ab\r",
+                &[(0, 4, Some(true)), (4, 7, Some(false))][..],
+                &[(0, 1), (4, 2)][..],
+                vec![(vec![boundary_text("a", 1), boundary_text("b", 2)], 7, Some(false))],
+            ),
+            (
+                "exhausted runs",
+                "ab",
+                &[(1, 2, Some(true))],
+                &[(1, 1)],
+                vec![(vec![boundary_text("a", 1), boundary_text("b", 0)], 0, None)],
+            ),
+            ("absent runs", "ab\r", &[], &[], vec![(vec![boundary_text("ab", 0)], 0, None)]),
+            (
+                "retained empty runs",
+                "ab",
+                &[(1, 1, Some(true)), (0, 4, Some(false)), (4, 5, Some(true))],
+                &[(1, 1), (0, 2), (4, 0)],
+                vec![(vec![boundary_text("a", 1), boundary_text("b", 2)], 5, Some(true))],
+            ),
+            ("empty source", "", &[(0, 4, Some(true))], &[(0, 1)], vec![]),
+        ];
+        for (case, source, paragraphs, chars, expected) in cases {
+            assert_run_boundaries(case, source, paragraphs, chars, &expected);
+        }
+    }
+
+    #[test]
+    fn paragraph_marks_and_line_breaks_advance_their_own_runs() {
+        let cases = [
+            (
+                "unterminated tail",
+                "a",
+                &[(1, 2, Some(true)), (2, 5, Some(false))][..],
+                &[(2, 1)][..],
+                vec![(vec![boundary_text("a", 1)], 5, Some(false))],
+            ),
+            (
+                "paragraph mark",
+                "a\r",
+                &[(2, 2, Some(true)), (2, 5, Some(false))],
+                &[(3, 1)],
+                vec![(vec![boundary_text("a", 1)], 2, Some(true))],
+            ),
+            (
+                "line break",
+                "a\u{b}bc\r",
+                &[(1, 2, Some(true)), (5, 5, Some(false))],
+                &[(2, 1), (4, 2)],
+                vec![(
+                    vec![boundary_text("a", 1), Inline::LineBreak, boundary_text("bc", 2)],
+                    5,
+                    Some(false),
+                )],
+            ),
+        ];
+        for (case, source, paragraphs, chars, expected) in cases {
+            assert_run_boundaries(case, source, paragraphs, chars, &expected);
+        }
     }
 
     #[test]
