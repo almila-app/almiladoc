@@ -32,6 +32,7 @@ __all__ = [
     "NeedsOcrError",
     "OcrFailure",
     "OcrHttp",
+    "OcrLine",
     "OcrRequest",
     "OcrSummary",
     "OnLoss",
@@ -260,7 +261,7 @@ class Limits:
     @property
     def max_ocr_text_bytes(self) -> int:
         """Bytes of one gap's fill, past which `Parsed.fill_gap` raises
-        `GapRefused`."""
+        `GapRefused`; located lines also count 32 bytes per box."""
 
 @final
 class Config:
@@ -364,6 +365,20 @@ class Conversion:
     def is_complete(self) -> bool:
         """True when no content was lost and every gap was filled; under
         `OnLoss.FAIL` only an image's gap not filled makes it false."""
+
+@final
+class OcrLine:
+    """A literal horizontal line with finite normalized left, top, right, bottom bounds."""
+
+    BOX_BYTES: ClassVar[int]
+    def __new__(cls, text: str, bounds: tuple[float, float, float, float]) -> OcrLine: ...
+    @property
+    def text(self) -> str:
+        """The literal UTF-8 text."""
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """The normalized image bounds."""
+    def __getnewargs__(self) -> tuple[str, tuple[float, float, float, float]]: ...
 
 @final
 class OcrRequest:
@@ -499,6 +514,12 @@ class Parsed:
         past `Limits.max_ocr_text_bytes`, nested past `max_nesting_depth` or
         whose tables may pass `max_grid_slots` `GapRefused`, and work past
         `max_work` `ResourceLimitError`; each leaves the document as it was."""
+    def fill_gap_lines(self, gap: _GapRow, lines: collections.abc.Sequence[OcrLine]) -> None:
+        """Fill with literal lines, grouping columns and paragraphs in the core.
+        Text and 32 bytes per box must fit max_ocr_text_bytes; refusal changes nothing.
+
+        Raises KeyError for an unknown gap, ValueError for a settled gap, GapRefused
+        for a fill bound, and conversion errors for fatal failures."""
     def fail_gap(self, gap: _GapRow) -> None:
         """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
         `<!-- ocr-failed page N -->` in a page's place and nothing after an

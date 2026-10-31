@@ -499,7 +499,7 @@ impl Parsed {
     }
 
     /// Fill the gap `id` names with what OCR read for it, on a pool built from
-    /// its [`Config`] and charging each Markdown event on from the work
+    /// its [`Config`] and charging Markdown events or line ordering and copies on from the work
     /// charged so far; [`Parsed::render`] writes the fill in the gap's place.
     ///
     /// # Errors
@@ -541,8 +541,7 @@ impl Parsed {
     pub fn fill_gap(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
         self.refuse_cancelled()?;
         let depth = self.fills.unsettled(id)?;
-        let GapFill::Markdown(text) = fill;
-        let read = self.on_pool(|| self.read_fill(depth, &text))?;
+        let read = self.on_pool(|| self.read_fill(depth, fill))?;
         self.settle_fill(id, read);
         Ok(())
     }
@@ -811,13 +810,14 @@ impl Parsed {
         }
     }
 
-    /// The blocks of `text`, read for a gap in a container at `depth`, and the work spent
-    /// once they are.
-    fn read_fill(&self, depth: u64, text: &str) -> Result<(Vec<Block>, u64), ConvertError> {
+    fn read_fill(&self, depth: u64, fill: GapFill) -> Result<(Vec<Block>, u64), ConvertError> {
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_cancel(self.cancel.as_ref())
             .starting_at(self.fuel);
-        let blocks = markdown::blocks(&parse_ctx, text, depth)?;
+        let blocks = match fill {
+            GapFill::Markdown(text) => markdown::blocks(&parse_ctx, &text, depth)?,
+            GapFill::Lines(lines) => crate::ocr::line_blocks(&parse_ctx, &lines)?,
+        };
         Ok((blocks, parse_ctx.ledger().spent()))
     }
 
@@ -871,8 +871,7 @@ impl Target for Parsed {
 
     fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
         let depth = self.fills.unsettled(id)?;
-        let GapFill::Markdown(text) = fill;
-        let read = self.read_fill(depth, &text)?;
+        let read = self.read_fill(depth, fill)?;
         self.settle_fill(id, read);
         Ok(())
     }
@@ -1690,7 +1689,7 @@ mod tests {
         let mut working = parsed(vec![page_gap(1)], Config::default());
         (deep.cancel, working.cancel) = (Some(token.clone()), Some(token.clone()));
         assert_matches!(deep.render(), Err(ConvertError::ResourceLimit { .. }));
-        working.read_fill(0, "a").unwrap();
+        working.read_fill(0, GapFill::Markdown("a".into())).unwrap();
         token.cancel();
         assert_eq!(deep.render().err(), Some(ConvertError::Cancelled));
         #[cfg(feature = "serde")]
@@ -1700,7 +1699,10 @@ mod tests {
         assert_eq!(fill, Err(GapError::Convert(ConvertError::Cancelled)));
         let charged = working.resumed().and_then(|ledger| ledger.charge(0));
         assert_eq!(charged, Err(ConvertError::Cancelled));
-        assert_eq!(working.read_fill(0, "a").err(), Some(ConvertError::Cancelled));
+        assert_eq!(
+            working.read_fill(0, GapFill::Markdown("a".into())).err(),
+            Some(ConvertError::Cancelled)
+        );
     }
 
     #[test]

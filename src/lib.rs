@@ -47,8 +47,8 @@ pub use json::JSON_SCHEMA_VERSION;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 pub use ocr::{
-    GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrOutcome, OcrRequest, OcrSummary,
-    RasterSpec,
+    GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrLine, OcrOutcome, OcrRequest,
+    OcrSummary, RasterSpec,
 };
 #[cfg(feature = "ocr-http")]
 pub use ocr::{OcrHttp, OcrHttpConfig};

@@ -8,7 +8,8 @@ use crate::build::{docx_with, relationships};
 use crate::support::{configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr, Input,
-    Limit, OcrEngine, OcrFailure, OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec,
+    Limit, OcrEngine, OcrFailure, OcrLine, OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed,
+    RasterSpec,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -291,4 +292,41 @@ fn requests_pass_over_a_settled_gap_and_charge_their_copies() {
     let mut parsed = image_ocr(|_| {}).parse(input).unwrap();
     cancelled.cancel();
     assert_eq!(parsed.ocr_requests(&RasterSpec::default(), None), Err(ConvertError::Cancelled));
+}
+
+struct Located(Vec<OcrLine>);
+
+impl OcrEngine for Located {
+    fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+        requests.iter().map(|_| OcrOutcome::Fill(GapFill::Lines(self.0.clone()))).collect()
+    }
+}
+
+#[test]
+fn located_lines_fill_directly_and_through_an_engine_without_markdown_interpretation() {
+    let engine =
+        Located(vec![OcrLine::new("# *literal* [x](javascript:y)", [0.0, 0.0, 1.0, 0.1]).unwrap()]);
+    let converter = image_ocr(|_| {});
+    let bytes = pictures(1, 8);
+    let mut direct = parsed(&converter, &bytes);
+    let gap = direct.gaps().next().unwrap().id;
+    direct.fill_gap(gap, GapFill::Lines(engine.0.clone())).unwrap();
+    let output = direct.render().unwrap().into_markdown();
+    assert_eq!(
+        converter.convert_with_ocr(Input::new(&bytes, Format::Docx), &engine).unwrap().markdown(),
+        output
+    );
+    let active = pulldown_cmark::Parser::new(&output)
+        .filter(|event| {
+            matches!(
+                event,
+                pulldown_cmark::Event::Start(
+                    pulldown_cmark::Tag::Heading { .. }
+                        | pulldown_cmark::Tag::Emphasis
+                        | pulldown_cmark::Tag::Link { .. }
+                ) | pulldown_cmark::Event::Html(_)
+            )
+        })
+        .count();
+    assert_eq!(active, 0);
 }

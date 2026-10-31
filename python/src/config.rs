@@ -166,7 +166,7 @@ limits! {
     /// PDF declaring more is refused before any page is read.
     max_pages,
     /// Bytes of one gap's fill, past which `Parsed.fill_gap` raises
-    /// `GapRefused`.
+    /// `GapRefused`; located lines also count 32 bytes per box.
     max_ocr_text_bytes,
 }
 

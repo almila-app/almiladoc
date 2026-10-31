@@ -144,7 +144,9 @@ mod tests {
             if let Some((_, error)) = self.fail_fill.take_if(|(at, _)| *at == n) {
                 return Err(GapError::Convert(error));
             }
-            let GapFill::Markdown(text) = fill;
+            let GapFill::Markdown(text) = fill else {
+                return Err(GapError::Convert(ConvertError::Internal));
+            };
             self.settled.push((n, Settled::Filled(text)));
             Ok(())
         }

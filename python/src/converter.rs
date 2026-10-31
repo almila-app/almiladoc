@@ -12,13 +12,13 @@ use almiladoc::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
-use pyo3::types::{PyBytes, PyInt, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyInt, PySequence, PyString, PyTuple};
 
 use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
-use crate::errors::{Failure, config_error, convert_error, gap_error};
+use crate::errors::{Failure, config_error, convert_error, gap_error, gap_refused};
 use crate::input::{Admission, buffer, read_file};
-use crate::ocr::{OcrHttp, OcrRequest, OcrSummary};
+use crate::ocr::{OcrHttp, OcrLine, OcrRequest, OcrSummary};
 
 /// A flag any thread sets to cancel the calls it was passed to.
 #[pyclass(frozen, module = "almiladoc")]
@@ -186,10 +186,16 @@ type GapName = (Option<String>, Option<u32>, u32);
 pub(crate) struct Parsed {
     parsed: Mutex<almiladoc::Parsed>,
     ids: HashMap<GapName, GapId>,
+    max_ocr_text_bytes: u64,
+    cancel: Option<almiladoc::CancelToken>,
 }
 
 impl Parsed {
-    fn new(parsed: almiladoc::Parsed) -> Self {
+    fn new(
+        parsed: almiladoc::Parsed,
+        max_ocr_text_bytes: u64,
+        cancel: Option<almiladoc::CancelToken>,
+    ) -> Self {
         let ids = parsed
             .gaps()
             .map(|gap| {
@@ -198,7 +204,7 @@ impl Parsed {
                 ((kind, unit.map(|unit| unit.ordinal.get()), gap.id.ordinal().get()), gap.id)
             })
             .collect();
-        Self { parsed: Mutex::new(parsed), ids }
+        Self { parsed: Mutex::new(parsed), ids, max_ocr_text_bytes, cancel }
     }
 
     fn lock(&self, py: Python<'_>) -> MutexGuard<'_, almiladoc::Parsed> {
@@ -247,6 +253,53 @@ impl Parsed {
         let parsed: &mut almiladoc::Parsed = &mut parsed;
         py.detach(|| parsed.fill_gap(id, GapFill::Markdown(markdown)))
             .map_err(|e| gap_error(py, &e))
+    }
+
+    /// Fill `gap` with literal `OcrLine` values, grouping columns and paragraphs in the core.
+    /// Text and 32 bytes per box must fit `max_ocr_text_bytes`; refusal leaves the gap unchanged.
+    ///
+    /// Raises `KeyError` for an unknown gap, `ValueError` for a settled gap, `GapRefused`
+    /// for a fill bound, and conversion errors for fatal failures.
+    fn fill_gap_lines(
+        &self,
+        py: Python<'_>,
+        gap: GapKey<'_>,
+        lines: &Bound<'_, PySequence>,
+    ) -> PyResult<()> {
+        let id = self.gap_id(gap).map_err(|error| gap_error(py, &error))?;
+        let cancelled = || {
+            if self.cancel.as_ref().is_some_and(almiladoc::CancelToken::is_cancelled) {
+                Err(convert_error(py, &ConvertError::Cancelled))
+            } else {
+                Ok(())
+            }
+        };
+        cancelled()?;
+        let len = lines.len()?;
+        let mut bytes = (len as u64).saturating_mul(almiladoc::OcrLine::BOX_BYTES);
+        let admit = |bytes| {
+            if bytes > self.max_ocr_text_bytes {
+                Err(gap_refused(py, almiladoc::Limit::OcrTextBytes))
+            } else {
+                Ok(())
+            }
+        };
+        admit(bytes)?;
+        let mut supplied = Vec::with_capacity(len);
+        for at in 0..len {
+            cancelled()?;
+            let line = lines.get_item(at)?.extract::<Py<OcrLine>>()?;
+            bytes = bytes.saturating_add(line.get().0.text().len() as u64);
+            admit(bytes)?;
+            supplied.push(line);
+        }
+        let mut parsed = self.lock(py);
+        let parsed: &mut almiladoc::Parsed = &mut parsed;
+        py.detach(|| {
+            let lines = supplied.iter().map(|line| line.get().0.clone()).collect();
+            parsed.fill_gap(id, GapFill::Lines(lines))
+        })
+        .map_err(|error| gap_error(py, &error))
     }
 
     /// Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
@@ -390,6 +443,7 @@ impl Parsed {
 pub(crate) struct Converter {
     inner: almiladoc::Converter,
     max_input_bytes: u64,
+    max_ocr_text_bytes: u64,
 }
 
 #[pymethods]
@@ -400,8 +454,9 @@ impl Converter {
         let config =
             config.map_or_else(almiladoc::Config::default, |config| config.get().0.clone());
         let max_input_bytes = config.limits.max_input_bytes;
+        let max_ocr_text_bytes = config.limits.max_ocr_text_bytes;
         let inner = almiladoc::Converter::new(config).map_err(|e| config_error(py, &e))?;
-        Ok(Self { inner, max_input_bytes })
+        Ok(Self { inner, max_input_bytes, max_ocr_text_bytes })
     }
 
     /// The `Identity` that fixes this converter's output.
@@ -457,7 +512,7 @@ impl Converter {
         let data = buffer(py, data, &self.admission(cancel))?;
         let bytes = data.as_bytes();
         py.detach(|| self.call(bytes, format, None, cancel, ocr_pages, almiladoc::Converter::parse))
-            .map(Parsed::new)
+            .map(|parsed| Parsed::new(parsed, self.max_ocr_text_bytes, cancel.cloned()))
             .map_err(|f| f.raise(py))
     }
 

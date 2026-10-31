@@ -6,6 +6,7 @@ mod fill;
 #[cfg(feature = "ocr-http")]
 mod http;
 mod images;
+mod lines;
 mod raster;
 mod request;
 
@@ -20,6 +21,8 @@ pub(crate) use fill::{GapFills, GapState, gaps};
 #[cfg(feature = "ocr-http")]
 pub use http::{OcrHttp, OcrHttpConfig};
 pub(crate) use images::leave_image_gaps;
+pub use lines::OcrLine;
+pub(crate) use lines::blocks as line_blocks;
 pub use raster::RasterSpec;
 pub(crate) use request::{Inputs, requests};
 pub use request::{OcrImage, OcrRequest};
@@ -31,12 +34,18 @@ pub enum GapFill {
     /// Markdown, plain text included: raw HTML in it stays text, a link its label and an image
     /// its alt, and its text is composed to NFC.
     Markdown(String),
+    /// Literal horizontal lines, grouped into left-to-right columns and paragraphs.
+    ///
+    /// Whitespace gutters identify columns; lines crossing a gutter separate sections.
+    /// Vertical gaps larger than adjacent line heights separate paragraphs; ties keep input order.
+    Lines(Vec<OcrLine>),
 }
 
 impl fmt::Debug for GapFill {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Markdown(markdown) => write!(f, "Markdown({} bytes)", markdown.len()),
+            Self::Lines(lines) => write!(f, "Lines({} lines)", lines.len()),
         }
     }
 }
@@ -45,6 +54,9 @@ impl fmt::Debug for GapFill {
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum GapError {
+    /// A line has non-finite, empty or out-of-range normalized bounds.
+    #[error("invalid normalized OCR line bounds")]
+    InvalidLine,
     /// No gap of the document has this id.
     #[error("no gap of the document has this id")]
     UnknownGap,

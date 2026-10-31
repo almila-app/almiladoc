@@ -92,10 +92,11 @@ pub struct Limits {
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, metadata text bytes serialized to JSON (each
     /// empty value costing one), 64 bytes of Markdown or JSON written, the
-    /// Markdown events of each gap's fill, 16 bytes of each image an OCR
-    /// request copies, and of a page it paints 128 pixels before painting,
-    /// 128 pixels of each step's work as unpdf prices it, rounded up, and 16
-    /// bytes of its PNG after. Detection shares these counters with parsing,
+    /// Markdown events or located-line input, ordering and text copies of
+    /// each gap's fill, 16 bytes of each image an OCR request copies, and of
+    /// a page it paints 128 pixels before painting, 128 pixels of each
+    /// step's work as unpdf prices it, rounded up, and 16 bytes of its PNG
+    /// after. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges
@@ -114,7 +115,8 @@ pub struct Limits {
     /// refused before any is read. At most `u32::MAX`.
     pub max_pages: u64,
     /// Bytes of one gap's fill: a model's reply is untrusted, and its
-    /// Markdown parse holds the whole of it at once.
+    /// Markdown parse holds the whole of it at once; located lines also count
+    /// 32 bytes per box.
     pub max_ocr_text_bytes: u64,
 }
 

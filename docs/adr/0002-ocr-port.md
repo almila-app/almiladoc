@@ -49,8 +49,10 @@ Date: 2026-10-14, revised 2026-10-26
    off the global pool (https://github.com/robertknight/rten/issues/1188).
 9. **Weights.** The local crate SHA-256-checks its weight files and downloads none for the caller.
 10. **Identity.** ADR 0001 decision 15 holds over fills; engines stay outside `config_fingerprint`.
-11. **Untrusted output.** `GapFill`, `#[non_exhaustive]`, is `Markdown(String)`, plain text
-    included, within `max_ocr_text_bytes` (1 MiB) and `max_nesting_depth`, each event charged; raw
+11. **Untrusted output.** `GapFill`, `#[non_exhaustive]`, takes `Markdown(String)` or
+    `Lines(Vec<OcrLine>)`: normalized horizontal lines are ordered and grouped in the core,
+    literal and NFC, with 32 bytes per box also counted against `max_ocr_text_bytes`.
+    Markdown stays within `max_ocr_text_bytes` (1 MiB) and `max_nesting_depth`, each event charged; raw
     HTML becomes escaped text, a link its label, an image its alt; NFC. A refused fill changes
     nothing: a fill limit is `GapError::Refused { limit }`, never fatal like `max_work`.
 12. **Containment.** An engine sees only its requests, each with the parse's fill limit; its panic

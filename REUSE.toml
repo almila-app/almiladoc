@@ -94,6 +94,7 @@ path = [
     "src/ocr/http/mod.rs",
     "src/ocr/http/wire.rs",
     "src/ocr/images.rs",
+    "src/ocr/lines.rs",
     "src/ocr/mod.rs",
     "src/ocr/raster.rs",
     "src/ocr/request.rs",

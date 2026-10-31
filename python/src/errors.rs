@@ -252,14 +252,16 @@ fn mismatched(kind: UnsupportedKind) -> Option<&'static str> {
 pub(crate) fn gap_error(py: Python<'_>, error: &GapError) -> PyErr {
     match error {
         GapError::UnknownGap => PyKeyError::new_err(error.to_string()),
-        GapError::Settled => PyValueError::new_err(error.to_string()),
-        GapError::Refused { limit, .. } => {
-            let raised = GapRefused::new_err(error.to_string());
-            raised.value(py).setattr("limit", limit.as_str()).err().unwrap_or(raised)
-        }
+        GapError::Settled | GapError::InvalidLine => PyValueError::new_err(error.to_string()),
+        GapError::Refused { limit, .. } => gap_refused(py, *limit),
         GapError::Convert(error) => convert_error(py, error),
         _ => raise(py, &ConvertError::Internal, error.to_string()),
     }
+}
+
+pub(crate) fn gap_refused(py: Python<'_>, limit: Limit) -> PyErr {
+    let raised = GapRefused::new_err(format!("fill refused: past {limit}"));
+    raised.value(py).setattr("limit", limit.as_str()).err().unwrap_or(raised)
 }
 
 /// The `ConfigError` naming the field `error` refuses; a variant newer than

@@ -92,8 +92,6 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   reads. A `Reject` revision policy keeps deleted text and drops inserted text, joining paragraphs whose
   mark a revision removes. The first step writes the
   grammar down as an ADR 0001 amendment.
-- **ocr-lines** (`GapFill::Lines`: located lines grouped into paragraphs in the crate). Trigger: a
-  caller whose engine returns only located lines.
 - **ocr-local-pipeline** (offline OCR as a separate crate wrapping oar-ocr or ocrs, never in this one,
   ADR 0002 decision 8). Trigger: demand for offline OCR, the rten pool fixes and a scan corpus. It
   returns lines in reading order across columns, not the engine's row-first order: a two-column fixture
@@ -150,4 +148,4 @@ Asked only when the item that needs them is next.
 | An OpenAI-compatible endpoint serving the consumer's model: its base URL, model id and a key in a file outside every repository, for `scripts/ocr_live.py` on the five-page fixture; the key never reaches a log, CI or a commit | the first release | before the first candidate tag |
 | After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | as each tag is due |
 | Agree with the consumer the PDF-path scope, how it maps `Incomplete` and `Internal`, its two-phase transport, prompt and `concurrency` | consumer proof | when the proof starts |
-| A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline, ocr-lines | when either is next |
+| A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline | when it is next |

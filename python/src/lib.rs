@@ -27,5 +27,5 @@ mod _almiladoc {
         ResourceLimitError, UnsupportedError,
     };
     #[pymodule_export]
-    use crate::ocr::{OcrFailure, OcrHttp, OcrRequest, OcrSummary};
+    use crate::ocr::{OcrFailure, OcrHttp, OcrLine, OcrRequest, OcrSummary};
 }

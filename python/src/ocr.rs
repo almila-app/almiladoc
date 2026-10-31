@@ -8,7 +8,45 @@ use pyo3::types::{PyBytes, PyDict, PyString, PyTuple, PyType};
 use serde_json::{Map, Value};
 
 use crate::converter::{CancelToken, GapRow};
-use crate::errors::{config_error, ocr_http_refusal};
+use crate::errors::{config_error, gap_error, ocr_http_refusal};
+
+/// One literal horizontal line with finite normalized `[left, top, right, bottom]` bounds.
+#[pyclass(frozen, module = "almiladoc")]
+pub(crate) struct OcrLine(pub(crate) almiladoc::OcrLine);
+
+#[pymethods]
+impl OcrLine {
+    #[classattr]
+    const BOX_BYTES: u64 = almiladoc::OcrLine::BOX_BYTES;
+
+    #[new]
+    fn new(py: Python<'_>, text: String, bounds: (f64, f64, f64, f64)) -> PyResult<Self> {
+        almiladoc::OcrLine::new(text, [bounds.0, bounds.1, bounds.2, bounds.3])
+            .map(Self)
+            .map_err(|error| gap_error(py, &error))
+    }
+
+    /// The literal UTF-8 text.
+    #[getter]
+    fn text(&self) -> &str {
+        self.0.text()
+    }
+
+    /// The normalized `[left, top, right, bottom]` image bounds.
+    #[getter]
+    fn bounds(&self) -> (f64, f64, f64, f64) {
+        let [left, top, right, bottom] = self.0.bounds();
+        (left, top, right, bottom)
+    }
+
+    fn __getnewargs__(&self) -> (String, (f64, f64, f64, f64)) {
+        (self.text().to_owned(), self.bounds())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
 
 /// One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
 /// `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
