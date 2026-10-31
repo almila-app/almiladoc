@@ -25,6 +25,9 @@ use std::collections::HashMap;
 /// Frontend hooks: how hrefs, image sources, and anchor ids resolve in the
 /// containing document (EPUB scopes them per chapter).
 pub(crate) trait HtmlCtx {
+    fn exact_tables(&self) -> bool {
+        false
+    }
     fn link_target(&self, href: &str) -> Option<LinkTarget>;
     fn image_source(&self, src: &str) -> Result<ImageSource, ConvertError>;
     fn anchor_id(&self, raw: &str) -> AnchorId;
@@ -740,11 +743,19 @@ impl Builder<'_> {
                 header_rows += 1;
             }
         }
-        let mut table = builder.finish()?;
+        let mut table = if self.ctx.exact_tables() {
+            builder.finish_preserving_rows()?
+        } else {
+            builder.finish()?
+        };
         if table.grid.is_empty() {
             return Ok(None);
         }
-        table.header_rows = resolve_header_rows(&table, header_rows);
+        table.header_rows = if self.ctx.exact_tables() {
+            header_rows
+        } else {
+            resolve_header_rows(&table, header_rows)
+        };
         Ok(Some(Block::Table(table)))
     }
 }

@@ -336,7 +336,15 @@ impl<L: GridLedger> GridBuilder<L> {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Result<Table, L::Error> {
+    pub(crate) fn finish(self) -> Result<Table, L::Error> {
+        self.finish_rows(false)
+    }
+
+    pub(crate) fn finish_preserving_rows(self) -> Result<Table, L::Error> {
+        self.finish_rows(true)
+    }
+
+    fn finish_rows(mut self, preserve_rows: bool) -> Result<Table, L::Error> {
         let mut sweep = Sweep::default();
         for row in 0..self.grid.len() {
             for Cover { cols, origin: (origin_row, origin_col) } in sweep.row(&self.spans, row) {
@@ -348,7 +356,9 @@ impl<L: GridLedger> GridBuilder<L> {
                 }
             }
         }
-        trim_empty_tail(&mut self.grid);
+        if !preserve_rows {
+            trim_empty_tail(&mut self.grid);
+        }
         let rows = self.grid.len();
         for (r, row) in self.grid.iter_mut().enumerate() {
             let width = row.len();

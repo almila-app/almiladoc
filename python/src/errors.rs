@@ -36,9 +36,8 @@ pub(crate) mod exceptions {
         almiladoc,
         GapRefused,
         PyValueError,
-        "A gap's fill crossed a limit that bounds one fill, and the document is \
-         unchanged: `limit` names it, `max_ocr_text_bytes`, `max_nesting_depth` \
-         or `max_grid_slots`, which a smaller fill may pass."
+        "A gap's fill crossed a per-fill size, nesting, node, grid or expansion \
+         limit, and the document is unchanged: `limit` names it, which a smaller fill may pass."
     );
 
     create_exception!(
@@ -252,7 +251,9 @@ fn mismatched(kind: UnsupportedKind) -> Option<&'static str> {
 pub(crate) fn gap_error(py: Python<'_>, error: &GapError) -> PyErr {
     match error {
         GapError::UnknownGap => PyKeyError::new_err(error.to_string()),
-        GapError::Settled | GapError::InvalidLine => PyValueError::new_err(error.to_string()),
+        GapError::Settled | GapError::InvalidLine | GapError::InvalidTable => {
+            PyValueError::new_err(error.to_string())
+        }
         GapError::Refused { limit, .. } => gap_refused(py, *limit),
         GapError::Convert(error) => convert_error(py, error),
         _ => raise(py, &ConvertError::Internal, error.to_string()),

@@ -507,12 +507,9 @@ impl Parsed {
     /// Each leaves the document, its diagnostics and its work as they were.
     /// [`GapError::UnknownGap`] when no gap has that id,
     /// [`GapError::Settled`] when it was filled or failed already, and
-    /// [`GapError::Refused`] when the fill passes
-    /// [`Limits::max_ocr_text_bytes`](crate::Limits::max_ocr_text_bytes),
-    /// nests deeper than
-    /// [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth) with
-    /// the gap's container, or its tables may hold more cells than
-    /// [`Limits::max_grid_slots`](crate::Limits::max_grid_slots);
+    /// [`GapError::Refused`] when the fill exceeds a per-fill text, nesting, node, grid or
+    /// expansion limit; [`GapError::InvalidTable`] for malformed or unsupported opted-in tables,
+    /// including a gap or table inside another container;
     /// [`GapError::Convert`] when the work passes
     /// [`Limits::max_work`](crate::Limits::max_work), with
     /// [`ConvertError::Cancelled`] once the parse's token is cancelled, or with
@@ -533,6 +530,12 @@ impl Parsed {
     /// assert_eq!(conversion.markdown(), "Text on the first page\n\nA _scanned_ page\n");
     /// assert!(conversion.is_complete());
     ///
+    /// let mut tables = Converter::new(Config::default())?.parse(Input::new(&pdf, Format::Pdf))?;
+    /// let id = tables.gaps().next().ok_or("no gap")?.id;
+    /// let table = "<table><tr><td colspan=\"2\">merged</td></tr></table>";
+    /// tables.fill_gap(id, GapFill::MarkdownTables(table.into()))?;
+    /// assert!(tables.render()?.markdown().contains(table));
+    ///
     /// let again = parsed.fill_gap(gap, GapFill::Markdown(String::new()));
     /// assert_eq!(again, Err(GapError::Settled));
     /// # }
@@ -541,8 +544,11 @@ impl Parsed {
     pub fn fill_gap(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
         self.refuse_cancelled()?;
         let depth = self.fills.unsettled(id)?;
-        let read = self.on_pool(|| self.read_fill(depth, fill))?;
-        self.settle_fill(id, read);
+        let tables = matches!(&fill, GapFill::MarkdownTables(_));
+        let read = self
+            .on_pool(|| self.read_fill(depth, fill))
+            .map_err(|error| GapError::for_fill(error, tables))?;
+        self.settle_fill(id, read, tables);
         Ok(())
     }
 
@@ -811,19 +817,34 @@ impl Parsed {
     }
 
     fn read_fill(&self, depth: u64, fill: GapFill) -> Result<(Vec<Block>, u64), ConvertError> {
+        if depth > 0 && matches!(&fill, GapFill::MarkdownTables(_)) {
+            return Err(ConvertError::malformed("OCR tables require a top-level gap"));
+        }
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_cancel(self.cancel.as_ref())
             .starting_at(self.fuel);
         let blocks = match fill {
             GapFill::Markdown(text) => markdown::blocks(&parse_ctx, &text, depth)?,
             GapFill::Lines(lines) => crate::ocr::line_blocks(&parse_ctx, &lines)?,
+            GapFill::MarkdownTables(text) => {
+                markdown::blocks_with_tables(&parse_ctx, &text, depth)?
+            }
         };
-        Ok((blocks, parse_ctx.ledger().spent()))
+        let fuel = parse_ctx.ledger().spent();
+        if !parse_ctx.into_report().0.is_empty() {
+            return Err(ConvertError::malformed("invalid OCR table markup"));
+        }
+        Ok((blocks, fuel))
     }
 
-    fn settle_fill(&mut self, id: GapId, (blocks, fuel): (Vec<Block>, u64)) {
+    fn settle_fill(&mut self, id: GapId, (blocks, fuel): (Vec<Block>, u64), preserve_spans: bool) {
         self.fuel = fuel;
-        self.fills.settle(id, GapState::Filled(blocks), &mut self.diagnostics);
+        let state = if preserve_spans {
+            GapState::FilledPreservingSpans(blocks)
+        } else {
+            GapState::Filled(blocks)
+        };
+        self.fills.settle(id, state, &mut self.diagnostics);
     }
 
     /// The unsettled gaps `listed` names, every one when `None`, that ask for an image, in
@@ -871,8 +892,10 @@ impl Target for Parsed {
 
     fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
         let depth = self.fills.unsettled(id)?;
-        let read = self.read_fill(depth, fill)?;
-        self.settle_fill(id, read);
+        let tables = matches!(&fill, GapFill::MarkdownTables(_));
+        let read =
+            self.read_fill(depth, fill).map_err(|error| GapError::for_fill(error, tables))?;
+        self.settle_fill(id, read, tables);
         Ok(())
     }
 

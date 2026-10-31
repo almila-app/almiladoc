@@ -1,6 +1,4 @@
-//! Table rendering over the canonical grid. Covered positions render as
-//! blank cells (GFM has no span syntax); the grid invariant means the
-//! renderer never synthesizes or duplicates columns.
+//! Table rendering over the canonical grid; an opted-in OCR fill preserves merged cells as HTML.
 
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, CellSlot, List, MarkerKind, Style, Table};
@@ -76,6 +74,65 @@ pub(crate) fn write_table(
     for row in rows {
         sink.write("\n")?;
         write_row(row, width, sink)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_preserved(table: &Table, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    sink.write("<table>")?;
+    for row in &table.grid {
+        sink.meter().charge(row.len() as u64 + 1)?;
+        sink.write("<tr>")?;
+        for slot in row {
+            let CellSlot::Origin(cell) = slot else { continue };
+            sink.write("<td")?;
+            for (name, value) in [("rowspan", cell.row_span), ("colspan", cell.col_span)] {
+                if value > 1 {
+                    sink.write(&format!(" {name}=\"{value}\""))?;
+                }
+            }
+            sink.write(">")?;
+            for (at, block) in cell.blocks.iter().enumerate() {
+                sink.meter().charge(1)?;
+                if at > 0 {
+                    sink.write("<br>")?;
+                }
+                let Block::Paragraph(inlines) = block else { return Err(ConvertError::Internal) };
+                for inline in inlines {
+                    sink.meter().charge(1)?;
+                    preserved_inline(inline, sink)?;
+                }
+            }
+            sink.write("</td>")?;
+        }
+        sink.write("</tr>")?;
+    }
+    sink.write("</table>")
+}
+
+fn preserved_inline(
+    inline: &crate::model::Inline,
+    sink: &mut Sink<'_>,
+) -> Result<(), ConvertError> {
+    match inline {
+        crate::model::Inline::Text { text, style } => {
+            if *style != Style::PLAIN {
+                return Err(ConvertError::Internal);
+            }
+            for c in text.chars() {
+                sink.meter().charge(1)?;
+                match c {
+                    '&' => sink.write("&amp;")?,
+                    '<' => sink.write("&lt;")?,
+                    '>' => sink.write("&gt;")?,
+                    c => {
+                        sink.write(c.encode_utf8(&mut [0; 4]))?;
+                    }
+                }
+            }
+        }
+        crate::model::Inline::LineBreak => sink.write("<br>")?,
+        _ => return Err(ConvertError::Internal),
     }
     Ok(())
 }

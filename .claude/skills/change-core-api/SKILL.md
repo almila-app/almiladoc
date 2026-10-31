@@ -36,7 +36,7 @@ stub against the core.
      `#[classattr]` and `__repr__` arm.
    - `ocr.rs`: an `OcrRequest` field, as a getter and in `__reduce__`'s arguments; an
      `OcrHttpConfig` field, as an `OcrHttp` keyword; an `OcrSummary` field, as a getter; an
-     `OcrOutcome` or `GapFill` variant, as its arm in `answer`.
+     `OcrOutcome` variant, as its adapter's `answer` arm; expose only fills that adapter produces.
    - `converter.rs`: a public `Converter` or `Parsed` call, run detached; `input.rs` admits every
      input against `max_input_bytes` before it is copied or read. `diagnostics.rs`: a
      `Diagnostic` field's getter.

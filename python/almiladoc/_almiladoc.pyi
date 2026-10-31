@@ -50,8 +50,7 @@ class GapRefused(ValueError):
     unchanged."""
 
     limit: str
-    """The limit: `max_ocr_text_bytes`, `max_nesting_depth` or
-    `max_grid_slots`, which a smaller fill may pass."""
+    """The per-fill size, nesting, node, grid or expansion limit that a smaller fill may pass."""
 
 class ConfigError(ValueError):
     """A `Limits`, `Config` or `OcrHttp` field, or a raster spec, is out of
@@ -221,7 +220,7 @@ class Limits:
         most 1024."""
     @property
     def max_xml_nodes(self) -> int:
-        """XML nodes one part holds at once."""
+        """XML nodes one part or opted-in OCR table fragment holds at once."""
     @property
     def max_grid_slots(self) -> int:
         """Grid positions the tables of one parse materialize together."""
@@ -520,6 +519,10 @@ class Parsed:
 
         Raises KeyError for an unknown gap, ValueError for a settled gap, GapRefused
         for a fill bound, and conversion errors for fatal failures."""
+    def fill_gap_tables(self, gap: _GapRow, markdown: str) -> None:
+        """Fill a top-level gap with Markdown and standalone top-level HTML tables.
+        Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
+        Unsupported tables/context raise ValueError and per-fill limits GapRefused, atomically."""
     def fail_gap(self, gap: _GapRow) -> None:
         """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
         `<!-- ocr-failed page N -->` in a page's place and nothing after an

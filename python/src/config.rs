@@ -139,7 +139,7 @@ limits! {
     /// Nesting depth of input structure and of the parsed document, at most
     /// 1024.
     max_nesting_depth,
-    /// XML nodes one part holds at once.
+    /// XML nodes one part or opted-in OCR table fragment holds at once.
     max_xml_nodes,
     /// Grid positions the tables of one parse materialize together.
     max_grid_slots,

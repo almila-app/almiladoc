@@ -722,6 +722,39 @@ class ConversionTest(unittest.TestCase):
         )
         self.assertNotIn("ocr_gap", [d.code for d in parsed.diagnostics])
 
+    def test_opted_in_ocr_tables_preserve_spans_and_refuse_atomically(self):
+        table = (
+            '<table><tr><td rowspan="2" colspan="2">'
+            "1.9 &lt; 2.5 &amp; &lt;b&gt;x&lt;/b&gt;</td></tr><tr></tr></table>"
+        )
+        parsed = almiladoc.Converter().parse(MIXED.read_bytes())
+        (gap,) = parsed.gaps
+        before = parsed.to_json()
+        with self.assertRaises(ValueError):
+            parsed.fill_gap_tables(gap, '<table><tr><td onclick="bad()">x</td></tr></table>')
+        self.assertEqual(parsed.to_json(), before)
+        parsed.fill_gap_tables(gap, f"## Reaction conditions\n\n{table}\n\nTable 1.")
+        self.assertIn(table, parsed.render().markdown)
+        grid = json.loads(parsed.to_json())["document"]["blocks"][-2]["value"]["grid"]
+        self.assertEqual(len(grid), 2)
+        self.assertEqual(grid[0][0]["value"]["row_span"], 2)
+        for method in ("fill_gap", "fill_gap_tables"):
+
+            class Misleading(str):
+                def __len__(self):
+                    return 0
+
+            limited = converter(max_ocr_text_bytes=4).parse(MIXED.read_bytes())
+            (gap,) = limited.gaps
+            oversized = Misleading("é" * 4096)
+            before = str.__sizeof__(oversized)
+            for text in (oversized, "😀😀"):
+                with self.assertRaises(almiladoc.GapRefused) as caught:
+                    getattr(limited, method)(gap, text)
+                self.assertEqual(caught.exception.limit, "max_ocr_text_bytes")
+            self.assertEqual(str.__sizeof__(oversized), before)
+            getattr(limited, method)(gap, "ok")
+
     def test_unpickled_requests_fill_their_gaps(self):
         config = almiladoc.Config(
             on_loss=almiladoc.OnLoss.REPORT, image_ocr=almiladoc.ImageOcr.ALL

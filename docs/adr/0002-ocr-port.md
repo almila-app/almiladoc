@@ -54,7 +54,10 @@ Date: 2026-10-14, revised 2026-10-26
     literal and NFC, with 32 bytes per box also counted against `max_ocr_text_bytes`.
     Markdown stays within `max_ocr_text_bytes` (1 MiB) and `max_nesting_depth`, each event charged; raw
     HTML becomes escaped text, a link its label, an image its alt; NFC. A refused fill changes
-    nothing: a fill limit is `GapError::Refused { limit }`, never fatal like `max_work`.
+    nothing. `MarkdownTables(String)` opts top-level gaps into standalone, text-only
+    `table`/`tr`/`td` HTML with positive spans, preserving merged cells as safe HTML; unsupported
+    markup or nested contexts refuse atomically as `InvalidTable`. A fill limit is
+    `GapError::Refused { limit }`, never fatal like `max_work`.
 12. **Containment.** An engine sees only its requests, each with the parse's fill limit; its panic
     is `Internal`. Python passes only the crate's engines; its own OCR fills through `ocr_requests`
     and `fill_gap`. No error, diagnostic or `Debug` holds OCR text, a response body, a key, a

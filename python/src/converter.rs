@@ -221,6 +221,30 @@ impl Parsed {
         self.ids.get(&(kind, unit, ordinal)).copied().ok_or(GapError::UnknownGap)
     }
 
+    fn fill(
+        &self,
+        py: Python<'_>,
+        gap: GapKey<'_>,
+        markdown: &Bound<'_, PyString>,
+        wrap: fn(String) -> GapFill,
+    ) -> PyResult<()> {
+        let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
+        if self.cancel.as_ref().is_some_and(almiladoc::CancelToken::is_cancelled) {
+            return Err(convert_error(py, &ConvertError::Cancelled));
+        }
+        if markdown.code_point_len()? as u64 > self.max_ocr_text_bytes {
+            return Err(gap_refused(py, almiladoc::Limit::OcrTextBytes));
+        }
+        let text = markdown.to_str()?;
+        if text.len() as u64 > self.max_ocr_text_bytes {
+            return Err(gap_refused(py, almiladoc::Limit::OcrTextBytes));
+        }
+        let fill = wrap(text.to_owned());
+        let mut parsed = self.lock(py);
+        let parsed: &mut almiladoc::Parsed = &mut parsed;
+        py.detach(|| parsed.fill_gap(id, fill)).map_err(|e| gap_error(py, &e))
+    }
+
     /// The ids of the gaps `rows` name, rows naming none passed over.
     fn gap_ids(&self, rows: Option<Vec<GapKey<'_>>>) -> Option<Vec<GapId>> {
         rows.map(|rows| rows.into_iter().filter_map(|row| self.gap_id(row).ok()).collect())
@@ -247,12 +271,25 @@ impl Parsed {
     /// past `Limits.max_ocr_text_bytes`, nested past `max_nesting_depth` or
     /// whose tables may pass `max_grid_slots` `GapRefused`, and work past
     /// `max_work` `ResourceLimitError`; each leaves the document as it was.
-    fn fill_gap(&self, py: Python<'_>, gap: GapKey<'_>, markdown: String) -> PyResult<()> {
-        let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
-        let mut parsed = self.lock(py);
-        let parsed: &mut almiladoc::Parsed = &mut parsed;
-        py.detach(|| parsed.fill_gap(id, GapFill::Markdown(markdown)))
-            .map_err(|e| gap_error(py, &e))
+    fn fill_gap(
+        &self,
+        py: Python<'_>,
+        gap: GapKey<'_>,
+        markdown: &Bound<'_, PyString>,
+    ) -> PyResult<()> {
+        self.fill(py, gap, markdown, GapFill::Markdown)
+    }
+
+    /// Fill a top-level `gap` with Markdown and standalone top-level HTML tables.
+    /// Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
+    /// Unsupported tables/context raise `ValueError`, per-fill limits `GapRefused`, atomically.
+    fn fill_gap_tables(
+        &self,
+        py: Python<'_>,
+        gap: GapKey<'_>,
+        markdown: &Bound<'_, PyString>,
+    ) -> PyResult<()> {
+        self.fill(py, gap, markdown, GapFill::MarkdownTables)
     }
 
     /// Fill `gap` with literal `OcrLine` values, grouping columns and paragraphs in the core.

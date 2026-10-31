@@ -12,6 +12,7 @@ pub(crate) enum GapState {
     Unfilled,
     Failed,
     Filled(Vec<Block>),
+    FilledPreservingSpans(Vec<Block>),
 }
 
 impl fmt::Debug for GapState {
@@ -20,6 +21,9 @@ impl fmt::Debug for GapState {
             Self::Unfilled => f.write_str("Unfilled"),
             Self::Failed => f.write_str("Failed"),
             Self::Filled(blocks) => write!(f, "Filled({} blocks)", blocks.len()),
+            Self::FilledPreservingSpans(blocks) => {
+                write!(f, "FilledPreservingSpans({} blocks)", blocks.len())
+            }
         }
     }
 }
@@ -53,7 +57,9 @@ impl GapFills {
 
     pub(crate) fn filled(&self, gap: &Gap) -> Option<&[Block]> {
         match self.state(gap.id) {
-            Some(GapState::Filled(blocks)) => Some(blocks),
+            Some(GapState::Filled(blocks) | GapState::FilledPreservingSpans(blocks)) => {
+                Some(blocks)
+            }
             _ => None,
         }
     }
@@ -83,7 +89,7 @@ impl GapFills {
         diagnostics.remove(DiagnosticCode::OcrGap, slot.region, unit, 1);
         match state {
             GapState::Failed => diagnostics.add(DiagnosticCode::OcrFailed, slot.region, unit, 1),
-            GapState::Filled(_) => {
+            GapState::Filled(_) | GapState::FilledPreservingSpans(_) => {
                 diagnostics.add(
                     DiagnosticCode::RasterIncomplete,
                     slot.region,
@@ -103,7 +109,9 @@ impl GapFills {
     )]
     #[expect(clippy::disallowed_methods, reason = "whether any gap is filled is order-free")]
     pub(crate) fn spliced<'d>(&self, document: &'d Document) -> Cow<'d, Document> {
-        if !self.slots.values().any(|slot| matches!(slot.state, GapState::Filled(_))) {
+        if !self.slots.values().any(|slot| {
+            matches!(slot.state, GapState::Filled(_) | GapState::FilledPreservingSpans(_))
+        }) {
             return Cow::Borrowed(document);
         }
         let mut spliced = document.clone();

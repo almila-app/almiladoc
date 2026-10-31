@@ -31,6 +31,7 @@ pub(crate) mod markdown;
 pub(crate) mod math;
 pub(crate) mod mc;
 pub(crate) mod numbering;
+pub(crate) mod ocr_table;
 #[deny(
     clippy::indexing_slicing,
     reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"

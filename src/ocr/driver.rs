@@ -49,7 +49,7 @@ pub(crate) fn run(
             match outcome {
                 OcrOutcome::Fill(fill) => match target.fill(request.gap, fill) {
                     Ok(()) => summary.filled += 1,
-                    Err(GapError::Refused { .. }) => {
+                    Err(GapError::Refused { .. } | GapError::InvalidTable) => {
                         settled(target.fail(request.gap))?;
                         summary.failed += 1;
                     }

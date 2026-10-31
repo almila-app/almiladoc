@@ -39,6 +39,9 @@ pub enum GapFill {
     /// Whitespace gutters identify columns; lines crossing a gutter separate sections.
     /// Vertical gaps larger than adjacent line heights separate paragraphs; ties keep input order.
     Lines(Vec<OcrLine>),
+    /// Markdown for a top-level gap with standalone top-level `table`/`tr`/`td` HTML and positive
+    /// spans; merged cells render as safe HTML. Unsupported markup or contexts refuse the fill.
+    MarkdownTables(String),
 }
 
 impl fmt::Debug for GapFill {
@@ -46,6 +49,7 @@ impl fmt::Debug for GapFill {
         match self {
             Self::Markdown(markdown) => write!(f, "Markdown({} bytes)", markdown.len()),
             Self::Lines(lines) => write!(f, "Lines({} lines)", lines.len()),
+            Self::MarkdownTables(text) => write!(f, "MarkdownTables({} bytes)", text.len()),
         }
     }
 }
@@ -57,6 +61,9 @@ pub enum GapError {
     /// A line has non-finite, empty or out-of-range normalized bounds.
     #[error("invalid normalized OCR line bounds")]
     InvalidLine,
+    /// An opted-in table is malformed, unsupported or cannot preserve its declared cells.
+    #[error("invalid OCR table markup")]
+    InvalidTable,
     /// No gap of the document has this id.
     #[error("no gap of the document has this id")]
     UnknownGap,
@@ -74,6 +81,16 @@ pub enum GapError {
     /// [`Limits::max_work`](crate::Limits::max_work), cancelled, or internal.
     #[error(transparent)]
     Convert(ConvertError),
+}
+
+impl GapError {
+    pub(crate) fn for_fill(error: ConvertError, tables: bool) -> Self {
+        if tables && matches!(&error, ConvertError::Malformed { .. }) {
+            Self::InvalidTable
+        } else {
+            Self::from(error)
+        }
+    }
 }
 
 impl From<ConvertError> for GapError {

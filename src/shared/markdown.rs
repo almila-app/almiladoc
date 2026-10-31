@@ -15,9 +15,29 @@ pub(crate) fn blocks(
     markdown: &str,
     depth: u64,
 ) -> Result<Vec<Block>, ConvertError> {
+    read(ctx, markdown, depth, false)
+}
+
+pub(crate) fn blocks_with_tables(
+    ctx: &ParseCtx<'_>,
+    markdown: &str,
+    depth: u64,
+) -> Result<Vec<Block>, ConvertError> {
+    read(ctx, markdown, depth, true)
+}
+
+fn read(
+    ctx: &ParseCtx<'_>,
+    markdown: &str,
+    depth: u64,
+    tables: bool,
+) -> Result<Vec<Block>, ConvertError> {
     let limits = ctx.limits();
     if markdown.len() as u64 > limits.max_ocr_text_bytes {
         return Err(ConvertError::limit(Limit::OcrTextBytes, limits.max_ocr_text_bytes));
+    }
+    if tables {
+        ctx.charge(markdown.len() as u64)?;
     }
     let room = limits.max_nesting_depth.saturating_sub(depth);
     if lines(markdown).map(line_nesting).max().unwrap_or(0) > room {
@@ -25,12 +45,68 @@ pub(crate) fn blocks(
     }
     ctx.admit_grid_positions(table_cells(markdown))?;
     let mut builder = Builder { depth, max_depth: limits.max_nesting_depth, ..Builder::default() };
-    for event in Parser::new_ext(markdown, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
+    let mut raw = None;
+    for (event, range) in
+        Parser::new_ext(markdown, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH)
+            .into_offset_iter()
+    {
         ctx.charge(1)?;
-        builder.event(event)?;
+        if tables {
+            let source = markdown.get(range.clone()).ok_or(ConvertError::Internal)?;
+            let prefix = markdown.get(..range.start).ok_or(ConvertError::Internal)?;
+            table_event(ctx, &mut builder, &mut raw, event, source, prefix)?;
+        } else {
+            builder.event(event)?;
+        }
     }
     builder.flush();
     Ok(builder.root)
+}
+
+fn table_event(
+    ctx: &ParseCtx<'_>,
+    builder: &mut Builder,
+    raw: &mut Option<String>,
+    event: Event<'_>,
+    source: &str,
+    prefix: &str,
+) -> Result<(), ConvertError> {
+    match event {
+        Event::Start(Tag::HtmlBlock) => *raw = Some(String::new()),
+        Event::Html(text) if raw.is_some() => {
+            if let Some(raw) = raw {
+                raw.push_str(&text);
+            }
+        }
+        Event::End(TagEnd::HtmlBlock) => {
+            let text = raw.take().ok_or(ConvertError::Internal)?;
+            if super::ocr_table::mentions_table(ctx, &text)? {
+                if builder.depth > 0 {
+                    return Err(ConvertError::malformed("OCR tables must be top-level blocks"));
+                }
+                builder.flush();
+                for block in super::ocr_table::blocks(ctx, &text)? {
+                    builder.push(block);
+                }
+            } else {
+                builder.event(Event::Start(Tag::HtmlBlock))?;
+                builder.event(Event::Html(text.into()))?;
+                builder.event(Event::End(TagEnd::HtmlBlock))?;
+            }
+        }
+        Event::InlineHtml(ref text) if super::ocr_table::mentions_table(ctx, text)? => {
+            return Err(ConvertError::malformed("OCR tables must be standalone blocks"));
+        }
+        Event::Text(ref text)
+            if text.contains('<')
+                && !matches!(builder.leaf, Some(Leaf::Code))
+                && super::ocr_table::unescaped_table(ctx, source, prefix)? =>
+        {
+            return Err(ConvertError::malformed("invalid OCR table markup"));
+        }
+        event => builder.event(event)?,
+    }
+    Ok(())
 }
 
 /// The most cells the tables of `markdown` can hold, short rows padded: the parser builds every

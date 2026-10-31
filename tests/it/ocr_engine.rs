@@ -330,3 +330,90 @@ fn located_lines_fill_directly_and_through_an_engine_without_markdown_interpreta
         .count();
     assert_eq!(active, 0);
 }
+
+const MERGED: &str = concat!(
+    "<table><tr><td rowspan=\"2\">Sample</td><td colspan=\"2\">Yield (%)</td></tr>",
+    "<tr><td>Run 1</td><td>Run 2</td></tr>",
+    "<tr><td>A</td><td>12.4</td><td>13.1</td></tr></table>"
+);
+
+#[test]
+fn opted_in_tables_preserve_merges_without_changing_other_tables_or_html() {
+    let source = format!(
+        "## Reaction conditions\n\nAt \\(25^{{\\circ}}\\mathrm{{C}}\\), with \\[d = (M _ {{1}} - M _ {{2}}) / S D\\]\n\n| **plain** | [label](https://invalid/) |\n| --- | --- |\n| a | b |\n\n{MERGED}\n\nTable 1. Mean yields per sample."
+    );
+    let rels = relationships(&[("png", "image", "media/a.png")]);
+    let bytes = docx_with(
+        concat!(
+            "<w:p><w:r><w:drawing><a:blip r:embed=\"png\"/></w:drawing></w:r></w:p>",
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>native</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            "<w:p><w:r><w:drawing><a:blip r:embed=\"png\"/></w:drawing></w:r></w:p>"
+        ),
+        &[("word/_rels/document.xml.rels", rels.as_bytes()), ("word/media/a.png", PNG)],
+    );
+    let converter = image_ocr(|_| {});
+    let mut filled = parsed(&converter, &bytes);
+    let ids: Vec<_> = filled.gaps().map(|gap| gap.id).collect();
+    filled.fill_gap(ids[0], GapFill::MarkdownTables(source.clone())).unwrap();
+    filled.fill_gap(ids[1], GapFill::Markdown("| after |\n| --- |\n| native |".into())).unwrap();
+    let output = filled.render().unwrap();
+    assert!(output.markdown().contains(MERGED), "{}", output.markdown());
+    assert_eq!(output.markdown().matches("<table>").count(), 1);
+    assert!(output.markdown().contains("| **plain** | label |"));
+    assert!(output.markdown().contains("| **native** |"));
+    assert!(output.markdown().contains("| after |\n| --- |\n| native |"));
+    assert!(output.markdown().contains("## Reaction conditions"));
+    assert!(output.markdown().contains("Table 1. Mean yields per sample."));
+    #[cfg(feature = "serde")]
+    assert!(filled.to_json().unwrap().contains("\"row_span\":2"));
+    let mut default = parsed(&converter, &bytes);
+    for id in ids {
+        default.fill_gap(id, GapFill::Markdown(source.clone())).unwrap();
+    }
+    assert!(default.render().unwrap().markdown().contains("\\<table>"));
+}
+
+#[test]
+fn unsupported_table_context_refuses_atomically_and_engines_use_the_same_owner() {
+    struct Tables(&'static str);
+    impl OcrEngine for Tables {
+        fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+            requests
+                .iter()
+                .map(|_| OcrOutcome::Fill(GapFill::MarkdownTables(self.0.into())))
+                .collect()
+        }
+    }
+    let rels = relationships(&[("png", "image", "media/a.png")]);
+    let bytes = docx_with(
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:drawing><a:blip r:embed=\"png\"/></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>",
+        &[("word/_rels/document.xml.rels", rels.as_bytes()), ("word/media/a.png", PNG)],
+    );
+    let converter = image_ocr(|_| {});
+    let mut nested = parsed(&converter, &bytes);
+    let id = nested.gaps().next().unwrap().id;
+    assert_eq!(
+        nested.fill_gap(id, GapFill::MarkdownTables(MERGED.into())),
+        Err(almiladoc::GapError::InvalidTable)
+    );
+    nested.fill_gap(id, GapFill::Markdown("ordinary fill".into())).unwrap();
+    assert!(nested.render().unwrap().markdown().contains("ordinary fill"));
+    let mut engine = parsed(&converter, &pictures(1, 8));
+    assert_eq!(engine.ocr(&Tables(MERGED), None), Ok(summary(1, 0, 0)));
+    assert!(engine.render().unwrap().markdown().contains(MERGED));
+    let bytes = pictures(1, 8);
+    let fuel = least_work(&bytes, &|_| true);
+    let limited = image_ocr(|c| c.limits.max_work = fuel + MERGED.len() as u64);
+    let mut short = parsed(&limited, &bytes);
+    let id = short.gaps().next().unwrap().id;
+    assert!(matches!(
+        short.fill_gap(id, GapFill::MarkdownTables(MERGED.into())),
+        Err(almiladoc::GapError::Convert(ConvertError::ResourceLimit { limit: Limit::Work, .. }))
+    ));
+    short.fill_gap(id, GapFill::Markdown("ok".into())).unwrap();
+    let mut invalid = parsed(&converter, &pictures(1, 8));
+    assert_eq!(
+        invalid.ocr(&Tables("<table><tr><td style=\"x\">x</td></tr></table>"), None),
+        Ok(summary(0, 1, 0))
+    );
+}

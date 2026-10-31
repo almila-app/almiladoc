@@ -30,12 +30,14 @@ use shape::Shapes;
 pub(crate) use sink::Meter;
 use sink::{Sink, Text};
 use std::borrow::Cow;
+use std::cell::Cell as Flag;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Footnote id -> rendered number, shared by all render functions.
 type NoteNumbers = HashMap<String, usize>;
 
 pub(crate) struct Ctx<'d> {
+    preserve_spans: Flag<bool>,
     fills: &'d GapFills,
     nums: NoteNumbers,
     anchors: AnchorMap,
@@ -60,6 +62,7 @@ impl<'d> Ctx<'d> {
         let duplicate_notes =
             u64::try_from(doc.notes.len() - selected_notes.len()).unwrap_or(u64::MAX);
         let mut ctx = Self {
+            preserve_spans: Flag::new(false),
             fills,
             nums: HashMap::new(),
             anchors: AnchorMap::default(),
@@ -648,6 +651,14 @@ fn write_block(
     match block {
         Block::List(list) => return write_list(list, rc, sink, last).map(Some),
         Block::Table(t) => {
+            if rc.preserve_spans.get() {
+                for row in &t.grid {
+                    sink.meter().charge(row.len() as u64 + 1)?;
+                }
+                if t.origins().any(|cell| cell.row_span > 1 || cell.col_span > 1) {
+                    return table::write_preserved(t, sink).map(|()| None);
+                }
+            }
             return table::write_table(unwrap(t, rc, sink.meter())?, rc, sink).map(|()| None);
         }
         Block::Heading { level, content, .. } => {
@@ -704,8 +715,12 @@ fn write_gap(
     last: Option<ListMark>,
 ) -> Result<Option<ListMark>, ConvertError> {
     let state = rc.fills.state(gap.id);
-    if let Some(GapState::Filled(blocks)) = state {
-        return write_blocks(blocks, rc, sink, last);
+    if let Some(GapState::Filled(blocks) | GapState::FilledPreservingSpans(blocks)) = state {
+        let before =
+            rc.preserve_spans.replace(matches!(state, Some(GapState::FilledPreservingSpans(_))));
+        let result = write_blocks(blocks, rc, sink, last);
+        rc.preserve_spans.set(before);
+        return result;
     }
     if let OcrOrigin::Page(page) = gap.origin {
         let marker = if state == Some(&GapState::Failed) { "ocr-failed" } else { "needs-ocr" };

@@ -92,9 +92,10 @@ pub struct Limits {
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, metadata text bytes serialized to JSON (each
     /// empty value costing one), 64 bytes of Markdown or JSON written, the
-    /// Markdown events or located-line input, ordering and text copies of
-    /// each gap's fill, 16 bytes of each image an OCR request copies, and of
-    /// a page it paints 128 pixels before painting, 128 pixels of each
+    /// Markdown events, opted-in table-fragment bytes or located-line input,
+    /// ordering and text copies of each gap's fill, 16 bytes of each image
+    /// an OCR request copies, and of a page it paints 128 pixels before
+    /// painting, 128 pixels of each
     /// step's work as unpdf prices it, rounded up, and 16 bytes of its PNG
     /// after. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per

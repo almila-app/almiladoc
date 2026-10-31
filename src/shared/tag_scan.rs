@@ -12,6 +12,23 @@ pub(crate) fn any_tag(
     bytes: &[u8],
     judges: impl Fn(&[u8], Attributes<'_>) -> bool,
 ) -> Result<bool, ConvertError> {
+    scan(parse_ctx, bytes, judges, false)
+}
+
+pub(crate) fn any_tag_or_end(
+    parse_ctx: &ParseCtx<'_>,
+    bytes: &[u8],
+    judges: impl Fn(&[u8], Attributes<'_>) -> bool,
+) -> Result<bool, ConvertError> {
+    scan(parse_ctx, bytes, judges, true)
+}
+
+fn scan(
+    parse_ctx: &ParseCtx<'_>,
+    bytes: &[u8],
+    judges: impl Fn(&[u8], Attributes<'_>) -> bool,
+    include_end: bool,
+) -> Result<bool, ConvertError> {
     parse_ctx.charge(bytes.len() as u64)?;
     let text = to_utf8(bytes).0;
     let mut rest: &[u8] = &text;
@@ -22,6 +39,7 @@ pub(crate) fn any_tag(
             continue;
         }
         let (tag, after) = rest.split_at(tag_len(rest));
+        let tag = if include_end { tag.strip_prefix(b"/").unwrap_or(tag) } else { tag };
         let name_end =
             tag.iter().position(|&b| b.is_ascii_whitespace() || b == b'/').unwrap_or(tag.len());
         let (name, attributes) = tag.split_at(name_end);
