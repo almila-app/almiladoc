@@ -497,4 +497,179 @@ mod tests {
             Err(ConvertError::Cancelled)
         );
     }
+
+    type BudgetRow = (&'static str, &'static str, [Option<&'static str>; 6], [u64; 4], usize, u64);
+
+    const PRINT_BUDGET_ROWS: [BudgetRow; 9] = [
+        ("absent", "", [Some(""), None, None, Some(""), None, None], [0; 4], 0, 18),
+        (
+            "selected",
+            "<headerFooter><oddHeader>é&amp;P</oddHeader></headerFooter>",
+            [Some("é{page}"), None, None, Some(""), None, None],
+            [0; 4],
+            1,
+            66,
+        ),
+        (
+            "duplicate equal",
+            "<headerFooter><oddHeader>é</oddHeader><oddHeader>é</oddHeader></headerFooter>",
+            [Some("é"), None, None, Some(""), None, None],
+            [0; 4],
+            0,
+            70,
+        ),
+        (
+            "duplicate different",
+            "<headerFooter><oddHeader>é</oddHeader><oddHeader>B</oddHeader></headerFooter>",
+            [Some("é"), None, None, Some(""), None, None],
+            [1, 0, 0, 0],
+            0,
+            64,
+        ),
+        (
+            "extra inherited",
+            "<headerFooter><oddHeader>é</oddHeader></headerFooter><headerFooter><oddHeader>é</oddHeader></headerFooter>",
+            [Some("é"), None, None, Some(""), None, None],
+            [0; 4],
+            0,
+            154,
+        ),
+        (
+            "extra clear",
+            "<headerFooter><oddHeader>é</oddHeader></headerFooter><headerFooter/>",
+            [Some("é"), None, None, Some(""), None, None],
+            [1, 0, 0, 0],
+            0,
+            114,
+        ),
+        (
+            "uncertain equal",
+            "<headerFooter differentFirst=\"&flag;\"><oddHeader>é</oddHeader><firstHeader>é</firstHeader></headerFooter>",
+            [Some("é"), None, None, Some(""), None, None],
+            [0; 4],
+            0,
+            75,
+        ),
+        (
+            "uncertain different",
+            "<headerFooter differentFirst=\"&flag;\"><oddHeader>é</oddHeader><firstHeader>B</firstHeader></headerFooter>",
+            [Some("é"), None, None, Some(""), None, None],
+            [0, 0, 1, 0],
+            0,
+            69,
+        ),
+        (
+            "full reader",
+            concat!(
+                "<headerFooter xmlns:x=\"urn:decoy\" differentFirst=\"&flag;\" x:differentOddEven=\"1\">",
+                "<x:oddHeader>decoy</x:oddHeader><oddHeader>é&amp;P</oddHeader><oddHeader>B</oddHeader>",
+                "<firstHeader>First</firstHeader><evenHeader>unused</evenHeader><oddFooter>F</oddFooter><firstFooter>Tail</firstFooter>",
+                "</headerFooter><headerFooter differentOddEven=\"1\"><oddHeader>é&amp;P</oddHeader>",
+                "<evenHeader>E</evenHeader><oddFooter>F</oddFooter><evenFooter>E2</evenFooter></headerFooter>"
+            ),
+            [Some("é{page}"), None, None, Some("F"), None, None],
+            [2, 1, 1, 1],
+            1,
+            426,
+        ),
+    ];
+
+    fn print_budget_sheet(body: &str) -> Element {
+        let xml = format!("<worksheet xmlns=\"{}\">{body}</worksheet>", ns::SML);
+        xml::parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xml, &mut WholeTree).unwrap().root
+    }
+
+    fn assert_print_budget_result(
+        ctx: &ParseCtx<'_>,
+        out: &SheetContent,
+        expected: [Option<&str>; 6],
+        counts: [u64; 4],
+        reports: usize,
+    ) {
+        assert_eq!(out.headers_footers.len(), FIELDS.len());
+        for (((state, _), text), (_, side, variant, _)) in
+            out.headers_footers.iter().zip(expected).zip(FIELDS)
+        {
+            assert_eq!((state.value.region, state.value.variant), (side, variant));
+            assert_eq!(
+                state.value.content,
+                text.map(|s| paragraphs([String::new(), s.to_owned(), String::new()]))
+            );
+            assert!(matches!(state.certainty, Certainty::Known));
+        }
+        assert_eq!(
+            out.headers_footers
+                .iter()
+                .flat_map(|(_, codes)| codes.iter().copied())
+                .collect::<Vec<_>>(),
+            vec![DiagnosticCode::FieldToken; reports]
+        );
+        let actual: Vec<_> =
+            ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
+        let expected: Vec<_> = [
+            (DiagnosticCode::BlockUnread, Region::Header),
+            (DiagnosticCode::BlockUnread, Region::Footer),
+            (DiagnosticCode::UnresolvedEntity, Region::Header),
+            (DiagnosticCode::UnresolvedEntity, Region::Footer),
+        ]
+        .into_iter()
+        .zip(counts)
+        .filter(|(_, count)| *count != 0)
+        .map(|((code, region), count)| (code, region, count))
+        .collect();
+        assert_eq!(actual.len(), expected.len());
+        for value in expected {
+            assert!(actual.contains(&value), "{actual:?} missing {value:?}");
+        }
+    }
+
+    #[test]
+    fn print_reader_work_budget_covers_retained_and_discarded_settings() {
+        for (name, body, expected, counts, reports, work) in PRINT_BUDGET_ROWS {
+            let tree = print_budget_sheet(body);
+            let sheet = tree.find(ns::SML, "worksheet").unwrap();
+            let limits = Limits { max_work: work, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(HeaderFooterPolicy::Emit);
+            let mut out = SheetContent::on(super::super::grid::OOXML_GRID, u64::MAX, u64::MAX);
+            assert_eq!(read(&ctx, sheet, &mut out), Ok(()), "{name}");
+            assert_eq!(ctx.fuel(), work, "{name}");
+            assert_print_budget_result(&ctx, &out, expected, counts, reports);
+            let limits = Limits { max_work: work - 1, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(HeaderFooterPolicy::Emit);
+            let mut out = SheetContent::on(super::super::grid::OOXML_GRID, u64::MAX, u64::MAX);
+            assert_eq!(
+                read(&ctx, sheet, &mut out),
+                Err(ConvertError::limit(Limit::Work, work - 1)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn print_state_comparison_prices_repeated_utf8_even_when_uncertain() {
+        let value = HeaderFooter {
+            region: Side::Header,
+            variant: Variant::Default,
+            content: Some(paragraphs([String::new(), "é".repeat(64), String::new()])),
+        };
+        let known = HeaderFooterState { value: value.clone(), certainty: Certainty::Known };
+        let uncertain = HeaderFooterState { value, certainty: Certainty::Uncertain };
+        for other in [&known, &uncertain] {
+            let limits = Limits { max_work: 266, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits);
+            for work in [133, 266] {
+                assert_eq!(
+                    known.same_content(other, |units| ctx.charge(units)),
+                    Ok(matches!(other.certainty, Certainty::Known))
+                );
+                assert_eq!(ctx.fuel(), work);
+            }
+            let limits = Limits { max_work: 132, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits);
+            assert_eq!(
+                known.same_content(other, |units| ctx.charge(units)),
+                Err(ConvertError::limit(Limit::Work, 132))
+            );
+        }
+    }
 }
