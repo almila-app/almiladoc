@@ -54,6 +54,9 @@ pub(crate) fn children<'d>(
         Block::List(list) => list.items.iter().map(|item| Node::Blocks(&item.blocks)).collect(),
         Block::Table(t) => Cells::of(t).map(Node::Cells).into_iter().collect(),
         Block::BlockQuote(blocks) => vec![Node::Blocks(blocks)],
+        Block::HeaderFooter(value) => {
+            value.content.as_deref().map(Node::Blocks).into_iter().collect()
+        }
         Block::Gap(gap) => filled(gap).map(Node::Blocks).into_iter().collect(),
         Block::CodeBlock { .. } | Block::Rule | Block::Math(_) | Block::UnitStart(_) => Vec::new(),
     }

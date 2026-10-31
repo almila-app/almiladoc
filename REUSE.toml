@@ -88,6 +88,8 @@ path = [
     "src/json.rs",
     "src/ledger.rs",
     "src/model/gap.rs",
+    "src/model/header_footer.rs",
+    "src/formats/sheet/headers.rs",
     "src/model/unit.rs",
     "src/ocr/driver.rs",
     "src/ocr/engine.rs",

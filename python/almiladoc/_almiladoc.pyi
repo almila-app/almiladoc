@@ -19,6 +19,7 @@ __all__ = [
     "Diagnostic",
     "EncryptedError",
     "GapRefused",
+    "HeaderFooterPolicy",
     "Identity",
     "ImageOcr",
     "ImagePolicy",
@@ -166,6 +167,13 @@ class ImagePolicy:
     OMIT: ClassVar[ImagePolicy]
 
 @final
+class HeaderFooterPolicy:
+    """Whether XLSX print headers and footers are omitted or emitted as labelled blockquotes."""
+
+    OMIT: ClassVar[HeaderFooterPolicy]
+    EMIT: ClassVar[HeaderFooterPolicy]
+
+@final
 class ImageOcr:
     """Which images a parse leaves a gap after for the caller's OCR: `NONE`,
     or `ALL`, every embedded PNG or JPEG judged by its bytes, each other image
@@ -268,7 +276,8 @@ class Config:
     `Limits`, the threads each call runs on (1 to 64; no reader uses more
     than one), what a loss does, how images appear and which leave gaps for
     OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
-    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER` and `ImageOcr.NONE`.
+    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE` and
+    `HeaderFooterPolicy.OMIT`.
     A thread count out of range raises `ConfigError`."""
 
     def __new__(
@@ -279,6 +288,7 @@ class Config:
         on_loss: OnLoss | None = None,
         images: ImagePolicy | None = None,
         image_ocr: ImageOcr | None = None,
+        headers_footers: HeaderFooterPolicy | None = None,
     ) -> Config: ...
     @property
     def limits(self) -> Limits:
@@ -295,6 +305,10 @@ class Config:
     @property
     def image_ocr(self) -> ImageOcr:
         """Which images a parse leaves a gap after for OCR."""
+
+    @property
+    def headers_footers(self) -> HeaderFooterPolicy:
+        """Whether XLSX print headers and footers appear."""
 
 @final
 class CancelToken:

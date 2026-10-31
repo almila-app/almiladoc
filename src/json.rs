@@ -6,6 +6,7 @@ use std::io;
 
 use serde::Serialize;
 
+use crate::config::{Config, HeaderFooterPolicy};
 use crate::diagnostics::Diagnostics;
 use crate::error::ConvertError;
 use crate::identity::EngineIdentity;
@@ -28,7 +29,7 @@ struct Envelope<'a> {
 }
 
 pub(crate) fn write(
-    identity: &EngineIdentity,
+    config: &Config,
     document: &Document,
     fills: &GapFills,
     diagnostics: &Diagnostics,
@@ -37,9 +38,22 @@ pub(crate) fn write(
     if let Some(metadata) = &document.metadata {
         meter.charge(metadata.text_work())?;
     }
+    if config.headers_footers == HeaderFooterPolicy::Emit {
+        meter.charge(document.blocks.len() as u64)?;
+        for block in &document.blocks {
+            if let crate::model::Block::HeaderFooter(value) = block {
+                value.charge_copy(|work| meter.charge(work))?;
+            }
+        }
+    }
     let document = &fills.spliced(document);
-    let envelope =
-        Envelope { schema_version: JSON_SCHEMA_VERSION, identity, document, diagnostics };
+    let identity = EngineIdentity::of(config);
+    let envelope = Envelope {
+        schema_version: JSON_SCHEMA_VERSION,
+        identity: &identity,
+        document,
+        diagnostics,
+    };
     let mut out = Metered { meter, json: Vec::new(), refused: None };
     let written = serde_json::to_writer(&mut out, &envelope);
     match (written, out.refused) {
@@ -75,7 +89,6 @@ impl io::Write for Metered<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::diagnostics::{DiagnosticCode, LossClass, Region};
     use crate::ledger::Ledger;
     use crate::limits::Limit;
@@ -88,9 +101,8 @@ mod tests {
 
     fn json(document: &Document, diagnostics: &Diagnostics) -> Result<String, ConvertError> {
         let ledger = Ledger::new(u64::MAX, None);
-        let identity = EngineIdentity::of(&Config::default());
         write(
-            &identity,
+            &Config::default(),
             document,
             &GapFills::default(),
             diagnostics,
@@ -315,6 +327,7 @@ mod tests {
                 Block::CodeBlock { .. } => "code_block",
                 Block::Rule => "rule",
                 Block::UnitStart(_) => "unit_start",
+                Block::HeaderFooter(_) => "header_footer",
                 Block::Math(_) => "math",
                 Block::Gap(_) => "gap",
             };
@@ -332,10 +345,51 @@ mod tests {
         kinds
     }
 
+    fn print_side() -> Document {
+        use crate::model::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
+        Document {
+            blocks: vec![Block::HeaderFooter(HeaderFooter {
+                region: HeaderFooterRegion::Footer,
+                variant: HeaderFooterVariant::Even,
+                content: Some(vec![paragraph("é")]),
+            })],
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn print_side_wire_is_additive_and_owned_text_is_charged() {
+        let value: serde_json::Value =
+            serde_json::from_str(&json(&print_side(), &Diagnostics::default()).unwrap()).unwrap();
+        assert_eq!(
+            value["document"]["blocks"][0],
+            serde_json::json!({"kind":"header_footer","value":{"region":"footer","variant":"even","content":[serde_json::to_value(paragraph("é")).unwrap()]}})
+        );
+        let mut source = awaiting_ocr();
+        source.blocks.splice(0..0, print_side().blocks);
+        let Block::Gap(gap) = &source.blocks[2] else { panic!("{source:?}") };
+        let mut fills = GapFills::of(&source);
+        fills.settle(gap.id, crate::ocr::GapState::Filled(Vec::new()), &mut Diagnostics::default());
+        assert!(matches!(fills.spliced(&source), std::borrow::Cow::Owned(_)));
+        let ledger = Ledger::new(9, None);
+        let meter = Meter::new(&ledger, u64::MAX);
+        assert_eq!(
+            write(
+                &Config { headers_footers: HeaderFooterPolicy::Emit, ..Config::default() },
+                &source,
+                &fills,
+                &Diagnostics::default(),
+                &meter
+            ),
+            Err(ConvertError::limit(Limit::Work, 9))
+        );
+        assert_eq!(meter.admitted(), 0);
+    }
+
     #[test]
     fn the_sample_holds_every_variant() {
         assert_eq!(
-            every_kind(&[every_variant(), awaiting_ocr()]),
+            every_kind(&[every_variant(), awaiting_ocr(), print_side()]),
             [
                 "anchor",
                 "block_quote",
@@ -343,6 +397,7 @@ mod tests {
                 "code_block",
                 "covered",
                 "gap",
+                "header_footer",
                 "heading",
                 "image asset",
                 "image external",
@@ -589,11 +644,11 @@ mod tests {
         let document = every_variant();
         let full = json(&document, &Diagnostics::default()).unwrap();
         let len = full.len() as u64;
-        let identity = EngineIdentity::of(&Config::default());
+        let config = Config::default();
         let with = |max_work, max_output| {
             let ledger = Ledger::new(max_work, None);
             write(
-                &identity,
+                &config,
                 &document,
                 &GapFills::default(),
                 &Diagnostics::default(),
@@ -631,7 +686,7 @@ mod tests {
         let ledger = Ledger::new(work - 1, None);
         assert_eq!(
             write(
-                &EngineIdentity::of(&Config::default()),
+                &Config::default(),
                 &document,
                 &GapFills::default(),
                 &Diagnostics::default(),

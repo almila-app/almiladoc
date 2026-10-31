@@ -1781,3 +1781,42 @@ fn note_references_on_one_line_render_in_linear_time() {
     assert_eq!(markdown, format!("{}\n\n[^1]: N\n", "[^1]".repeat(count)));
     assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
 }
+
+#[test]
+fn rich_side_content_has_an_empty_anchor_and_note_scope_and_bounded_nesting() {
+    use crate::model::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
+    let plain = Inline::plain;
+    let side = Block::HeaderFooter(HeaderFooter {
+        region: HeaderFooterRegion::Footer,
+        variant: HeaderFooterVariant::First,
+        content: Some(vec![Block::BlockQuote(vec![Block::Paragraph(vec![
+            styled("rich", BOLD),
+            Inline::Anchor("side".into()),
+            Inline::NoteRef("n".into()),
+            link(vec![plain(" local")], LinkTarget::anchor("body".into())),
+        ])])]),
+    });
+    let source = Document {
+        blocks: vec![
+            anchored(1, "body", vec![plain("Body")]),
+            side,
+            Block::Paragraph(vec![link(vec![plain("outside")], LinkTarget::anchor("side".into()))]),
+        ],
+        notes: vec![Note { id: "n".into(), kind: NoteKind::Footnote, blocks: vec![text("N")] }],
+        ..Document::default()
+    };
+    assert_eq!(
+        document_to_markdown(&source),
+        "# Body\n\n> <a id=\"almiladoc:footer:first:1\"></a>Footer (first):\n>\n> > **rich** local\n\noutside\n\n[^1]: N\n"
+    );
+    let ledger = Ledger::new(u64::MAX, None);
+    assert_eq!(
+        super::render_losses(&source, READ, Placeholder, &Meter::new(&ledger, u64::MAX)).unwrap(),
+        [(DiagnosticCode::DanglingReference, Region::Body, None, 1)]
+    );
+    assert_eq!(check_nesting(&source, &GapFills::default(), 3), Ok(()));
+    assert_eq!(
+        check_nesting(&source, &GapFills::default(), 2),
+        Err(ConvertError::limit(Limit::NestingDepth, 2))
+    );
+}

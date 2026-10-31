@@ -2,8 +2,8 @@
 //! sheets, shared strings, cell number formats from `xl/styles.xml`, and
 //! merge regions. Rows, columns, and sheets the source hides are omitted,
 //! and merge regions are remapped onto the surviving grid. Hyperlinks,
-//! print headers and footers, comments and the referenced drawing are read
-//! only to report what the grid does not carry.
+//! print headers and footers follow their output policy; comments and the
+//! referenced drawing report what the grid does not carry.
 
 use super::controls::read_vml_checkboxes;
 use super::grid::{
@@ -92,7 +92,7 @@ pub(super) fn parse(
                 .and_then(|d| d.attr_qualified(ns::R, "id"))
                 .map(str::to_string);
             let mut content = read_sheet(worksheet, rows.content);
-            omit_headers(parse_ctx, worksheet, &mut content)?;
+            super::headers::read(parse_ctx, worksheet, &mut content)?;
             Ok(Some((content, drawing)))
         },
         |&name| name.to_string(),
@@ -142,6 +142,7 @@ pub(super) fn convert_sheets<T>(
 ) -> Result<Document, ConvertError> {
     let mut doc = Document::default();
     let mut failed = 0usize;
+    let mut previous = HashMap::new();
     for Listed { unit, sheet, part } in sheets {
         let _unit = parse_ctx.enter_admitted(*unit);
         let Some((mut content, drawing)) = read(pkg, part)? else {
@@ -151,13 +152,29 @@ pub(super) fn convert_sheets<T>(
         };
         doc.blocks.push(Block::UnitStart(unit.model()));
         read_sheet_parts(parse_ctx, pkg, part, drawing.as_deref(), &mut content)?;
-        let Some(table) = build_table(parse_ctx, content)? else {
-            continue;
-        };
-        if sheets.len() > 1 {
-            doc.blocks.push(Block::heading(2, vec![Inline::plain(heading(sheet))]));
+        let start = doc.blocks.len();
+        for (state, reports) in std::mem::take(&mut content.headers_footers) {
+            let region = match state.value.region {
+                crate::model::HeaderFooterRegion::Header => Region::Header,
+                crate::model::HeaderFooterRegion::Footer => Region::Footer,
+            };
+            if doc.push_header_footer(state, &mut previous, |work| parse_ctx.charge(work))? {
+                parse_ctx.charge(reports.len() as u64)?;
+                for code in reports {
+                    parse_ctx.emit(code, region);
+                }
+            }
         }
-        doc.blocks.push(Block::Table(table));
+        let table = build_table(parse_ctx, content)?;
+        if table.is_none() && doc.blocks.len() == start {
+            continue;
+        }
+        if sheets.len() > 1 {
+            doc.blocks.insert(start, Block::heading(2, vec![Inline::plain(heading(sheet))]));
+        }
+        if let Some(table) = table {
+            doc.blocks.push(Block::Table(table));
+        }
     }
     if !sheets.is_empty() && failed == sheets.len() {
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
@@ -532,7 +549,7 @@ fn read_sheet(worksheet: &Element, mut out: SheetContent) -> SheetContent {
     out
 }
 
-fn omit_headers(
+pub(super) fn omit_headers(
     ctx: &ParseCtx<'_>,
     sheet: &Element,
     out: &mut SheetContent,
@@ -636,7 +653,7 @@ fn parse_region(r: &str, cell: fn(&str) -> Option<CellRef>) -> Option<CellRange>
 }
 
 /// XML schema boolean attribute.
-fn bool_attr(v: &str) -> bool {
+pub(super) fn bool_attr(v: &str) -> bool {
     matches!(v.trim(), "1" | "true")
 }
 
@@ -1790,6 +1807,398 @@ mod tests {
             CONTROL.to_string(),
         ]
         .concat()
+    }
+
+    fn print_values(wb: &Wb<'_>) -> Document {
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        super::super::parse(&ctx, &wb.build()).unwrap()
+    }
+
+    #[test]
+    fn consecutive_print_values_only_repeat_after_a_change() {
+        let a = "<headerFooter><oddHeader>A</oddHeader></headerFooter>";
+        let b = "<headerFooter><oddHeader>B</oddHeader></headerFooter>";
+        let document = print_values(&Wb {
+            sheets: vec![
+                ("one", "", a),
+                ("two", "", "<headerFooter><oddHeader> A </oddHeader></headerFooter>"),
+                ("three", "", b),
+                ("four", "", a),
+                ("five", "", "<headerFooter><oddHeader> &#32; </oddHeader></headerFooter>"),
+            ],
+            ..Wb::default()
+        });
+        let values: Vec<_> = document
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::HeaderFooter(value) => Some(
+                    value
+                        .content
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(Block::plain_text)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, ["A", "B", "A", ""]);
+        assert_eq!(unit_starts(&document).len(), 5);
+    }
+
+    #[test]
+    fn print_variants_distinguish_explicit_empty_and_using_default() {
+        use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
+        let active = r#"<headerFooter differentFirst="1" differentOddEven="true"><x:oddHeader xmlns:x="urn:decoy">wrong</x:oddHeader><oddHeader>A</oddHeader><firstHeader>First</firstHeader><evenHeader>Even</evenHeader><oddFooter>Z</oddFooter><firstFooter>Front</firstFooter><evenFooter>Back</evenFooter></headerFooter>"#;
+        let inactive = r#"<headerFooter xmlns:x="urn:decoy" x:differentFirst="1"><oddHeader>A</oddHeader><x:firstHeader>decoy</x:firstHeader><firstHeader>unused</firstHeader><evenHeader>unused even</evenHeader><oddFooter>Z</oddFooter></headerFooter>"#;
+        let empty = r#"<headerFooter differentFirst="true"><oddHeader>A</oddHeader><oddFooter>Z</oddFooter><firstHeader/></headerFooter>"#;
+        let document = print_values(&Wb {
+            sheets: vec![("one", "", active), ("two", "", inactive), ("three", "", empty)],
+            ..Wb::default()
+        });
+        let values: Vec<_> = document
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::HeaderFooter(value) => Some((
+                    value.region,
+                    value.variant,
+                    value
+                        .content
+                        .as_ref()
+                        .map(|s| s.iter().map(Block::plain_text).collect::<Vec<_>>().join(" ")),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (Side::Header, Variant::Default, Some("A")),
+                (Side::Header, Variant::First, Some("First")),
+                (Side::Header, Variant::Even, Some("Even")),
+                (Side::Footer, Variant::Default, Some("Z")),
+                (Side::Footer, Variant::First, Some("Front")),
+                (Side::Footer, Variant::Even, Some("Back")),
+                (Side::Header, Variant::First, None),
+                (Side::Header, Variant::Even, None),
+                (Side::Footer, Variant::First, None),
+                (Side::Footer, Variant::Even, None),
+                (Side::Header, Variant::First, Some("")),
+                (Side::Footer, Variant::First, Some(""))
+            ]
+            .map(|(region, variant, text)| (region, variant, text.map(str::to_owned)))
+        );
+        let markdown = crate::render::markdown::document_to_markdown(&document);
+        assert_eq!(
+            (
+                markdown.contains("Header (first, uses default):"),
+                markdown.ends_with("> <a id=\"almiladoc:footer:first:12\"></a>Footer (first):\n")
+            ),
+            (true, true)
+        );
+        let decoys = r#"<x:headerFooter xmlns:x="urn:decoy"><x:oddHeader>wrong</x:oddHeader></x:headerFooter>"#;
+        assert_eq!(print_values(&one_sheet(decoys)).blocks.len(), 1);
+    }
+
+    #[test]
+    fn print_fields_and_formatting_are_explicit_and_literal_escapes_stay_literal() {
+        let source = r#"<headerFooter><oddFooter>&amp;L&amp;&amp;P _x005F_x0041_&amp;C&amp;Bbold&amp;B&amp;12&amp;KFF0000&amp;"Arial,Bold" text_x000A_tail &amp;P/&amp;N &amp;D &amp;T &amp;F &amp;Z &amp;A&amp;R&amp;G_xD83D__xDE00_</oddFooter></headerFooter>"#;
+        let bytes = one_sheet(source).build();
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let document = super::super::parse(&ctx, &bytes).unwrap();
+        let Block::HeaderFooter(value) = &document.blocks[1] else { panic!("{document:?}") };
+        assert_eq!(
+            value.content.as_ref().unwrap().iter().map(Block::plain_text).collect::<Vec<_>>(),
+            [
+                "&P _x0041_",
+                "bold text tail {page}/{pages} {date} {time} {file} {path} {sheet}",
+                "😀"
+            ]
+        );
+        assert_eq!(
+            ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect::<Vec<_>>(),
+            [
+                (DiagnosticCode::ImageUnplaced, Region::Footer, 1),
+                (DiagnosticCode::FieldToken, Region::Footer, 7),
+                (DiagnosticCode::FormattingUnreadable, Region::Footer, 5)
+            ]
+        );
+        let omitted = parse(&bytes).unwrap();
+        assert_eq!(omitted.blocks.len(), 1);
+    }
+
+    #[test]
+    fn print_damage_follows_visible_spans_after_decoding_and_formatting() {
+        for (local, region) in [("oddHeader", Region::Header), ("oddFooter", Region::Footer)] {
+            for (source, text, lost, formatting) in [
+                ("&P;", "&P;", Some(DiagnosticCode::UnresolvedEntity), 0),
+                ("&amp;&amp;P;", "&P;", None, 0),
+                (r#"&amp;"é&unknown;,Bold"Shown"#, "Shown", None, 1),
+                ("&amp;K04+000Shown", "Shown", None, 1),
+                ("&amp;K12-100Shown", "Shown", None, 1),
+                ("_x00E9_&unknown;", "é&unknown;", Some(DiagnosticCode::UnresolvedEntity), 0),
+                (
+                    "_xD83D__xDE00_&unknown;",
+                    "😀&unknown;",
+                    Some(DiagnosticCode::UnresolvedEntity),
+                    0,
+                ),
+                ("_xD800_", "�", Some(DiagnosticCode::InvalidEncoding), 0),
+                (r#"&amp;"_xD800_"Shown"#, "Shown", None, 1),
+            ] {
+                let bytes =
+                    one_sheet(&format!("<headerFooter><{local}>{source}</{local}></headerFooter>"))
+                        .build();
+                let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+                let document = super::super::parse(&ctx, &bytes).unwrap();
+                let Block::HeaderFooter(value) = &document.blocks[1] else {
+                    panic!("{document:?}")
+                };
+                let actual: Vec<_> =
+                    ctx.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect();
+                let mut expected = Vec::new();
+                if let Some(code) = lost {
+                    expected.push((code, region, 1));
+                }
+                if formatting != 0 {
+                    expected.push((DiagnosticCode::FormattingUnreadable, region, formatting));
+                }
+                let actual_text = value
+                    .content
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Block::plain_text)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_eq!((actual_text.as_str(), actual), (text, expected), "{local}: {source}");
+            }
+        }
+    }
+
+    #[test]
+    fn print_selectors_own_only_the_attributes_that_change_visible_content() {
+        for (attributes, values, blocks, expected) in [
+            (r#"unused="&bad;""#, r#"<oddHeader style="&bad;">Shown</oddHeader>"#, 2, vec![]),
+            (r#"differentFirst="&bad;""#, "", 1, vec![]),
+            (
+                r#"differentFirst="&bad;""#,
+                "<oddHeader>&amp;&amp;unknown;</oddHeader><firstHeader>&unknown;</firstHeader>",
+                2,
+                vec![(Region::Header, 1)],
+            ),
+            (
+                r#"differentFirst="&bad;""#,
+                "<oddHeader>&unknown;</oddHeader><firstHeader>&amp;&amp;unknown;</firstHeader>",
+                2,
+                vec![(Region::Header, 2)],
+            ),
+            (
+                r#"xmlns:x="urn:decoy" x:differentFirst="1" differentFirst="&bad;""#,
+                "<oddHeader>A</oddHeader><firstHeader>B</firstHeader>",
+                2,
+                vec![(Region::Header, 1)],
+            ),
+            (
+                r#"differentFirst="&bad;""#,
+                "<oddHeader>A</oddHeader><firstHeader>A</firstHeader>",
+                2,
+                vec![],
+            ),
+            (r#"differentFirst="&bad;""#, "<oddHeader>A</oddHeader>", 2, vec![(Region::Header, 1)]),
+            (
+                r#"differentFirst="&bad;""#,
+                "<oddHeader>A</oddHeader><firstHeader>B</firstHeader><oddFooter>C</oddFooter><firstFooter>D</firstFooter>",
+                3,
+                vec![(Region::Header, 1), (Region::Footer, 1)],
+            ),
+            (
+                r#"differentFirst="0""#,
+                "<oddHeader>A</oddHeader><firstHeader>&unknown;</firstHeader>",
+                2,
+                vec![],
+            ),
+        ] {
+            let body = format!("<headerFooter {attributes}>{values}</headerFooter>");
+            let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let document = super::super::parse(&ctx, &one_sheet(&body).build()).unwrap();
+            assert_eq!(document.blocks.len(), blocks);
+            assert_eq!(
+                ctx.diagnostics()
+                    .iter()
+                    .filter(|d| d.code == DiagnosticCode::UnresolvedEntity)
+                    .map(|d| (d.region, d.count))
+                    .collect::<Vec<_>>(),
+                expected,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn coalesced_print_text_reports_only_retained_damage_and_unread_content() {
+        for (first, second, count, loss) in [
+            ("&amp;&amp;unknown;", "&unknown;", 2, Some(DiagnosticCode::UnresolvedEntity)),
+            ("�", "_xD800_", 2, Some(DiagnosticCode::InvalidEncoding)),
+            ("Old", "&unknown;", 2, Some(DiagnosticCode::UnresolvedEntity)),
+            ("Same", "Same&amp;G", 1, Some(DiagnosticCode::ImageUnplaced)),
+            ("Same", "Same<x/>", 1, Some(DiagnosticCode::BlockUnread)),
+        ] {
+            let field =
+                |text| format!("<headerFooter><oddHeader>{text}</oddHeader></headerFooter>");
+            let (a, b) = (field(first), field(second));
+            let bytes =
+                Wb { sheets: vec![("one", "", &a), ("two", "", &b)], ..Wb::default() }.build();
+            let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let document = super::super::parse(&ctx, &bytes).unwrap();
+            assert_eq!(
+                document.blocks.iter().filter(|b| matches!(b, Block::HeaderFooter(_))).count(),
+                count
+            );
+            let actual: Vec<_> = ctx
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code.class() == crate::LossClass::Lost)
+                .map(|d| (d.code, d.region, d.unit.map(std::num::NonZeroU32::get), d.count))
+                .collect();
+            let expected =
+                loss.map(|code| vec![(code, Region::Header, Some(2), 1)]).unwrap_or_default();
+            assert_eq!(actual, expected, "{first} → {second}");
+        }
+    }
+
+    #[test]
+    fn uncertain_print_values_do_not_establish_known_inheritance() {
+        for (sources, count, units) in [
+            (["&amp;&amp;unknown;", "&unknown;", "&amp;&amp;unknown;"], 3, vec![2]),
+            (["Known", "&unknown;", ""], 3, vec![2]),
+            (["&unknown;", "&amp;&amp;unknown;", "&amp;&amp;unknown;"], 2, vec![1]),
+            (["&unknown;", "&unknown;", "&unknown;"], 3, vec![1, 2, 3]),
+        ] {
+            let bodies = sources
+                .map(|text| format!("<headerFooter><oddHeader>{text}</oddHeader></headerFooter>"));
+            let bytes = Wb {
+                sheets: ["one", "two", "three"]
+                    .into_iter()
+                    .zip(&bodies)
+                    .map(|(name, body)| (name, "", body.as_str()))
+                    .collect(),
+                ..Wb::default()
+            }
+            .build();
+            let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let doc = super::super::parse(&ctx, &bytes).unwrap();
+            assert_eq!(
+                doc.blocks.iter().filter(|b| matches!(b, Block::HeaderFooter(_))).count(),
+                count,
+                "{sources:?}"
+            );
+            assert_eq!(
+                ctx.diagnostics()
+                    .iter()
+                    .filter(|d| d.code == DiagnosticCode::UnresolvedEntity)
+                    .map(|d| (d.unit.map(std::num::NonZeroU32::get), d.count))
+                    .collect::<Vec<_>>(),
+                units.into_iter().map(|unit| (Some(unit), 1)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    const DUPLICATE_PRINT_CASES: &[(&str, &[(Region, u64)])] = &[
+        (
+            "<headerFooter><oddHeader>A</oddHeader><oddHeader>B</oddHeader></headerFooter>",
+            &[(Region::Header, 1)],
+        ),
+        (
+            "<headerFooter><oddHeader>A</oddHeader><oddHeader/></headerFooter>",
+            &[(Region::Header, 1)],
+        ),
+        (
+            "<headerFooter><oddHeader>A</oddHeader></headerFooter><headerFooter><oddHeader>B</oddHeader></headerFooter>",
+            &[(Region::Header, 1)],
+        ),
+        (
+            "<headerFooter><oddHeader>A</oddHeader></headerFooter><headerFooter/>",
+            &[(Region::Header, 1)],
+        ),
+        ("<headerFooter><oddHeader>A</oddHeader><oddHeader>A</oddHeader></headerFooter>", &[]),
+        (
+            "<headerFooter><oddHeader>&amp;&amp;unknown;</oddHeader><oddHeader>&unknown;</oddHeader></headerFooter>",
+            &[(Region::Header, 1)],
+        ),
+        (
+            "<headerFooter><oddHeader>A</oddHeader><firstHeader>&unknown;</firstHeader><firstHeader>B</firstHeader></headerFooter>",
+            &[],
+        ),
+        (
+            "<headerFooter><oddHeader>A</oddHeader><x:oddHeader xmlns:x=\"urn:decoy\">B</x:oddHeader></headerFooter>",
+            &[],
+        ),
+        ("<headerFooter/><headerFooter/>", &[]),
+    ];
+
+    #[test]
+    fn duplicate_print_definitions_use_first_values_and_report_distinct_or_unknown_alternatives() {
+        for &(body, expected) in DUPLICATE_PRINT_CASES {
+            let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let document = super::super::parse(&ctx, &one_sheet(body).build()).unwrap();
+            let actual = ctx
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code.class() == crate::LossClass::Lost)
+                .map(|d| (d.code, d.region, d.count))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                expected
+                    .iter()
+                    .copied()
+                    .map(|(region, count)| (DiagnosticCode::BlockUnread, region, count))
+                    .collect::<Vec<_>>(),
+                "{body}"
+            );
+            if let Some(Block::HeaderFooter(value)) =
+                document.blocks.iter().find(|block| matches!(block, Block::HeaderFooter(_)))
+            {
+                let text = value
+                    .content
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Block::plain_text)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(text == "A" || text == "&unknown;", "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn print_headers_emit_only_when_requested() {
+        let bytes = one_sheet(
+            "<headerFooter><oddHeader>&amp;LLeft&amp;CCenter &amp;P&amp;RRight</oddHeader></headerFooter>",
+        )
+        .build();
+        let config = crate::Config {
+            headers_footers: crate::HeaderFooterPolicy::Emit,
+            ..crate::Config::default()
+        };
+        let converted = crate::Converter::new(config)
+            .unwrap()
+            .convert(crate::Input::new(&bytes, crate::Format::Excel))
+            .unwrap();
+        assert_eq!(
+            converted.markdown(),
+            "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n> Left\n>\n> Center {page}\n>\n> Right\n"
+        );
+        assert_eq!(
+            converted.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect::<Vec<_>>(),
+            [(DiagnosticCode::FieldToken, Region::Header, 1)]
+        );
     }
 
     #[test]

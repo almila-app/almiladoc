@@ -53,6 +53,8 @@ pub struct Config {
     pub images: ImagePolicy,
     /// Which images a parse leaves gaps after, for the caller's OCR.
     pub image_ocr: ImageOcr,
+    /// Whether XLSX print headers and footers appear; other readers still omit them.
+    pub headers_footers: HeaderFooterPolicy,
 }
 
 impl Config {
@@ -105,8 +107,20 @@ impl Default for Config {
             on_loss: OnLoss::Fail,
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
+            headers_footers: HeaderFooterPolicy::Omit,
         }
     }
+}
+
+/// Whether supported print headers and footers appear in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum HeaderFooterPolicy {
+    /// Count omitted source values without interpreting their print codes.
+    #[default]
+    Omit,
+    /// Preserve their text and fixed dynamic-field tokens in labelled blockquotes.
+    Emit,
 }
 
 /// How an image appears without fetching or interpreting its content.

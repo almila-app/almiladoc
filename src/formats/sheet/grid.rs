@@ -130,6 +130,7 @@ pub(super) struct SheetContent {
     cells: HashMap<CellRef, String>,
     /// Form control checkboxes by the cell they are anchored in.
     pub(super) checkboxes: Checkboxes,
+    pub(super) headers_footers: Vec<(crate::model::HeaderFooterState, Vec<DiagnosticCode>)>,
     hidden_rows: Vec<Range<u64>>,
     hidden_cols: Vec<Range<u64>>,
     /// Merge ranges of more than one cell.
@@ -155,6 +156,7 @@ impl SheetContent {
             grid,
             cells: HashMap::new(),
             checkboxes: Checkboxes::default(),
+            headers_footers: Vec::new(),
             hidden_rows: Vec::new(),
             hidden_cols: Vec::new(),
             merges: Vec::new(),

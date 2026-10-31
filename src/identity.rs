@@ -17,8 +17,9 @@ use crate::config::Config;
 pub struct EngineIdentity {
     /// The crate version.
     pub version: &'static str,
-    /// The lowercase hex SHA-256 of `key=value;` pairs, one per [`Config`]
-    /// field in declaration order, leaving out `limits` and `threads`, which
+    /// The lowercase hex SHA-256 of `key=value;` pairs, one per output-shaping [`Config`]
+    /// field in declaration order, omitting default header/footer policy for compatibility,
+    /// and leaving out `limits` and `threads`, which
     /// never change output that converts.
     pub config_fingerprint: String,
 }
@@ -33,13 +34,18 @@ impl EngineIdentity {
 }
 
 fn fingerprinted(config: &Config) -> String {
-    let Config { limits: _, threads: _, on_loss, images, image_ocr } = config;
-    format!(
+    let Config { limits: _, threads: _, on_loss, images, image_ocr, headers_footers } = config;
+    let mut fields = format!(
         "on_loss={};images={};image_ocr={};",
         on_loss.as_str(),
         images.as_str(),
         image_ocr.as_str()
-    )
+    );
+    match headers_footers {
+        crate::HeaderFooterPolicy::Omit => {}
+        crate::HeaderFooterPolicy::Emit => fields.push_str("headers_footers=emit;"),
+    }
+    fields
 }
 
 #[cfg(test)]
@@ -69,6 +75,13 @@ mod tests {
         for images in [crate::ImagePolicy::AltText, crate::ImagePolicy::Omit] {
             assert_ne!(EngineIdentity::of(&Config { images, ..Config::default() }), fail);
         }
+        assert_ne!(
+            EngineIdentity::of(&Config {
+                headers_footers: crate::HeaderFooterPolicy::Emit,
+                ..Config::default()
+            }),
+            fail
+        );
         let image_ocr = crate::ImageOcr::All;
         assert_ne!(EngineIdentity::of(&Config { image_ocr, ..Config::default() }), fail);
         let mut resourced = Config { threads: 8, ..Config::default() };

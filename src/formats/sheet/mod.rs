@@ -5,6 +5,7 @@
 
 mod controls;
 mod grid;
+mod headers;
 mod numfmt;
 #[cfg(test)]
 mod test_support;

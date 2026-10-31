@@ -830,6 +830,15 @@ class ConversionTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_header_footer_policy_is_frozen_and_fingerprinted(self):
+        omitted = almiladoc.Config()
+        emitted = almiladoc.Config(headers_footers=almiladoc.HeaderFooterPolicy.EMIT)
+        self.assertEqual(omitted.headers_footers, almiladoc.HeaderFooterPolicy.OMIT)
+        self.assertEqual(almiladoc.Config(headers_footers=None), omitted)
+        self.assertEqual(repr(emitted.headers_footers), "HeaderFooterPolicy.EMIT")
+        self.assertEqual(len({omitted, emitted}), 2)
+        self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
+
     def test_defaults_are_almiladocs(self):
         limits = almiladoc.Limits()
         self.assertEqual(limits.max_input_bytes, 256 << 20)
@@ -846,7 +855,7 @@ class ConfigTest(unittest.TestCase):
             r"^Config\(limits=Limits\(max_entry_bytes=134217728, .*, max_work=536870912, "
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
-            r"image_ocr=ImageOcr\.NONE\)$",
+            r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT\)$",
         )
 
     def test_limits_and_config_are_frozen_keyword_only_values(self):

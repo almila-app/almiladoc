@@ -8,6 +8,7 @@
 mod asset;
 mod block;
 mod gap;
+mod header_footer;
 mod inline;
 mod link;
 mod list;
@@ -19,6 +20,8 @@ mod walk;
 pub use asset::{Asset, AssetId};
 pub use block::Block;
 pub use gap::{Gap, GapId, GapReason, OcrOrigin};
+pub use header_footer::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
+pub(crate) use header_footer::{HeaderFooterCertainty, HeaderFooterState};
 pub use inline::{Inline, inlines_are_empty, inlines_to_plain_text};
 pub use link::{AnchorId, ImageOrigin, ImageSource, LinkTarget};
 pub use list::{List, ListItem, MarkerKind};

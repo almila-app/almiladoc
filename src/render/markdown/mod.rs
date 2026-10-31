@@ -30,14 +30,14 @@ use shape::Shapes;
 pub(crate) use sink::Meter;
 use sink::{Sink, Text};
 use std::borrow::Cow;
-use std::cell::Cell as Flag;
+use std::cell::Cell as StateCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Footnote id -> rendered number, shared by all render functions.
 type NoteNumbers = HashMap<String, usize>;
 
 pub(crate) struct Ctx<'d> {
-    preserve_spans: Flag<bool>,
+    preserve_spans: StateCell<bool>,
     fills: &'d GapFills,
     nums: NoteNumbers,
     anchors: AnchorMap,
@@ -47,6 +47,7 @@ pub(crate) struct Ctx<'d> {
     defined_notes: HashSet<&'d str>,
     omitted_notes: HashSet<&'d str>,
     duplicate_notes: u64,
+    side_index: StateCell<usize>,
 }
 
 impl<'d> Ctx<'d> {
@@ -61,18 +62,10 @@ impl<'d> Ctx<'d> {
             doc.notes.iter().filter(|note| defined_notes.insert(note.id.as_str())).collect();
         let duplicate_notes =
             u64::try_from(doc.notes.len() - selected_notes.len()).unwrap_or(u64::MAX);
-        let mut ctx = Self {
-            preserve_spans: Flag::new(false),
-            fills,
-            nums: HashMap::new(),
-            anchors: AnchorMap::default(),
-            shapes: Shapes::default(),
-            images,
-            selected_notes,
-            defined_notes,
-            omitted_notes: HashSet::new(),
-            duplicate_notes,
-        };
+        let mut ctx = Self::empty(fills, images, 0);
+        ctx.selected_notes = selected_notes;
+        ctx.defined_notes = defined_notes;
+        ctx.duplicate_notes = duplicate_notes;
         if images == ImagePolicy::Omit {
             ctx.omit_image_notes(meter)?;
         }
@@ -80,6 +73,22 @@ impl<'d> Ctx<'d> {
         let notes: Vec<&Note> = numbered_notes(&ctx).into_iter().map(|(note, _)| note).collect();
         ctx.anchors = resolve_anchors(doc, fills, &notes, images, &ctx.nums);
         Ok(ctx)
+    }
+
+    fn empty(fills: &'d GapFills, images: ImagePolicy, side_index: usize) -> Self {
+        Self {
+            preserve_spans: StateCell::new(false),
+            fills,
+            nums: HashMap::new(),
+            anchors: AnchorMap::default(),
+            shapes: Shapes::default(),
+            images,
+            selected_notes: Vec::new(),
+            defined_notes: HashSet::new(),
+            omitted_notes: HashSet::new(),
+            duplicate_notes: 0,
+            side_index: StateCell::new(side_index),
+        }
     }
 
     fn omit_image_notes(&mut self, meter: &Meter<'_>) -> Result<(), ConvertError> {
@@ -418,7 +427,11 @@ fn check_nesting(doc: &Document, fills: &GapFills, max: u64) -> Result<(), Conve
 }
 
 fn children<'d>(block: &'d Block, fills: &'d GapFills) -> Vec<Node<'d>> {
-    crate::model::children(block, &|gap| fills.filled(gap))
+    if matches!(block, Block::HeaderFooter(_)) {
+        Vec::new()
+    } else {
+        crate::model::children(block, &|gap| fills.filled(gap))
+    }
 }
 
 fn write_body(
@@ -612,9 +625,35 @@ fn write_block(
             }
         }
         Block::Gap(gap) => return write_gap(gap, rc, sink, last),
+        Block::HeaderFooter(value) => write_header_footer(value, rc, sink)?,
         Block::UnitStart(_) => {}
     }
     Ok(None)
+}
+
+fn write_header_footer(
+    value: &crate::model::HeaderFooter,
+    rc: &Ctx<'_>,
+    sink: &mut Sink<'_>,
+) -> Result<(), ConvertError> {
+    let number = rc.side_index.get().saturating_add(1);
+    rc.side_index.set(number);
+    sink.push_quote();
+    let region = value.region.name();
+    let variant = value.variant.name();
+    let label = if region == "header" { "Header" } else { "Footer" };
+    let inherited = if value.content.is_none() { ", uses default" } else { "" };
+    sink.write(&format!(
+        "<a id=\"almiladoc:{region}:{variant}:{number}\"></a>{label} ({variant}{inherited}):"
+    ))?;
+    if let Some(content) = &value.content {
+        let side = Ctx::empty(rc.fills, rc.images, number);
+        sink.gap(2);
+        write_blocks(content, &side, sink, None)?;
+        rc.side_index.set(side.side_index.get());
+    }
+    sink.pop();
+    Ok(())
 }
 
 /// Write a filled gap's fill in its place after the sibling list marked `last`, else a page's

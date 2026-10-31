@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
-use crate::config::{ConfigError, ImageOcr, ImagePolicy, PageSelection};
+use crate::config::{ConfigError, HeaderFooterPolicy, ImageOcr, ImagePolicy, PageSelection};
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::ledger::{CancelToken, Ledger};
@@ -20,6 +20,7 @@ pub(crate) struct ParseCtx<'a> {
     limits: &'a Limits,
     images: ImagePolicy,
     image_ocr: ImageOcr,
+    headers_footers: HeaderFooterPolicy,
     ocr_pages: PageSelection,
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
@@ -81,6 +82,7 @@ impl<'a> ParseCtx<'a> {
             limits,
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
+            headers_footers: HeaderFooterPolicy::Omit,
             ocr_pages: PageSelection::None,
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
@@ -112,6 +114,14 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn with_image_ocr(self, image_ocr: ImageOcr) -> Self {
         Self { image_ocr, ..self }
+    }
+
+    pub(crate) fn with_headers_footers(self, headers_footers: HeaderFooterPolicy) -> Self {
+        Self { headers_footers, ..self }
+    }
+
+    pub(crate) fn headers_footers_requested(&self) -> bool {
+        self.headers_footers == HeaderFooterPolicy::Emit
     }
 
     pub(crate) fn image_ocr(&self) -> ImageOcr {

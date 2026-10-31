@@ -271,7 +271,7 @@ fn cell_block_text(
             .unwrap_or_default()
             .iter()
             .try_for_each(|block| cell_block_text(block, rc, out, parts)),
-        Block::Rule | Block::UnitStart(_) => Ok(()),
+        Block::Rule | Block::UnitStart(_) | Block::HeaderFooter(_) => Ok(()),
     }
 }
 

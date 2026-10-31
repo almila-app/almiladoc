@@ -45,6 +45,8 @@ pub enum Block {
     Math(String),
     /// Content that awaits OCR.
     Gap(Gap),
+    /// A header or footer update, occurring only in the document body.
+    HeaderFooter(crate::model::HeaderFooter),
 }
 
 impl Block {
@@ -74,7 +76,7 @@ impl Block {
                     .map(|cell| join(cell.blocks.iter().map(Self::plain_text).collect()))
                     .collect(),
             ),
-            Self::Rule | Self::UnitStart(_) | Self::Gap(_) => String::new(),
+            Self::Rule | Self::UnitStart(_) | Self::Gap(_) | Self::HeaderFooter(_) => String::new(),
         }
     }
 }

@@ -287,6 +287,7 @@ impl Converter {
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_images(self.config.images)
             .with_image_ocr(self.config.image_ocr)
+            .with_headers_footers(self.config.headers_footers)
             .with_cancel(cancel);
         #[cfg(test)]
         let parse_ctx = parse_ctx.with_detection_counter(&self.detections);
@@ -797,13 +798,7 @@ impl Parsed {
         self.on_pool(|| {
             let ledger = self.resumed()?;
             let meter = Meter::new(&ledger, self.config.limits.max_output_bytes);
-            crate::json::write(
-                &EngineIdentity::of(&self.config),
-                &self.document,
-                &self.fills,
-                &self.diagnostics,
-                &meter,
-            )
+            crate::json::write(&self.config, &self.document, &self.fills, &self.diagnostics, &meter)
         })
     }
 

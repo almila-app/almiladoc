@@ -137,7 +137,7 @@ pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bo
             Some(blocks) => any(blocks, |b| shows(b, rc, meter))?,
             None => matches!(gap.origin, OcrOrigin::Page(_)),
         },
-        Block::CodeBlock { .. } | Block::Rule => true,
+        Block::CodeBlock { .. } | Block::Rule | Block::HeaderFooter(_) => true,
         Block::UnitStart(_) => false,
         Block::Math(tex) => !tex.trim().is_empty(),
     })
@@ -175,7 +175,7 @@ fn shows_in_cell(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool,
         Block::Gap(gap) => {
             any(rc.fills.filled(gap).unwrap_or_default(), |b| shows_in_cell(b, rc, meter))
         }
-        Block::Rule | Block::UnitStart(_) => Ok(false),
+        Block::Rule | Block::UnitStart(_) | Block::HeaderFooter(_) => Ok(false),
     }
 }
 
@@ -279,7 +279,11 @@ fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, Convert
             Some(blocks) => blank_body(blocks, rc, meter)?,
             None => false,
         },
-        Block::Table(_) | Block::BlockQuote(_) | Block::Rule | Block::UnitStart(_) => false,
+        Block::HeaderFooter(_)
+        | Block::Table(_)
+        | Block::BlockQuote(_)
+        | Block::Rule
+        | Block::UnitStart(_) => false,
     })
 }
 
@@ -542,6 +546,13 @@ mod tests {
                 vec![Block::Math(" ".into())],
             ]),
         ];
+        containers.extend([None, Some(vec![]), Some(vec![text("a"), text("b")])].map(|content| {
+            Block::HeaderFooter(crate::model::HeaderFooter {
+                region: crate::model::HeaderFooterRegion::Header,
+                variant: crate::model::HeaderFooterVariant::Default,
+                content,
+            })
+        }));
         let parse_ctx = ParseCtx::default();
         let mut covered = crate::model::GridBuilder::new(&parse_ctx);
         covered.next_row();

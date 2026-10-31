@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 #[pymodule]
 mod _almiladoc {
     #[pymodule_export]
-    use crate::config::{Config, ImageOcr, ImagePolicy, Limits, OnLoss};
+    use crate::config::{Config, HeaderFooterPolicy, ImageOcr, ImagePolicy, Limits, OnLoss};
     #[pymodule_export]
     use crate::converter::{
         CancelToken, Conversion, Converter, Identity, Inspection, Parsed, sniff,

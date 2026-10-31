@@ -121,6 +121,8 @@ diagnostic_codes! {
     UnmappedSymbol = "unmapped_symbol", Lost;
     /// A page-number or date character whose value the file does not store.
     FieldValueUnread = "field_value_unread", Lost;
+    /// A dynamic print field preserved as a fixed token instead of an evaluated value.
+    FieldToken = "field_token", Info;
     /// An external link target, not resolved, that its label does not show.
     LinkTargetUnread = "link_target_unread", Lost;
     /// A value shown without its number format, where the format may show more than the value or
@@ -390,7 +392,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const CODES: [(&str, LossClass); 46] = [
+    const CODES: [(&str, LossClass); 47] = [
         ("part_unreadable", LossClass::Lost),
         ("unit_unreadable", LossClass::Lost),
         ("cell_value_unreadable", LossClass::Lost),
@@ -415,6 +417,7 @@ mod tests {
         ("ruby_unread", LossClass::Lost),
         ("unmapped_symbol", LossClass::Lost),
         ("field_value_unread", LossClass::Lost),
+        ("field_token", LossClass::Info),
         ("link_target_unread", LossClass::Lost),
         ("number_format_unread", LossClass::Lost),
         ("recovered_stream_order", LossClass::Lost),
