@@ -23,8 +23,12 @@ use crate::ocr::{
     Target, gaps, leave_image_gaps, requests,
 };
 use crate::pool::run_on_pool;
-use crate::render::markdown::{Meter, Unread, check_nesting, render, render_losses};
+use crate::render::markdown::{Meter, Unread, render, render_losses};
 use crate::shared::markdown;
+
+fn check_nesting(doc: &Document, fills: &GapFills, max: u64) -> Result<(), ConvertError> {
+    crate::model::check_nesting(doc, |gap| fills.filled(gap), max).map_err(Into::into)
+}
 
 /// Converts documents under one validated [`Config`]; share it across threads
 /// and calls.

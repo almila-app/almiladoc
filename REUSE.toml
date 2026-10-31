@@ -688,6 +688,7 @@ SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
 path = [
+    "src/model/walk.rs",
     "src/render/markdown/mod.rs",
     "src/render/markdown/tests/mod.rs",
     "tests/fixturegen/docx.py",

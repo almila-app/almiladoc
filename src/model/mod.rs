@@ -14,6 +14,7 @@ mod list;
 mod style;
 mod table;
 mod unit;
+mod walk;
 
 pub use asset::{Asset, AssetId};
 pub use block::Block;
@@ -24,6 +25,8 @@ pub use list::{List, ListItem, MarkerKind};
 pub use style::{Style, VerticalPosition};
 pub use table::{Cell, CellSlot, Table};
 pub use unit::{Region, Unit, UnitKind};
+
+pub(crate) use walk::{Node, check_nesting, children};
 
 pub(crate) use table::{Cover, GridBuilder, GridLedger, Span, Sweep};
 
