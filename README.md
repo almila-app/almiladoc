@@ -116,6 +116,8 @@ The `ocr-http` feature adds `OcrHttp`, an `OcrEngine` that posts each image to a
 
 `Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures.
 
+The optional Rust [offline OCR adapter](ocr-local/) uses verified caller files and shares the core’s located-line layout.
+
 ## Development
 
 `make ci` runs every gate CI runs, with the toolchain `rust-toolchain.toml` pins; it needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs the locked Python tools and CPython 3.11 and 3.15. Each gate is also a target of its own: `fmt`, `clippy`, `test`, `doc`, `features` and `python`, which builds the wheel from the sdist and tests it installed; `policy` (cargo-deny), `locks`, `licences` (regenerates `THIRD-PARTY-LICENSES`), `reuse`, `hygiene`, `actions` (zizmor, online when `GH_TOKEN` is set), `dco` and `fuzz`. `make tools` fetches the sha256-pinned cargo-deny, cargo-about and cargo-fuzz binaries into the build directory. A target the host cannot run reports `NOT RUN` and its reason.

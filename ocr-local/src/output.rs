@@ -25,6 +25,10 @@ pub struct Line {
 }
 
 impl Line {
+    pub(crate) fn into_parts(self) -> (String, Rectangle) {
+        (self.text, self.rectangle)
+    }
+
     /// The exact recognized UTF-8 text.
     #[must_use]
     pub fn text(&self) -> &str {

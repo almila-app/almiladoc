@@ -1,5 +1,6 @@
 //! Offline PP-OCR inference with caller-verified files and ungrouped image-space text regions.
 
+mod adapter;
 mod artifact;
 mod backend;
 mod config;
@@ -10,6 +11,7 @@ mod output;
 mod runtime;
 mod stages;
 
+pub use adapter::LocalOcr;
 pub use artifact::{FileRole, FileSpec, ModelFiles};
 pub use backend::OfflineOcr;
 pub use config::{Config, Limits};
@@ -26,6 +28,9 @@ mod stage_tests;
 pub(crate) fn checkpoint(cancelled: &(impl Fn() -> bool + Sync)) -> Result<(), Error> {
     if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
 }
+
+#[cfg(test)]
+mod adapter_tests;
 
 #[cfg(test)]
 #[path = "../tests/support/logging.rs"]

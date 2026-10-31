@@ -12,6 +12,10 @@ pub(crate) fn buffer_bytes(pixels: u64, source_bytes: u64) -> Option<u64> {
     pixels.checked_mul(RGBA_BYTES_PER_PIXEL + RGB_BYTES_PER_PIXEL)?.checked_add(source_bytes)
 }
 
+pub(crate) fn painted_buffer_bytes(pixels: u64) -> Option<u64> {
+    buffer_bytes(pixels, pixels.checked_mul(RGB_BYTES_PER_PIXEL)?)
+}
+
 pub(crate) fn decode(bytes: &[u8], bounds: &Limits) -> Result<RgbImage, Error> {
     decode_with_cancel(bytes, bounds, &|| false)
 }

@@ -265,8 +265,10 @@ fn transparent_png_pixels_are_composited_against_white() {
 #[test]
 fn decode_accounting_holds_exact_source_and_normalization_boundaries() {
     assert_eq!(decode::buffer_bytes(6, 18), Some(60));
+    assert_eq!(decode::painted_buffer_bytes(6), Some(60));
     assert_eq!(decode::buffer_bytes(u64::MAX, 1), None);
     assert_eq!(decode::buffer_bytes(1, u64::MAX), None);
+    assert_eq!(decode::painted_buffer_bytes(u64::MAX / 10 + 1), None);
     let encoded = picture(ImageFormat::Png);
     let limits = Limits { max_image_bytes: encoded.len(), ..Limits::default() };
     assert_eq!(decode::decode(&encoded, &limits).unwrap().dimensions(), (3, 2));
