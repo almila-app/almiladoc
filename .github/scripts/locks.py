@@ -1,4 +1,4 @@
-"""Reproduce fuzz/Cargo.lock from the root Cargo.lock and fail when the tracked one differs."""
+"""Reproduce excluded-crate lockfiles from Cargo.lock and refuse drift."""
 
 import argparse
 import difflib
@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 PACKAGE = "\n[[package]]\n"
-FUZZ_LOCK = "fuzz/Cargo.lock"
+LOCKS = ("fuzz/Cargo.lock", "ocr-local/Cargo.lock")
 
 
 def entries(text: str) -> tuple[str, list[str]]:
@@ -18,13 +18,24 @@ def entries(text: str) -> tuple[str, list[str]]:
     return header, blocks
 
 
-def name(block: str) -> str:
-    return tomllib.loads(block)["name"]
+def package_id(block: str) -> tuple[str, str, str | None]:
+    package = tomllib.loads(block)
+    return package["name"], package["version"], package.get("source")
 
 
-def seed(root: str, fuzz: str) -> str:
-    shared = {name(block) for block in entries(root)[1]}
-    own = [block for block in entries(fuzz)[1] if name(block) not in shared]
+def seed_key(block: str) -> tuple[str, tuple[int, ...], str | None]:
+    name, version, source = package_id(block)
+    major, minor, patch = map(int, version.split("+", 1)[0].split("-", 1)[0].split("."))
+    if major:
+        return name, (major,), source
+    if minor:
+        return name, (0, minor), source
+    return name, (0, 0, patch), source
+
+
+def seed(root: str, isolated: str) -> str:
+    shared = {seed_key(block) for block in entries(root)[1]}
+    own = [block for block in entries(isolated)[1] if seed_key(block) not in shared]
     return root.rstrip("\n") + "".join(PACKAGE + block.rstrip("\n") + "\n" for block in own)
 
 
@@ -51,10 +62,10 @@ class Scratch:
                 (directory / entry).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, directory / entry, follow_symlinks=False)
 
-    def reproduce(self, fuzz: str) -> str:
-        lock = self.root / FUZZ_LOCK
+    def reproduce(self, relative: str, tracked: str) -> str:
+        lock = self.root / relative
         lock.write_text(
-            seed((self.root / "Cargo.lock").read_text(encoding="utf-8"), fuzz),
+            seed((self.root / "Cargo.lock").read_text(encoding="utf-8"), tracked),
             encoding="utf-8",
             newline="\n",
         )
@@ -65,7 +76,7 @@ class Scratch:
                 "--format-version",
                 "1",
                 "--manifest-path",
-                str(self.root / "fuzz" / "Cargo.toml"),
+                str(lock.with_name("Cargo.toml")),
             ],
             cwd=self.root,
             stdout=subprocess.DEVNULL,
@@ -74,28 +85,28 @@ class Scratch:
         return lock.read_text(encoding="utf-8")
 
 
-def drift(scratch: Scratch, fuzz: str) -> list[str]:
+def drift(scratch: Scratch, relative: str, tracked: str) -> list[str]:
     return list(
         difflib.unified_diff(
-            fuzz.splitlines(),
-            scratch.reproduce(fuzz).splitlines(),
-            f"{FUZZ_LOCK} (tracked)",
-            f"{FUZZ_LOCK} (reproduced)",
+            tracked.splitlines(),
+            scratch.reproduce(relative, tracked).splitlines(),
+            f"{relative} (tracked)",
+            f"{relative} (reproduced)",
             lineterm="",
         )
     )
 
 
-def self_test(scratch: Scratch, fuzz: str) -> int:
-    header, blocks = entries(fuzz)
+def self_test(scratch: Scratch, relative: str, tracked: str) -> int:
+    header, blocks = entries(tracked)
     shared = {
-        name(block)
+        package_id(block)
         for block in entries((scratch.root / "Cargo.lock").read_text(encoding="utf-8"))[1]
     }
     at = next(
         index
         for index, block in enumerate(blocks)
-        if name(block) in shared and "checksum" in block
+        if package_id(block) in shared and "checksum" in block
     )
     target = blocks[at]
     version = tomllib.loads(target)["version"]
@@ -119,11 +130,34 @@ def self_test(scratch: Scratch, fuzz: str) -> int:
     }
     failures = (
         []
-        if not drift(scratch, fuzz)
-        else ["the tracked lockfile does not reproduce, so the planted cases prove nothing"]
+        if not drift(scratch, relative, tracked)
+        else [f"{relative} does not reproduce, so the planted cases prove nothing"]
     )
+    for pinned, isolated, retained in [
+        ("1.0.0", "2.0.0", True),
+        ("1.0.0", "1.9.9", False),
+        ("0.2.0", "0.2.9", False),
+        ("0.2.0", "0.3.0", True),
+        ("0.0.0", "0.0.1", True),
+        ("0.0.1", "0.0.2", True),
+        ("1.0.0+root", "1.0.0+drift", False),
+        ("2.0.0-rc.13", "2.0.0-rc.15", False),
+    ]:
+        sample = f'version = 4\n{PACKAGE}name = "shared"\nversion = "{pinned}"\n'
+        excluded = sample.replace(f'version = "{pinned}"', f'version = "{isolated}"')
+        versions = {
+            tomllib.loads(block)["version"] for block in entries(seed(sample, excluded))[1]
+        }
+        expected = {pinned, isolated} if retained else {pinned}
+        if versions != expected:
+            failures.append(f"seeding {pinned} with {isolated}: {versions}, expected {expected}")
+    other_source = sample + 'source = "registry+https://example.com/index"\n'
+    if len(entries(seed(sample, other_source))[1]) != 2:
+        failures.append("seeding dropped another package source")
     failures += [
-        f"{label} was not reported" for label, text in cases.items() if not drift(scratch, text)
+        f"{relative}: {label} was not reported"
+        for label, text in cases.items()
+        if not drift(scratch, relative, text)
     ]
     for failure in failures:
         print(f"self-test: {failure}", file=sys.stderr)
@@ -144,18 +178,23 @@ def main() -> int:
             encoding="utf-8",
         ).stdout.strip()
     )
-    fuzz = (tree / FUZZ_LOCK).read_text(encoding="utf-8")
+    tracked = {relative: (tree / relative).read_text(encoding="utf-8") for relative in LOCKS}
     with tempfile.TemporaryDirectory() as directory:
         scratch = Scratch(args.cargo, tree, Path(directory))
         if args.self_test:
-            return self_test(scratch, fuzz)
-        problems = drift(scratch, fuzz)
+            results = [self_test(scratch, relative, text) for relative, text in tracked.items()]
+            return int(any(results))
+        problems = [
+            problem
+            for relative, text in tracked.items()
+            for problem in drift(scratch, relative, text)
+        ]
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         print(
-            f"{FUZZ_LOCK} does not reproduce from Cargo.lock: "
-            f"copy Cargo.lock to {FUZZ_LOCK} and run cargo metadata in fuzz/",
+            "excluded-crate locks do not reproduce from Cargo.lock; "
+            "seed each from Cargo.lock and run cargo metadata with its manifest",
             file=sys.stderr,
         )
     return 1 if problems else 0

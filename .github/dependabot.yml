@@ -14,6 +14,14 @@ updates:
       interval: daily
     allow:
       - dependency-name: libfuzzer-sys
+  - package-ecosystem: cargo
+    directory: /ocr-local
+    schedule:
+      interval: daily
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
   - package-ecosystem: uv
     directory: /
     schedule:

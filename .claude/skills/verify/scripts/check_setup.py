@@ -11,6 +11,9 @@ import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / ".github/scripts"))
+from hygiene import licence_text
+
 INSTRUCTIONS = ("AGENTS.md", "CLAUDE.md")
 OVERRIDE = "AGENTS.override.md"
 SETUP_DIR = ".claude"
@@ -309,7 +312,9 @@ def leaks(
             text_of = rust_text(line) if kind == "host" and path.endswith(".rs") else line
             for match in PATTERNS[kind].finditer(text_of):
                 text = match.group(0)
-                if kind == "e-mail address" and (text in public or PUBLIC_MAIL.search(text)):
+                if kind == "e-mail address" and (
+                    text in public or PUBLIC_MAIL.search(text) or licence_text(path)
+                ):
                     continue
                 found.append(f"{path}:{number}: {kind}: {text}")
     return found
@@ -601,6 +606,16 @@ def self_test_cases() -> tuple[list[str], int]:
         failures.append(f"public scan misjudges: {public}")
     if not public_leaks([("a.rs", 1, f'let h = "printer{DOT}local";')], set()):
         failures.append("a host in a Rust string is not reported")
+    notice = "ocr-local/THIRD-PARTY-LICENSES"
+    contact = f"someone{AT}corp.co"
+    if public_leaks([(notice, 1, contact)], set()):
+        failures.append("a third-party licence contact is reported")
+    if not public_leaks([(notice + ".rs", 1, contact)], set()):
+        failures.append("a contact outside the exact licence path is not reported")
+    if not public_leaks([("other/THIRD-PARTY-LICENSES", 1, contact)], set()):
+        failures.append("a contact under an unrelated licence filename is not reported")
+    if not public_leaks([(notice, 1, lan_ip)], set()):
+        failures.append("a private address inside licence text is not reported")
     with tempfile.TemporaryDirectory() as scratch:
         git(Path(scratch), "init", "-q")
         try:
@@ -608,7 +623,7 @@ def self_test_cases() -> tuple[list[str], int]:
             failures.append("a git failure reads as nothing ignored")
         except subprocess.CalledProcessError:
             pass
-    return failures, len(defects) + len(unreported) + len(foreign) + 4
+    return failures, len(defects) + len(unreported) + len(foreign) + 8
 
 
 def main() -> int:

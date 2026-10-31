@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 LICENSOR_CONTACT = b"almilaapp@gmail.com"
-LICENCE_TEXTS = ("LICENSE", "LICENSES/", "THIRD-PARTY-LICENSES")
+LICENCE_TEXTS = ("LICENSE", "LICENSES/", "THIRD-PARTY-LICENSES", "ocr-local/THIRD-PARTY-LICENSES")
 RESERVED_MAIL_DOMAIN = re.compile(
     rb"(?:^|\.)(?:example\.(?:com|net|org)|example|test|invalid|localhost)$", re.IGNORECASE
 )
@@ -92,8 +92,12 @@ SCANNERS = {
 }
 
 
+def licence_text(path: str | None) -> bool:
+    return path is not None and (path in LICENCE_TEXTS or path.startswith(LICENCE_TEXTS[1]))
+
+
 def allowed_mail(address: bytes, path: str | None) -> bool:
-    if path is not None and (path in LICENCE_TEXTS or path.startswith(LICENCE_TEXTS[1])):
+    if licence_text(path):
         return True
     domain = address.rsplit(b"@", 1)[1]
     return (
@@ -218,6 +222,7 @@ def self_test() -> int:
         + "host.test\n",
         "LICENSES/X.txt": "Copyright someone <someone" + at + "corp.co>\n",
         "THIRD-PARTY-LICENSES": "someone" + at + "corp.co\n",
+        "ocr-local/THIRD-PARTY-LICENSES": "someone" + at + "corp.co\n",
         "hex.txt": "fcde12ab checksum\n",
         "upper.LOG": "a log only a case-folding config would ignore\n",
     }

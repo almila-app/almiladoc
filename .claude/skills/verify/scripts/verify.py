@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[4]
 SKILLS = ROOT / ".claude/skills"
@@ -35,11 +36,19 @@ CORE_API = (
     "src/limits.rs",
     "src/model/",
 )
-RUST = ("src/", "tests/", "python/src/", "fuzz/fuzz_targets/")
+RUST = (
+    "src/",
+    "tests/",
+    "python/src/",
+    "fuzz/fuzz_targets/",
+    "ocr-local/src/",
+    "ocr-local/tests/",
+)
 ROOT_CARGO = ("Cargo.toml", "Cargo.lock")
 CARGO = (*ROOT_CARGO, "python/Cargo.toml")
 TOOLCHAIN = "rust-toolchain.toml"
 FUZZ_CARGO = ("fuzz/Cargo.toml", "fuzz/Cargo.lock")
+NATIVE_CARGO = ("ocr-local/Cargo.toml", "ocr-local/Cargo.lock")
 UV = ("pyproject.toml", "uv.lock")
 MAKEFILE = "Makefile"
 DIST = ("scripts/check_dist.py", "LICENSE", "NOTICE")
@@ -191,34 +200,53 @@ def target(*targets: str, cargo: bool = False) -> Callable[["Change"], Outcome]:
     return lambda _: make(*targets, tools=("cargo",) if cargo else ())
 
 
+def diagnostic_path(name: str, workspace: Path) -> str:
+    path = Path(name)
+    resolved = (path if path.is_absolute() else workspace / path).resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
 def policy_lints(change: Change) -> Outcome:
     flags = [flag for lint in POLICY_LINTS for flag in ("-W", lint)]
-    argv = ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--all-features"]
-    print(f"$ {' '.join(argv)} --message-format=json -- {' '.join(flags)}", flush=True)
-    done = subprocess.run(
-        [*argv, "--message-format=json", "--", *flags],
-        cwd=ROOT,
-        env=insta_env(),
-        capture_output=True,
-        text=True,
-    )
     changed = {path: {n for n, _ in lines} for path, lines in change.added_lines(".rs").items()}
     findings: dict[tuple[str, int, str], str] = {}
-    for raw in done.stdout.splitlines():
-        message = json.loads(raw)
-        body = message.get("message") or {}
-        if message.get("reason") != "compiler-message" or not body.get("spans"):
-            continue
-        if body["level"] not in ("warning", "error"):
-            continue
-        span = next((s for s in body["spans"] if s["is_primary"]), body["spans"][0])
-        code = (body.get("code") or {}).get("code") or body["level"]
-        if code in POLICY_LINTS and span["line_start"] not in changed.get(span["file_name"], ()):
-            continue
-        findings[(span["file_name"], span["line_start"], code)] = body["message"]
+    failures = []
+    environment = insta_env()
+    environment.setdefault("CARGO_TARGET_DIR", str(ROOT / "target"))
+    for package, workspace in (
+        (("--workspace",), ROOT),
+        (("--manifest-path", "ocr-local/Cargo.toml"), ROOT / "ocr-local"),
+    ):
+        argv = ["cargo", "clippy", "--locked", *package, "--all-targets", "--all-features"]
+        print(f"$ {' '.join(argv)} --message-format=json -- {' '.join(flags)}", flush=True)
+        done = subprocess.run(
+            [*argv, "--message-format=json", "--", *flags],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        for raw in done.stdout.splitlines():
+            message = json.loads(raw)
+            body = message.get("message") or {}
+            if message.get("reason") != "compiler-message" or not body.get("spans"):
+                continue
+            if body["level"] not in ("warning", "error"):
+                continue
+            span = next((s for s in body["spans"] if s["is_primary"]), body["spans"][0])
+            code = (body.get("code") or {}).get("code") or body["level"]
+            file = diagnostic_path(span["file_name"], workspace)
+            if code in POLICY_LINTS and span["line_start"] not in changed.get(file, ()):
+                continue
+            findings[(file, span["line_start"], code)] = body["message"]
+        if done.returncode:
+            failures.append(tail(done.stderr))
     report = [f"{file}:{line}: {code}\n  {text}" for (file, line, code), text in findings.items()]
-    if done.returncode and not report:
-        report.append(tail(done.stderr))
+    if not report:
+        report.extend(failures)
     return Outcome("FAIL", "\n".join(report)) if report else Outcome("PASS")
 
 
@@ -260,7 +288,8 @@ def commits(change: Change) -> Outcome:
         subject = message.splitlines()[0]
         if voice := COMMIT_VOICE.search(message):
             wrong.append(f"{subject}: names `{voice.group(0)}`; commits read as the author's")
-        lines = [(subject, n, text) for n, text in enumerate(message.splitlines(), 1)]
+        label = f"commit:{subject.split(maxsplit=1)[0]}"
+        lines = [(label, n, text) for n, text in enumerate(message.splitlines(), 1)]
         wrong += public_leaks(lines, known)
     own = Outcome("FAIL", "\n".join(wrong)) if wrong else Outcome("PASS")
     counted = Outcome("PASS", f"commits: {len(messages)} after the base")
@@ -295,20 +324,31 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
             rust,
             lambda c: (
                 c.touches(*RUST, suffix=".rs")
-                + c.touches(*CARGO, TOOLCHAIN, "rustfmt.toml", MAKEFILE)
+                + c.touches(*CARGO, *NATIVE_CARGO, TOOLCHAIN, "rustfmt.toml", MAKEFILE)
             ),
         ),
         (
             "test",
             target("test", cargo=True),
-            lambda c: c.touches("src/", "tests/", *CARGO, TOOLCHAIN, MAKEFILE),
+            lambda c: c.touches(
+                "src/",
+                "tests/",
+                "ocr-local/src/",
+                "ocr-local/tests/",
+                *CARGO,
+                *NATIVE_CARGO,
+                TOOLCHAIN,
+                MAKEFILE,
+            ),
         ),
         (
             "doc",
             target("doc", cargo=True),
             lambda c: (
-                c.touches("src/", "python/src/", suffix=".rs")
-                + c.touches(*CARGO, TOOLCHAIN, MAKEFILE)
+                c.touches(
+                    "src/", "python/src/", "ocr-local/src/", "ocr-local/tests/", suffix=".rs"
+                )
+                + c.touches(*CARGO, *NATIVE_CARGO, TOOLCHAIN, MAKEFILE)
             ),
         ),
         (
@@ -346,18 +386,39 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
         (
             "policy",
             target("policy", cargo=True),
-            lambda c: c.touches(*CARGO, *FUZZ_CARGO, "deny.toml", "deny-offline.toml", MAKEFILE),
+            lambda c: c.touches(
+                *CARGO,
+                *FUZZ_CARGO,
+                *NATIVE_CARGO,
+                "deny.toml",
+                "deny-offline.toml",
+                "ocr-local/deny.toml",
+                MAKEFILE,
+            ),
         ),
         (
             "locks",
             target("locks", cargo=True),
-            lambda c: c.touches(*CARGO, *FUZZ_CARGO, ".github/scripts/locks.py", *UV, MAKEFILE),
+            lambda c: c.touches(
+                *CARGO,
+                *FUZZ_CARGO,
+                *NATIVE_CARGO,
+                ".github/scripts/locks.py",
+                *UV,
+                MAKEFILE,
+            ),
         ),
         (
             "licences",
             target("licences", cargo=True),
             lambda c: c.touches(
-                *CARGO, "about.toml", "about.hbs", "THIRD-PARTY-LICENSES", MAKEFILE
+                *CARGO,
+                *NATIVE_CARGO,
+                "about.toml",
+                "about.hbs",
+                "THIRD-PARTY-LICENSES",
+                "ocr-local/THIRD-PARTY-LICENSES",
+                MAKEFILE,
             ),
         ),
         ("reuse", target("reuse"), lambda c: c.paths),
@@ -411,6 +472,14 @@ def self_test() -> int:
         "tests/snapshots/snapshots__docx__other.docx.diagnostics.snap": every_path | {"test"},
         "fuzz/fuzz_targets/xlsx.rs": every_path | {"rust", "fuzz"},
         "fuzz/Cargo.lock": every_path | {"fuzz", "policy", "locks"},
+        "ocr-local/src/lib.rs": every_path | {"rust", "test", "doc"},
+        "ocr-local/tests/native.rs": every_path | {"rust", "test", "doc"},
+        "ocr-local/Cargo.toml": every_path
+        | {"rust", "test", "doc", "policy", "locks", "licences"},
+        "ocr-local/Cargo.lock": every_path
+        | {"rust", "test", "doc", "policy", "locks", "licences"},
+        "ocr-local/deny.toml": every_path | {"policy"},
+        "ocr-local/THIRD-PARTY-LICENSES": every_path | {"licences"},
         "Cargo.lock": every_path | make_gates | {"rust"},
         "uv.lock": every_path | {"python", "locks", "actions", "commits"},
         "Makefile": every_path | make_gates | {"rust", "actions", "commits"},
@@ -455,7 +524,108 @@ def self_test() -> int:
         failures.append("a target's own note is dropped from a pass")
     if combine(Outcome("PASS"), Outcome("NOT RUN", "x"), Outcome("FAIL", "y")).status != "FAIL":
         failures.append("combine lets a failure through")
-    print("\n".join(failures) or f"self-test: {len(cases) + len(readings) + 4} cases pass")
+    native = "ocr-local/src/lib.rs"
+    lint = POLICY_LINTS[0]
+    external = str(ROOT.parent / "outside.rs")
+    lint_cases = [
+        (native, 1, "src/lib.rs", lint, 0, "FAIL"),
+        ("src/lib.rs", 1, "src/lib.rs", lint, 0, "PASS"),
+        ("src/lib.rs", 0, "src/lib.rs", lint, 0, "FAIL"),
+        (native, 0, "src/lib.rs", lint, 0, "PASS"),
+        (native, 1, str(ROOT / native), lint, 0, "FAIL"),
+        ("src/lib.rs", 1, str(ROOT / "src/lib.rs"), lint, 0, "FAIL"),
+        (native, 1, external, lint, 0, "PASS"),
+        ("src/lib.rs", 1, "../src/lib.rs", lint, 0, "FAIL"),
+        ("ocr-local/src/naïve file.rs", 1, "src/naïve file.rs", lint, 0, "FAIL"),
+        (native, 1, "", lint, 101, "FAIL"),
+        (native, 1, external, lint, 101, "FAIL"),
+        (native, 1, external, "E0308", 0, "FAIL"),
+        ("src/lib.rs", 0, "", lint, 101, "FAIL"),
+    ]
+    for changed, invocation, filename, code, returncode, expected in lint_cases:
+        replies = [subprocess.CompletedProcess([], 0, "", "") for _ in range(2)]
+        reply = replies[invocation]
+        reply.returncode = returncode
+        reply.stderr = "compiler failed" if returncode else ""
+        if filename:
+            reply.stdout = json.dumps(
+                {
+                    "reason": "compiler-message",
+                    "message": {
+                        "level": "warning",
+                        "code": {"code": code},
+                        "message": "planted diagnostic",
+                        "spans": [{"file_name": filename, "line_start": 1, "is_primary": True}],
+                    },
+                }
+            )
+        with (
+            patch.object(Change, "added_lines", return_value={changed: [(1, "changed")]}),
+            patch.object(subprocess, "run", side_effect=replies),
+            patch("builtins.print"),
+        ):
+            found = policy_lints(Change("", [])).status
+        if found != expected:
+            failures.append(f"lint {invocation}:{filename}: {found}, expected {expected}")
+    at, dot = chr(64), chr(46)
+    private_mail = f"synthetic-private{at}corp{dot}co"
+    contact = f"Co-authored-by: Synthetic Contributor <{private_mail}>"
+    commit_cases = [
+        ("licence subject", "LICENSE", contact, set(), "FAIL", "e-mail address"),
+        (
+            "licence directory subject",
+            "LICENSES/BUSL-1.1.txt",
+            contact,
+            set(),
+            "FAIL",
+            "e-mail address",
+        ),
+        ("Rust-looking subject", "Restore report.rs", f"printer{dot}local", set(), "FAIL", "host"),
+        (
+            "home path",
+            "Restore report.rs",
+            "/ho" + "me/synthetic/input",
+            set(),
+            "FAIL",
+            "home path",
+        ),
+        (
+            "private address",
+            "Restore report.rs",
+            dot.join(("192", "168", "1", "9")),
+            set(),
+            "FAIL",
+            "private IP address",
+        ),
+        ("ticket", "Restore report.rs", "ABC" + "-42", set(), "FAIL", "ticket id"),
+        ("public contact", "LICENSE", f"fixture{at}example.com", set(), "PASS", ""),
+        ("published contact", "LICENSE", contact, {private_mail}, "PASS", ""),
+        (
+            "noreply contact",
+            "Restore report.rs",
+            f"fixture{at}users.noreply.github.com",
+            set(),
+            "PASS",
+            "",
+        ),
+        ("author voice", "Restore wording", "Claude wrote this", set(), "FAIL", "names `Claude`"),
+    ]
+    for label, subject, body, known, expected, finding in commit_cases:
+        with (
+            patch(__name__ + ".git", return_value=f"abc123 {subject}\n{body}\x1e") as log,
+            patch(__name__ + ".published_mail", return_value=known),
+            patch(__name__ + ".make", return_value=Outcome("PASS")) as dco,
+            patch(__name__ + ".public_leaks", wraps=public_leaks) as scan,
+        ):
+            found = commits(Change("base", []))
+        log.assert_called_once_with("log", "--format=%h %s%n%b%x1e", "base..HEAD")
+        dco.assert_called_once_with("dco")
+        if found.status != expected or (finding and finding not in found.detail):
+            failures.append(f"commit {label}: {found.status}, expected {expected} {finding}")
+        if {path for path, _, _ in scan.call_args.args[0]} != {"commit:abc123"}:
+            failures.append(f"commit {label}: scanner label is influenced by the subject")
+    count = len(cases) + len(readings) + len(lint_cases) + len(commit_cases) + 4
+    print("\n".join(failures) or f"self-test: {count} cases pass")
     return 1 if failures else 0
 
 

@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: true
-          key: cargo-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'Makefile', '.github/workflows/gates.yml') }}
+          key: cargo-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'ocr-local/Cargo.toml', 'ocr-local/Cargo.lock', 'Makefile', '.github/workflows/gates.yml') }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
@@ -43,7 +43,7 @@ jobs:
         if: steps.probe.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: cargo-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'Makefile', '.github/workflows/gates.yml') }}
+          key: cargo-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'ocr-local/Cargo.toml', 'ocr-local/Cargo.lock', 'Makefile', '.github/workflows/gates.yml') }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
@@ -76,7 +76,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           lookup-only: true
-          key: cargo-rust-arm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'Makefile', '.github/workflows/gates.yml') }}
+          key: cargo-rust-arm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'ocr-local/Cargo.toml', 'ocr-local/Cargo.lock', 'Makefile', '.github/workflows/gates.yml') }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
@@ -88,7 +88,7 @@ jobs:
         if: steps.probe.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: cargo-rust-arm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'Makefile', '.github/workflows/gates.yml') }}
+          key: cargo-rust-arm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'python/Cargo.toml', 'ocr-local/Cargo.toml', 'ocr-local/Cargo.lock', 'Makefile', '.github/workflows/gates.yml') }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache

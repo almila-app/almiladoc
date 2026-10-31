@@ -133,9 +133,16 @@ def pythons(root: Path) -> tuple[list[str], str]:
 
 
 def advisory_ignores(root: Path) -> list[str]:
-    entries = tomllib.loads((root / "deny.toml").read_text(encoding="utf-8"))["advisories"].get(
-        "ignore", []
-    )
+    configs = [root / "deny.toml"]
+    if (native := root / "ocr-local/deny.toml").is_file():
+        configs.append(native)
+    entries = [
+        entry
+        for path in configs
+        for entry in tomllib.loads(path.read_text(encoding="utf-8"))["advisories"].get(
+            "ignore", []
+        )
+    ]
     return [entry if isinstance(entry, str) else entry["id"] for entry in entries]
 
 
@@ -177,7 +184,7 @@ def locked_versions(root: Path) -> dict[str, str]:
 def locked_crates(root: Path) -> set[str]:
     return {
         package["name"]
-        for lock in ("Cargo.lock", "fuzz/Cargo.lock")
+        for lock in ("Cargo.lock", "fuzz/Cargo.lock", "ocr-local/Cargo.lock")
         for package in tomllib.loads((root / lock).read_text(encoding="utf-8"))["package"]
     }
 
@@ -492,10 +499,19 @@ def self_test() -> int:
     expect(consistency(ROOT) == [], f"consistency {consistency(ROOT)}")
     expect(
         advisory_ignores(ROOT)
-        == re.findall(r"RUSTSEC-\d{4}-\d{4}", (ROOT / "deny.toml").read_text(encoding="utf-8")),
+        == re.findall(
+            r"RUSTSEC-\d{4}-\d{4}",
+            "".join(
+                (ROOT / path).read_text(encoding="utf-8")
+                for path in ("deny.toml", "ocr-local/deny.toml")
+            ),
+        ),
         "advisory ignores",
     )
-    expect({"zip", "libfuzzer-sys"} <= locked_crates(ROOT), "locked crates of both lock files")
+    expect(
+        {"zip", "libfuzzer-sys", "oar-ocr-core"} <= locked_crates(ROOT),
+        "locked crates of every lock file",
+    )
     clarified = clarifications(ROOT)
     expect(
         clarified.keys() <= locked_versions(ROOT).keys()

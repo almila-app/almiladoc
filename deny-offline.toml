@@ -18,4 +18,8 @@ deny = [
     { crate = "reqwest", reason = "the default build makes no network call" },
     { crate = "libloading", reason = "the default build loads no library at run time" },
     { crate = "rten", reason = "local OCR is opt-in" },
+    { crate = "oar-ocr", reason = "local OCR lives in its separate crate" },
+    { crate = "oar-ocr-core", reason = "local OCR lives in its separate crate" },
+    { crate = "ort", reason = "local OCR lives in its separate crate" },
+    { crate = "ort-sys", reason = "local OCR lives in its separate crate" },
 ]

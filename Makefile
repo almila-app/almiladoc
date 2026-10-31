@@ -47,6 +47,7 @@ refresh_index = $(CARGO) update --quiet --dry-run --manifest-path $(1)
 need = if ! command -v $(1) >/dev/null; then $(call not_run,$(1) is not installed); exit 0; fi
 policy_sync = UV_PROJECT_ENVIRONMENT=$(POLICY) $(UV) sync --locked --only-group policy --quiet
 policy_env = $(call need,$(firstword $(UV))); $(policy_sync)
+native_cargo = CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),target))" $(CARGO)
 
 # fetch(url, sha256, members): an archive's binaries, installed beside $@ only once its sha256 matches.
 define fetch
@@ -66,20 +67,24 @@ ci: fmt clippy test doc features python policy locks licences reuse hygiene acti
 
 fmt:
 	$(CARGO) fmt --all --check
+	$(native_cargo) fmt --manifest-path ocr-local/Cargo.toml --check
 	rustfmt --check --edition 2024 fuzz/fuzz_targets/*.rs fuzz/src/*.rs
 
 clippy:
 	$(CARGO) clippy --locked --workspace --all-targets --all-features
 	$(CARGO) clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features
+	$(native_cargo) clippy --locked --manifest-path ocr-local/Cargo.toml --all-targets --all-features
 
 test:
 	$(CARGO) test --locked --all-features
+	$(native_cargo) test --locked --manifest-path ocr-local/Cargo.toml --all-features
 	$(CARGO) test --locked --all-features --config profile.test.opt-level=0 --test it bounds::every_recursion_converts_at_the_ceiling_and_refuses_one_level_more
 	pending=$$(find . -path ./target -prune -o \( -name '*.snap.new' -o -name '*.pending-snap' \) -print)
 	if [ -n "$$pending" ]; then echo "unreviewed snapshots:"; echo "$$pending"; exit 1; fi
 
 doc:
 	$(CARGO) doc --locked --workspace --all-features --no-deps --document-private-items
+	$(native_cargo) doc --locked --manifest-path ocr-local/Cargo.toml --all-features --no-deps --document-private-items
 
 features:
 	$(CARGO) clippy --locked -p almiladoc --all-targets --no-default-features
@@ -133,6 +138,8 @@ policy: $(CARGO_DENY)
 	$(call refresh_index,fuzz/Cargo.toml)
 	$(CARGO_DENY) --manifest-path fuzz/Cargo.toml --all-features --locked --config deny.toml check
 	$(CARGO_DENY) --manifest-path python/Cargo.toml --locked --config deny-offline.toml check bans
+	$(call refresh_index,ocr-local/Cargo.toml)
+	$(CARGO_DENY) --manifest-path ocr-local/Cargo.toml --all-features --locked --config ocr-local/deny.toml check advisories bans sources
 	mkdir -p $(OUT)
 	$(CARGO) tree --locked -p almiladoc -e normal,build --target all --prefix none --format '{p}' > $(OUT)/default-graph.txt
 	banned=$$(sed -n 's/.*crate = "\([^"]*\)".*/\1/p' deny-offline.toml | paste -sd '|')
@@ -149,12 +156,17 @@ locks:
 licences: $(CARGO_ABOUT)
 	$(call need_tool,$(CARGO_ABOUT))
 	mkdir -p $(OUT)
-	$(CARGO_ABOUT) generate --locked --workspace --all-features --fail --config about.toml --output-file $(OUT)/THIRD-PARTY-LICENSES about.hbs
-	if ! cmp -s $(OUT)/THIRD-PARTY-LICENSES THIRD-PARTY-LICENSES; then
-	  cp $(OUT)/THIRD-PARTY-LICENSES THIRD-PARTY-LICENSES
-	  echo "THIRD-PARTY-LICENSES was stale and is regenerated: review and commit it"
-	  exit 1
-	fi
+	changed=0
+	for manifest in Cargo.toml ocr-local/Cargo.toml; do
+	  $(CARGO_ABOUT) generate --locked --workspace --all-features --fail --manifest-path "$$manifest" --config about.toml --output-file $(OUT)/THIRD-PARTY-LICENSES about.hbs
+	  destination=$$(dirname "$$manifest")/THIRD-PARTY-LICENSES
+	  if ! cmp -s $(OUT)/THIRD-PARTY-LICENSES "$$destination"; then
+	    cp $(OUT)/THIRD-PARTY-LICENSES "$$destination"
+	    echo "$$destination was stale and is regenerated: review and commit it"
+	    changed=1
+	  fi
+	done
+	exit "$$changed"
 
 reuse:
 	$(policy_env)
