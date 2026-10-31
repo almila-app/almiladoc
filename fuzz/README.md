@@ -25,9 +25,12 @@ and format-code parsers rather than dying at the container gate. `xlsx` takes
 a whole workbook, and its seeds cover all three containers because the
 frontend picks the reader from the bytes.
 
-Every target converts through `converter()` in `src/lib.rs`, which the whole-input targets reach as
-`convert(data, format)`: the default configuration with `max_grid_slots` lowered, so a grid at its
-limit stays inside libFuzzer's slow-unit bound.
+Every target but `pdf_raster` converts through `converter()` in `src/lib.rs`, which the whole-input
+targets reach as `convert(data, format)`: the default configuration with `max_grid_slots` lowered,
+so a grid at its limit stays inside libFuzzer's slow-unit bound.
+
+`pdf_raster` parses a PDF with every page a gap through `painting_converter()`, which lowers
+`max_work` too, paints every page at up to 50 dpi within 1 Mpx twice, and fails on any difference.
 
 `docx_body`, `pptx_slide`, `xlsx_sheet` and `odf_content` write the input as the one fuzzed part of a
 stored package that `src/lib.rs` builds, and name its format, so detection never reads fuzzed

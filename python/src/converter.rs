@@ -31,10 +31,9 @@ impl CancelToken {
         Self(almiladoc::CancelToken::new())
     }
 
-    /// Cancel every call holding this token, from any thread: each raises
-    /// `CancelledError` at its next unit of work, a PDF's between its pages,
-    /// as do `render`, `to_json`, `fill_gap` and `ocr_requests` on a `Parsed`
-    /// a parse holding it made.
+    /// Cancel calls and `Parsed` operations holding this token with `CancelledError` at
+    /// their next charged step.
+    /// PDF extraction checks between pages; painting checks each step.
     fn cancel(&self) {
         self.0.cancel();
     }

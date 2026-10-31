@@ -18,9 +18,10 @@ const MIB: u64 = 1024 * 1024;
 ///
 /// The defaults admit ordinary large documents.
 ///
-/// Limits and cancellation reach the PDF engine (unpdf) only between pages:
-/// inside a page its stream decoding takes no caller budget, so isolate PDF
-/// work in a memory-capped worker that is recycled after a failure.
+/// Limits and cancellation reach the PDF engine (unpdf) between pages and
+/// before each step of painting one: inside a page its stream decoding takes
+/// no caller budget, so isolate PDF work in a memory-capped worker that is
+/// recycled after a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -91,10 +92,9 @@ pub struct Limits {
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
     /// ahead at and writes, 64 bytes of Markdown or JSON written, the
     /// Markdown events of each gap's fill, 16 bytes of each image an OCR
-    /// request copies, and of a page it paints 128 pixels before painting and
-    /// 16 bytes of its PNG after: those two rates and
-    /// [`RasterSpec::max_pixels`](crate::RasterSpec::max_pixels) alone bound
-    /// painting. Detection shares these counters with parsing,
+    /// request copies, and of a page it paints 128 pixels before painting,
+    /// 128 pixels of each step's work as unpdf prices it, rounded up, and 16
+    /// bytes of its PNG after. Detection shares these counters with parsing,
     /// and rendering continues the same ledger. The default, two units per
     /// byte of [`Limits::max_input_bytes`], admits every input whose cost is
     /// linear at that rate: a 256 MiB RTF of one hex picture charges

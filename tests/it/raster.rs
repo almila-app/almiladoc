@@ -1,11 +1,11 @@
 //! A PDF page gap's request carries its page painted as a PNG under the engine's raster spec.
 
 use crate::pdf::write_pdf;
-use crate::support::{converter, fixture, limited, reported, trips};
+use crate::support::{configured, converter, fixture, limited, reported, trips};
 use almiladoc::model::OcrOrigin;
 use almiladoc::{
     CancelToken, ConfigError, ConvertError, Converter, DiagnosticCode, Format, GapFill, Input,
-    Limit, OcrEngine, OcrOutcome, OcrRequest, PageSelection, Parsed, RasterSpec, Region,
+    Limit, Limits, OcrEngine, OcrOutcome, OcrRequest, PageSelection, Parsed, RasterSpec, Region,
 };
 
 fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
@@ -173,7 +173,7 @@ fn an_engine_and_the_hand_run_requests_fill_pages_alike() {
 }
 
 #[test]
-fn a_page_s_pixels_are_charged_before_it_is_painted_and_its_png_after() {
+fn a_page_s_pixels_are_charged_before_it_is_painted_its_steps_as_it_paints_and_its_png_after() {
     let bytes = page_pdf("/MediaBox [0 0 612 792]");
     let mut unlimited = every_page(&converter(1), &bytes);
     let [request] =
@@ -188,12 +188,58 @@ fn a_page_s_pixels_are_charged_before_it_is_painted_and_its_png_after() {
     };
     let parse = least(&|_| true);
     let full = least(&|parsed| parsed.ocr_requests(&RasterSpec::default(), None).is_ok());
-    assert_eq!(full, parse + pixels + bytes_charged);
+    let painting = full - parse - pixels - bytes_charged;
+    let (operators, glyphs) = (5, 7);
+    assert!(painting >= pixels + operators + glyphs, "{painting}");
     for max in [parse + pixels - 1, full - 1] {
         let input = Input::new(&bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
         let mut parsed = limited(|limits| limits.max_work = max).parse(input).unwrap();
         let refused = parsed.ocr_requests(&RasterSpec::default(), None);
         assert!(trips(&refused, Limit::Work, max), "{max}: {refused:?}");
+    }
+}
+
+fn filled_pages(side: u32, fills: usize, page_count: usize) -> Vec<u8> {
+    let kids: Vec<_> = (4..4 + page_count).map(|id| format!("{id} 0 R")).collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{}] /Count {page_count} >>", kids.join(" ")),
+        plain(&format!("0 0 1 rg 0 0 {side} {side} re f\n").repeat(fills)),
+    ];
+    objects.extend((0..page_count).map(|_| {
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {side} {side}] /Contents 3 0 R >>")
+    }));
+    write_pdf(&objects)
+}
+
+#[test]
+fn a_page_painting_its_whole_area_twenty_thousand_times_trips_max_work() {
+    let max = Limits::default().max_work;
+    let mut parsed = every_page(&converter(1), &filled_pages(1450, 20_000, 1));
+    let refused = parsed.ocr_requests(&RasterSpec::default(), None);
+    assert!(trips(&refused, Limit::Work, max), "{refused:?}");
+}
+
+#[test]
+fn pages_on_any_thread_count_share_one_paint_budget() {
+    let spec = RasterSpec::default();
+    let one = filled_pages(72, 100, 1);
+    let two = filled_pages(72, 100, 2);
+    let one_page_work = crate::bounds::least_work(|converter| {
+        let input = Input::new(&one, Format::Pdf).with_ocr_pages(PageSelection::All);
+        converter.parse(input).is_ok_and(|mut parsed| parsed.ocr_requests(&spec, None).is_ok())
+    });
+    let max = one_page_work + one_page_work / 2;
+    let images = |threads| requested(&mut every_page(&converter(threads), &two), &spec);
+    assert_eq!(images(1), images(4));
+    for threads in [1, 4] {
+        let bounded = configured(|config| {
+            config.threads = threads;
+            config.limits.max_work = max;
+        });
+        let mut parsed = every_page(&bounded, &two);
+        let refused = parsed.ocr_requests(&spec, None);
+        assert!(trips(&refused, Limit::Work, max), "{threads}: {refused:?}");
     }
 }
 

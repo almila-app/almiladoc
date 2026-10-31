@@ -140,3 +140,9 @@ name = "gap_fill"
 path = "fuzz_targets/gap_fill.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "pdf_raster"
+path = "fuzz_targets/pdf_raster.rs"
+test = false
+doc = false

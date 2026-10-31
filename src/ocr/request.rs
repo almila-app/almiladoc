@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::error::ConvertError;
 use crate::formats::Source;
-use crate::ledger::{CancelToken, Ledger};
+use crate::ledger::Ledger;
 use crate::model::{Asset, Gap, GapId, GapReason, OcrOrigin};
 use crate::ocr::images::media_type;
 use crate::ocr::{RasterSpec, raster};
@@ -107,10 +107,7 @@ enum Plan {
 }
 
 /// The request of each of `gaps` that asks for an image, in order, with how much of its page
-/// painting left out: embedded images copied, then pages painted under `spec` up to the
-/// pool's threads at once, each charged to `ledger` (a page's pixels before the pages are
-/// painted, every image's bytes at one unit per [`BYTES_PER_UNIT`]); a page unpdf cannot
-/// paint asks for none.
+/// painting left out, charged to `ledger` as [`crate::Parsed::ocr_requests`] says.
 pub(crate) fn requests(
     gaps: &[Gap],
     inputs: Inputs<'_>,
@@ -128,14 +125,12 @@ pub(crate) fn requests(
         };
         plans.extend(plan.map(|plan| (gap, plan)));
     }
-    let cancel = ledger.cancel();
+    let shared = ledger.share();
     let painted = map_ordered(&plans, |(_, plan)| match *plan {
-        Plan::Page { .. } if cancel.is_some_and(CancelToken::is_cancelled) => {
-            Err(ConvertError::Cancelled)
-        }
-        Plan::Page { page, dpi } => Ok(raster::paint(inputs.source, page, dpi)),
+        Plan::Page { page, dpi } => raster::paint(inputs.source, page, dpi, &shared),
         Plan::Image(_) => Ok(None),
     });
+    ledger.settle(shared);
     let mut made = Vec::with_capacity(plans.len());
     for ((gap, plan), painted) in plans.into_iter().zip(painted) {
         let (image, unpainted) = match (plan, painted?) {

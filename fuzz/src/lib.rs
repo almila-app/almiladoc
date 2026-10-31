@@ -1,4 +1,4 @@
-//! The converter every fuzz target runs, the packages around one fuzzed part, and the determinism
+//! The converters the fuzz targets run, the packages around one fuzzed part, and the determinism
 //! check the part-injection targets run.
 
 use almiladoc::{Config, Conversion, ConvertError, Converter, Format, Input};
@@ -14,16 +14,38 @@ pub use libfuzzer_sys::fuzz_target;
 /// sanitizers; below it the bound still catches work that grows faster than its input.
 pub const MAX_GRID_SLOTS: u64 = 500_000;
 
-/// The converter every target runs: the default configuration with [`MAX_GRID_SLOTS`].
+/// Work a target that paints pages admits. At the default, painting runs to about 69 billion
+/// pixels before it is stopped, which fills libFuzzer's 10 s slow-unit bound under the
+/// sanitizers; below it the bound still catches painting that is charged too little.
+pub const MAX_PAINTING_WORK: u64 = 1 << 20;
+
+/// The converter every target that does not paint runs: the default configuration with
+/// [`MAX_GRID_SLOTS`].
 ///
 /// # Panics
 ///
 /// If that configuration is invalid, so a broken harness fails every run instead of skipping it.
 #[must_use]
 pub fn converter() -> Converter {
+    Converter::new(config()).expect("the fuzz configuration is valid")
+}
+
+/// [`converter`] with `max_work` lowered to [`MAX_PAINTING_WORK`], for the targets that paint.
+///
+/// # Panics
+///
+/// As [`converter`] does.
+#[must_use]
+pub fn painting_converter() -> Converter {
+    let mut config = config();
+    config.limits.max_work = MAX_PAINTING_WORK;
+    Converter::new(config).expect("the fuzz configuration is valid")
+}
+
+fn config() -> Config {
     let mut config = Config::default();
     config.limits.max_grid_slots = MAX_GRID_SLOTS;
-    Converter::new(config).expect("the fuzz configuration is valid")
+    config
 }
 
 /// Converts `data` as `format`; a conversion may fail with a typed error but never panic, hang or
@@ -458,6 +480,44 @@ mod tests {
                 })
             ),
             "{converted:?}"
+        );
+    }
+
+    #[test]
+    fn painting_past_the_fuzz_limit_is_refused() {
+        use almiladoc::{PageSelection, RasterSpec};
+        use std::fmt::Write as _;
+
+        let content = "0 0 1 rg 0 0 1440 1440 re f\n".repeat(200);
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1440 1440] /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        ];
+        let mut pdf = "%PDF-1.7\n".to_owned();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            writeln!(pdf, "{} 0 obj\n{object}\nendobj", index + 1).unwrap();
+        }
+        let xref = pdf.len();
+        writeln!(pdf, "xref\n0 5\n0000000000 65535 f ").unwrap();
+        for offset in offsets {
+            writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+        }
+        writeln!(pdf, "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF").unwrap();
+        let input = Input::new(pdf.as_bytes(), Format::Pdf).with_ocr_pages(PageSelection::All);
+        let mut parsed = painting_converter().parse(input).unwrap();
+        let mut spec = RasterSpec::default();
+        (spec.dpi, spec.max_pixels) = (50, 1 << 20);
+        let refused = parsed.ocr_requests(&spec, None);
+        assert!(
+            matches!(
+                refused,
+                Err(ConvertError::ResourceLimit { limit: Limit::Work, max: MAX_PAINTING_WORK, .. })
+            ),
+            "{refused:?}"
         );
     }
 }

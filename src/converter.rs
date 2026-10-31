@@ -590,14 +590,16 @@ impl Parsed {
     /// box fits `spec`'s pixel cap, the pages at once on a pool built from its [`Config`]; a page
     /// that cannot be painted asks for none, and an id that names no unsettled gap is passed
     /// over. Work is charged on from the work charged so far: a page's media-box pixels at one
-    /// unit per 128 before it is painted, and each image's bytes at one per 16.
+    /// unit per 128 before it is painted, each step of its painting the pixels of work unpdf
+    /// prices it at one unit per 128, rounded up, and each image's bytes at one per 16.
     ///
     /// # Errors
     ///
     /// [`ConvertError::InvalidConfig`] when `spec` is out of range;
-    /// [`ConvertError::ResourceLimit`] when the images take the work past
+    /// [`ConvertError::ResourceLimit`] when the images or their painting take the work past
     /// [`Limits::max_work`](crate::Limits::max_work); [`ConvertError::Cancelled`] once the
-    /// parse's token is cancelled; [`ConvertError::Internal`] when the pool cannot start.
+    /// parse's token is cancelled, a page painting at the time stopping at its next step;
+    /// [`ConvertError::Internal`] when the pool cannot start.
     ///
     /// # Examples
     ///
@@ -642,7 +644,8 @@ impl Parsed {
     ///
     /// Each keeps what earlier batches settled. [`ConvertError::InvalidConfig`] when the
     /// engine's [`OcrEngine::raster`] is out of range; [`ConvertError::ResourceLimit`] when the
-    /// images and fills take the work past [`Limits::max_work`](crate::Limits::max_work);
+    /// images, their painting and the fills take the work past
+    /// [`Limits::max_work`](crate::Limits::max_work);
     /// [`ConvertError::Cancelled`] once the parse's token is cancelled, a batch whose
     /// recognition saw the cancel settling nothing; [`ConvertError::Internal`] when the pool
     /// cannot start or the engine or a fill panics.

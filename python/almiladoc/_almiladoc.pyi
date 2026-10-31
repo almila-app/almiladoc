@@ -301,10 +301,9 @@ class CancelToken:
     """A flag any thread sets to cancel the calls it was passed to."""
 
     def cancel(self) -> None:
-        """Cancel every call holding this token, from any thread: each raises
-        `CancelledError` at its next unit of work, a PDF's between its
-        pages, as do `render`, `to_json`, `fill_gap` and `ocr_requests` on a
-        `Parsed` a parse holding it made."""
+        """Cancel calls and `Parsed` operations holding this token with `CancelledError`
+        at their next charged step.
+        PDF extraction checks between pages; painting checks each step."""
     @property
     def cancelled(self) -> bool:
         """True once `cancel` was called."""

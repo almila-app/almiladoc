@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use crate::config::ConfigError;
 use crate::error::ConvertError;
 use crate::formats::Source;
-use crate::ledger::Ledger;
+use crate::ledger::{Ledger, SharedLedger};
 
 /// How large an image of a page an [`OcrEngine`](crate::OcrEngine) takes: the resolution a
 /// page is painted at, unless its pixels would pass `max_pixels`.
@@ -75,7 +75,8 @@ impl Default for RasterSpec {
     }
 }
 
-/// Pixels of a painted page per unit of [`Limits::max_work`](crate::Limits::max_work).
+/// Pixels of a painted page, or of one step of its painting, per unit of
+/// [`Limits::max_work`](crate::Limits::max_work).
 #[cfg_attr(not(feature = "raster"), expect(dead_code, reason = "only painting charges pixels"))]
 const PIXELS_PER_UNIT: u64 = 128;
 
@@ -113,23 +114,52 @@ pub(crate) struct Painted {
     pub(crate) unpainted: u64,
 }
 
-/// 1-based `page` of `source` painted at `dpi`, its crop box turned by its `/Rotate`; `None`
-/// when unpdf cannot paint it.
+/// 1-based `page` of `source` painted at `dpi`, its crop box turned by its `/Rotate`, each step
+/// charged to `ledger` per [`PIXELS_PER_UNIT`] of its work; `None` when unpdf cannot paint it.
 #[cfg(feature = "raster")]
-pub(crate) fn paint(source: &Source, page: NonZeroU32, dpi: u32) -> Option<Painted> {
+pub(crate) fn paint(
+    source: &Source,
+    page: NonZeroU32,
+    dpi: u32,
+    ledger: &SharedLedger<'_>,
+) -> Result<Option<Painted>, ConvertError> {
+    paint_with_budget(source, page, dpi, |units| ledger.charge(units))
+}
+
+#[cfg(feature = "raster")]
+fn paint_with_budget(
+    source: &Source,
+    page: NonZeroU32,
+    dpi: u32,
+    mut charge: impl FnMut(u64) -> Result<(), ConvertError>,
+) -> Result<Option<Painted>, ConvertError> {
+    use std::ops::ControlFlow;
     use unpdf::parser::raster::{PageRegion, RasterOptions};
-    let options =
-        RasterOptions { dpi: f32::from(u16::try_from(dpi).ok()?), region: PageRegion::Crop };
-    let painted = source.pdf.as_ref()?.parser.render_page(page.get(), &options).ok()?;
+    let (Some(pdf), Ok(dpi)) = (source.pdf.as_ref(), u16::try_from(dpi)) else { return Ok(None) };
+    let options = RasterOptions { dpi: f32::from(dpi), region: PageRegion::Crop };
+    let mut charged = Ok(());
+    let painted = pdf.parser.render_page_with(page.get(), &options, &mut |pixels| {
+        charged = charge(pixels.div_ceil(PIXELS_PER_UNIT));
+        if charged.is_ok() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
+    });
+    charged?;
+    let Ok(painted) = painted else { return Ok(None) };
     let gaps = painted.gaps;
     let unpainted =
         [gaps.text_runs, gaps.images, gaps.inline_images, gaps.undecodable_content_streams];
-    Some(Painted { png: painted.to_png(), unpainted: unpainted.into_iter().map(u64::from).sum() })
+    let unpainted = unpainted.into_iter().map(u64::from).sum();
+    Ok(Some(Painted { png: painted.to_png(), unpainted }))
 }
 
 #[cfg(not(feature = "raster"))]
-pub(crate) fn paint(_: &Source, _: NonZeroU32, _: u32) -> Option<Painted> {
-    None
+#[expect(clippy::unnecessary_wraps, reason = "the signature painting has")]
+pub(crate) fn paint(
+    _: &Source,
+    _: NonZeroU32,
+    _: u32,
+    _: &SharedLedger<'_>,
+) -> Result<Option<Painted>, ConvertError> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -168,5 +198,71 @@ mod tests {
         assert_eq!(default.fit(0.0, 792.0), None);
         assert_eq!(default.fit(f32::MAX, f32::MAX), None);
         assert_eq!(default.fit(f32::NAN, 792.0), None);
+    }
+
+    #[cfg(feature = "raster")]
+    fn source() -> Source {
+        let bytes = include_bytes!("../../tests/fixtures/pdf/handmade-five-page.pdf");
+        let parser = unpdf::parser::PdfParser::from_bytes(bytes).unwrap();
+        let pdf = crate::formats::pdf::PdfSource { parser, boxes: Vec::new() };
+        Source { pdf: Some(pdf) }
+    }
+
+    #[cfg(feature = "raster")]
+    fn painting(max: u64, cancel: Option<&crate::CancelToken>) -> (Result<(), ConvertError>, u64) {
+        let source = source();
+        let ledger = Ledger::new(max, cancel);
+        let shared = ledger.share();
+        let painted = paint(&source, NonZeroU32::MIN, 72, &shared).map(|painted| {
+            assert!(painted.is_some_and(|painted| !painted.png.is_empty()));
+        });
+        ledger.settle(shared);
+        (painted, ledger.spent())
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn an_unpaintable_page_remains_recoverable() {
+        let absent = NonZeroU32::new(6).unwrap();
+        let mut steps = 0;
+        let painted = paint_with_budget(&source(), absent, 72, |_| {
+            steps += 1;
+            Ok(())
+        });
+        assert_eq!(painted.map(|page| page.is_none()), Ok(true));
+        assert_eq!(steps, 0);
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn a_failing_charge_stops_a_page_at_the_step_it_prices() {
+        let (painted, whole) = painting(u64::MAX, None);
+        assert_eq!(painted, Ok(()));
+        let token = crate::CancelToken::new();
+        token.cancel();
+        let page = (612 * 792_u64).div_ceil(PIXELS_PER_UNIT);
+        assert_eq!(painting(u64::MAX, Some(&token)), (Err(ConvertError::Cancelled), page));
+        let half = whole / 2;
+        let (limited, spent) = painting(half, None);
+        assert_eq!(limited, Err(ConvertError::limit(crate::Limit::Work, half)));
+        assert!(half < spent && spent < whole, "{spent} of {whole}");
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn cancellation_after_painting_begins_stops_the_next_step() {
+        let token = crate::CancelToken::new();
+        let ledger = Ledger::new(u64::MAX, Some(&token));
+        let mut steps = 0;
+        let painted = paint_with_budget(&source(), NonZeroU32::MIN, 72, |units| {
+            steps += 1;
+            if steps == 3 {
+                token.cancel();
+            }
+            ledger.charge(units)
+        });
+        assert_eq!(painted.map(|_| ()), Err(ConvertError::Cancelled));
+        assert_eq!(steps, 3);
+        assert!(ledger.spent() < painting(u64::MAX, None).1);
     }
 }
