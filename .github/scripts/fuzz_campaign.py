@@ -536,8 +536,10 @@ def self_test() -> int:
                     sys.executable,
                     "-I",
                     "-c",
-                    "import os, sys; os.write(2, b'E'); "
-                    "sys.stdout.write(os.environ['PROPTEST_RNG_SEED'])",
+                    (
+                        "import os, sys; os.write(2, b'E'); "
+                        "sys.stdout.write(os.environ['PROPTEST_RNG_SEED'])"
+                    ),
                 ],
                 root,
                 {"PROPTEST_RNG_SEED": "7"},
@@ -555,8 +557,11 @@ def self_test() -> int:
         try:
             known(root, "../csv")
             expect(False, "an unknown target")
-        except SystemExit:
-            pass
+        except SystemExit as refused:
+            expect(
+                refused.code == "'../csv' is not a fuzz target",
+                f"an unknown target's refusal: {refused.code!r}",
+            )
 
     for failure in failures:
         print(f"self-test: {failure}", file=sys.stderr)

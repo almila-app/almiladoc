@@ -347,29 +347,38 @@ class ConversionTest(unittest.TestCase):
 
     def test_located_line_admission_is_atomic_and_precedes_sequence_access(self):
         class Unread(Sequence):
+            def __init__(self):
+                self.reads = []
+
             def __len__(self):
                 return 2
 
             def __getitem__(self, index):
-                raise AssertionError("sequence was read before admission")
+                self.reads.append(index)
+                if index not in range(len(self)):
+                    raise IndexError(index)
+                return almiladoc.OcrLine("a", (0, 0, 1, 1))
 
         converter = almiladoc.Converter(
             almiladoc.Config(limits=almiladoc.Limits(max_ocr_text_bytes=32))
         )
         parsed = converter.parse(MIXED.read_bytes())
         (gap,) = parsed.gaps
-        for lines in [Unread(), [almiladoc.OcrLine("a", (0, 0, 1, 1))]]:
+        unread = Unread()
+        for lines in [unread, [almiladoc.OcrLine("a", (0, 0, 1, 1))]]:
             with self.assertRaises(almiladoc.GapRefused) as refused:
                 parsed.fill_gap_lines(gap, lines)
             self.assertEqual(refused.exception.limit, "max_ocr_text_bytes")
             self.assertEqual(parsed.gaps, [gap])
+            self.assertEqual(unread.reads, [])
         parsed.fill_gap_lines(gap, [])
         self.assertEqual(parsed.render().markdown, "Text on the first page\n")
         token = almiladoc.CancelToken()
         parsed = converter.parse(MIXED.read_bytes(), cancel=token)
         token.cancel()
         with self.assertRaises(almiladoc.CancelledError):
-            parsed.fill_gap_lines(gap, Unread())
+            parsed.fill_gap_lines(gap, unread)
+        self.assertEqual(unread.reads, [])
 
     def test_fill_gap_writes_the_ocr_in_place_and_fail_gap_its_marker(self):
         data = FIVE_PAGE.read_bytes()

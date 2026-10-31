@@ -621,8 +621,11 @@ def self_test_cases() -> tuple[list[str], int]:
         try:
             ignored(Path(scratch), ["../outside"])
             failures.append("a git failure reads as nothing ignored")
-        except subprocess.CalledProcessError:
-            pass
+        except subprocess.CalledProcessError as error:
+            if "check-ignore" not in error.cmd or error.returncode != 128:
+                failures.append(
+                    f"a git failure is not the probe's: {error.cmd} {error.returncode}"
+                )
     return failures, len(defects) + len(unreported) + len(foreign) + 8
 
 

@@ -60,8 +60,10 @@ def blockstyle_rtf(out: Path) -> None:
         rb"{\fonttbl{\f0\fcharset0 Arial;}}",
         # The style name is the trailing text of each stylesheet group; \s4
         # reaches its container only through the \sbasedon chain.
-        rb"{\stylesheet{\s0 Normal;}{\s1 Preformatted Text;}"
-        rb"{\s2 Quotations;}{\s3 Quote;}{\s4\sbasedon1 Listing;}}",
+        (
+            rb"{\stylesheet{\s0 Normal;}{\s1 Preformatted Text;}"
+            rb"{\s2 Quotations;}{\s3 Quote;}{\s4\sbasedon1 Listing;}}"
+        ),
         rb"\pard\plain\s0 Body before.\par",
         rb"\pard\plain\s1 fn main() \{\par",
         rb"\pard\plain\s4     println!(\'22ok\'22);\par",
@@ -89,14 +91,20 @@ def hidden_rtf(out: Path) -> None:
         rb"\pard\plain\s2 This paragraph is hidden by its style.\par",
         rb"\pard\plain\s0 A hidden mark joins this paragraph{\v\par}",
         rb"\pard\plain\s0  to the next one.\par",
-        rb"\pard\plain\s0 A hidden note reference{\v{\super\chftn}{\footnote\pard\plain\s0"
-        rb" {\super\chftn} Never read.}} and a shown one{\super\chftn}{\footnote\pard\plain\s0"
-        rb" {\super\chftn} A shown note{\v  with hidden words}.}.\par",
-        rb"\pard\plain\s0 A hidden picture{\v{\*\shppict{\pict\pngblip 89504e47}}}"
-        rb" and check box{\v{\field{\*\fldinst FORMCHECKBOX}{\fldrslt }}} drop;"
-        rb" {\webhidden web-hidden text} shows.\par",
-        rb"\trowd\cellx3000\cellx6000\pard\plain\intbl Cell one{\v\par} joined\cell"
-        rb" Cell two{\v  hidden}\cell\row",
+        (
+            rb"\pard\plain\s0 A hidden note reference{\v{\super\chftn}{\footnote\pard\plain\s0"
+            rb" {\super\chftn} Never read.}} and a shown one{\super\chftn}{\footnote\pard\plain\s0"
+            rb" {\super\chftn} A shown note{\v  with hidden words}.}.\par"
+        ),
+        (
+            rb"\pard\plain\s0 A hidden picture{\v{\*\shppict{\pict\pngblip 89504e47}}}"
+            rb" and check box{\v{\field{\*\fldinst FORMCHECKBOX}{\fldrslt }}} drop;"
+            rb" {\webhidden web-hidden text} shows.\par"
+        ),
+        (
+            rb"\trowd\cellx3000\cellx6000\pard\plain\intbl Cell one{\v\par} joined\cell"
+            rb" Cell two{\v  hidden}\cell\row"
+        ),
         rb"\pard\plain\s0 After the table.\par",
         rb"}",
     ]
@@ -108,8 +116,10 @@ def merge_rtf(out: Path) -> None:
     parts = [
         rb"{\rtf1\ansi\ansicpg1252\deff0",
         rb"{\fonttbl{\f0\fcharset0 Arial;}}",
-        rb"{\stylesheet{\s1\b\outlinelevel1 Base Bold;}"
-        rb"{\s2\sbasedon1\i Child Italic;}}",
+        (
+            rb"{\stylesheet{\s1\b\outlinelevel1 Base Bold;}"
+            rb"{\s2\sbasedon1\i Child Italic;}}"
+        ),
         # The paragraph carries only \s2: bold and the outline level must
         # arrive through the \sbasedon chain.
         rb"\pard\s2 Inherited heading\par",
@@ -134,15 +144,19 @@ def bin_rtf(out: Path) -> None:
         rb"{\rtf1\ansi\ansicpg1252\deff0",
         rb"{\fonttbl{\f0\fcharset0 Arial;}{\f1\fcharset204 Arial;}}",
         rb"{\stylesheet{\s1\outlinelevel0\b Heading One;}{\s0 Normal;}}",
-        rb"{\*\listtable{\list\listtemplateid1{\listlevel\levelnfc2\levelstartat4"
-        rb"{\leveltext \'02\'00.;}{\levelnumbers \'01;}}\listid100}}",
-        rb"{\*\listoverridetable{\listoverride\listid100\listoverridecount0\ls1}"
-        # Per-level override records - an overridden start, and an
-        # overriding format via an embedded \listlevel
-        rb"{\listoverride\listid100\listoverridecount1"
-        rb"{\lfolevel\listoverridestartat\levelstartat10}\ls2}"
-        rb"{\listoverride\listid100\listoverridecount1"
-        rb"{\lfolevel\listoverrideformat{\listlevel\levelnfc0\levelstartat7}}\ls3}}",
+        (
+            rb"{\*\listtable{\list\listtemplateid1{\listlevel\levelnfc2\levelstartat4"
+            rb"{\leveltext \'02\'00.;}{\levelnumbers \'01;}}\listid100}}"
+        ),
+        (
+            rb"{\*\listoverridetable{\listoverride\listid100\listoverridecount0\ls1}"
+            # Per-level override records - an overridden start, and an
+            # overriding format via an embedded \listlevel
+            rb"{\listoverride\listid100\listoverridecount1"
+            rb"{\lfolevel\listoverridestartat\levelstartat10}\ls2}"
+            rb"{\listoverride\listid100\listoverridecount1"
+            rb"{\lfolevel\listoverrideformat{\listlevel\levelnfc0\levelstartat7}}\ls3}}"
+        ),
         rb"\pard\s1\b Heading via style\b0\par",
         rb"\pard Before the binary blob.\par",
         rb"{\*\pict\wmetafile8\bin14 " + payload + rb"}",
@@ -157,8 +171,10 @@ def bin_rtf(out: Path) -> None:
         rb"\trowd\cellx4000\cellx8000 L\cell R\cell\row",
         # nested table inside the first cell of an outer table
         rb"\trowd\cellx4000\cellx8000",
-        rb"\pard\intbl\itap2 nested A\nestcell nested B\nestcell"
-        rb"{\*\nesttableprops\trowd\cellx2000\cellx4000\nestrow}",
+        (
+            rb"\pard\intbl\itap2 nested A\nestcell nested B\nestcell"
+            rb"{\*\nesttableprops\trowd\cellx2000\cellx4000\nestrow}"
+        ),
         rb"\pard\intbl outer second\cell\row",
         # cp1251 text under \f1 (fcharset204): bytes for Russian "Da"
         rb"\pard\f1 \'c4\'e0\f0\par",
@@ -196,10 +212,14 @@ def scientific_rtf(out: Path) -> None:
     code, and a private-use code after a symbol font."""
     parts = [
         rb"{\rtf1\ansi\ansicpg1252\deff0",
-        rb"{\fonttbl{\f0\froman\fcharset0 Times New Roman;}{\f1\froman\fcharset2 Symbol;}"
-        rb"{\f2\fnil\fcharset2{\*\panose 05000000000000000000}Wingdings;}}",
-        rb"\pard\plain Particles of 10 {\f1 m}m {\f1\'b1} 2 {\f1 m}m settle at a rate"
-        rb" {\f1\'b5} {\f1\u-3998?}.\par",
+        (
+            rb"{\fonttbl{\f0\froman\fcharset0 Times New Roman;}{\f1\froman\fcharset2 Symbol;}"
+            rb"{\f2\fnil\fcharset2{\*\panose 05000000000000000000}Wingdings;}}"
+        ),
+        (
+            rb"\pard\plain Particles of 10 {\f1 m}m {\f1\'b1} 2 {\f1 m}m settle at a rate"
+            rb" {\f1\'b5} {\f1\u-3998?}.\par"
+        ),
         rb"\pard\plain A field pasted as Unicode keeps the last symbol font: 5\u-3987?m.\par",
         rb"\pard\plain {\f2\'fe} Calibrated {\f2\'6f} Replicated {\f2\'fc} Reviewed\par",
         rb"\pard\plain Step {\f2\'81} precedes step {\f2\'82}{\v  and {\f2\'83}}.\par",

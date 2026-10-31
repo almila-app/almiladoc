@@ -741,8 +741,11 @@ def self_test() -> int:
     try:
         ga_labels("## Available Images\nNo table.\n## Next\n| Old | x | `ubuntu-30.04` | y |\n")
         expect(False, "a README listing no generally available label")
-    except ValueError:
-        pass
+    except ValueError as error:
+        expect(
+            str(error) == "the runner-images README lists no generally available label",
+            f"a README listing no generally available label: {error}",
+        )
     pinned = {
         "ubuntu-24.04": ["w:1"],
         "ubuntu-26.04": ["w:2"],

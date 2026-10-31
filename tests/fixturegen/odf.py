@@ -76,10 +76,12 @@ def hidden_ods(out: Path) -> None:
             '<table:table table:name="Report">',
             "<table:table-column/>",
             '<table:table-column table:visibility="collapse"/>',
-            '<table:table-column-group table:display="false"><table:table-column/>'
-            '<table:table-column-group table:display="true"><table:table-column/>'
-            "</table:table-column-group>"
-            "</table:table-column-group>",
+            (
+                '<table:table-column-group table:display="false"><table:table-column/>'
+                '<table:table-column-group table:display="true"><table:table-column/>'
+                "</table:table-column-group>"
+                "</table:table-column-group>"
+            ),
             "<table:table-column/>",
             '<table:table-column table:visibility="filter"/>',
             "<table:table-column/>",
@@ -104,8 +106,10 @@ def hidden_ods(out: Path) -> None:
     merged = "\n".join(
         [
             '<table:table table:name="Merged">',
-            '<table:table-column/><table:table-column table:visibility="collapse"/>'
-            "<table:table-column/><table:table-column/>",
+            (
+                '<table:table-column/><table:table-column table:visibility="collapse"/>'
+                "<table:table-column/><table:table-column/>"
+            ),
             row(span.format(3, 1, "across"), covered, covered, *text("end")),
             row(
                 span.format(1, 2, "moved down"),

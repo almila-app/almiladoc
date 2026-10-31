@@ -286,12 +286,18 @@ def self_test() -> int:
             f"Oz <Oz@example.com> {long}",
             f"Oz <Oz@example.com> {joined}",
             f"{DEPENDABOT[0]} <Eve@example.com> {unsigned}",
-            "Pat <Pat@example.com> names an assistant as its committer: "
-            "Bot <bot@anthropic.example>",
-            "Claude <Claude@example.com> names an assistant as its author: "
-            "Claude <Claude@example.com>",
-            "Sam <llm_bot@example.com> names an assistant as its author: "
-            "Sam <llm_bot@example.com>",
+            (
+                "Pat <Pat@example.com> names an assistant as its committer: "
+                "Bot <bot@anthropic.example>"
+            ),
+            (
+                "Claude <Claude@example.com> names an assistant as its author: "
+                "Claude <Claude@example.com>"
+            ),
+            (
+                "Sam <llm_bot@example.com> names an assistant as its author: "
+                "Sam <llm_bot@example.com>"
+            ),
         ]
     )
     bot = f"{DEPENDABOT[0]} <{DEPENDABOT[1]}>"
