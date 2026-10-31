@@ -153,18 +153,7 @@ pub(super) fn convert_sheets<T>(
         doc.blocks.push(Block::UnitStart(unit.model()));
         read_sheet_parts(parse_ctx, pkg, part, drawing.as_deref(), &mut content)?;
         let start = doc.blocks.len();
-        for (state, reports) in std::mem::take(&mut content.headers_footers) {
-            let region = match state.value.region {
-                crate::model::HeaderFooterRegion::Header => Region::Header,
-                crate::model::HeaderFooterRegion::Footer => Region::Footer,
-            };
-            if doc.push_header_footer(state, &mut previous, |work| parse_ctx.charge(work))? {
-                parse_ctx.charge(reports.len() as u64)?;
-                for code in reports {
-                    parse_ctx.emit(code, region);
-                }
-            }
-        }
+        super::headers::append(parse_ctx, &mut doc, &mut previous, &mut content)?;
         let table = build_table(parse_ctx, content)?;
         if table.is_none() && doc.blocks.len() == start {
             continue;

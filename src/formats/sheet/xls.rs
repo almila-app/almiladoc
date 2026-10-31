@@ -1480,6 +1480,37 @@ mod tests {
     }
 
     #[test]
+    fn biff8_string_boundaries_preserve_the_following_length() {
+        let next = ustr("B");
+        for (segments, runs, expected) in [
+            (vec![vec![], ustr("A"), next.clone()], Runs::Plain, "A"),
+            (vec![le16(&[1]), vec![0, b'A'], next.clone()], Runs::Plain, "A"),
+            (vec![ustr("A"), vec![], next.clone()], Runs::Plain, "A"),
+            (vec![vec![2, 0, 0, b'A'], vec![1, 0xA9, 0], next.clone()], Runs::Plain, "A©"),
+            (vec![vec![2, 0, 1, 0x3D, 0xD8], vec![1, 0, 0xDE], next.clone()], Runs::Plain, "😀"),
+            (
+                vec![
+                    vec![1, 0, 12, 1, 0, 3, 0, 0, 0, b'a', 0xAA, 0xBB],
+                    [vec![1, 0xDD, 0xEE, 0xFF, 0x11], next].concat(),
+                ],
+                Runs::Rich,
+                "a",
+            ),
+        ] {
+            let segments: Vec<_> = segments.iter().map(Vec::as_slice).collect();
+            let mut reader = SegReader::new(&segments);
+            assert_eq!(
+                read_biff8_string(&mut reader, LengthPrefix::U16, runs),
+                Some((expected.into(), false))
+            );
+            assert_eq!(
+                read_biff8_string(&mut reader, LengthPrefix::U16, Runs::Plain),
+                Some(("B".into(), false))
+            );
+        }
+    }
+
+    #[test]
     fn sst_string_split_mid_word_re_reads_the_flags_byte() {
         // Trap 1: the string continues into a CONTINUE record and switches
         // from 8-bit compressed to 16-bit encoding at the boundary, marked

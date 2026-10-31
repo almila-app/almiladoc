@@ -21,7 +21,6 @@ use crate::shared::binary::{ByteReader, decode_utf16, utf16le_units};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
 
-const MAX_HEADER_FOOTER_UNITS: usize = 255;
 const HF_DIFFERENT_EVEN: u16 = 1;
 const HF_DIFFERENT_FIRST: u16 = 2;
 
@@ -482,7 +481,9 @@ fn binary_print_settings(
         };
         *value = if active {
             match bytes {
-                Some(bytes) if bytes.is_none_or(|b| b.len() / 2 <= MAX_HEADER_FOOTER_UNITS) => {
+                Some(bytes)
+                    if bytes.is_none_or(|b| b.len() / 2 <= headers::MAX_BINARY_PRINT_UNITS) =>
+                {
                     BinaryPrintText::Utf16(bytes)
                 }
                 _ => BinaryPrintText::Unread,

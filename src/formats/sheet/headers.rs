@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
 use super::grid::SheetContent;
@@ -14,6 +15,7 @@ use crate::shared::text::clean_text;
 
 const COLOR_BYTES: usize = 6;
 const THEME_ID_BYTES: usize = 2;
+pub(super) const MAX_BINARY_PRINT_UNITS: usize = 255;
 
 type Damage = (Range<usize>, DiagnosticCode);
 type Field = (&'static str, Side, Variant, Option<&'static str>);
@@ -63,21 +65,10 @@ impl PrintSettings {
     ) -> Result<Self, ConvertError> {
         let mut result = Self { slots: Vec::with_capacity(FIELDS.len()), conflicts: [0; 2] };
         for ((_, side, variant, _), field) in FIELDS.into_iter().zip(fields) {
-            ctx.charge(1)?;
-            let mut slot = inherit(side, variant);
-            match field {
-                BinaryPrintText::Inherit => {}
-                BinaryPrintText::Unread => {
-                    slot.state.value.content = Some(Vec::new());
-                    slot.state.certainty = Certainty::Uncertain;
-                    slot.unread_content = true;
-                    result.conflicts[side_index(side)] = 1;
-                }
-                BinaryPrintText::Utf16(bytes) => {
-                    let (text, damage) = utf16_text(ctx, bytes.unwrap_or_default())?;
-                    let sections = sections(ctx, &text, &damage, |code| slot.report(code))?;
-                    slot.state.value.content = Some(paragraphs(sections));
-                }
+            let unread = matches!(field, BinaryPrintText::Unread);
+            let slot = binary_slot(ctx, side, variant, field)?;
+            if unread {
+                result.conflicts[side_index(side)] = 1;
             }
             result.slots.push(slot);
         }
@@ -101,6 +92,30 @@ impl PrintSlot {
         self.unread_content |= code.class() == crate::LossClass::Lost;
         self.reports.push(code);
     }
+}
+
+fn binary_slot(
+    ctx: &ParseCtx<'_>,
+    side: Side,
+    variant: Variant,
+    field: BinaryPrintText<'_>,
+) -> Result<PrintSlot, ConvertError> {
+    ctx.charge(1)?;
+    let mut slot = inherit(side, variant);
+    match field {
+        BinaryPrintText::Inherit => {}
+        BinaryPrintText::Unread => {
+            slot.state.value.content = Some(Vec::new());
+            slot.state.certainty = Certainty::Uncertain;
+            slot.unread_content = true;
+        }
+        BinaryPrintText::Utf16(bytes) => {
+            let (text, damage) = utf16_text(ctx, bytes.unwrap_or_default())?;
+            let sections = sections(ctx, &text, &damage, |code| slot.report(code))?;
+            slot.state.value.content = Some(paragraphs(sections));
+        }
+    }
+    Ok(slot)
 }
 
 fn utf16_text(ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<(String, Vec<Damage>), ConvertError> {
@@ -335,6 +350,24 @@ pub(super) fn publish(
             }
         }
         out.headers_footers.push((slot.state, reports));
+    }
+    Ok(())
+}
+
+pub(super) fn append(
+    ctx: &ParseCtx<'_>,
+    document: &mut crate::model::Document,
+    previous: &mut HashMap<(Side, Variant), HeaderFooterState>,
+    content: &mut SheetContent,
+) -> Result<(), ConvertError> {
+    for (state, reports) in std::mem::take(&mut content.headers_footers) {
+        let region = diagnostic_region(state.value.region);
+        if document.push_header_footer(state, previous, |work| ctx.charge(work))? {
+            ctx.charge(reports.len() as u64)?;
+            for code in reports {
+                ctx.emit(code, region);
+            }
+        }
     }
     Ok(())
 }
