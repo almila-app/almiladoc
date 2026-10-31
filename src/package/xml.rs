@@ -82,6 +82,7 @@ pub(crate) struct Element {
     pub local: String,
     pub attrs: Vec<Attr>,
     pub children: Vec<Node>,
+    pub unresolved_text: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -199,6 +200,18 @@ impl Element {
         self.descendant_elems().filter(move |e| e.local == local)
     }
 
+    pub(crate) fn checked_text(&self, parse_ctx: &ParseCtx<'_>) -> Result<String, ConvertError> {
+        let mut text = String::new();
+        for node in self.descendant_nodes() {
+            parse_ctx.charge(1)?;
+            if let Node::Text(value) = node {
+                parse_ctx.charge(value.len() as u64)?;
+                text.push_str(value);
+            }
+        }
+        Ok(text)
+    }
+
     /// Concatenated text of all descendant text nodes.
     pub(crate) fn text(&self) -> String {
         self.descendant_nodes()
@@ -268,7 +281,7 @@ fn char_reference(number: &str) -> Option<char> {
 
 /// Whether `name` is an XML 1.0 (fifth edition) `Name`, so `&name;` is a
 /// reference rather than an ampersand followed by text.
-fn is_name(name: &str) -> bool {
+pub(crate) fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
 }
@@ -394,7 +407,11 @@ pub(crate) fn parse(
             }
             Event::Text(e) => tree.text(e.into_inner(), sink, limits.max_xml_nodes)?,
             Event::GeneralRef(e) => {
-                let text = reference_text(dialect, &e, &mut marks);
+                let mut reference = Marks::default();
+                let text = reference_text(dialect, &e, &mut reference);
+                marks.unresolved |= reference.unresolved;
+                tree.stack.last_mut().unwrap_or(&mut tree.root).unresolved_text |=
+                    reference.unresolved;
                 tree.text(text, sink, limits.max_xml_nodes)?;
             }
             Event::CData(e) => tree.text(e.into_inner(), sink, limits.max_xml_nodes)?,
@@ -440,6 +457,7 @@ impl Tree {
             self.nodes = before;
             return sink.take(&self.stack, elem);
         }
+        self.stack.last_mut().unwrap_or(&mut self.root).unresolved_text |= elem.unresolved_text;
         self.siblings().push(Node::Elem(elem));
         Ok(())
     }
@@ -690,7 +708,7 @@ fn start_to_element(
             .collect::<Vec<_>>()
             .join(" ");
     }
-    Ok(Element { ns, local, attrs, children: Vec::new() })
+    Ok(Element { ns, local, attrs, children: Vec::new(), unresolved_text: false })
 }
 
 /// A name's interned namespace, `None` for an unprefixed name outside any
@@ -1642,7 +1660,13 @@ mod tests {
                         Content::Piece(piece) => merge_text(&mut children, piece.shown(false)),
                     }
                 }
-                Element { ns, local: LOCALS[self.local].to_owned(), attrs, children }
+                Element {
+                    ns,
+                    local: LOCALS[self.local].to_owned(),
+                    attrs,
+                    children,
+                    unresolved_text: false,
+                }
             }
         }
 
@@ -1840,6 +1864,7 @@ mod tests {
                     prop_assert!(!marks.unresolved, "{marks:?}");
                     let root = document.child_elems().next().unwrap();
                     let expected = Element {
+                        unresolved_text: false,
                         ns: None,
                         local: "root".into(),
                         attrs: Vec::new(),

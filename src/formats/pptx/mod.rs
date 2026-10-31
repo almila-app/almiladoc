@@ -207,7 +207,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     }
 
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes: Vec::new(), assets })
+    Ok(Document { blocks, notes: Vec::new(), assets, ..Document::default() })
 }
 
 fn listed_slides(

@@ -40,6 +40,9 @@ pub struct Document {
     pub notes: Vec<Note>,
     /// Every embedded asset, indexed by [`AssetId`].
     pub assets: Vec<Asset>,
+    /// Source-declared descriptive values; absent metadata is omitted from JSON.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub metadata: Option<DocumentMeta>,
 }
 
 /// Footnote or endnote body, referenced from text by [`Inline::NoteRef`].
@@ -64,4 +67,33 @@ pub enum NoteKind {
     Footnote,
     /// Collected at the end of the document or section.
     Endnote,
+}
+
+/// Descriptive values preserved from the source, without inferred names or dates.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct DocumentMeta {
+    /// The first source-declared title, before display trimming.
+    pub title: Option<String>,
+    /// Creator names in source order, without assuming authorship.
+    pub creators: Vec<String>,
+    /// The source's publication date string, without date normalization.
+    pub publication_date: Option<String>,
+    /// The source's modification date string, without date normalization.
+    pub modification_date: Option<String>,
+    /// Some preserved metadata text contains an unresolved entity reference.
+    pub unresolved_entities: bool,
+}
+
+#[cfg(feature = "serde")]
+impl DocumentMeta {
+    pub(crate) fn text_work(&self) -> u64 {
+        self.title
+            .iter()
+            .chain(self.publication_date.iter())
+            .chain(self.modification_date.iter())
+            .chain(self.creators.iter())
+            .fold(0_u64, |work, value| work.saturating_add((value.len() as u64).max(1)))
+    }
 }

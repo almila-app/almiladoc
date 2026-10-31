@@ -77,7 +77,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, references.comments());
 
     let assets = assets.into_inner().assets;
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, notes, assets, ..Document::default() })
 }
 
 fn read_numbering(

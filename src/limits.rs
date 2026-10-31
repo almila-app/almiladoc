@@ -90,7 +90,8 @@ pub struct Limits {
     /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
     /// style and numbering resolution, grid positions counted against
     /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
-    /// ahead at and writes, 64 bytes of Markdown or JSON written, the
+    /// ahead at and writes, metadata text bytes serialized to JSON (each
+    /// empty value costing one), 64 bytes of Markdown or JSON written, the
     /// Markdown events of each gap's fill, 16 bytes of each image an OCR
     /// request copies, and of a page it paints 128 pixels before painting,
     /// 128 pixels of each step's work as unpdf prices it, rounded up, and 16

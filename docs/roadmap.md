@@ -92,8 +92,6 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   reads. A `Reject` revision policy keeps deleted text and drops inserted text, joining paragraphs whose
   mark a revision removes. The first step writes the
   grammar down as an ADR 0001 amendment.
-- **document-meta** (document title, author and dates). Trigger: the consumer needs them; `DocumentMeta`
-  lands with that producer (ADR 0001 decision 5).
 - **ocr-lines** (`GapFill::Lines`: located lines grouped into paragraphs in the crate). Trigger: a
   caller whose engine returns only located lines.
 - **ocr-http-roots** (caller trust anchors and an explicit proxy for `OcrHttp`). Trigger: a caller

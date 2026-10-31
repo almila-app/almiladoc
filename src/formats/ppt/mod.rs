@@ -71,7 +71,12 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let pictures = collect_pictures(parse_ctx, &mut ole)?;
     ex.report_pictures(&pictures);
     ex.report_masters()?;
-    Ok(Document { blocks: ex.into_blocks()?, notes: Vec::new(), assets: pictures.assets })
+    Ok(Document {
+        blocks: ex.into_blocks()?,
+        notes: Vec::new(),
+        assets: pictures.assets,
+        ..Document::default()
+    })
 }
 
 /// The deck's pictures, kept as document-level assets, and what keeps a

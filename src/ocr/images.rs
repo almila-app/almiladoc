@@ -20,7 +20,7 @@ pub(crate) fn leave_image_gaps(
     parse_ctx: &ParseCtx<'_>,
     document: &mut Document,
 ) -> Result<(), ConvertError> {
-    let Document { blocks, notes, assets } = document;
+    let Document { blocks, notes, assets, .. } = document;
     let mut ids = HashSet::new();
     let selected: Vec<bool> = notes.iter().map(|note| ids.insert(note.id.as_str())).collect();
     let notes =
@@ -229,6 +229,7 @@ mod tests {
             target: crate::model::LinkTarget::External("https://example.org".into()),
         };
         let mut document = Document {
+            metadata: None,
             blocks: vec![
                 para(vec![Inline::plain("a"), image(0, body, one), image(1, body, one)]),
                 Block::BlockQuote(vec![para(vec![image(0, body, one)])]),

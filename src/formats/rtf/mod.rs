@@ -487,6 +487,7 @@ fn strip_markers(root: &mut Element) {
 
 fn math_elem(local: &str) -> Element {
     Element {
+        unresolved_text: false,
         ns: Some(Rc::from(ns::M)),
         local: local.to_string(),
         attrs: Vec::new(),
@@ -1794,7 +1795,12 @@ impl<'a> Parser<'a> {
         self.table.collapse_nested()?;
         self.flush_top_table()?;
         self.flush_runs();
-        Ok(Document { blocks: self.blocks, notes: self.dest.notes, assets: self.assets.assets })
+        Ok(Document {
+            blocks: self.blocks,
+            notes: self.dest.notes,
+            assets: self.assets.assets,
+            ..Document::default()
+        })
     }
 }
 

@@ -34,6 +34,9 @@ pub(crate) fn write(
     diagnostics: &Diagnostics,
     meter: &Meter<'_>,
 ) -> Result<String, ConvertError> {
+    if let Some(metadata) = &document.metadata {
+        meter.charge(metadata.text_work())?;
+    }
     let document = &fills.spliced(document);
     let envelope =
         Envelope { schema_version: JSON_SCHEMA_VERSION, identity, document, diagnostics };
@@ -182,8 +185,6 @@ mod tests {
         ]
     }
 
-    /// A document holding every variant of every model type, each optional
-    /// field both set and unset.
     fn every_variant() -> Document {
         let list = List {
             marker: MarkerKind::LowerRoman,
@@ -207,6 +208,7 @@ mod tests {
             header_rows: 1,
         };
         Document {
+            metadata: None,
             blocks: vec![
                 Block::Heading {
                     level: 1,
@@ -605,5 +607,67 @@ mod tests {
             Err(ConvertError::limit(Limit::Work, len / 64 - 1))
         );
         with(len / 64, u64::MAX).unwrap();
+    }
+    #[test]
+    fn descriptive_metadata_is_additive_and_text_is_metered() {
+        let metadata = crate::model::DocumentMeta {
+            title: Some("Title".into()),
+            creators: vec!["First".into(), "Second".into()],
+            publication_date: Some("1994".into()),
+            modification_date: Some(" raw modified ".into()),
+            unresolved_entities: true,
+        };
+        let work = 34;
+        assert_eq!(metadata.text_work(), work);
+        let document = Document { metadata: Some(metadata), ..Document::default() };
+        let value: serde_json::Value =
+            serde_json::from_str(&json(&document, &Diagnostics::default()).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 5);
+        assert_eq!(
+            value["document"]["metadata"],
+            serde_json::json!({"title":"Title", "creators":["First","Second"],
+            "publication_date":"1994", "modification_date":" raw modified ", "unresolved_entities":true})
+        );
+        let ledger = Ledger::new(work - 1, None);
+        assert_eq!(
+            write(
+                &EngineIdentity::of(&Config::default()),
+                &document,
+                &GapFills::default(),
+                &Diagnostics::default(),
+                &Meter::new(&ledger, u64::MAX)
+            ),
+            Err(ConvertError::limit(Limit::Work, work - 1))
+        );
+    }
+
+    #[test]
+    fn metadata_text_work_counts_empty_values_and_utf8_bytes() {
+        use crate::model::DocumentMeta;
+        for (metadata, expected) in [
+            (DocumentMeta::default(), 0),
+            (
+                DocumentMeta {
+                    title: Some(String::new()),
+                    creators: vec![String::new()],
+                    publication_date: Some(String::new()),
+                    modification_date: Some(String::new()),
+                    ..DocumentMeta::default()
+                },
+                4,
+            ),
+            (
+                DocumentMeta {
+                    title: Some("İ".into()),
+                    creators: vec![String::new(), "ç".into()],
+                    publication_date: Some("ğ".into()),
+                    modification_date: Some("ü".into()),
+                    ..DocumentMeta::default()
+                },
+                9,
+            ),
+        ] {
+            assert_eq!(metadata.text_work(), expected);
+        }
     }
 }

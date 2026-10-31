@@ -560,7 +560,12 @@ mod tests {
         }
         leaves.append(&mut containers);
         let note = Note { id: "n".into(), kind: NoteKind::Footnote, blocks: vec![text("N")] };
-        let doc = Document { blocks: leaves, notes: vec![note], assets: Vec::new() };
+        let doc = Document {
+            blocks: leaves,
+            notes: vec![note],
+            assets: Vec::new(),
+            ..Document::default()
+        };
         agrees_with_rendering(&doc, "crafted");
     }
 

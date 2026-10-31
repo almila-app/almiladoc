@@ -31,7 +31,7 @@ const SUB: Style = Style { position: VerticalPosition::Subscript, ..Style::PLAIN
 const READ: Unread<'static> = Unread { notes: false, targets: None };
 
 fn with_notes(blocks: Vec<Block>, notes: Vec<Note>) -> String {
-    document_to_markdown(&Document { blocks, notes, assets: Vec::new() })
+    document_to_markdown(&Document { blocks, notes, assets: Vec::new(), ..Document::default() })
 }
 
 fn doc(blocks: Vec<Block>) -> String {

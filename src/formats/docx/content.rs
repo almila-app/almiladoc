@@ -363,7 +363,13 @@ fn copy_with(
         attrs.push(Attr { ns: a.ns.clone(), local, value: copied(parse_ctx, &a.value)? });
     }
     let local = copied(parse_ctx, &elem.local)?;
-    Ok(Element { ns: elem.ns.clone(), local, attrs, children })
+    Ok(Element {
+        ns: elem.ns.clone(),
+        local,
+        attrs,
+        children,
+        unresolved_text: elem.unresolved_text,
+    })
 }
 
 fn copied(parse_ctx: &ParseCtx<'_>, text: &str) -> Result<String, ConvertError> {

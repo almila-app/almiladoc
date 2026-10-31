@@ -4,9 +4,11 @@
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
-use crate::model::{AnchorId, Block, Document, ImageSource, Inline, LinkTarget, Unit, UnitKind};
+use crate::model::{
+    AnchorId, Block, Document, DocumentMeta, ImageSource, Inline, LinkTarget, Unit, UnitKind,
+};
 use crate::package::archive::{Role, report};
-use crate::package::xml::Element;
+use crate::package::xml::{self, Element};
 use crate::package::{Package, PackageKind, path};
 use crate::shared::assets::{AssetSink, media_type_for};
 use crate::shared::css::{self, Applies};
@@ -19,13 +21,9 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let pkg = Package::open(parse_ctx, bytes, PackageKind::Epub)?;
 
     let opf_path = rootfile_path(&pkg)?;
-    let opf = pkg.required_xml_part(&opf_path, Role::Content(Region::Body))?;
+    let opf = pkg.required_xml_part(&opf_path, Role::Probe)?;
 
-    let mut doc = Document::default();
-    let title = opf.descendants_any("title").next().map(Element::text);
-    if let Some(title) = title.as_deref().map(str::trim).filter(|title| !title.is_empty()) {
-        doc.blocks.push(Block::heading(1, vec![Inline::plain(title)]));
-    }
+    let mut doc = document_with_metadata(parse_ctx, &opf)?;
 
     let manifest: HashMap<&str, Option<&str>> = opf
         .descendants_any("item")
@@ -83,6 +81,151 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
 
     doc.assets = std::mem::take(&mut assets.borrow_mut().assets);
     Ok(doc)
+}
+
+fn document_with_metadata(
+    parse_ctx: &ParseCtx<'_>,
+    opf: &Element,
+) -> Result<Document, ConvertError> {
+    let mut doc = Document::default();
+    let values = metadata(parse_ctx, opf)?;
+    let title = values.as_ref().and_then(|(metadata, unresolved)| {
+        metadata
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| (title, *unresolved))
+    });
+    let fallback = if title.is_none() { legacy_title(parse_ctx, opf)? } else { None };
+    let title =
+        title.or_else(|| fallback.as_ref().map(|(text, unresolved)| (text.trim(), *unresolved)));
+    if let Some((title, unresolved)) = title.filter(|(title, _)| !title.is_empty()) {
+        parse_ctx.charge(title.len() as u64)?;
+        if unresolved {
+            parse_ctx.emit(DiagnosticCode::UnresolvedEntity, Region::Body);
+        }
+        doc.blocks.push(Block::heading(1, vec![Inline::plain(title)]));
+    }
+    doc.metadata = values.map(|(metadata, _)| metadata);
+    Ok(doc)
+}
+
+fn legacy_title(ctx: &ParseCtx<'_>, opf: &Element) -> Result<Option<(String, bool)>, ConvertError> {
+    for elem in opf.descendant_elems() {
+        ctx.charge(1)?;
+        if elem.local == "title" {
+            return Ok(Some((elem.checked_text(ctx)?, elem.unresolved_text)));
+        }
+    }
+    Ok(None)
+}
+
+const OPF: &str = "http://www.idpf.org/2007/opf";
+const DC: &str = "http://purl.org/dc/elements/1.1/";
+const DCTERMS: &str = "http://purl.org/dc/terms/";
+const MODIFIED: &str = "http://purl.org/dc/terms/modified";
+
+fn metadata(
+    ctx: &ParseCtx<'_>,
+    opf: &Element,
+) -> Result<Option<(DocumentMeta, bool)>, ConvertError> {
+    let Some(package) = opf.find(OPF, "package") else { return Ok(None) };
+    let Some(container) = package.find(OPF, "metadata") else {
+        return Ok(None);
+    };
+    let prefixes = modified_prefixes(ctx, package)?;
+    let mut metadata = DocumentMeta::default();
+    for elem in metadata_elements(container) {
+        ctx.charge(1)?;
+        if elem.is(OPF, "meta")
+            && elem.attr_unqualified("refines").is_none()
+            && metadata.modification_date.is_none()
+            && modified_property(ctx, &prefixes, elem.attr_unqualified("property"))?
+        {
+            metadata.modification_date =
+                Some(meta_text(ctx, elem, &mut metadata.unresolved_entities)?);
+        }
+    }
+    let mut title_unresolved = false;
+    for elem in metadata_elements(container) {
+        ctx.charge(1)?;
+        let target = match (elem.ns.as_deref(), elem.local.as_str()) {
+            (Some(DC), "title") if metadata.title.is_none() => {
+                title_unresolved = elem.unresolved_text;
+                &mut metadata.title
+            }
+            (Some(DC), "creator") => {
+                metadata.creators.push(meta_text(ctx, elem, &mut metadata.unresolved_entities)?);
+                continue;
+            }
+            (Some(DC), "date") => match elem.attr_qualified(OPF, "event") {
+                None | Some("publication") if metadata.publication_date.is_none() => {
+                    &mut metadata.publication_date
+                }
+                Some("modification") if metadata.modification_date.is_none() => {
+                    &mut metadata.modification_date
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        *target = Some(meta_text(ctx, elem, &mut metadata.unresolved_entities)?);
+    }
+    Ok(Some((metadata, title_unresolved)))
+}
+
+fn metadata_elements(container: &Element) -> impl Iterator<Item = &Element> {
+    container.child_elems().flat_map(|elem| {
+        let count = if elem.is(OPF, "dc-metadata") { usize::MAX } else { 0 };
+        std::iter::once(elem).chain(elem.child_elems().take(count))
+    })
+}
+
+fn modified_prefixes<'a>(
+    ctx: &ParseCtx<'_>,
+    package: &'a Element,
+) -> Result<HashMap<&'a str, &'a str>, ConvertError> {
+    let mut prefixes = HashMap::new();
+    let Some(declaration) = package.attr_unqualified("prefix") else { return Ok(prefixes) };
+    ctx.charge(declaration.len() as u64)?;
+    let mut words = declaration.split_ascii_whitespace();
+    while let (Some(name), Some(uri)) = (words.next(), words.next()) {
+        ctx.charge(name.len() as u64)?;
+        if let Some(prefix) = name.strip_suffix(':')
+            && !prefix.contains(':')
+            && xml::is_name(prefix)
+        {
+            prefixes.entry(prefix).and_modify(|bound| *bound = "").or_insert(uri);
+        }
+    }
+    Ok(prefixes)
+}
+
+fn modified_property(
+    ctx: &ParseCtx<'_>,
+    prefixes: &HashMap<&str, &str>,
+    property: Option<&str>,
+) -> Result<bool, ConvertError> {
+    let Some(value) = property else { return Ok(false) };
+    ctx.charge(value.len() as u64)?;
+    let Some((prefix, reference)) = value.split_once(':') else { return Ok(false) };
+    if reference.is_empty() || reference.starts_with('/') || reference.contains(':') {
+        return Ok(false);
+    }
+    ctx.charge(prefix.len() as u64)?;
+    let base = prefixes.get(prefix).copied().or_else(|| (prefix == "dcterms").then_some(DCTERMS));
+    Ok(base.is_some_and(|base| !base.is_empty() && MODIFIED.strip_prefix(base) == Some(reference)))
+}
+
+fn meta_text(
+    ctx: &ParseCtx<'_>,
+    elem: &Element,
+    unresolved: &mut bool,
+) -> Result<String, ConvertError> {
+    let text = elem.checked_text(ctx)?;
+    *unresolved |= elem.unresolved_text;
+    Ok(text)
 }
 
 fn rootfile_path(pkg: &Package<'_>) -> Result<String, ConvertError> {
@@ -867,5 +1010,287 @@ mod tests {
             assert_eq!(crate::render::markdown::document_to_markdown(&document), "beforeafter\n");
             assert!(ctx.diagnostics().iter().all(|d| d.code == DiagnosticCode::HiddenOmitted));
         }
+    }
+    fn descriptive_book(metadata: &str) -> Vec<u8> {
+        descriptive_package("", metadata)
+    }
+
+    fn descriptive_package(attributes: &str, metadata: &str) -> Vec<u8> {
+        let opf = format!(
+            r#"<package {attributes} xmlns="http://www.idpf.org/2007/opf"
+            xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:x="urn:decoy">
+            {metadata}<manifest><item id="c" href="c.xhtml"/></manifest>
+            <spine><itemref idref="c"/></spine></package>"#
+        );
+        descriptive_opf(&opf)
+    }
+
+    fn descriptive_opf(opf: &str) -> Vec<u8> {
+        zip_package(&[
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("c.opf", opf.as_bytes()),
+            ("c.xhtml", &chapter("", "")),
+        ])
+    }
+
+    #[test]
+    fn modified_properties_resolve_package_prefixes() {
+        for (attributes, property, expected) in [
+            ("", "dcterms:modified", Some("date")),
+            (r#"prefix="pub: http://purl.org/dc/terms/""#, "pub:modified", Some("date")),
+            (r#"prefix="pub: http://purl.org/dc/""#, "pub:terms/modified", Some("date")),
+            (r#"xmlns:dcterms="urn:decoy""#, "dcterms:modified", Some("date")),
+            (r#"xmlns:pub="http://purl.org/dc/terms/""#, "pub:modified", None),
+            (r#"prefix="pub: https://purl.org/dc/terms/""#, "pub:modified", None),
+            (r#"prefix="pub: http://purl.org/dc/terms/ pub: urn:decoy""#, "pub:modified", None),
+            (r#"prefix="1pub: http://purl.org/dc/terms/""#, "1pub:modified", None),
+            (r#"prefix="pub: http""#, "pub:://purl.org/dc/terms/modified", None),
+            (r#"prefix="pub: http:""#, "pub://purl.org/dc/terms/modified", None),
+            ("", "modified", None),
+        ] {
+            let metadata =
+                format!("<metadata><meta property=\"{property}\">date</meta></metadata>");
+            let document =
+                parse(&ParseCtx::default(), &descriptive_package(attributes, &metadata)).unwrap();
+            assert_eq!(
+                document.metadata.unwrap().modification_date.as_deref(),
+                expected,
+                "{attributes}"
+            );
+        }
+    }
+
+    #[test]
+    fn rebound_dcterms_does_not_borrow_the_reserved_meaning() {
+        let bytes = descriptive_package(
+            r#"prefix="dcterms: urn:decoy""#,
+            r#"<metadata><meta property="dcterms:modified">not a modification date</meta></metadata>"#,
+        );
+        let document = parse(&ParseCtx::default(), &bytes).unwrap();
+        assert_eq!(document.metadata.unwrap().modification_date, None);
+    }
+
+    #[test]
+    fn modified_property_declarations_and_lookups_spend_work() {
+        use crate::Limits;
+        use crate::limits::Limit;
+        use crate::package::xml::{Dialect, WholeTree};
+        for (prefixes, property) in [
+            (format!("pub: urn:{}", "x".repeat(100)), "pub:modified".into()),
+            (String::new(), format!("{}:modified", "p".repeat(100))),
+        ] {
+            let source = format!(
+                r#"<package xmlns="http://www.idpf.org/2007/opf" prefix="{prefixes}">
+                <metadata><meta property="{property}">date</meta></metadata></package>"#
+            );
+            let tree =
+                xml::parse(&ParseCtx::default(), source.as_bytes(), Dialect::Xhtml, &mut WholeTree)
+                    .unwrap()
+                    .root;
+            for max_work in [20, 129] {
+                let limits = Limits { max_work, ..Limits::default() };
+                assert_eq!(
+                    metadata(&ParseCtx::new(&limits), &tree),
+                    Err(ConvertError::limit(Limit::Work, max_work))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn descriptive_values_keep_their_source_order_and_lexical_dates() {
+        let bytes = descriptive_book(
+            r##"<x:metadata><dc:title>wrong container</dc:title></x:metadata>
+            <metadata xmlns:opf="http://www.idpf.org/2007/opf">
+            <x:title>wrong namespace</x:title><x:creator>wrong creator</x:creator><x:date>wrong date</x:date>
+            <x:meta property="dcterms:modified">wrong modified</x:meta>
+            <meta x:property="dcterms:modified">wrong attribute</meta>
+            <x:wrap><dc:title>nested</dc:title><dc:creator>nested creator</dc:creator>
+            <dc:date>nested date</dc:date><meta property="dcterms:modified">nested modified</meta></x:wrap>
+            <dc:title>  Actual &amp; Title  </dc:title><dc:creator opf:role="edt">Editor</dc:creator>
+            <dc:creator>Second Creator</dc:creator><dc:date opf:event="creation">not publication</dc:date>
+            <dc:date> 1982-03 </dc:date><dc:date opf:event="modification">legacy date</dc:date>
+            <meta property="dcterms:modified" refines="#other">not global</meta>
+            <meta property="dcterms:modified"> 2020-01-02T03:04:05+03:00 </meta></metadata>"##,
+        );
+        let document = parse(&ParseCtx::default(), &bytes).unwrap();
+        assert_eq!(
+            document.metadata,
+            Some(DocumentMeta {
+                title: Some("  Actual & Title  ".into()),
+                creators: vec!["Editor".into(), "Second Creator".into()],
+                publication_date: Some(" 1982-03 ".into()),
+                modification_date: Some(" 2020-01-02T03:04:05+03:00 ".into()),
+                unresolved_entities: false,
+            })
+        );
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&document),
+            "# Actual & Title\n\ntext\n"
+        );
+    }
+
+    #[test]
+    fn absent_metadata_is_not_inferred_and_legacy_dates_keep_their_meaning() {
+        for (xml, expected, markdown) in [
+            ("", None, "text\n"),
+            ("<x:metadata><dc:title>decoy</dc:title></x:metadata>", None, "# decoy\n\ntext\n"),
+            (
+                r#"<metadata xmlns:opf="http://www.idpf.org/2007/opf">
+                <dc:date opf:event="publication">published</dc:date>
+                <dc:date opf:event="modification">modified</dc:date></metadata>"#,
+                Some(DocumentMeta {
+                    publication_date: Some("published".into()),
+                    modification_date: Some("modified".into()),
+                    ..DocumentMeta::default()
+                }),
+                "text\n",
+            ),
+        ] {
+            let document = parse(&ParseCtx::default(), &descriptive_book(xml)).unwrap();
+            assert_eq!(document.metadata, expected, "{xml}");
+            assert_eq!(crate::render::markdown::document_to_markdown(&document), markdown);
+        }
+    }
+
+    #[test]
+    fn legacy_wrapped_metadata_keeps_its_values_and_heading() {
+        let bytes = descriptive_book(
+            "<metadata><dc-metadata><dc:title>Legacy</dc:title><dc:creator>Creator</dc:creator>\
+            <dc:date>1991</dc:date></dc-metadata></metadata>",
+        );
+        let document = parse(&ParseCtx::default(), &bytes).unwrap();
+        assert_eq!(
+            document.metadata,
+            Some(DocumentMeta {
+                title: Some("Legacy".into()),
+                creators: vec!["Creator".into()],
+                publication_date: Some("1991".into()),
+                ..DocumentMeta::default()
+            })
+        );
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "# Legacy\n\ntext\n");
+    }
+
+    #[test]
+    fn a_namespace_free_package_keeps_its_title_heading() {
+        let bytes = descriptive_opf(
+            r#"<package xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <metadata><dc:title>Legacy</dc:title></metadata>
+            <manifest><item id="c" href="c.xhtml"/></manifest>
+            <spine><itemref idref="c"/></spine></package>"#,
+        );
+        let document = parse(&ParseCtx::default(), &bytes).unwrap();
+        assert_eq!(document.metadata, None);
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "# Legacy\n\ntext\n");
+    }
+
+    #[test]
+    fn legacy_title_lookup_and_copies_charge_work_and_check_cancellation() {
+        use crate::limits::Limit;
+        use crate::package::xml::{Dialect, WholeTree};
+        use crate::{CancelToken, Limits};
+
+        let text = "a".repeat(100);
+        let source = format!("<package><title>{text}</title></package>");
+        let tree =
+            xml::parse(&ParseCtx::default(), source.as_bytes(), Dialect::Xhtml, &mut WholeTree)
+                .unwrap()
+                .root;
+        let ctx = ParseCtx::default();
+        let document = document_with_metadata(&ctx, &tree).unwrap();
+        assert_eq!(document.blocks, [Block::heading(1, vec![Inline::plain(text)])]);
+        assert_eq!(ctx.fuel(), 203);
+        let limits = Limits { max_work: 202, ..Limits::default() };
+        assert_eq!(
+            document_with_metadata(&ParseCtx::new(&limits), &tree),
+            Err(ConvertError::limit(Limit::Work, 202))
+        );
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            document_with_metadata(&ParseCtx::default().with_cancel(Some(&cancel)), &tree),
+            Err(ConvertError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn only_damage_to_the_rendered_title_fails_markdown() {
+        use crate::{Config, Converter, Format, Input};
+        let converter = Converter::new(Config { threads: 1, ..Config::default() }).unwrap();
+        for (value, damaged, body_loss) in [
+            ("<dc:title>bad &unknown;</dc:title>", true, true),
+            ("<dc:creator>bad &unknown;</dc:creator>", true, false),
+            ("<dc:creator><x:a><x:b>bad &unknown;</x:b></x:a></dc:creator>", true, false),
+            ("<dc:date>bad &unknown;</dc:date>", true, false),
+            (r#"<meta property="dcterms:modified">bad &unknown;</meta>"#, true, false),
+            ("<dc:title>literal &amp;unknown;</dc:title>", false, false),
+            ("<x:title>&unknown;</x:title>", false, true),
+            ("<x:title>&unknown;</x:title><dc:title>readable</dc:title>", false, false),
+            (r#"<dc:title x:ignored="&unknown;">readable</dc:title>"#, false, false),
+        ] {
+            let xml = format!("<metadata>{value}</metadata>");
+            let bytes = descriptive_book(&xml);
+            let parsed = converter.parse(Input::new(&bytes, Format::Epub)).unwrap();
+            assert_eq!(
+                parsed.document().metadata.as_ref().unwrap().unresolved_entities,
+                damaged,
+                "{value}"
+            );
+            assert_eq!(parsed.diagnostics().has_loss(), body_loss, "{value}");
+            let rendered = parsed.render();
+            assert_eq!(
+                matches!(rendered, Err(ConvertError::Incomplete { .. })),
+                body_loss,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_text_copies_propagate_work_and_cancellation() {
+        use crate::limits::Limit;
+        use crate::package::xml::{Dialect, WholeTree};
+        use crate::{CancelToken, Limits};
+        let xml = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata>
+            <dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">{}</dc:creator></metadata></package>"#,
+            "a".repeat(100)
+        );
+        let tree = xml::parse(&ParseCtx::default(), xml.as_bytes(), Dialect::Xhtml, &mut WholeTree)
+            .unwrap()
+            .root;
+        let limits = Limits { max_work: 5, ..Limits::default() };
+        assert_eq!(
+            metadata(&ParseCtx::new(&limits), &tree),
+            Err(ConvertError::limit(Limit::Work, 5))
+        );
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            metadata(&ParseCtx::default().with_cancel(Some(&token)), &tree),
+            Err(ConvertError::Cancelled)
+        );
+    }
+    #[cfg(feature = "serde")]
+    #[test]
+    fn epub_metadata_reaches_the_existing_json_envelope() {
+        use crate::{Config, Converter, Format, Input};
+        let bytes = descriptive_book(
+            "<metadata><dc:title>Book</dc:title><dc:creator>First</dc:creator>\
+            <dc:creator>Second</dc:creator><dc:date> raw date </dc:date></metadata>",
+        );
+        let parsed = Converter::new(Config { threads: 1, ..Config::default() })
+            .unwrap()
+            .parse(Input::new(&bytes, Format::Epub))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 5);
+        assert_eq!(
+            value["document"]["metadata"],
+            serde_json::json!({"title":"Book", "creators":["First","Second"],
+            "publication_date":" raw date ", "modification_date":null, "unresolved_entities":false})
+        );
+        assert_eq!(parsed.render().unwrap().markdown(), "# Book\n\ntext\n");
     }
 }

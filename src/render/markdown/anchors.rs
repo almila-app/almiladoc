@@ -351,6 +351,7 @@ mod tests {
     #[test]
     fn heading_line_breaks_slug_as_spaces() {
         let doc = Document {
+            metadata: None,
             blocks: vec![Block::Heading {
                 level: 1,
                 anchor: Some("toc".to_string()),

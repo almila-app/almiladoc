@@ -69,7 +69,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
 
     let notes = ctx.notes.into_inner();
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, notes, assets, ..Document::default() })
 }
 
 /// A spreadsheet's styles part that does not read costs formatting alone, unless its entry

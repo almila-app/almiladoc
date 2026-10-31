@@ -233,6 +233,7 @@ mod tests {
         let table =
             Table::from_rows(vec![vec![Cell::new(vec![gap(4)]), Cell::new(vec![gap(5)])]], 0);
         let document = Document {
+            metadata: None,
             blocks: vec![
                 gap(1),
                 Block::BlockQuote(vec![Block::Paragraph(vec![Inline::plain("x")]), gap(2)]),
@@ -268,6 +269,7 @@ mod tests {
         let table = |blocks| Block::Table(Table::from_rows(vec![vec![Cell::new(blocks)]], 0));
         let note = |blocks| Note { id: "n".into(), kind: NoteKind::Footnote, blocks };
         let document = Document {
+            metadata: None,
             blocks: vec![
                 gap(1),
                 Block::BlockQuote(vec![gap(2)]),
@@ -297,6 +299,7 @@ mod tests {
         fills.settle(failed, GapState::Failed, &mut diagnostics);
         let filled = |page: &str| vec![para(page), Block::Rule];
         let expected = Document {
+            metadata: None,
             blocks: [
                 filled("1"),
                 vec![Block::BlockQuote(filled("2"))],

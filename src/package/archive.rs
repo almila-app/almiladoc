@@ -37,7 +37,6 @@ pub(crate) enum Role {
     /// A part whose loss the reader, or each consumer of the part, reports;
     /// its unresolved references still report in the region.
     Reported(Region),
-    /// A part no content depends on.
     Probe,
 }
 

@@ -96,7 +96,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         }
     }
     let assets = assembler.assets.into_inner().assets;
-    Ok(Document { blocks, notes, assets })
+    Ok(Document { blocks, notes, assets, ..Document::default() })
 }
 
 /// A note's body range, the story that holds it, its id and its kind.
