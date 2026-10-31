@@ -9,6 +9,7 @@ use crate::model::{
     HeaderFooterState, HeaderFooterVariant as Variant, Inline,
 };
 use crate::package::xml::{Element, Node, ns};
+use crate::shared::binary::utf16le_units;
 use crate::shared::text::clean_text;
 
 const COLOR_BYTES: usize = 6;
@@ -33,9 +34,90 @@ struct PrintSlot {
     unread_content: bool,
 }
 
-struct PrintSettings {
+pub(super) struct PrintSettings {
     slots: Vec<PrintSlot>,
     conflicts: [u64; 2],
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BinaryPrintText<'a> {
+    Inherit,
+    Unread,
+    Utf16(Option<&'a [u8]>),
+}
+
+impl PrintSettings {
+    pub(super) fn empty(ctx: &ParseCtx<'_>) -> Result<Self, ConvertError> {
+        use BinaryPrintText::{Inherit, Utf16};
+        Self::from_utf16(ctx, [Utf16(None), Inherit, Inherit, Utf16(None), Inherit, Inherit])
+    }
+
+    pub(super) fn unread(ctx: &ParseCtx<'_>) -> Result<Self, ConvertError> {
+        use BinaryPrintText::{Inherit, Unread};
+        Self::from_utf16(ctx, [Unread, Inherit, Inherit, Unread, Inherit, Inherit])
+    }
+
+    pub(super) fn from_utf16(
+        ctx: &ParseCtx<'_>,
+        fields: [BinaryPrintText<'_>; 6],
+    ) -> Result<Self, ConvertError> {
+        let mut result = Self { slots: Vec::with_capacity(FIELDS.len()), conflicts: [0; 2] };
+        for ((_, side, variant, _), field) in FIELDS.into_iter().zip(fields) {
+            ctx.charge(1)?;
+            let mut slot = inherit(side, variant);
+            match field {
+                BinaryPrintText::Inherit => {}
+                BinaryPrintText::Unread => {
+                    slot.state.value.content = Some(Vec::new());
+                    slot.state.certainty = Certainty::Uncertain;
+                    slot.unread_content = true;
+                    result.conflicts[side_index(side)] = 1;
+                }
+                BinaryPrintText::Utf16(bytes) => {
+                    let (text, damage) = utf16_text(ctx, bytes.unwrap_or_default())?;
+                    let sections = sections(ctx, &text, &damage, |code| slot.report(code))?;
+                    slot.state.value.content = Some(paragraphs(sections));
+                }
+            }
+            result.slots.push(slot);
+        }
+        Ok(result)
+    }
+
+    pub(super) fn merge(&mut self, ctx: &ParseCtx<'_>, extra: &Self) -> Result<(), ConvertError> {
+        let conflicts = conflicting_sides(ctx, self, extra)?;
+        for (count, conflict) in self.conflicts.iter_mut().zip(conflicts) {
+            *count = count.saturating_add(u64::from(conflict));
+        }
+        Ok(())
+    }
+}
+
+impl PrintSlot {
+    fn report(&mut self, code: DiagnosticCode) {
+        if matches!(code, DiagnosticCode::UnresolvedEntity | DiagnosticCode::InvalidEncoding) {
+            self.state.certainty = Certainty::Uncertain;
+        }
+        self.unread_content |= code.class() == crate::LossClass::Lost;
+        self.reports.push(code);
+    }
+}
+
+fn utf16_text(ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<(String, Vec<Damage>), ConvertError> {
+    ctx.charge(bytes.len() as u64)?;
+    let mut text = String::new();
+    let mut damage = Vec::new();
+    for decoded in char::decode_utf16(utf16le_units(bytes)) {
+        let invalid = decoded.is_err();
+        let ch = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
+        ctx.charge(ch.len_utf8() as u64)?;
+        let start = text.len();
+        text.push(ch);
+        if invalid {
+            damage.push((start..text.len(), DiagnosticCode::InvalidEncoding));
+        }
+    }
+    Ok((text, damage))
 }
 
 pub(super) fn read(
@@ -51,12 +133,7 @@ pub(super) fn read(
     let kept = read_settings(ctx, containers.next())?;
     for container in containers {
         let extra = read_settings(ctx, Some(container))?;
-        let mut conflicts = extra.conflicts.map(|count| count != 0);
-        for (index, slot) in extra.slots.iter().enumerate() {
-            if !same_effective(ctx, &kept, &extra, index)? {
-                conflicts[side_index(slot.state.value.region)] = true;
-            }
-        }
+        let conflicts = conflicting_sides(ctx, &kept, &extra)?;
         for (side, conflict) in [Side::Header, Side::Footer].into_iter().zip(conflicts) {
             if conflict {
                 ctx.emit(DiagnosticCode::BlockUnread, diagnostic_region(side));
@@ -64,6 +141,20 @@ pub(super) fn read(
         }
     }
     publish(ctx, kept, out)
+}
+
+fn conflicting_sides(
+    ctx: &ParseCtx<'_>,
+    kept: &PrintSettings,
+    extra: &PrintSettings,
+) -> Result<[bool; 2], ConvertError> {
+    let mut conflicts = extra.conflicts.map(|count| count != 0);
+    for (index, slot) in extra.slots.iter().enumerate() {
+        if !same_effective(ctx, kept, extra, index)? {
+            conflicts[side_index(slot.state.value.region)] = true;
+        }
+    }
+    Ok(conflicts)
 }
 
 fn diagnostic_region(side: Side) -> Region {
@@ -150,13 +241,7 @@ fn read_item(
 ) -> Result<PrintSlot, ConvertError> {
     let mut slot = inherit(side, variant);
     let sections = if let Some(item) = item {
-        read_text_with(ctx, item, |code| {
-            if matches!(code, DiagnosticCode::UnresolvedEntity | DiagnosticCode::InvalidEncoding) {
-                slot.state.certainty = Certainty::Uncertain;
-            }
-            slot.unread_content |= code.class() == crate::LossClass::Lost;
-            slot.reports.push(code);
-        })?
+        read_text_with(ctx, item, |code| slot.report(code))?
     } else {
         std::array::from_fn(|_| String::new())
     };
@@ -221,7 +306,7 @@ fn same_effective(
     Ok(same && !kept_unread && !extra_unread)
 }
 
-fn publish(
+pub(super) fn publish(
     ctx: &ParseCtx<'_>,
     settings: PrintSettings,
     out: &mut SheetContent,

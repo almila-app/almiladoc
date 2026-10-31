@@ -102,7 +102,7 @@ The crate reads no file: pass bytes through `Input::new(bytes, format)` or `Inpu
 
 What a conversion cannot carry into its output is reported as `Diagnostics`: each `Diagnostic` is a `DiagnosticCode` with its fixed `LossClass` (`Omitted` by a policy, `Deferred` behind a placeholder or gap, `Lost`, or `Info`), the `Region` it sat in, an optional unit and a count, and holds no input text. Under the default `Config::on_loss`, `OnLoss::Fail`, a conversion that lost content fails `Incomplete` with its diagnostics; `OnLoss::Report` returns the `Conversion`, whose `diagnostics()` lists them and whose `is_complete()` is false. `parse` never fails on a loss: `Parsed::diagnostics` lists them and `Parsed::render` decides. [docs/support.md](docs/support.md) states, per format, what each reader leaves out and the code that reports it.
 
-`Config::headers_footers` defaults to `HeaderFooterPolicy::Omit`; `Emit` preserves XLSX print text as labelled blockquotes with fixed dynamic-field tokens. Other readers still omit their headers and footers.
+`Config::headers_footers` defaults to `HeaderFooterPolicy::Omit`; `Emit` preserves XLSX and XLSB print text as labelled blockquotes with fixed dynamic-field tokens. Other readers still omit their headers and footers.
 
 `Conversion::units()` returns typed source units and UTF-8 byte ranges into `markdown()`. Ranges contain unit content, excluding unit anchors, separators, boundary whitespace, the final newline and appended note definitions. Empty readable units keep zero-length ranges and original ordinals; hidden sheets and unreadable units have no range, bar a PPT slide whose slide-list text outlives its lost container. Slides with content are separated by one `---`; empty slides add no separator.
 

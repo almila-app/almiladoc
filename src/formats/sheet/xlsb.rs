@@ -6,6 +6,7 @@ use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, OOXML_GRID, SheetContent,
     SheetLink, UnreadFormats, format_as_text, render_number, resolve_format,
 };
+use super::headers::{self, BinaryPrintText, PrintSettings};
 use super::xlsx::{SHARED_STRINGS_REL, Sibling, convert_sheets, list_sheets};
 use super::{error_literal, rk_number};
 use crate::ctx::ParseCtx;
@@ -20,6 +21,10 @@ use crate::shared::binary::{ByteReader, decode_utf16, utf16le_units};
 use crate::shared::text::clean_text;
 use std::collections::HashMap;
 
+const MAX_HEADER_FOOTER_UNITS: usize = 255;
+const HF_DIFFERENT_EVEN: u16 = 1;
+const HF_DIFFERENT_FIRST: u16 = 2;
+
 // MS-XLSB record type values (section 2.3, "By Number").
 const BRT_ROW_HDR: u16 = 0;
 const BRT_CELL_RK: u16 = 2;
@@ -33,6 +38,10 @@ const BRT_FMLA_NUM: u16 = 9;
 const BRT_FMLA_BOOL: u16 = 10;
 const BRT_FMLA_ERROR: u16 = 11;
 const BRT_SST_ITEM: u16 = 19;
+const BRT_FRT_BEGIN: u16 = 35;
+const BRT_FRT_END: u16 = 36;
+const BRT_AC_BEGIN: u16 = 37;
+const BRT_AC_END: u16 = 38;
 const BRT_FMT: u16 = 44;
 const BRT_XF: u16 = 47;
 const BRT_COL_INFO: u16 = 60;
@@ -40,11 +49,115 @@ const BRT_CELL_RSTRING: u16 = 62;
 const BRT_WB_PROP: u16 = 153;
 const BRT_BUNDLE_SH: u16 = 156;
 const BRT_MERGE_CELL: u16 = 176;
+const BRT_BEGIN_USER_SH_VIEWS: u16 = 422;
+const BRT_BEGIN_USER_SH_VIEW: u16 = 423;
+const BRT_END_USER_SH_VIEW: u16 = 424;
+const BRT_END_USER_SH_VIEWS: u16 = 425;
 const BRT_BEGIN_HEADER_FOOTER: u16 = 479;
 const BRT_HLINK: u16 = 494;
 const BRT_DRAWING: u16 = 550;
 const BRT_BEGIN_CELL_XFS: u16 = 617;
 const BRT_END_CELL_XFS: u16 = 618;
+const BRT_BEGIN_USER_CS_VIEWS: u16 = 653;
+const BRT_END_USER_CS_VIEWS: u16 = 654;
+const BRT_BEGIN_USER_CS_VIEW: u16 = 655;
+const BRT_END_USER_CS_VIEW: u16 = 656;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrintKind {
+    SheetViews,
+    SheetView,
+    ChartViews,
+    ChartView,
+    Future,
+    Alternate,
+}
+
+impl PrintKind {
+    fn boundary(id: u16) -> Option<(Self, bool)> {
+        Some(match id {
+            BRT_BEGIN_USER_SH_VIEWS => (Self::SheetViews, true),
+            BRT_END_USER_SH_VIEWS => (Self::SheetViews, false),
+            BRT_BEGIN_USER_SH_VIEW => (Self::SheetView, true),
+            BRT_END_USER_SH_VIEW => (Self::SheetView, false),
+            BRT_BEGIN_USER_CS_VIEWS => (Self::ChartViews, true),
+            BRT_END_USER_CS_VIEWS => (Self::ChartViews, false),
+            BRT_BEGIN_USER_CS_VIEW => (Self::ChartView, true),
+            BRT_END_USER_CS_VIEW => (Self::ChartView, false),
+            BRT_FRT_BEGIN => (Self::Future, true),
+            BRT_FRT_END => (Self::Future, false),
+            BRT_AC_BEGIN => (Self::Alternate, true),
+            BRT_AC_END => (Self::Alternate, false),
+            _ => return None,
+        })
+    }
+
+    fn opaque(self) -> bool {
+        matches!(self, Self::Future | Self::Alternate)
+    }
+}
+
+struct PrintFrame {
+    kind: PrintKind,
+    saw_header_footer: bool,
+}
+
+#[derive(Default)]
+struct PrintScope {
+    frames: Vec<PrintFrame>,
+    opaque_depth: usize,
+}
+
+impl PrintScope {
+    fn observe(&mut self, ctx: &ParseCtx<'_>, id: u16) -> Result<(), ConvertError> {
+        if !ctx.headers_footers_requested() {
+            return Ok(());
+        }
+        ctx.charge(1)?;
+        if id == BRT_BEGIN_HEADER_FOOTER {
+            if let Some(frame) = self.frames.last_mut() {
+                frame.saw_header_footer = true;
+            }
+            return Ok(());
+        }
+        let Some((kind, entering)) = PrintKind::boundary(id) else { return Ok(()) };
+        if self.opaque_depth != 0 && !kind.opaque() {
+            return Ok(());
+        }
+        if entering {
+            self.enter(ctx, kind)?;
+        } else if self.frames.last().is_some_and(|frame| frame.kind == kind) {
+            let frame = self.frames.pop().ok_or(ConvertError::Internal)?;
+            if frame.kind.opaque() {
+                self.opaque_depth =
+                    self.opaque_depth.checked_sub(1).ok_or(ConvertError::Internal)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn enter(&mut self, ctx: &ParseCtx<'_>, kind: PrintKind) -> Result<(), ConvertError> {
+        let max = ctx.limits().max_record_depth;
+        if self.frames.len() as u64 >= max {
+            return Err(ConvertError::limit(Limit::RecordDepth, max));
+        }
+        self.frames.try_reserve(1).map_err(|_| ConvertError::limit(Limit::Allocation, 0))?;
+        self.frames.push(PrintFrame { kind, saw_header_footer: false });
+        if kind.opaque() {
+            self.opaque_depth += 1;
+        }
+        Ok(())
+    }
+
+    fn is_sheet(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    fn has_unread(&self, ctx: &ParseCtx<'_>) -> Result<bool, ConvertError> {
+        ctx.charge(self.frames.len() as u64)?;
+        Ok(self.frames.iter().any(|frame| frame.saw_header_footer))
+    }
+}
 
 pub(super) fn parse(
     parse_ctx: &ParseCtx<'_>,
@@ -260,9 +373,12 @@ fn read_sheet(
         parse_ctx.limits().max_grid_slots,
     );
     let mut drawing = None;
+    let mut print = None;
+    let mut scope = PrintScope::default();
     let mut row: Option<u32> = None;
     let mut records = Records::new(parse_ctx, data);
     while let Some((id, payload)) = records.next()? {
+        scope.observe(parse_ctx, id)?;
         let mut f = Fields::new(payload);
         match id {
             BRT_ROW_HDR => {
@@ -292,8 +408,8 @@ fn read_sheet(
                 Some(link) => out.links.extend(link),
                 None => out.report(DiagnosticCode::LinkTargetUnread, Region::Body),
             },
-            BRT_BEGIN_HEADER_FOOTER => {
-                unless_fatal(omit_headers_and_footers(&mut out, &mut f))?;
+            BRT_BEGIN_HEADER_FOOTER if scope.is_sheet() => {
+                read_print(parse_ctx, &mut f, &mut print, &mut out)?;
             }
             BRT_DRAWING => match unless_fatal(f.nullable_wide_string())? {
                 Some(id) => drawing = id.map(|(id, _)| id),
@@ -302,7 +418,84 @@ fn read_sheet(
             _ => {}
         }
     }
+    if parse_ctx.headers_footers_requested() {
+        publish_print(parse_ctx, print, &scope, &mut out)?;
+    }
     Ok((out, drawing))
+}
+
+fn publish_print(
+    ctx: &ParseCtx<'_>,
+    mut pending: Option<PrintSettings>,
+    scope: &PrintScope,
+    out: &mut SheetContent,
+) -> Result<(), ConvertError> {
+    if scope.has_unread(ctx)? {
+        let unread = PrintSettings::unread(ctx)?;
+        if let Some(kept) = &mut pending {
+            kept.merge(ctx, &unread)?;
+        } else {
+            pending = Some(unread);
+        }
+    }
+    let print = match pending {
+        Some(print) => print,
+        None => PrintSettings::empty(ctx)?,
+    };
+    headers::publish(ctx, print, out)
+}
+
+fn read_print(
+    ctx: &ParseCtx<'_>,
+    fields: &mut Fields<'_>,
+    pending: &mut Option<PrintSettings>,
+    out: &mut SheetContent,
+) -> Result<(), ConvertError> {
+    if !ctx.headers_footers_requested() {
+        return unless_fatal(omit_headers_and_footers(out, fields)).map(drop);
+    }
+    let extra = binary_print_settings(ctx, fields)?;
+    if let Some(kept) = pending {
+        kept.merge(ctx, &extra)?;
+    } else {
+        *pending = Some(extra);
+    }
+    Ok(())
+}
+
+fn binary_print_settings(
+    ctx: &ParseCtx<'_>,
+    fields: &mut Fields<'_>,
+) -> Result<PrintSettings, ConvertError> {
+    ctx.charge(1)?;
+    let flags = fields.u16().ok();
+    let mut broken = flags.is_none();
+    let mut source = [BinaryPrintText::Unread; 6];
+    for (index, value) in source.iter_mut().enumerate() {
+        ctx.charge(1)?;
+        let bytes = if broken { None } else { fields.nullable_wide_bytes().ok() };
+        broken |= bytes.is_none();
+        let active = match index {
+            0 | 1 => true,
+            2 | 3 => flags.is_some_and(|flags| flags & HF_DIFFERENT_EVEN != 0),
+            _ => flags.is_some_and(|flags| flags & HF_DIFFERENT_FIRST != 0),
+        };
+        *value = if active {
+            match bytes {
+                Some(bytes) if bytes.is_none_or(|b| b.len() / 2 <= MAX_HEADER_FOOTER_UNITS) => {
+                    BinaryPrintText::Utf16(bytes)
+                }
+                _ => BinaryPrintText::Unread,
+            }
+        } else {
+            BinaryPrintText::Inherit
+        };
+    }
+    let [header, footer, even_header, even_footer, first_header, first_footer] = source;
+    PrintSettings::from_utf16(
+        ctx,
+        [header, first_header, even_header, footer, first_footer, even_footer],
+    )
 }
 
 /// A BrtHLink's range and relationship id; `None` for a link within the
@@ -488,6 +681,17 @@ impl<'a> Fields<'a> {
         }
         self.wide_string().map(Some)
     }
+
+    fn nullable_wide_bytes(&mut self) -> Result<Option<&'a [u8]>, ConvertError> {
+        let count = self.u32()?;
+        if count == u32::MAX {
+            return Ok(None);
+        }
+        let len = (count as usize)
+            .checked_mul(2)
+            .ok_or_else(|| ConvertError::malformed("oversized string length"))?;
+        self.take(len).map(Some)
+    }
 }
 
 #[cfg(test)]
@@ -500,7 +704,10 @@ mod tests {
     use super::super::grid::{MAX_COLS, MAX_ROWS};
     use super::super::test_support::{Reported, first_table, in_unit, origin, reported, texts};
     use super::*;
-    use crate::model::{Block, UnitKind};
+    use crate::model::{
+        Block, HeaderFooterRegion as Side, HeaderFooterVariant as Variant, UnitKind,
+        inlines_to_plain_text,
+    };
     use crate::package::xml::ns::PKG_RELS;
     use crate::shared::test_support::{unit_starts, zip_package};
     use std::assert_matches;
@@ -626,6 +833,7 @@ mod tests {
         /// Further workbook records and relationships, verbatim.
         bundles: Vec<u8>,
         workbook_rels: &'a str,
+        sheet_type: Option<&'a str>,
     }
 
     impl Wb<'_> {
@@ -643,8 +851,9 @@ mod tests {
                 p.extend(wstr(&format!("rId{id}")));
                 p.extend(wstr(name));
                 workbook.extend(rec(BRT_BUNDLE_SH, &p));
+                let sheet_type = self.sheet_type.unwrap_or(WS_REL);
                 rels.push_str(&format!(
-                    r#"<Relationship Id="rId{id}" Type="{WS_REL}" Target="worksheets/sheet{id}.bin"/>"#
+                    r#"<Relationship Id="rId{id}" Type="{sheet_type}" Target="worksheets/sheet{id}.bin"/>"#
                 ));
             }
             workbook.extend_from_slice(&self.bundles);
@@ -685,6 +894,702 @@ mod tests {
 
     fn one_sheet(body: Vec<u8>) -> Wb<'static> {
         Wb { sheets: vec![("S", 0, body)], ..Wb::default() }
+    }
+
+    fn print_fields(flags: u16, fields: [Option<&[u16]>; 6]) -> Vec<u8> {
+        const BRT_END_HEADER_FOOTER: u16 = 480;
+        let mut payload = flags.to_le_bytes().to_vec();
+        for field in fields {
+            payload.extend(field.map_or_else(|| vec![0xFF; 4], wunits));
+        }
+        [rec(BRT_BEGIN_HEADER_FOOTER, &payload), rec(BRT_END_HEADER_FOOTER, &[])].concat()
+    }
+
+    fn print_strings(flags: u16, fields: [&str; 6]) -> Vec<u8> {
+        let fields = fields.map(|text| text.encode_utf16().collect::<Vec<_>>());
+        print_fields(flags, fields.each_ref().map(|units| Some(units.as_slice())))
+    }
+
+    fn emit_print(wb: &Wb<'_>) -> (Document, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        (doc, reported(ctx))
+    }
+
+    type PrintValue = (Side, Variant, Option<Vec<String>>);
+
+    fn print_values(doc: &Document) -> Vec<PrintValue> {
+        doc.blocks
+            .iter()
+            .filter_map(|block| {
+                let Block::HeaderFooter(value) = block else { return None };
+                let content = value.content.as_ref().map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| match block {
+                            Block::Paragraph(inlines) => inlines_to_plain_text(inlines),
+                            other => panic!("unexpected print block: {other:?}"),
+                        })
+                        .collect()
+                });
+                Some((value.region, value.variant, content))
+            })
+            .collect()
+    }
+
+    fn cleared_print_pair() -> [PrintValue; 2] {
+        [Side::Header, Side::Footer].map(|side| (side, Variant::Default, Some(Vec::new())))
+    }
+
+    fn unread_print_reports(unit: u32) -> [Reported; 2] {
+        [Region::Header, Region::Footer]
+            .map(|region| (DiagnosticCode::BlockUnread, region, Some(unit), 1))
+    }
+
+    fn default_print_pair(header: &str, footer: &str) -> [PrintValue; 2] {
+        [
+            (Side::Header, Variant::Default, Some(vec![header.into()])),
+            (Side::Footer, Variant::Default, Some(vec![footer.into()])),
+        ]
+    }
+
+    #[test]
+    fn binary_print_flags_select_distinct_fields_in_canonical_order() {
+        for flags in [0, 1, 2, 3, 12] {
+            let source = print_strings(flags, ["H", "F", "EH", "EF", "FH", "FF"]);
+            let (doc, reports) = emit_print(&one_sheet(source));
+            let mut expected = Vec::new();
+            for (side, text, first, even) in
+                [(Side::Header, "H", "FH", "EH"), (Side::Footer, "F", "FF", "EF")]
+            {
+                expected.push((side, Variant::Default, Some(vec![text.to_owned()])));
+                if flags & 2 != 0 {
+                    expected.push((side, Variant::First, Some(vec![first.to_owned()])));
+                }
+                if flags & 1 != 0 {
+                    expected.push((side, Variant::Even, Some(vec![even.to_owned()])));
+                }
+            }
+            assert_eq!(print_values(&doc), expected, "{flags}");
+            assert_eq!(reports, [], "{flags}");
+        }
+    }
+
+    #[test]
+    fn binary_print_codes_share_formatting_without_xml_escape_decoding() {
+        let source = print_strings(
+            0,
+            [
+                "&LLeft&C&KFF0000Red&K04+000Theme&K03-123Dark&R_x0041_ _xD800_ &&K112233",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
+        );
+        let (doc, reports) = emit_print(&one_sheet(source));
+        assert_eq!(
+            print_values(&doc),
+            [(
+                Side::Header,
+                Variant::Default,
+                Some(vec!["Left".into(), "RedThemeDark".into(), "_x0041_ _xD800_ &K112233".into()])
+            )]
+        );
+        assert_eq!(reports, [(DiagnosticCode::FormattingUnreadable, Region::Header, Some(1), 3)]);
+    }
+
+    #[test]
+    fn binary_print_decode_damage_follows_visible_utf16_spans() {
+        let cases: &[(&[u16], &str, u64, u64)] = &[
+            (&[0xD83D, 0xDE00], "😀", 0, 0),
+            (&[0xD800, 0x41, 0xDC00], "�A�", 2, 0),
+            (&[0xFFFD], "�", 0, 0),
+            (&[0x26, 0x22, 0xD800, 0x22, 0x41], "A", 0, 1),
+            (&[0x26, 0xD800, 0x50], "�P", 1, 0),
+            (&[0x26, 0x4B, 0x31, 0x32, 0x2B, 0x30, 0x35, 0x5A], "12+05Z", 0, 1),
+        ];
+        for &(units, expected, invalid, formatting) in cases {
+            let source = print_fields(0, [Some(units), None, None, None, None, None]);
+            let (doc, reports) = emit_print(&one_sheet(source));
+            assert_eq!(
+                print_values(&doc),
+                [(Side::Header, Variant::Default, Some(vec![expected.into()]))]
+            );
+            let mut expected_reports = Vec::new();
+            for (code, count) in [
+                (DiagnosticCode::InvalidEncoding, invalid),
+                (DiagnosticCode::FormattingUnreadable, formatting),
+            ] {
+                if count != 0 {
+                    expected_reports.push((code, Region::Header, Some(1), count));
+                }
+            }
+            assert_eq!(reports, expected_reports, "{units:?}");
+        }
+    }
+
+    #[test]
+    fn binary_print_updates_coalesce_and_absence_clears_every_variant() {
+        let a = print_strings(0, ["A", "", "", "", "", ""]);
+        let b = print_strings(0, ["B", "", "", "", "", ""]);
+        let wb = Wb {
+            sheets: vec![
+                ("A", 0, a.clone()),
+                ("same", 0, a.clone()),
+                ("B", 0, b),
+                ("again", 0, a),
+                ("clear", 0, Vec::new()),
+            ],
+            ..Wb::default()
+        };
+        let (doc, reports) = emit_print(&wb);
+        assert_eq!(
+            print_values(&doc),
+            [
+                Some(vec!["A".into()]),
+                Some(vec!["B".into()]),
+                Some(vec!["A".into()]),
+                Some(Vec::new())
+            ]
+            .map(|text| (Side::Header, Variant::Default, text))
+        );
+        assert_eq!(reports, []);
+        let source = print_strings(3, ["H", "F", "EH", "EF", "FH", "FF"]);
+        for clear in [
+            Vec::new(),
+            print_fields(3, [None; 6]),
+            print_strings(3, [""; 6]),
+            print_strings(3, [" \t"; 6]),
+        ] {
+            let inherited = clear.is_empty();
+            let wb = Wb {
+                sheets: vec![("set", 0, source.clone()), ("clear", 0, clear)],
+                ..Wb::default()
+            };
+            let (doc, reports) = emit_print(&wb);
+            let values = print_values(&doc);
+            assert_eq!(values.len(), 12);
+            for (side, variant, content) in &values[6..] {
+                assert!(matches!(side, Side::Header | Side::Footer));
+                assert_eq!(
+                    *content,
+                    if inherited && *variant != Variant::Default { None } else { Some(Vec::new()) }
+                );
+            }
+            assert_eq!(reports, []);
+        }
+    }
+
+    #[test]
+    fn binary_print_duplicate_definitions_keep_the_first_effective_values() {
+        let first = print_strings(0, ["H", "F", "unused", "unused", "unused", "unused"]);
+        let damaged =
+            print_fields(0, [Some(&[0xD800]), Some(&[0x26, 0x50]), None, None, None, None]);
+        for (extra, sides) in [
+            (first.clone(), vec![]),
+            (
+                print_strings(0, ["H", "F", "different", "different", "different", "different"]),
+                vec![],
+            ),
+            (print_strings(3, ["H", "F", "H", "F", "H", "F"]), vec![]),
+            (print_strings(0, ["X", "F", "", "", "", ""]), vec![Region::Header]),
+            (print_fields(0, [None; 6]), vec![Region::Header, Region::Footer]),
+            (damaged, vec![Region::Header, Region::Footer]),
+        ] {
+            let body = [first.clone(), extra].concat();
+            let (doc, reports) = emit_print(&one_sheet(body));
+            assert_eq!(
+                print_values(&doc),
+                [
+                    (Side::Header, Variant::Default, Some(vec!["H".into()])),
+                    (Side::Footer, Variant::Default, Some(vec!["F".into()]))
+                ]
+            );
+            assert_eq!(
+                reports,
+                sides
+                    .into_iter()
+                    .map(|side| (DiagnosticCode::BlockUnread, side, Some(1), 1))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn binary_print_unread_envelopes_keep_the_valid_prefix_and_cells() {
+        let prefix = [0u16.to_le_bytes().to_vec(), wstr("H")].concat();
+        let short_footer = [prefix.clone(), vec![2, 0, 0, 0, b'F']].concat();
+        let inactive_tail = [prefix, wstr("F"), vec![1, 0]].concat();
+        let active_tail = [2u16.to_le_bytes().to_vec(), wstr("H"), wstr("F"), vec![1, 0]].concat();
+        for (payload, expected, sides) in [
+            (short_footer, vec!["H"], vec![Region::Footer]),
+            (inactive_tail, vec!["H", "F"], vec![]),
+            (active_tail, vec!["H", "F"], vec![Region::Header, Region::Footer]),
+            (vec![], vec![], vec![Region::Header, Region::Footer]),
+            (vec![0], vec![], vec![Region::Header, Region::Footer]),
+            (
+                [0u16.to_le_bytes().to_vec(), 6u32.to_le_bytes().to_vec(), vec![0; 8]].concat(),
+                vec![],
+                vec![Region::Header, Region::Footer],
+            ),
+        ] {
+            let body = [one_value(), rec(BRT_BEGIN_HEADER_FOOTER, &payload), real_cell(1, 0, 2.0)]
+                .concat();
+            let (doc, reports) = emit_print(&one_sheet(body));
+            assert_eq!(texts(first_table(&doc)), vec![vec!["1", "2"]]);
+            let visible: Vec<_> =
+                print_values(&doc).into_iter().filter_map(|(_, _, text)| text).flatten().collect();
+            assert_eq!(visible, expected);
+            assert_eq!(
+                reports,
+                sides
+                    .into_iter()
+                    .map(|side| (DiagnosticCode::BlockUnread, side, Some(1), 1))
+                    .collect::<Vec<_>>(),
+                "{payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_print_unread_flags_clear_defaults_and_restore_inheritance() {
+        let expected = [
+            (Side::Header, Variant::Default, Some(Vec::new())),
+            (Side::Header, Variant::First, None),
+            (Side::Header, Variant::Even, None),
+            (Side::Footer, Variant::Default, Some(Vec::new())),
+            (Side::Footer, Variant::First, None),
+            (Side::Footer, Variant::Even, None),
+        ];
+        for payload in [&[][..], &[0][..]] {
+            let unread = rec(BRT_BEGIN_HEADER_FOOTER, payload);
+            let (doc, reports) = emit_print(&one_sheet(unread.clone()));
+            assert_eq!(print_values(&doc), [expected[0].clone(), expected[3].clone()]);
+            assert_eq!(reports, unread_print_reports(1));
+            let prior = print_strings(3, ["H", "F", "EH", "EF", "FH", "FF"]);
+            let wb = Wb { sheets: vec![("set", 0, prior), ("unread", 0, unread)], ..Wb::default() };
+            let (doc, reports) = emit_print(&wb);
+            assert_eq!(&print_values(&doc)[6..], &expected);
+            assert_eq!(reports, unread_print_reports(2));
+        }
+    }
+
+    #[test]
+    fn binary_print_size_bound_skips_only_the_active_oversized_field() {
+        let allowed = vec![0x41; 255];
+        let refused = vec![0x42; 256];
+        let damaged = [0xD800];
+        for first in [allowed.as_slice(), refused.as_slice()] {
+            let source = print_fields(
+                0,
+                [Some(first), Some(&[0x46]), Some(&damaged), Some(&refused), None, None],
+            );
+            let (doc, reports) = emit_print(&one_sheet(source));
+            let values = print_values(&doc);
+            assert_eq!(
+                values.last(),
+                Some(&(Side::Footer, Variant::Default, Some(vec!["F".into()])))
+            );
+            if first.len() == 255 {
+                assert_eq!(
+                    values[0],
+                    (Side::Header, Variant::Default, Some(vec!["A".repeat(255)]))
+                );
+                assert_eq!(reports, []);
+            } else {
+                assert_eq!(values[0], (Side::Header, Variant::Default, Some(Vec::new())));
+                assert_eq!(reports, [(DiagnosticCode::BlockUnread, Region::Header, Some(1), 1)]);
+            }
+        }
+    }
+
+    #[test]
+    fn binary_print_pending_losses_disappear_with_a_failed_or_hidden_sheet() {
+        let source = print_strings(0, ["&P&G", "F", "", "", "", ""]);
+        assert_eq!(print_values(&emit_print(&one_sheet(source.clone())).0).len(), 2);
+        let conflict = print_strings(0, ["different", "tail", "", "", "", ""]);
+        for bad in [short_real(1), vec![0x80]] {
+            let body = [source.clone(), conflict.clone(), bad].concat();
+            let wb = Wb {
+                sheets: vec![("valid", 0, one_value()), ("failed", 0, body)],
+                ..Wb::default()
+            };
+            let (doc, reports) = emit_print(&wb);
+            assert_eq!(print_values(&doc), []);
+            assert_eq!(reports, [in_unit(DiagnosticCode::UnitUnreadable, 2, 1)]);
+        }
+        let wb =
+            Wb { sheets: vec![("hidden", 1, source), ("valid", 0, one_value())], ..Wb::default() };
+        let (doc, reports) = emit_print(&wb);
+        assert_eq!(print_values(&doc), []);
+        assert_eq!(reports, [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+    }
+
+    fn custom_view_begin() -> Vec<u8> {
+        let mut view = vec![0; 16];
+        view.extend_from_slice(&1u32.to_le_bytes());
+        view.extend_from_slice(&100u32.to_le_bytes());
+        view.extend_from_slice(&[0; 24]);
+        rec(BRT_BEGIN_USER_SH_VIEW, &view)
+    }
+
+    fn custom_print_view(body: Vec<u8>) -> Vec<u8> {
+        [
+            rec(BRT_BEGIN_USER_SH_VIEWS, &[]),
+            custom_view_begin(),
+            body,
+            rec(BRT_END_USER_SH_VIEW, &[]),
+            rec(BRT_END_USER_SH_VIEWS, &[]),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn binary_print_custom_views_do_not_replace_sheet_settings() {
+        let custom =
+            custom_print_view(print_strings(0, ["Draft &P", "custom footer", "", "", "", ""]));
+        let selected = print_strings(0, ["Final", "ordinary footer", "", "", "", ""]);
+        for body in
+            [[custom.clone(), selected.clone()].concat(), [selected, custom.clone()].concat()]
+        {
+            let (doc, reports) = emit_print(&one_sheet(body));
+            assert_eq!(print_values(&doc), default_print_pair("Final", "ordinary footer"));
+            assert_eq!(reports, []);
+        }
+        let (doc, reports) = emit_print(&one_sheet(custom));
+        assert_eq!(print_values(&doc), []);
+        assert_eq!(reports, []);
+    }
+
+    #[test]
+    fn binary_print_chart_views_do_not_replace_ordinary_settings() {
+        let mut view = vec![0; 16];
+        view.extend_from_slice(&1u32.to_le_bytes());
+        view.extend_from_slice(&100u32.to_le_bytes());
+        view.extend_from_slice(&0u32.to_le_bytes());
+        let custom = [
+            rec(BRT_BEGIN_USER_CS_VIEWS, &[]),
+            rec(BRT_BEGIN_USER_CS_VIEW, &view),
+            print_strings(0, ["Chart draft", "chart draft footer", "", "", "", ""]),
+            rec(BRT_END_USER_CS_VIEW, &[]),
+            rec(BRT_END_USER_CS_VIEWS, &[]),
+        ]
+        .concat();
+        let body = [custom, print_strings(0, ["Final", "tail", "", "", "", ""])].concat();
+        const CHART_REL: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet";
+        let wb = Wb { sheet_type: Some(CHART_REL), ..one_sheet(body) };
+        let (doc, reports) = emit_print(&wb);
+        assert_eq!(print_values(&doc), default_print_pair("Final", "tail"));
+        assert_eq!(reports, []);
+    }
+
+    #[test]
+    fn binary_print_unclosed_scopes_report_ambiguous_settings() {
+        let final_settings = print_strings(0, ["Final", "tail", "", "", "", ""]);
+        for prefix in [
+            custom_view_begin(),
+            [
+                rec(BRT_BEGIN_USER_SH_VIEWS, &[]),
+                custom_view_begin(),
+                rec(BRT_END_USER_SH_VIEWS, &[]),
+            ]
+            .concat(),
+            rec(BRT_FRT_BEGIN, &[0; 4]),
+        ] {
+            let (doc, reports) = emit_print(&one_sheet([prefix, final_settings.clone()].concat()));
+            assert_eq!(print_values(&doc), cleared_print_pair());
+            assert_eq!(reports, unread_print_reports(1));
+        }
+        for body in [
+            [custom_print_view(final_settings.clone()), rec(BRT_FRT_BEGIN, &[0; 4])].concat(),
+            [
+                rec(BRT_BEGIN_USER_SH_VIEWS, &[]),
+                custom_view_begin(),
+                final_settings,
+                rec(BRT_END_USER_SH_VIEW, &[]),
+            ]
+            .concat(),
+            [
+                custom_view_begin(),
+                rec(BRT_FRT_BEGIN, &[0; 4]),
+                print_strings(0, ["", "unused tail", "", "", "", ""]),
+                rec(BRT_FRT_END, &[]),
+            ]
+            .concat(),
+        ] {
+            let (doc, reports) = emit_print(&one_sheet(body));
+            assert_eq!(print_values(&doc), []);
+            assert_eq!(reports, []);
+        }
+    }
+
+    #[test]
+    fn binary_print_scopes_keep_nested_boundaries_and_leave_omit_unchanged() {
+        for (begin, end) in [
+            (BRT_BEGIN_USER_SH_VIEWS, BRT_END_USER_SH_VIEWS),
+            (BRT_BEGIN_USER_SH_VIEW, BRT_END_USER_SH_VIEW),
+            (BRT_BEGIN_USER_CS_VIEWS, BRT_END_USER_CS_VIEWS),
+            (BRT_BEGIN_USER_CS_VIEW, BRT_END_USER_CS_VIEW),
+            (BRT_FRT_BEGIN, BRT_FRT_END),
+            (BRT_AC_BEGIN, BRT_AC_END),
+        ] {
+            let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let mut scope = PrintScope::default();
+            for (id, expected) in
+                [(end, true), (begin, false), (begin, false), (end, false), (end, true)]
+            {
+                scope.observe(&ctx, id).unwrap();
+                assert_eq!(scope.is_sheet(), expected, "{begin}/{end}/{id}");
+            }
+            assert_eq!(ctx.fuel(), 5);
+            let ctx = ParseCtx::default();
+            scope.observe(&ctx, begin).unwrap();
+            assert!(scope.is_sheet());
+            assert_eq!(ctx.fuel(), 0);
+        }
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let mut scope = PrintScope::default();
+        for id in [BRT_ROW_HDR, BRT_BEGIN_HEADER_FOOTER, BRT_DRAWING] {
+            scope.observe(&ctx, id).unwrap();
+            assert!(scope.is_sheet());
+        }
+        assert_eq!(ctx.fuel(), 3);
+    }
+
+    #[test]
+    fn binary_print_opaque_extensions_never_change_native_view_scope() {
+        let selected = print_strings(0, ["Final", "tail", "", "", "", ""]);
+        for (begin, end, payload) in [
+            (BRT_FRT_BEGIN, BRT_FRT_END, vec![0; 4]),
+            (BRT_AC_BEGIN, BRT_AC_END, vec![1, 0, 2, 14, 0, 0]),
+        ] {
+            for decoy in [
+                BRT_BEGIN_USER_SH_VIEW,
+                BRT_END_USER_SH_VIEW,
+                BRT_BEGIN_USER_SH_VIEWS,
+                BRT_END_USER_SH_VIEWS,
+            ] {
+                let decoy = if decoy == BRT_BEGIN_USER_SH_VIEW {
+                    custom_view_begin()
+                } else {
+                    rec(decoy, &[])
+                };
+                let header = if begin == BRT_FRT_BEGIN { "" } else { "Unused &P" };
+                let opaque = [
+                    rec(begin, &payload),
+                    decoy,
+                    print_strings(0, [header, "unused tail &P", "", "", "", ""]),
+                    rec(end, &[]),
+                ]
+                .concat();
+                for body in [
+                    [opaque.clone(), selected.clone()].concat(),
+                    [custom_print_view(opaque.clone()), selected.clone()].concat(),
+                ] {
+                    let (doc, reports) = emit_print(&one_sheet(body));
+                    assert_eq!(print_values(&doc), default_print_pair("Final", "tail"));
+                    assert_eq!(reports, []);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binary_print_opaque_end_records_cannot_close_native_scopes() {
+        for (native_begin, native_end) in [
+            (BRT_BEGIN_USER_SH_VIEW, BRT_END_USER_SH_VIEW),
+            (BRT_BEGIN_USER_SH_VIEWS, BRT_END_USER_SH_VIEWS),
+        ] {
+            for (extension_begin, extension_end) in
+                [(BRT_FRT_BEGIN, BRT_FRT_END), (BRT_AC_BEGIN, BRT_AC_END)]
+            {
+                let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+                let mut scope = PrintScope::default();
+                for id in [native_begin, extension_begin, native_end, extension_end] {
+                    scope.observe(&ctx, id).unwrap();
+                    assert!(!scope.is_sheet());
+                }
+                scope.observe(&ctx, native_end).unwrap();
+                assert!(scope.is_sheet());
+            }
+        }
+        let selected = print_strings(0, ["Final", "tail", "", "", "", ""]);
+        let unclosed = [
+            selected,
+            custom_view_begin(),
+            print_strings(0, ["Unused", "unused footer", "", "", "", ""]),
+        ]
+        .concat();
+        let (doc, reports) = emit_print(&one_sheet(unclosed));
+        assert_eq!(print_values(&doc), default_print_pair("Final", "tail"));
+        assert_eq!(reports, unread_print_reports(1));
+    }
+
+    #[test]
+    fn binary_print_tokens_and_pictures_follow_the_existing_policies() {
+        let body = print_strings(0, ["&P &N &D &T &F &Z &A &G", "", "", "", "", ""]);
+        let bytes = one_sheet(body).build();
+        for (policy, code) in [
+            (crate::ImagePolicy::Placeholder, DiagnosticCode::ImageUnplaced),
+            (crate::ImagePolicy::AltText, DiagnosticCode::ImageUnplaced),
+            (crate::ImagePolicy::Omit, DiagnosticCode::ImageOmitted),
+        ] {
+            let ctx = ParseCtx::default()
+                .with_headers_footers(crate::HeaderFooterPolicy::Emit)
+                .with_images(policy);
+            let doc = super::super::parse(&ctx, &bytes).unwrap();
+            assert_eq!(
+                print_values(&doc),
+                [(
+                    Side::Header,
+                    Variant::Default,
+                    Some(vec!["{page} {pages} {date} {time} {file} {path} {sheet}".into()])
+                )]
+            );
+            let reports = reported(ctx);
+            assert_eq!(reports.len(), 2);
+            assert!(reports.contains(&(DiagnosticCode::FieldToken, Region::Header, Some(1), 7)));
+            assert!(reports.contains(&(code, Region::Header, Some(1), 1)));
+        }
+    }
+
+    fn read_print_sheet(ctx: &ParseCtx<'_>, body: &[u8]) -> Result<SheetContent, ConvertError> {
+        read_sheet(ctx, body, &[], &CellXfs::new(Vec::new()), DateSystem::default())
+            .map(|(content, _)| content)
+    }
+
+    #[test]
+    fn binary_print_work_charges_cover_null_text_and_duplicate_paths() {
+        use crate::limits::Limits;
+        let selected = print_strings(0, ["é&P", "", "", "", "", ""]);
+        for (body, fuel, text) in [
+            (Vec::new(), 18, None),
+            (print_fields(0, [None; 6]), 27, None),
+            (custom_print_view(print_strings(0, ["Unused &P", "", "", "", "", ""])), 24, None),
+            (
+                [custom_view_begin(), print_strings(0, ["Unused", "", "", "", "", ""])].concat(),
+                10,
+                None,
+            ),
+            (selected.clone(), 62, Some("é{page}")),
+            (
+                [
+                    selected.clone(),
+                    custom_view_begin(),
+                    print_strings(0, ["Unused", "", "", "", "", ""]),
+                ]
+                .concat(),
+                126,
+                Some("é{page}"),
+            ),
+            ([selected.clone(), selected].concat(), 213, Some("é{page}")),
+        ] {
+            let limits = Limits { max_work: fuel, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            let out = read_print_sheet(&ctx, &body).unwrap();
+            assert_eq!(ctx.fuel(), fuel);
+            assert_eq!(out.headers_footers.len(), 6);
+            assert_eq!(
+                out.headers_footers[0].0.value.content,
+                Some(text.map_or_else(Vec::new, |s| vec![Block::Paragraph(vec![
+                    crate::model::Inline::plain(s)
+                ])]))
+            );
+            let limits = Limits { max_work: fuel - 1, ..limits };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            assert_eq!(
+                read_print_sheet(&ctx, &body).map(drop),
+                Err(ConvertError::limit(Limit::Work, fuel - 1))
+            );
+        }
+    }
+
+    #[test]
+    fn binary_print_fatal_limits_and_cancellation_keep_their_reason() {
+        use crate::limits::Limits;
+        let body = print_strings(0, ["H", "F", "", "", "", ""]);
+        let limits = Limits { max_records: 1, ..Limits::default() };
+        let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        assert_eq!(
+            read_print_sheet(&ctx, &body).map(drop),
+            Err(ConvertError::limit(Limit::Records, 1))
+        );
+        for source in [body.as_slice(), &[]] {
+            let token = crate::CancelToken::default();
+            token.cancel();
+            let ctx = ParseCtx::default()
+                .with_headers_footers(crate::HeaderFooterPolicy::Emit)
+                .with_cancel(Some(&token));
+            assert_eq!(read_print_sheet(&ctx, source).map(drop), Err(ConvertError::Cancelled));
+        }
+    }
+
+    #[test]
+    fn binary_print_scope_depth_uses_the_caller_limit() {
+        use crate::limits::Limits;
+        for max in [1, Limits::DEFAULT.max_record_depth, Limits::DEFAULT.max_record_depth + 1] {
+            let body = rec(BRT_FRT_BEGIN, &[0; 4]).repeat(max as usize);
+            let limits = Limits { max_record_depth: max, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            assert_eq!(read_print_sheet(&ctx, &body).unwrap().headers_footers.len(), 6);
+            let body = [body, rec(BRT_FRT_BEGIN, &[0; 4])].concat();
+            let ctx = ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+            assert_eq!(
+                read_print_sheet(&ctx, &body).map(drop),
+                Err(ConvertError::limit(Limit::RecordDepth, max))
+            );
+        }
+    }
+
+    #[test]
+    fn binary_print_crossed_or_other_sheet_boundaries_never_reopen_a_scope() {
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let mut scope = PrintScope::default();
+        for (id, expected) in [
+            (BRT_BEGIN_USER_SH_VIEWS, false),
+            (BRT_BEGIN_USER_SH_VIEW, false),
+            (BRT_END_USER_CS_VIEW, false),
+            (BRT_END_USER_SH_VIEWS, false),
+            (BRT_END_USER_SH_VIEW, false),
+            (BRT_END_USER_SH_VIEWS, true),
+        ] {
+            scope.observe(&ctx, id).unwrap();
+            assert_eq!(scope.is_sheet(), expected);
+        }
+    }
+
+    #[test]
+    fn binary_print_headers_render_only_when_requested() {
+        let bytes =
+            one_sheet(print_strings(0, ["&LLeft&CCenter &P&RRight", "", "", "", "", ""])).build();
+        let config = crate::Config {
+            headers_footers: crate::HeaderFooterPolicy::Emit,
+            ..crate::Config::default()
+        };
+        let converted = crate::Converter::new(config)
+            .unwrap()
+            .convert(crate::Input::new(&bytes, crate::Format::Excel))
+            .unwrap();
+        assert_eq!(
+            converted.markdown(),
+            "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n> Left\n>\n> Center {page}\n>\n> Right\n"
+        );
+        assert_eq!(
+            converted.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect::<Vec<_>>(),
+            [(DiagnosticCode::FieldToken, Region::Header, 1)]
+        );
+        let omitted = crate::Converter::new(crate::Config::default())
+            .unwrap()
+            .convert(crate::Input::new(&bytes, crate::Format::Excel))
+            .unwrap();
+        assert_eq!(omitted.markdown(), "");
+        assert_eq!(
+            omitted.diagnostics().iter().map(|d| (d.code, d.region, d.count)).collect::<Vec<_>>(),
+            [(DiagnosticCode::HeaderOmitted, Region::Header, 1)]
+        );
     }
 
     fn table(wb: &Wb<'_>) -> Vec<Vec<String>> {

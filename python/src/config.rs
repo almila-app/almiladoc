@@ -31,7 +31,7 @@ impl OnLoss {
     }
 }
 
-/// Whether XLSX print headers and footers are omitted or emitted as labelled blockquotes.
+/// Whether supported print headers and footers appear in the output.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct HeaderFooterPolicy(almiladoc::HeaderFooterPolicy);
@@ -270,7 +270,7 @@ impl Config {
         ImageOcr(self.0.image_ocr)
     }
 
-    /// Whether XLSX print headers and footers appear.
+    /// Whether XLSX and XLSB print headers and footers appear.
     #[getter]
     fn headers_footers(&self) -> HeaderFooterPolicy {
         HeaderFooterPolicy(self.0.headers_footers)

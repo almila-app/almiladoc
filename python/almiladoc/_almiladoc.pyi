@@ -168,7 +168,7 @@ class ImagePolicy:
 
 @final
 class HeaderFooterPolicy:
-    """Whether XLSX print headers and footers are omitted or emitted as labelled blockquotes."""
+    """Whether supported print headers and footers appear in the output."""
 
     OMIT: ClassVar[HeaderFooterPolicy]
     EMIT: ClassVar[HeaderFooterPolicy]
@@ -308,7 +308,7 @@ class Config:
 
     @property
     def headers_footers(self) -> HeaderFooterPolicy:
-        """Whether XLSX print headers and footers appear."""
+        """Whether XLSX and XLSB print headers and footers appear."""
 
 @final
 class CancelToken:

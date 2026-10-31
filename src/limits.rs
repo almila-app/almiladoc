@@ -65,8 +65,8 @@ pub struct Limits {
     /// Bytes of embedded assets one document retains: they are kept in
     /// memory with the document.
     pub max_asset_total_bytes: u64,
-    /// Nesting depth of binary record containers: recursion over them needs
-    /// stack in proportion.
+    /// Nesting depth of binary record containers: their traversal needs
+    /// memory in proportion.
     pub max_record_depth: u64,
     /// Binary records visited in one record stream: each costs time even
     /// when it yields nothing.

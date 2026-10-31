@@ -80,14 +80,14 @@ release is next.
 
 #### side-policies: finish source content policies
 - **Goal:** let the caller preserve supported side content and choose the tracked text view.
-- **Scope:** extend header/footer Emit beyond XLSX, with rich content and source variants. Add
+- **Scope:** extend header/footer Emit beyond XLSX and XLSB, with rich content and source variants. Add
   comments as GFM footnotes in a reserved label space, replies inside their parent, text revision
   Reject and hidden-structure output policies. Reject retains deleted text, drops inserted text and
   rejoins paragraphs whose mark a revision removes. Omit counts existing references without reading
   side parts. Side anchors and references stay isolated from body resolution.
 - **Order:** assign assets in first-reference order across body, notes, side content and comments,
   preserving unreferenced payloads; carry that mapping into image OCR origins. Complete rich-story
-  traversal and rendering before adopting rich producers. XLS/XLSB print text can land first.
+  traversal and rendering before adopting rich producers. XLS print text can land first.
 - **Size:** separate shared prerequisites and each source frontend. **Tier:** T3.
 
 ## External tracks
