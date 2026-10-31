@@ -57,6 +57,7 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that fixes hidden raster gaps) | |
+| W8 | side-policies | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
 release is next.
@@ -75,40 +76,29 @@ release is next.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
 
-## Deferred
+### W8
 
-Each returns to the roadmap when its trigger fires, as a new item with its own section.
-
-- **side-policies** (headers, footers, comments, rejected revisions and hidden structure as output
-  policies). Trigger: the primary consumer asks for any of them. Design in outline: under an `Emit`
-  policy headers and footers render in place as labelled blockquotes, each opening with a reserved
-  `<a id>` that names its variant, and a model step keeps an item only when it changes what is in force
-  for its region and variant; comments render as GFM footnotes in their own label space with replies
-  inside their parent; page, page-count, date, time and file fields in headers and footers render fixed
-  tokens such as `{page}` (Info); sheet print headers render one paragraph per non-empty section. Side
-  content is inert to the body: every anchor inside it emits nothing and the body's anchor and note
-  resolution never reads it; asset ids are assigned by one model pass in first-reference order (body,
-  notes, side content, comments). `Omit` walks no side content and counts it from references it already
-  reads. A `Reject` revision policy keeps deleted text and drops inserted text, joining paragraphs whose
-  mark a revision removes. The first step writes the
-  grammar down as an ADR 0001 amendment.
-- **ocr-local-pipeline** (offline OCR as a separate crate wrapping oar-ocr or ocrs, never in this one,
-  ADR 0002 decision 8). Trigger: demand for offline OCR, the rten pool fixes and a scan corpus. It
-  returns lines in reading order across columns, not the engine's row-first order: a two-column fixture
-  reads `L1, L2, R1, R2`.
+#### side-policies: finish source content policies
+- **Goal:** let the caller preserve supported side content and choose the tracked text view.
+- **Scope:** extend header/footer Emit beyond XLSX, with rich content and source variants. Add
+  comments as GFM footnotes in a reserved label space, replies inside their parent, text revision
+  Reject and hidden-structure output policies. Reject retains deleted text, drops inserted text and
+  rejoins paragraphs whose mark a revision removes. Omit counts existing references without reading
+  side parts. Side anchors and references stay isolated from body resolution.
+- **Order:** assign assets in first-reference order across body, notes, side content and comments,
+  preserving unreferenced payloads; carry that mapping into image OCR origins. Complete rich-story
+  traversal and rendering before adopting rich producers. XLS/XLSB print text can land first.
+- **Size:** separate shared prerequisites and each source frontend. **Tier:** T3.
 
 ## External tracks
 
-For rten: upstream first, then wait a week for the maintainers, then decide: merged, take the
-release; silent or declined, fall back as its bullet says. unpdf's pull requests are checked at the
-start of each wave, rten's when ocr-local-pipeline is next. Check a pull request with
+Check unpdf pull requests at the start of each wave with
 `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`.
 
 - **unpdf** (ADR 0001 decision 6): unpdf 0.51.0 carries every merged pull request below and
   exposes the paint budget; unpdf-clip awaits hidden raster gaps being excluded.
-- **rten** (dormant; gates only the deferred local OCR). rten's contribution policy has this
-  repository's maintainer open and answer its pull requests. If they stay unmerged, rten is forked
-  and published under a new name.
+- **Offline OCR quality:** evaluate the optional native engine on the consumer's representative
+  scans once its labelled corpus is available.
 - **Consumer proof** (a change in the primary consumer's own repository). Trigger: the `almiladoc`
   candidate wheel on TestPyPI or on PyPI. It proves the consumer depends on that wheel
   instead of the converter it replaces, a test asserts `importlib.metadata.version("almiladoc")`
@@ -119,9 +109,6 @@ start of each wave, rten's when ocr-local-pipeline is next. Check a pull request
 
 | Repository | Pull request | Serves | State |
 |---|---|---|---|
-| robertknight/rten | [#1523](https://github.com/robertknight/rten/pull/1523) | the global pool only when no custom pool is set | merged |
-| robertknight/rten | [#1524](https://github.com/robertknight/rten/pull/1524) | load-time work on the caller's pool | closed for issue [#1533](https://github.com/robertknight/rten/issues/1533); the maintainer asked for the use context there |
-| robertknight/rten | [#1525](https://github.com/robertknight/rten/pull/1525) | pool build failure visible to the caller | closed: its question on the use context went unanswered |
 | iyulab/unpdf | [#11](https://github.com/iyulab/unpdf/pull/11) | ligature glyph names in `/Differences` read as their letters (`handmade-ligatures.pdf`) | merged |
 | iyulab/unpdf | [#12](https://github.com/iyulab/unpdf/pull/12) | superscript, subscript and struck runs (`text.pdf`) | closed: reworked by the maintainer, in 0.49.0 |
 | iyulab/unpdf | [#13](https://github.com/iyulab/unpdf/pull/13) | page facts: invisible, painted, margin and clipped text, blank runs, fills | in 0.49.0 |
@@ -146,4 +133,4 @@ Asked only when the item that needs them is next.
 |---|---|---|
 | After a green dispatched rehearsal of `release.yml`, the first candidate tag `v0.1.0-rc.1`, approved in the `testpypi` environment; before the first final tag, the crates.io `publish-new` token as the `crates-io` environment secret `CRATES_IO_PUBLISH_NEW_TOKEN`; the final 0.x tag after a green consumer proof, its row then added to `docs/release-dates.tsv` before the next final (ADR 0003 decisions 7 and 9) | the first release | as each tag is due |
 | Agree with the consumer the PDF-path scope, how it maps `Incomplete` and `Internal`, its two-phase transport, prompt and `concurrency` | consumer proof | when the proof starts |
-| A scan corpus with paragraph ground truth and headings marked (the consumer's) | ocr-local-pipeline | when it is next |
+| A scan corpus with paragraph ground truth and headings marked (the consumer's) | offline OCR quality | when the corpus is available |
