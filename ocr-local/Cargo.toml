@@ -1,0 +1,46 @@
+[package]
+name = "almiladoc-ocr-local"
+version = "0.1.0-rc.1"
+edition = "2024"
+rust-version = "1.99"
+license = "BUSL-1.1"
+repository = "https://github.com/almila-app/almiladoc"
+description = "Offline CPU OCR with verified caller files"
+readme = "README.md"
+publish = false
+include = ["Cargo.toml", "Cargo.lock", "README.md", "THIRD-PARTY-LICENSES", "src/**", "tests/**"]
+
+[dependencies]
+almiladoc = { path = "..", default-features = false }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+oar-ocr-core = { version = "=0.10.2", default-features = false }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"] }
+rayon = "=1.12.0"
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+tracing = "=0.1.44"
+
+[dev-dependencies]
+almiladoc = { path = "..", default-features = false, features = ["raster"] }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+png = "=0.18.1"
+tempfile = "=3.27.0"
+serde_json = "=1.0.154"
+unicode-normalization = "=0.1.26"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+disallowed_methods = "allow"
+disallowed_types = "allow"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

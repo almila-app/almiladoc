@@ -1,0 +1,29 @@
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "The pinned Oar core depends on this compile-time macro; the advisory is an unmaintained notice, not a vulnerability." },
+    { id = "RUSTSEC-2026-0192", reason = "The current Oar core includes this unmaintained font parser; the image-only pipeline accepts no font inputs." },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "reqwest", reason = "models and runtime files come from the caller" },
+    { crate = "ureq", reason = "models and runtime files come from the caller" },
+    { crate = "hyper", reason = "models and runtime files come from the caller" },
+]
+
+[[bans.features]]
+crate = "ort"
+deny = ["download-binaries"]
+
+[[bans.features]]
+crate = "ort-sys"
+deny = ["download-binaries"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

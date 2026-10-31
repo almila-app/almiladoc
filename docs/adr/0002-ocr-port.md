@@ -45,9 +45,12 @@ Date: 2026-10-14, revised 2026-10-26
    provider, asks before it sends a body, follows no redirect, caps the body, uses only an explicit
    proxy and leaves no thread behind a call. A caller's PEM bundle replaces Mozilla roots for the
    endpoint and HTTPS proxy. A key needs an HTTPS endpoint or direct loopback; `new` opens no socket.
-8. **Local OCR.** A separate crate wrapping oar-ocr or ocrs, when demanded; ocrs waits for rten runs
-   off the global pool (https://github.com/robertknight/rten/issues/1188).
-9. **Weights.** The local crate SHA-256-checks its weight files and downloads none for the caller.
+8. **Local OCR.** The separately locked `ocr-local/` crate wraps Oar core on private CPU workers
+   and sessions, outside the core and Python dependency graphs. Its verified ONNX Runtime supports
+   API 27; process-wide initialization precedes other ORT use and cannot retry a native failure.
+9. **Files.** The local crate SHA-256-checks caller-supplied models, dictionary and runtime; it
+   downloads none. Native calls have no hard cancellation, memory or total-thread cap; a caller
+   needing those bounds owns the process.
 10. **Identity.** ADR 0001 decision 15 holds over fills; engines stay outside `config_fingerprint`.
 11. **Untrusted output.** `GapFill`, `#[non_exhaustive]`, takes `Markdown(String)` or
     `Lines(Vec<OcrLine>)`: normalized horizontal lines are ordered and grouped in the core,

@@ -1,7 +1,6 @@
 [workspace]
 members = ["python"]
-# cargo-fuzz keeps its own lockfile and nightly-only dependencies.
-exclude = ["fuzz"]
+exclude = ["fuzz", "ocr-local"]
 
 [workspace.package]
 version = "0.1.0-rc.1"
