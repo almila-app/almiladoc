@@ -42,8 +42,9 @@ Date: 2026-10-14, revised 2026-10-26
    a leading `<think>` block stripped. 408, 429, 500 and 502-504 retry with backoff, which a
    cancel ends; a rejected reply fails its gap, any other failure leaves it unattempted and its
    batch takes no further request. ureq on rustls, with ring unless the process installs another
-   provider, asks before it sends a body, follows no redirect, caps the body, uses no proxy and
-   leaves no thread behind a call. A key needs TLS or loopback; `new` opens no socket.
+   provider, asks before it sends a body, follows no redirect, caps the body, uses only an explicit
+   proxy and leaves no thread behind a call. A caller's PEM bundle replaces Mozilla roots for the
+   endpoint and HTTPS proxy. A key needs an HTTPS endpoint or direct loopback; `new` opens no socket.
 8. **Local OCR.** A separate crate wrapping oar-ocr or ocrs, when demanded; ocrs waits for rten runs
    off the global pool (https://github.com/robertknight/rten/issues/1188).
 9. **Weights.** The local crate SHA-256-checks its weight files and downloads none for the caller.

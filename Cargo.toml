@@ -88,6 +88,7 @@ encoding_rs = "0.8.44"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 quick-xml = { version = "0.42.0", features = ["escape-html"] }
 rayon = "1.12.0"
+rustls = { version = "0.23.46", default-features = false, features = ["std"], optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 sha2 = "0.11.1"
@@ -102,7 +103,7 @@ default = ["pdf", "raster"]
 pdf = ["dep:unpdf"]
 raster = ["pdf", "unpdf/raster", "unpdf/standard-fonts"]
 serde = ["dep:serde", "dep:serde_json"]
-ocr-http = ["dep:ureq", "dep:base64", "dep:serde_json"]
+ocr-http = ["dep:ureq", "dep:base64", "dep:serde_json", "dep:rustls"]
 
 [profile.release]
 lto = "thin"

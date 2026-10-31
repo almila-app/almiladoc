@@ -409,7 +409,9 @@ class OcrHttp:
     `dpi` and `max_pixels`; a request the server cannot take yet is tried up
     to `retries` more times, at most 10; and `concurrency`, 1 to 16, requests
     go out at once. A field out of range raises `ConfigError` naming it. No
-    socket opens before a request, no proxy is used and no redirect followed."""
+    socket opens before a request and no redirect is followed. `root_certificates_pem`
+    replaces Mozilla roots, including for an HTTPS proxy; `proxy` explicitly selects
+    an HTTP(S) CONNECT proxy and requires HTTPS when `api_key` is set."""
 
     def __new__(
         cls,
@@ -426,7 +428,15 @@ class OcrHttp:
         max_pixels: int = 12_845_056,
         retries: int = 3,
         concurrency: int = 1,
+        root_certificates_pem: bytes | None = None,
+        proxy: str | None = None,
     ) -> OcrHttp: ...
+    @property
+    def root_certificates_pem(self) -> bytes | None:
+        """The caller's replacement PEM bundle, absent for Mozilla roots."""
+    @property
+    def proxy(self) -> str | None:
+        """The configured proxy URI, including caller-supplied credentials."""
     def recognize(
         self,
         requests: collections.abc.Sequence[OcrRequest],

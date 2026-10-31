@@ -94,8 +94,6 @@ Each returns to the roadmap when its trigger fires, as a new item with its own s
   grammar down as an ADR 0001 amendment.
 - **ocr-lines** (`GapFill::Lines`: located lines grouped into paragraphs in the crate). Trigger: a
   caller whose engine returns only located lines.
-- **ocr-http-roots** (caller trust anchors and an explicit proxy for `OcrHttp`). Trigger: a caller
-  behind a private CA or an explicit proxy.
 - **ocr-local-pipeline** (offline OCR as a separate crate wrapping oar-ocr or ocrs, never in this one,
   ADR 0002 decision 8). Trigger: demand for offline OCR, the rten pool fixes and a scan corpus. It
   returns lines in reading order across columns, not the engine's row-first order: a two-column fixture

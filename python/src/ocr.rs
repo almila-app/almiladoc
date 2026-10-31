@@ -129,7 +129,9 @@ impl OcrRequest {
 /// `dpi` and `max_pixels`; a request the server cannot take yet is tried up
 /// to `retries` more times, at most 10; and `concurrency`, 1 to 16, requests
 /// go out at once. A field out of range raises `ConfigError` naming it. No
-/// socket opens before a request, no proxy is used and no redirect followed.
+/// socket opens before a request and no redirect is followed. `root_certificates_pem`
+/// replaces Mozilla roots, including for an HTTPS proxy; `proxy` explicitly selects
+/// an HTTP(S) CONNECT proxy and requires HTTPS when `api_key` is set.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct OcrHttp(pub(crate) almiladoc::OcrHttp);
 
@@ -139,7 +141,7 @@ impl OcrHttp {
     #[pyo3(signature = (
         base_url, model, *, api_key = None, prompt = None, image_first = true, extra_body = None,
         max_tokens = 8192, temperature = 0.0, dpi = 150, max_pixels = 12_845_056, retries = 3,
-        concurrency = 1,
+        concurrency = 1, root_certificates_pem = None, proxy = None,
     ))]
     #[expect(
         clippy::too_many_arguments,
@@ -159,9 +161,13 @@ impl OcrHttp {
         max_pixels: u64,
         retries: u32,
         concurrency: usize,
+        root_certificates_pem: Option<&Bound<'_, PyBytes>>,
+        proxy: Option<&Bound<'_, PyString>>,
     ) -> PyResult<Self> {
         let mut config = OcrHttpConfig::new(base_url, model);
         config.api_key = api_key;
+        config.root_certificates_pem = bounded_roots(py, root_certificates_pem)?;
+        config.proxy = bounded_proxy(py, proxy)?;
         config.prompt = prompt.unwrap_or(config.prompt);
         config.image_first = image_first;
         if let Some(body) = extra_body {
@@ -172,6 +178,18 @@ impl OcrHttp {
         (config.raster.dpi, config.raster.max_pixels) = (dpi, max_pixels);
         (config.retries, config.concurrency) = (retries, concurrency);
         almiladoc::OcrHttp::new(config).map(Self).map_err(|e| config_error(py, &e))
+    }
+
+    /// The caller's replacement PEM bundle, absent for Mozilla roots.
+    #[getter]
+    fn root_certificates_pem<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.0.root_certificates_pem().map(|pem| PyBytes::new(py, pem))
+    }
+
+    /// The configured proxy URI, including caller-supplied credentials.
+    #[getter]
+    fn proxy(&self) -> Option<&str> {
+        self.0.proxy()
     }
 
     /// The text the server reads for each of `requests`, in order, with the
@@ -198,6 +216,35 @@ impl OcrHttp {
     fn __repr__(&self) -> String {
         format!("{:?}", self.0)
     }
+}
+
+fn bounded_roots(py: Python<'_>, value: Option<&Bound<'_, PyBytes>>) -> PyResult<Option<Vec<u8>>> {
+    value
+        .map(|value| {
+            let bytes = value.as_bytes();
+            if bytes.len() > OcrHttpConfig::MAX_ROOT_PEM_BYTES {
+                return Err(ocr_http_refusal(py, "root_certificates_pem"));
+            }
+            Ok(bytes.to_vec())
+        })
+        .transpose()
+}
+
+fn bounded_proxy(py: Python<'_>, value: Option<&Bound<'_, PyString>>) -> PyResult<Option<String>> {
+    value
+        .map(|value| {
+            if value.code_point_len().map_err(|_| ocr_http_refusal(py, "proxy"))?
+                > OcrHttpConfig::MAX_PROXY_BYTES
+            {
+                return Err(ocr_http_refusal(py, "proxy"));
+            }
+            let value = value.to_str().map_err(|_| ocr_http_refusal(py, "proxy"))?;
+            if value.len() > OcrHttpConfig::MAX_PROXY_BYTES {
+                return Err(ocr_http_refusal(py, "proxy"));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()
 }
 
 /// `body` as a JSON object, `None` when JSON cannot hold it.

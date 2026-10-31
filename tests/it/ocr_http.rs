@@ -4,7 +4,7 @@
     reason = "a loopback server stands in for the vision server, and a child test process carries a proxy environment"
 )]
 
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +53,7 @@ struct Server {
 
 impl Server {
     fn start(answers: Vec<Answer>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let (seen, stop) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
@@ -96,22 +96,38 @@ impl Seen {
 fn serve(stream: &TcpStream, answer: Answer) -> Seen {
     stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let mut reader = BufReader::new(stream);
+    let early = matches!(answer, Answer::Early(_));
+    let seen = serve_on(&mut &*stream, answer);
+    if early {
+        stream.shutdown(Shutdown::Write).unwrap();
+        thread::sleep(Duration::from_millis(200));
+    }
+    seen
+}
+
+fn read_head(reader: &mut impl BufRead) -> std::io::Result<String> {
     let mut head = String::new();
     while !head.ends_with("\r\n\r\n") {
-        assert_ne!(reader.read_line(&mut head).unwrap(), 0, "{head}");
+        if reader.read_line(&mut head)? == 0 {
+            return Err(ErrorKind::UnexpectedEof.into());
+        }
     }
-    let mut writer = stream;
+    Ok(head)
+}
+
+fn serve_on(stream: &mut (impl Read + Write), answer: Answer) -> Seen {
+    let mut reader = BufReader::new(stream);
+    let head = read_head(&mut reader).unwrap();
     if let Answer::Early(code) = answer {
         let early =
             format!("HTTP/1.1 {code} Early\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-        writer.write_all(early.as_bytes()).unwrap();
-        stream.shutdown(Shutdown::Write).unwrap();
-        thread::sleep(Duration::from_millis(200));
+        reader.get_mut().write_all(early.as_bytes()).unwrap();
+        reader.get_mut().flush().unwrap();
         return Seen { head, body: None };
     }
     if head.to_ascii_lowercase().contains("\r\nexpect: 100-continue\r\n") {
-        writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+        reader.get_mut().write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+        reader.get_mut().flush().unwrap();
     }
     let length = head
         .lines()
@@ -122,14 +138,15 @@ fn serve(stream: &TcpStream, answer: Answer) -> Seen {
         })
         .unwrap_or(0);
     let mut body = vec![0; length];
-    std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+    reader.read_exact(&mut body).unwrap();
     if let Answer::Reply(code, headers, body) = answer {
         let head = format!(
             "HTTP/1.1 {code} Scripted\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n",
             body.len()
         );
-        writer.write_all(head.as_bytes()).unwrap();
-        writer.write_all(&body).unwrap();
+        reader.get_mut().write_all(head.as_bytes()).unwrap();
+        reader.get_mut().write_all(&body).unwrap();
+        reader.get_mut().flush().unwrap();
     }
     Seen { head, body: Some(serde_json::from_slice(&body).unwrap()) }
 }
@@ -464,17 +481,11 @@ const TEST_KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSTj+2rUJ
 #[test]
 fn a_server_whose_certificate_no_root_signs_leaves_its_gap_after_one_connection() {
     use base64::Engine as _;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::pki_types::{CertificateDer, ServerName};
     let decode = |text| base64::engine::general_purpose::STANDARD.decode(text).unwrap();
     let certificate = CertificateDer::from(decode(TEST_CERTIFICATE));
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(decode(TEST_KEY)));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certificate.clone()], key)
-        .unwrap();
+    let tls = tls_config();
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).unwrap();
     let trusting = rustls::ClientConfig::builder_with_provider(provider)
@@ -485,7 +496,7 @@ fn a_server_whose_certificate_no_root_signs_leaves_its_gap_after_one_connection(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
-    let (requests, tls) = (images(1 << 20).1, Arc::new(tls));
+    let requests = images(1 << 20).1;
     let (stop, deadline) =
         (Arc::new(AtomicBool::new(false)), Instant::now() + Duration::from_secs(10));
     let stopped = Arc::clone(&stop);
@@ -522,6 +533,10 @@ const PROXIED_CHILD: &str = "ALMILADOC_PROXIED_CHILD";
 
 #[test]
 fn a_proxy_in_the_environment_changes_no_outcome() {
+    if std::env::var(PROXIED_CHILD).as_deref() == Ok("explicit") {
+        caller_roots_and_both_connect_proxy_schemes_are_verified();
+        return;
+    }
     if std::env::var_os(PROXIED_CHILD).is_some() {
         let (_, requests) = images(1 << 20);
         let server = Server::start(vec![reply("direct")]);
@@ -543,4 +558,225 @@ fn a_proxy_in_the_environment_changes_no_outcome() {
         .unwrap();
     let printed = String::from_utf8_lossy(&child.stdout);
     assert!(child.status.success() && printed.contains("1 passed"), "{printed}");
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "ocr_http::a_proxy_in_the_environment_changes_no_outcome"])
+        .env(PROXIED_CHILD, "explicit")
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*")
+        .output()
+        .unwrap();
+    let printed = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success() && printed.contains("1 passed"), "{printed}");
+}
+
+fn pem(der: &[u8]) -> Vec<u8> {
+    use base64::Engine as _;
+    format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        base64::engine::general_purpose::STANDARD.encode(der)
+    )
+    .into_bytes()
+}
+
+fn test_certificate() -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(TEST_CERTIFICATE).unwrap()
+}
+
+fn wrong_certificate() -> Vec<u8> {
+    let mut der = test_certificate();
+    for at in 0..der.len().saturating_sub(8) {
+        if &der[at..at + 9] == b"localhost" {
+            der[at..at + 9].copy_from_slice(b"otherhost");
+        }
+    }
+    der
+}
+
+fn tls_config() -> Arc<rustls::ServerConfig> {
+    use base64::Engine as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let key = base64::engine::general_purpose::STANDARD.decode(TEST_KEY).unwrap();
+    Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(test_certificate())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+        )
+        .unwrap(),
+    )
+}
+
+trait Channel: Read + Write + Send {}
+impl<T: Read + Write + Send> Channel for T {}
+
+fn encrypted(mut stream: Box<dyn Channel>) -> Option<Box<dyn Channel>> {
+    let mut tls = rustls::ServerConnection::new(tls_config()).unwrap();
+    while tls.is_handshaking() {
+        tls.complete_io(&mut stream).ok()?;
+    }
+    Some(Box::new(rustls::StreamOwned::new(tls, stream)))
+}
+
+#[derive(Clone, Copy)]
+enum Route {
+    Direct,
+    Http(u16),
+    Https(u16),
+}
+
+struct TlsPeer {
+    base_url: String,
+    proxy: Option<String>,
+    serving: JoinHandle<Option<(String, Option<Seen>)>>,
+}
+
+impl TlsPeer {
+    fn start(route: Route) -> Self {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = match route {
+            Route::Direct => None,
+            Route::Http(_) => Some(format!("http://user:pass@{address}")),
+            Route::Https(_) => Some(format!("https://user:pass@{address}")),
+        };
+        let base_url = if proxy.is_none() {
+            format!("https://{address}/v1")
+        } else {
+            format!("https://{}:443/v1", address.ip())
+        };
+        let serving = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let stream = loop {
+                if let Ok((stream, _)) = listener.accept() {
+                    break stream;
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut transport: Box<dyn Channel> = Box::new(stream);
+            if matches!(route, Route::Https(_)) {
+                transport = encrypted(transport)?;
+            }
+            let mut proxy_head = String::new();
+            if let Route::Http(code) | Route::Https(code) = route {
+                let mut reader = BufReader::new(&mut transport);
+                proxy_head = read_head(&mut reader).ok()?;
+                write!(reader.get_mut(), "HTTP/1.1 {code} Proxy\r\ncontent-length: 0\r\n\r\n")
+                    .ok()?;
+                reader.get_mut().flush().ok()?;
+                if code != 200 {
+                    return Some((proxy_head, None));
+                }
+            }
+            let mut transport = encrypted(transport)?;
+            Some((proxy_head, Some(serve_on(&mut transport, reply("private")))))
+        });
+        Self { base_url, proxy, serving }
+    }
+}
+
+#[test]
+fn caller_roots_and_both_connect_proxy_schemes_are_verified() {
+    let (_, requests) = images(1024);
+    for route in [Route::Direct, Route::Http(200), Route::Https(200)] {
+        let peer = TlsPeer::start(route);
+        let bundle = [pem(&wrong_certificate()), pem(&test_certificate())].concat();
+        let engine = engine(&peer.base_url, |config| {
+            config.root_certificates_pem = Some(bundle.clone());
+            config.proxy.clone_from(&peer.proxy);
+            config.api_key = Some("sk-local".into());
+            config.retries = 0;
+        });
+        assert_eq!(engine.root_certificates_pem(), Some(bundle.as_slice()));
+        assert_eq!(engine.proxy(), peer.proxy.as_deref());
+        let shown = format!("{engine:?}");
+        assert!(!shown.contains("user") && !shown.contains("pass") && !shown.contains("sk-local"));
+        assert_eq!(one(&engine, &requests[0]), filled("private"));
+        let (proxy, seen) = peer.serving.join().unwrap().unwrap();
+        let seen = seen.unwrap();
+        assert!(!seen.head.to_ascii_lowercase().contains("proxy-authorization"));
+        assert!(seen.head.to_ascii_lowercase().contains("authorization: bearer sk-local"));
+        if !matches!(route, Route::Direct) {
+            assert!(proxy.starts_with(&format!(
+                "CONNECT {}:443 HTTP/1.1\r\n",
+                std::net::Ipv4Addr::LOCALHOST
+            )));
+            assert!(proxy.contains("Proxy-Authorization: Basic dXNlcjpwYXNz"));
+        }
+    }
+}
+
+#[test]
+fn a_wrong_anchor_hostname_or_proxy_refusal_leaves_the_request_unattempted() {
+    let (_, requests) = images(1024);
+    for (route, wrong_root, wrong_name) in [
+        (Route::Direct, true, false),
+        (Route::Https(200), true, false),
+        (Route::Http(200), false, true),
+        (Route::Http(407), false, false),
+    ] {
+        let peer = TlsPeer::start(route);
+        let base = if wrong_name { "https://untrusted.invalid/v1" } else { &peer.base_url };
+        let engine = engine(base, |config| {
+            config.proxy.clone_from(&peer.proxy);
+            config.root_certificates_pem =
+                Some(pem(&if wrong_root { wrong_certificate() } else { test_certificate() }));
+            config.retries = 0;
+        });
+        assert_eq!(one(&engine, &requests[0]), unattempted(None));
+        let seen = peer.serving.join().unwrap();
+        assert!(seen.is_none_or(|(_, http)| http.is_none()));
+    }
+}
+
+#[test]
+fn the_entire_certificate_bundle_is_refused_before_any_socket_opens() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("https://{}/v1", listener.local_addr().unwrap());
+    let valid = pem(&test_certificate());
+    let invalid = pem(&[0x30, 0x00]);
+    let mut oversized = valid.clone();
+    oversized.resize(OcrHttpConfig::MAX_ROOT_PEM_BYTES + 1, b' ');
+    let mut trailing_der = test_certificate();
+    trailing_der.push(0);
+    for bundle in [
+        Vec::new(),
+        b"private junk".to_vec(),
+        b" ".repeat(2 << 20),
+        oversized,
+        b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----".to_vec(),
+        invalid.clone(),
+        [valid.clone(), invalid].concat(),
+        [valid.clone(), pem(&trailing_der)].concat(),
+        [valid.clone(), b"trailing junk".to_vec()].concat(),
+        valid.repeat(257),
+    ] {
+        let mut config = OcrHttpConfig::new(&base, "vision");
+        config.root_certificates_pem = Some(bundle);
+        assert!(matches!(
+            OcrHttp::new(config),
+            Err(almiladoc::ConfigError::OcrHttp { field: "root_certificates_pem", .. })
+        ));
+    }
+    let mut padded = valid.clone();
+    padded.resize(OcrHttpConfig::MAX_ROOT_PEM_BYTES, b' ');
+    for bundle in [valid.clone(), valid.repeat(256), padded] {
+        let mut config = OcrHttpConfig::new(&base, "vision");
+        config.root_certificates_pem = Some(bundle.clone());
+        let engine = OcrHttp::new(config).unwrap();
+        assert_eq!(engine.root_certificates_pem(), Some(bundle.as_slice()));
+    }
+    assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock));
 }

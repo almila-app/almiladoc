@@ -1086,6 +1086,12 @@ class OcrHttpTest(unittest.TestCase):
             ("base_url", {"base_url": "ftp://127.0.0.1/v1"}),
             ("base_url", {"base_url": "http://user@127.0.0.1/v1"}),
             ("model", {"model": ""}),
+            ("root_certificates_pem", {"root_certificates_pem": b""}),
+            ("root_certificates_pem", {"root_certificates_pem": b"x" * (2 << 20)}),
+            ("proxy", {"proxy": "http://user:pass@h:0"}),
+            ("proxy", {"proxy": "x" * 8193}),
+            ("proxy", {"proxy": "http://user:pass@h/\ud800"}),
+            ("api_key", {"api_key": "sk-secret", "proxy": "http://localhost:1"}),
             ("api_key", {"base_url": "http://vision.example/v1", "api_key": "sk-secret"}),
             ("extra_body", {"extra_body": {"model": "other"}}),
             ("extra_body", {"extra_body": {"seed": {1, 2}}}),
@@ -1097,11 +1103,27 @@ class OcrHttpTest(unittest.TestCase):
             ("concurrency", {"concurrency": 17}),
             ("raster", {"dpi": 49}),
         ]:
-            arguments = {"base_url": "http://127.0.0.1:1/v1", "model": "vision", **given}
+            arguments = {"base_url": "http://localhost:1/v1", "model": "vision", **given}
             with self.assertRaises(almiladoc.ConfigError) as caught:
                 almiladoc.OcrHttp(arguments.pop("base_url"), arguments.pop("model"), **arguments)
             self.assertEqual(caught.exception.limit, field, given)
             self.assertNotIn("sk-secret", str(caught.exception))
+
+    def test_explicit_transport_fields_round_trip_without_repr_credentials(self):
+        source = (ROOT / "tests" / "it" / "ocr_http.rs").read_text()
+        encoded = re.search(r'const TEST_CERTIFICATE: &str = "([^"]+)";', source).group(1)
+        bundle = f"-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n".encode()
+        proxy = "https://user:pass@localhost:1"
+        engine = almiladoc.OcrHttp(
+            "https://localhost:1", "vision", root_certificates_pem=bundle, proxy=proxy
+        )
+        self.assertEqual(engine.root_certificates_pem, bundle)
+        self.assertEqual(engine.proxy, proxy)
+        self.assertNotIn("user", repr(engine))
+        self.assertNotIn("pass", repr(engine))
+        direct = almiladoc.OcrHttp("https://localhost:1", "vision")
+        self.assertIsNone(direct.root_certificates_pem)
+        self.assertIsNone(direct.proxy)
 
     def test_a_cancel_ends_a_retry_wait(self):
         converter_, data = self.rich()

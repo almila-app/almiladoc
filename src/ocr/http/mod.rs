@@ -28,6 +28,8 @@ use crate::pool::{fan_out, wait};
 /// config.api_key = Some("secret".into());
 /// let engine = OcrHttp::new(config)?;
 /// assert!(!format!("{engine:?}").contains("secret"));
+/// assert_eq!(engine.root_certificates_pem(), None);
+/// assert_eq!(engine.proxy(), None);
 /// # Ok::<(), almiladoc::ConfigError>(())
 /// ```
 #[derive(Clone, PartialEq)]
@@ -38,8 +40,14 @@ pub struct OcrHttpConfig {
     pub base_url: String,
     /// The model the server runs.
     pub model: String,
-    /// A bearer token, sent only over `https` or to a loopback host.
+    /// A bearer token, sent only over `https` or directly to a loopback host.
     pub api_key: Option<String>,
+    /// A certificate-only PEM bundle replacing Mozilla roots, at most [`Self::MAX_ROOT_PEM_BYTES`]
+    /// bytes and 256 certificates; it also authenticates an HTTPS proxy.
+    pub root_certificates_pem: Option<Vec<u8>>,
+    /// An explicit HTTP(S) CONNECT proxy URI, including optional credentials, at most
+    /// [`Self::MAX_PROXY_BYTES`] bytes; absent means direct connections, regardless of environment.
+    pub proxy: Option<String>,
     /// What the model is asked of each image; [`OcrHttpConfig::DEFAULT_PROMPT`] by default.
     pub prompt: String,
     /// Whether the image comes before the prompt in the message; true by default.
@@ -64,6 +72,11 @@ impl OcrHttpConfig {
     /// The prompt a config starts with.
     pub const DEFAULT_PROMPT: &str = "Transcribe all text in this image as Markdown, keeping \
         its headings, lists and tables, and reply with the Markdown alone.";
+    /// The largest caller-supplied PEM trust bundle.
+    pub const MAX_ROOT_PEM_BYTES: usize = 1 << 20;
+    /// The largest caller-supplied proxy URI.
+    pub const MAX_PROXY_BYTES: usize = 8 << 10;
+    const MAX_ROOTS: usize = 256;
     const MAX_RETRIES: u32 = 10;
     const MAX_CONCURRENCY: usize = 16;
 
@@ -74,6 +87,8 @@ impl OcrHttpConfig {
             base_url: base_url.into(),
             model: model.into(),
             api_key: None,
+            root_certificates_pem: None,
+            proxy: None,
             prompt: Self::DEFAULT_PROMPT.into(),
             image_first: true,
             extra_body: Map::new(),
@@ -92,6 +107,8 @@ impl fmt::Debug for OcrHttpConfig {
             .field("base_url", &Redacted(&self.base_url))
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("root_certificates_pem", &self.root_certificates_pem.as_ref().map(Vec::len))
+            .field("proxy", &self.proxy.as_ref().map(|_| "<redacted>"))
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("image_first", &self.image_first)
             .field("extra_body", &self.extra_body.keys().collect::<Vec<_>>())
@@ -126,8 +143,9 @@ impl fmt::Debug for Redacted<'_> {
 /// reset before its response, or 408, 429, 500, 502, 503 or 504) is retried after 0.5 s
 /// doubling to 30 s, or the `Retry-After` seconds up to 60 s, a cancel ending the wait. A
 /// request the server rejects (400, 413 or 422) or a reply that holds no Markdown fails its
-/// gap; any other failure leaves its gap unattempted. It follows no redirect, uses no proxy,
-/// verifies TLS against the Mozilla roots on rustls' process-wide provider or ring, and reads a
+/// gap; any other failure leaves its gap unattempted. It follows no redirect, uses only an explicitly
+/// configured proxy, verifies TLS against Mozilla or the caller's replacement roots on rustls'
+/// process-wide provider or ring, and reads a
 /// reply body of under six times the request's `max_text_bytes` and 64 KiB. ureq logs each
 /// request's head, the key included, at `log`'s trace level: a process whose logger keeps
 /// ureq's trace records the key.
@@ -135,6 +153,8 @@ pub struct OcrHttp {
     agent: Agent,
     endpoint: Uri,
     authorization: Option<String>,
+    root_certificates_pem: Option<Vec<u8>>,
+    proxy: Option<String>,
     template: wire::Template,
     raster: RasterSpec,
     retries: u32,
@@ -171,7 +191,10 @@ impl OcrHttp {
     /// or `https` with a host and no user, query or fragment, an empty `model`, `api_key` that
     /// is empty, holds anything but visible ASCII, or would go over `http` to a host other than
     /// loopback, `extra_body` naming a field the engine sets or reads, `max_tokens` of 0,
-    /// `temperature` outside 0 to 2, `retries` above 10, or `concurrency` outside 1 to 16.
+    /// `temperature` outside 0 to 2, `retries` above 10, or `concurrency` outside 1 to 16;
+    /// `root_certificates_pem` empty, oversized, or holding any item other than a structurally
+    /// valid certificate; `proxy` oversized or not an HTTP(S) URI with only an authority and
+    /// optional `/`; or `api_key` combined with a proxy for an HTTP endpoint.
     pub fn new(config: OcrHttpConfig) -> Result<Self, ConfigError> {
         config.raster.validate()?;
         let refuse = |field| ConfigError::OcrHttp { field };
@@ -183,7 +206,12 @@ impl OcrHttp {
             Some(key) if key.is_empty() || !key.bytes().all(|b| b.is_ascii_graphic()) => {
                 return Err(refuse("api_key"));
             }
-            Some(_) if !secure => return Err(refuse("api_key")),
+            Some(_)
+                if !secure
+                    || (config.proxy.is_some() && endpoint.scheme_str() != Some("https")) =>
+            {
+                return Err(refuse("api_key"));
+            }
             Some(key) => Some(format!("Bearer {key}")),
             None => None,
         };
@@ -202,6 +230,7 @@ impl OcrHttp {
         if !(1..=OcrHttpConfig::MAX_CONCURRENCY).contains(&config.concurrency) {
             return Err(refuse("concurrency"));
         }
+        let (tls, proxy) = transport_config(&config)?;
         let mut fields = config.extra_body;
         fields.insert("model".into(), config.model.into());
         fields.insert("max_tokens".into(), config.max_tokens.into());
@@ -209,14 +238,28 @@ impl OcrHttp {
         let template =
             wire::Template { fields, prompt: config.prompt, image_first: config.image_first };
         Ok(Self {
-            agent: configured(Agent::config_builder()).build().into(),
+            agent: configured(Agent::config_builder()).tls_config(tls).proxy(proxy).build().into(),
             endpoint,
             authorization,
+            root_certificates_pem: config.root_certificates_pem,
+            proxy: config.proxy,
             template,
             raster: config.raster,
             retries: config.retries,
             concurrency: config.concurrency,
         })
+    }
+
+    /// The configured replacement trust bundle, absent for Mozilla roots.
+    #[must_use]
+    pub fn root_certificates_pem(&self) -> Option<&[u8]> {
+        self.root_certificates_pem.as_deref()
+    }
+
+    /// The configured proxy URI, including any caller-supplied credentials.
+    #[must_use]
+    pub fn proxy(&self) -> Option<&str> {
+        self.proxy.as_deref()
     }
 
     /// What the server makes of each of `images`, each with the most bytes of Markdown its fill
@@ -373,7 +416,81 @@ fn loopback(host: &str) -> bool {
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// `builder` as every request's agent takes it: no proxy, no redirect, statuses as responses,
+fn transport_config(
+    config: &OcrHttpConfig,
+) -> Result<(ureq::tls::TlsConfig, Option<ureq::Proxy>), ConfigError> {
+    let roots = trust_roots(config.root_certificates_pem.as_deref())?;
+    let proxy = config
+        .proxy
+        .as_deref()
+        .map(|value| explicit_proxy(value).ok_or(ConfigError::OcrHttp { field: "proxy" }))
+        .transpose()?;
+    Ok((ureq::tls::TlsConfig::builder().root_certs(roots).build(), proxy))
+}
+
+fn explicit_proxy(value: &str) -> Option<ureq::Proxy> {
+    if value.len() > OcrHttpConfig::MAX_PROXY_BYTES || value.contains('#') {
+        return None;
+    }
+    let uri: Uri = value.parse().ok()?;
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.query().is_some()
+        || !matches!(uri.path(), "" | "/")
+        || uri.host()?.is_empty()
+    {
+        return None;
+    }
+    let authority = uri.authority()?.as_str().rsplit('@').next()?;
+    let port = authority.strip_prefix(uri.host()?)?;
+    if !port.is_empty() {
+        let port = port.strip_prefix(':')?;
+        if !port.bytes().all(|byte| byte.is_ascii_digit()) || port.parse::<u16>().ok()? == 0 {
+            return None;
+        }
+    }
+    ureq::Proxy::new(value).ok()
+}
+
+fn trust_roots(pem: Option<&[u8]>) -> Result<ureq::tls::RootCerts, ConfigError> {
+    use ureq::tls::{Certificate, RootCerts};
+    let Some(mut rest) = pem else { return Ok(RootCerts::WebPki) };
+    let refused = || ConfigError::OcrHttp { field: "root_certificates_pem" };
+    if rest.len() > OcrHttpConfig::MAX_ROOT_PEM_BYTES {
+        return Err(refused());
+    }
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    const END: &[u8] = b"-----END CERTIFICATE-----";
+    let mut certificates = Vec::new();
+    let mut validation = rustls::RootCertStore::empty();
+    while !rest.trim_ascii().is_empty() {
+        rest = rest.trim_ascii_start();
+        let body = rest.strip_prefix(BEGIN).ok_or_else(refused)?;
+        let end = body.windows(END.len()).position(|part| part == END).ok_or_else(refused)?;
+        if !body[..end].iter().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || byte.is_ascii_whitespace()
+                || matches!(byte, b'+' | b'/' | b'=')
+        }) {
+            return Err(refused());
+        }
+        let consumed = BEGIN.len() + end + END.len();
+        let certificate = Certificate::from_pem(&rest[..consumed]).map_err(|_| refused())?;
+        validation
+            .add(rustls::pki_types::CertificateDer::from(certificate.der()))
+            .map_err(|_| refused())?;
+        certificates.push(certificate);
+        if certificates.len() > OcrHttpConfig::MAX_ROOTS {
+            return Err(refused());
+        }
+        rest = &rest[consumed..];
+    }
+    if certificates.is_empty() {
+        return Err(refused());
+    }
+    Ok(certificates.into())
+}
+
+/// `builder` defaults to direct connections, no redirect, statuses as responses,
 /// and no resolve, per-call or overall timeout, each of which would resolve on a thread of its
 /// own.
 fn configured(builder: ConfigBuilder<AgentScope>) -> ConfigBuilder<AgentScope> {
@@ -572,6 +689,43 @@ mod tests {
             (ErrorKind::Other, false),
         ] {
             assert_eq!(reset(kind), dropped, "{kind:?}");
+        }
+    }
+    #[test]
+    fn only_explicit_http_proxies_are_accepted_and_never_shown() {
+        for uri in [
+            "",
+            "proxy:80",
+            "ftp://h",
+            "socks5://h",
+            "http://h:0",
+            "http://h:99999",
+            "http://h:abc",
+            "http://h:+80",
+            "http://h/path",
+            "http://h?q=private",
+            "http://h#private",
+            "http://u:%FF@h",
+        ] {
+            let mut config = config("https://h/v1");
+            config.proxy = Some(uri.into());
+            assert_eq!(refused(config), Some("proxy"), "{uri}");
+        }
+        for uri in ["http://proxy", "https://user:pass@proxy:8080/", "http://[::1]:80"] {
+            let mut config = config("https://h/v1");
+            config.proxy = Some(uri.into());
+            let engine = OcrHttp::new(config).unwrap();
+            assert_eq!(engine.proxy(), Some(uri));
+            assert_eq!(engine.root_certificates_pem(), None);
+        }
+        let mut config = config("http://localhost/v1");
+        config.api_key = Some("sk-secret".into());
+        config.proxy = Some("https://user:pass@proxy".into());
+        assert_eq!(refused(config.clone()), Some("api_key"));
+        config.root_certificates_pem = Some(b"private roots".to_vec());
+        let shown = format!("{config:?}");
+        for secret in ["sk-secret", "user", "pass", "private roots"] {
+            assert!(!shown.contains(secret), "{shown}");
         }
     }
 }
