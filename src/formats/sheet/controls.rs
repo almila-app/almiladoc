@@ -51,8 +51,9 @@ pub(super) fn read_vml_checkboxes(
     pkg: &mut Package<'_>,
     sheet_part: &str,
     rels: &Relationships,
-) -> Result<Checkboxes, ConvertError> {
+) -> Result<(Checkboxes, Vec<CellRef>), ConvertError> {
     let mut out = Checkboxes::new();
+    let mut damaged = Vec::new();
     let targets: BTreeSet<String> = rels
         .iter()
         .filter(|(_, r)| r.rel_type == VML_DRAWING_REL && r.mode == TargetMode::Internal)
@@ -60,11 +61,15 @@ pub(super) fn read_vml_checkboxes(
         .map(|t| t.path)
         .collect();
     for target in targets {
-        if let Some(root) = pkg.related_xml_part(&target, Role::Content(Region::Body))? {
-            vml_checkboxes(parse_ctx, &root, &mut out);
+        if let Some(root) = pkg.related_xml_part_streamed(
+            &target,
+            Role::Content(Region::Body),
+            &mut super::SelectedTextTree,
+        )? {
+            vml_checkboxes(parse_ctx, &root, &mut out, &mut damaged)?;
         }
     }
-    Ok(out)
+    Ok((out, damaged))
 }
 
 /// The form control kinds a legacy drawing holds beside checkboxes, each of
@@ -72,8 +77,14 @@ pub(super) fn read_vml_checkboxes(
 const OTHER_CONTROLS: [&str; 9] =
     ["Radio", "Label", "Button", "GBox", "Drop", "List", "Spin", "Scroll", "Edit"];
 
-fn vml_checkboxes(parse_ctx: &ParseCtx<'_>, root: &Element, out: &mut Checkboxes) {
+fn vml_checkboxes(
+    parse_ctx: &ParseCtx<'_>,
+    root: &Element,
+    out: &mut Checkboxes,
+    damaged: &mut Vec<CellRef>,
+) -> Result<(), ConvertError> {
     for shape in root.descendants(ns::VML, "shape") {
+        parse_ctx.charge(1)?;
         let Some(data) = shape.find(ns::X_VML, "ClientData") else {
             continue;
         };
@@ -101,12 +112,18 @@ fn vml_checkboxes(parse_ctx: &ParseCtx<'_>, root: &Element, out: &mut Checkboxes
             parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body);
             continue;
         };
-        let caption = shape
-            .find(ns::VML, "textbox")
-            .map(|t| collapse_ws(&clean_text(&t.text())).trim().to_string())
+        let textbox = shape.find(ns::VML, "textbox");
+        let caption = textbox
+            .map(|text| text.checked_text(parse_ctx))
+            .transpose()?
+            .map(|text| collapse_ws(&clean_text(&text)).trim().to_string())
             .unwrap_or_default();
+        if textbox.is_some_and(super::text_damaged) && !caption.is_empty() {
+            damaged.push(at);
+        }
         out.entry(at).or_default().push(Checkbox { checked, caption });
     }
+    Ok(())
 }
 
 /// The cell an `x:Anchor` starts in: `LeftColumn, LeftOffset, TopRow, TopOffset, ...`.

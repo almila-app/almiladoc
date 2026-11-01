@@ -3,6 +3,7 @@
 //! OLE-based BIFF (xls). All three share the number format engine and grid
 //! assembly, so one workbook saved in any of them converts identically.
 
+mod comments;
 mod controls;
 mod grid;
 mod headers;
@@ -33,6 +34,32 @@ use crate::package::archive::probe_ole;
 use crate::package::relationships::read_main_part;
 use crate::package::{Package, PackageKind};
 use crate::shared::lossy;
+
+struct SelectedTextTree;
+
+impl crate::package::xml::NodeSink for SelectedTextTree {
+    fn takes(&self, _: &[crate::package::xml::Element]) -> bool {
+        false
+    }
+    fn reports_unresolved(
+        &self,
+        _: &[crate::package::xml::Element],
+        _: Option<&crate::package::xml::Element>,
+    ) -> bool {
+        false
+    }
+    fn take(
+        &mut self,
+        _: &[crate::package::xml::Element],
+        _: crate::package::xml::Element,
+    ) -> Result<(), ConvertError> {
+        Ok(())
+    }
+}
+
+fn text_damaged(text: &crate::package::xml::Element) -> bool {
+    text.unresolved_text || text.descendant_elems().any(|element| element.unresolved_text)
+}
 
 const MAIN_PARTS: [&str; 2] = ["xl/workbook.xml", "xl/workbook.bin"];
 

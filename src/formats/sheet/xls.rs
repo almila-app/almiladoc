@@ -8,7 +8,8 @@
 use super::controls::Checkbox;
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, GridBounds, LinkTarget, SheetContent,
-    SheetLink, UnreadFormats, build_table, format_as_text, render_number, resolve_format,
+    SheetLink, UnreadFormats, build_table_with_notes, format_as_text, render_number,
+    resolve_format,
 };
 use super::numfmt::NumberFormat;
 use super::xls_print::{FOOTER, HEADER, HEADER_FOOTER, PrintRecords};
@@ -83,17 +84,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let mut previous = HashMap::new();
     for (position, listed) in globals.sheets.iter().enumerate() {
         let unit = parse_ctx.begin_unit(UnitKind::Sheet, position)?;
-        let sheet = match listed {
-            Listed::Shown(sheet) => sheet,
-            Listed::Hidden => {
-                parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
-                continue;
-            }
-            Listed::Unreadable => {
-                parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
-                continue;
-            }
-        };
+        let Some(sheet) = selected_sheet(parse_ctx, listed) else { continue };
         let Some(mut content) = read_sheet(&data, &globals, sheet.offset, &mut records)? else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             failed += 1;
@@ -102,7 +93,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         doc.blocks.push(Block::UnitStart(unit.unit().model()));
         let start = doc.blocks.len();
         super::headers::append(parse_ctx, &mut doc, &mut previous, &mut content)?;
-        let table = build_table(parse_ctx, content)?;
+        let table = build_table_with_notes(parse_ctx, content, &mut doc.notes)?;
         if table.is_none() && doc.blocks.len() == start {
             continue;
         }
@@ -123,6 +114,20 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         return Err(ConvertError::malformed("no sheet in the workbook could be read"));
     }
     Ok(doc)
+}
+
+fn selected_sheet<'a>(ctx: &ParseCtx<'_>, listed: &'a Listed) -> Option<&'a BoundSheet> {
+    match listed {
+        Listed::Shown(sheet) => Some(sheet),
+        Listed::Hidden => {
+            ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+            None
+        }
+        Listed::Unreadable => {
+            ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
+            None
+        }
+    }
 }
 
 /// The BIFF stream: `Workbook` (BIFF8) or `Book` (older BIFF), matched
@@ -705,22 +710,27 @@ fn resolve_xfs(
 /// macro sheets stay listed (their substreams fail the worksheet check and
 /// count as unreadable, matching the xlsx reader's treatment of their
 /// parts); VBA modules are not sheets in any container and are dropped
-/// (`None`). A hidden sheet is hidden whatever else its record holds.
+/// (`None`).
 fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<Listed> {
     if body.get(5) == Some(&0x06) {
         return None;
     }
     let read = || {
-        if body.get(4)? & 0x03 != 0 {
-            return Some(Listed::Hidden);
-        }
+        let hidden = body.get(4)? & 0x03 != 0;
         let offset = get_u32(body, 0)? as usize;
         let segs = [body.get(6..)?];
         let (name, name_loss) =
             globals.read_string(&mut SegReader::new(&segs), LengthPrefix::U8)?;
-        Some(Listed::Shown(BoundSheet { name: clean_text(&name), name_loss, offset }))
+        let sheet = BoundSheet { name: clean_text(&name), name_loss, offset };
+        Some(if hidden { Listed::Hidden } else { Listed::Shown(sheet) })
     };
-    Some(read().unwrap_or(Listed::Unreadable))
+    Some(read().unwrap_or_else(|| {
+        if body.get(4).is_some_and(|state| state & 3 != 0) {
+            Listed::Hidden
+        } else {
+            Listed::Unreadable
+        }
+    }))
 }
 
 /// The shared string table (trap 1: strings routinely split across
@@ -791,7 +801,7 @@ fn read_sheet(
             BOOLERR => sheet.bool_err(body)?,
             FORMULA => sheet.formula(body)?,
             OBJ if globals.biff8 => sheet.object(body)?,
-            NOTE => records.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment),
+            NOTE => sheet.note(body)?,
             HEADER | FOOTER | HEADER_FOOTER => {
                 sheet.read_print_record(data, rec_type, body, &mut walk, records)?;
             }
@@ -814,6 +824,13 @@ fn read_sheet(
     sheet.finish(data, walk, records).map(Some)
 }
 
+struct OldNote {
+    at: Option<CellRef>,
+    expected: Option<usize>,
+    bytes: Vec<u8>,
+    broken: bool,
+}
+
 /// The walk state of one worksheet substream, with one method per record family.
 struct SheetReader<'g, 'p> {
     print: Option<PrintRecords>,
@@ -827,6 +844,9 @@ struct SheetReader<'g, 'p> {
     /// its text in the TXO after it.
     shape: Option<Shape>,
     text_of: Option<TextOf>,
+    comments: HashMap<u16, super::comments::Comment>,
+    comment_cells: Vec<(Option<CellRef>, Option<u16>)>,
+    old_note: Option<OldNote>,
 }
 
 impl<'g, 'p> SheetReader<'g, 'p> {
@@ -847,6 +867,7 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         if let Some(print) = self.print.take() {
             print.finish(self.parse_ctx, &mut self.out)?;
         }
+        self.finish_comments()?;
         Ok(self.out)
     }
 
@@ -857,7 +878,109 @@ impl<'g, 'p> SheetReader<'g, 'p> {
             parse_ctx.limits().max_grid_slots,
         );
         let print = parse_ctx.headers_footers_requested().then(PrintRecords::default);
-        Self { print, parse_ctx, globals, out, pending: None, shape: None, text_of: None }
+        Self {
+            print,
+            parse_ctx,
+            globals,
+            out,
+            pending: None,
+            shape: None,
+            text_of: None,
+            comments: HashMap::new(),
+            comment_cells: Vec::new(),
+            old_note: None,
+        }
+    }
+
+    fn note(&mut self, body: &[u8]) -> Result<(), ConvertError> {
+        let ctx = self.parse_ctx;
+        let continuation = !self.globals.biff8 && get_u16(body, 0) == Some(u16::MAX);
+        let at = get_u16(body, 0)
+            .zip(get_u16(body, 2))
+            .map(|(row, col)| CellRef::new(u32::from(row), u32::from(col)));
+        if !ctx.comments_requested() {
+            if !continuation {
+                ctx.charge(1)?;
+                self.out.comment(super::comments::Comment {
+                    at,
+                    blocks: Vec::new(),
+                    losses: Vec::new(),
+                })?;
+            }
+            return Ok(());
+        }
+        ctx.charge(body.len() as u64 + 1)?;
+        if !self.globals.biff8 {
+            return self.old_note_record(body, continuation);
+        }
+        self.comment_cells.push((at, get_u16(body, 6)));
+        Ok(())
+    }
+
+    fn old_note_record(&mut self, body: &[u8], continuation: bool) -> Result<(), ConvertError> {
+        if !continuation {
+            self.finish_old_note()?;
+            let at = get_u16(body, 0)
+                .zip(get_u16(body, 2))
+                .map(|(row, col)| CellRef::new(u32::from(row), u32::from(col)));
+            self.old_note = Some(OldNote {
+                at,
+                expected: get_u16(body, 4).map(usize::from),
+                bytes: Vec::new(),
+                broken: false,
+            });
+        }
+        let Some(note) = &mut self.old_note else {
+            self.parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Comment);
+            return Ok(());
+        };
+        let bytes = body.get(6..).unwrap_or_default();
+        let remaining = note.expected.unwrap_or_default().saturating_sub(note.bytes.len());
+        let declared = if continuation {
+            get_u16(body, 4).map(usize::from).unwrap_or_default()
+        } else {
+            remaining
+        };
+        let take = bytes.len().min(declared).min(remaining);
+        note.bytes.extend_from_slice(bytes.get(..take).unwrap_or_default());
+        note.broken |= continuation && bytes.len() < declared;
+        Ok(())
+    }
+
+    fn finish_old_note(&mut self) -> Result<(), ConvertError> {
+        let Some(note) = self.old_note.take() else { return Ok(()) };
+        let (text, loss) = self.globals.encoding.decode(&note.bytes);
+        let mut comment = super::comments::Comment::text(note.at, clean_text(&text));
+        if note.broken || note.expected != Some(note.bytes.len()) {
+            comment.losses.push(DiagnosticCode::PartUnreadable);
+        }
+        if loss.invalid {
+            comment.losses.push(DiagnosticCode::InvalidEncoding);
+        }
+        if loss.assumed {
+            comment.losses.push(DiagnosticCode::EncodingAssumed);
+        }
+        self.out.comment(comment)
+    }
+
+    fn finish_comments(&mut self) -> Result<(), ConvertError> {
+        self.finish_old_note()?;
+        for (at, id) in self.comment_cells.drain(..) {
+            self.parse_ctx.charge(1)?;
+            let mut comment = id.and_then(|id| self.comments.remove(&id)).unwrap_or_else(|| {
+                let mut comment = super::comments::Comment::text(at, String::new());
+                comment.losses.push(DiagnosticCode::PartUnreadable);
+                comment
+            });
+            comment.at = at;
+            self.out.comment(comment)?;
+        }
+        self.parse_ctx.emit_count(
+            DiagnosticCode::PartUnreadable,
+            Region::Comment,
+            self.comments.len() as u64,
+        );
+        Ok(())
     }
 
     fn row(&mut self, body: &[u8]) {
@@ -994,7 +1117,7 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         let anchor = shape.map(|s| s.anchor).filter(|at| at.col < BIFF8_COLS);
         let parse_ctx = self.parse_ctx;
         match (obj_kind(body), anchor) {
-            (Some(Obj::Checkbox(_) | Obj::Control), _) if hidden => {
+            (Some(Obj::Checkbox(_) | Obj::Control | Obj::Picture | Obj::Chart), _) if hidden => {
                 parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             }
             (Some(Obj::Checkbox(Some(checked))), Some(at)) => {
@@ -1008,6 +1131,10 @@ impl<'g, 'p> SheetReader<'g, 'p> {
             (Some(Obj::Checkbox(_) | Obj::Control), _) => {
                 parse_ctx.emit(DiagnosticCode::FormControlUnread, Region::Body);
             }
+            (Some(Obj::Comment(id)), _) if parse_ctx.comments_requested() => {
+                self.text_of = Some(TextOf::Comment(id));
+            }
+            (Some(Obj::Shape), _) if hidden => self.text_of = Some(TextOf::HiddenShape),
             (Some(Obj::Picture), _) if !hidden => {
                 parse_ctx.image_loss(crate::ctx::ImageLoss::Unplaced, Region::Body);
             }
@@ -1020,9 +1147,29 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         Ok(())
     }
 
-    /// A TXO: a checkbox's caption, or a shown shape's text the grid does not hold.
     fn text_object(&mut self, segs: &[&[u8]]) -> Result<(), ConvertError> {
-        match self.text_of.take() {
+        let selected = self.text_of.take();
+        if matches!(selected.as_ref(), Some(TextOf::Comment(_) | TextOf::HiddenShape)) {
+            self.parse_ctx.charge(segs.iter().map(|seg| seg.len() as u64).sum())?;
+        }
+        match selected {
+            Some(TextOf::Comment(id)) => {
+                let mut comment = super::comments::Comment::text(None, String::new());
+                match txo_comment_text(segs) {
+                    Some((text, replaced, truncated)) => {
+                        comment.blocks =
+                            vec![Block::Paragraph(vec![Inline::plain(clean_text(&text))])];
+                        if replaced {
+                            comment.losses.push(DiagnosticCode::InvalidEncoding);
+                        }
+                        if truncated {
+                            comment.losses.push(DiagnosticCode::PartUnreadable);
+                        }
+                    }
+                    None => comment.losses.push(DiagnosticCode::PartUnreadable),
+                }
+                self.comments.insert(id, comment);
+            }
             Some(TextOf::Checkbox(at)) => {
                 if let Some((caption, replaced)) = txo_text(segs)
                     && let Some(b) = self.out.checkboxes.get_mut(&at).and_then(|v| v.last_mut())
@@ -1032,6 +1179,11 @@ impl<'g, 'p> SheetReader<'g, 'p> {
                         self.out.lose(at, DiagnosticCode::InvalidEncoding)?;
                     }
                 }
+            }
+            Some(TextOf::HiddenShape)
+                if txo_text(segs).is_none_or(|(text, _)| !text.trim().is_empty()) =>
+            {
+                self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             }
             Some(TextOf::Shape)
                 if txo_text(segs).is_none_or(|(text, _)| !text.trim().is_empty()) =>
@@ -1192,6 +1344,8 @@ fn header_footer_regions(
 enum TextOf {
     /// A checkbox's caption, by the cell it is anchored in.
     Checkbox(CellRef),
+    Comment(u16),
+    HiddenShape,
     /// A shown shape's text, which the grid does not hold.
     Shape,
 }
@@ -1260,6 +1414,7 @@ enum Obj {
     /// Another form control: a button, option button, edit box, label,
     /// spinner, scroll bar, list, group box or drop-down.
     Control,
+    Comment(u16),
     Picture,
     Chart,
     /// A text box or a drawn shape that can hold text: a rectangle, oval,
@@ -1279,6 +1434,7 @@ fn obj_kind(body: &[u8]) -> Option<Obj> {
     const FT_LBS_DATA: u16 = 0x0013;
     let mut r = ByteReader::new(body);
     let mut ot = None;
+    let mut id = None;
     let mut state = None;
     let mut interface = false;
     while let (Some(ft), Some(cb)) = (r.u16(), r.u16()) {
@@ -1293,7 +1449,10 @@ fn obj_kind(body: &[u8]) -> Option<Obj> {
             break;
         };
         match ft {
-            FT_CMO => ot = get_u16(data, 0),
+            FT_CMO => {
+                ot = get_u16(data, 0);
+                id = get_u16(data, 2);
+            }
             FT_CBLS_DATA => state = get_u16(data, 0),
             _ => {}
         }
@@ -1308,6 +1467,7 @@ fn obj_kind(body: &[u8]) -> Option<Obj> {
         0x0007 | 0x000C | 0x000D | 0x000E | 0x0010 | 0x0011 | 0x0012 | 0x0013 | 0x0014 => {
             Obj::Control
         }
+        0x0019 => Obj::Comment(id?),
         0x0008 => Obj::Picture,
         0x0005 => Obj::Chart,
         0x0002 | 0x0003 | 0x0006 | 0x0009 | 0x001E => Obj::Shape,
@@ -1404,6 +1564,20 @@ fn utf16_until_nul(bytes: &[u8]) -> Option<String> {
 /// records after it, each opening with its own encoding flag byte; with
 /// whether a unit did not decode.
 fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
+    read_txo_text(segs, TxoExtent::Prefix).map(|(text, replaced, _)| (text, replaced))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TxoExtent {
+    Prefix,
+    WholeRecords,
+}
+
+fn txo_comment_text(segs: &[&[u8]]) -> Option<(String, bool, bool)> {
+    read_txo_text(segs, TxoExtent::WholeRecords)
+}
+
+fn read_txo_text(segs: &[&[u8]], extent: TxoExtent) -> Option<(String, bool, bool)> {
     let mut remaining = usize::from(get_u16(segs.first()?, 10)?);
     let mut units: Vec<u16> = Vec::with_capacity(remaining);
     for seg in segs.iter().skip(1) {
@@ -1411,6 +1585,10 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
             break;
         }
         let (&flags, chars) = seg.split_first()?;
+        let width = if flags & 0x01 != 0 { 2 } else { 1 };
+        if extent == TxoExtent::WholeRecords && chars.len() > remaining * width {
+            break;
+        }
         if flags & 0x01 != 0 {
             let take = (chars.len() / 2).min(remaining);
             units.extend(utf16le_units(chars).take(take));
@@ -1421,7 +1599,8 @@ fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
             remaining -= take;
         }
     }
-    Some(decode_utf16(units))
+    let (text, replaced) = decode_utf16(units);
+    Some((text, replaced, remaining != 0))
 }
 
 #[cfg(test)]
@@ -2775,6 +2954,161 @@ mod tests {
         assert_eq!(grid(&one_sheet(records)), vec![vec!["14", "", "", "[x] Roof", "[ ]"]]);
     }
 
+    fn comment_records(id: u16, row: u16, col: u16, text: &str) -> Vec<u8> {
+        let object =
+            rec(OBJ, &[le16(&[0x0015, 0x0012, 0x0019, id]), vec![0; 14], le16(&[0, 0])].concat());
+        [
+            msodrawing(row, col, false),
+            object,
+            client_textbox(),
+            txo(text),
+            rec(NOTE, &[le16(&[row, col, 0, id]), ustr("Ada")].concat()),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn selected_biff8_comments_resolve_object_ids_and_keep_units_separate() {
+        let records =
+            [comment_records(2, 0, 1, "second object"), comment_records(1, 0, 0, "first object")]
+                .concat();
+        let wb = Wb { sheets: vec![("A", 0, records.clone()), ("B", 0, records)], ..Wb::default() };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(
+            doc.notes.iter().map(|note| note.blocks[0].plain_text()).collect::<Vec<_>>(),
+            ["second object", "first object", "second object", "first object"]
+        );
+        assert_ne!(doc.notes[0].id, doc.notes[2].id);
+        assert_matches!(&origin(first_table(&doc)).blocks[0], Block::Paragraph(inlines) if inlines == &[Inline::CommentRef(doc.notes[1].id.clone())]);
+        assert_eq!(reported(ctx), []);
+    }
+
+    #[test]
+    fn selected_truncated_comment_text_reports_only_for_visible_anchors() {
+        let object = rec(OBJ, &[le16(&[0x0015, 0x0012, 0x0019, 1]), vec![0; 14]].concat());
+        let base = le16(&[0, 0, 0, 0, 0, 5, 0, 0, 0]);
+        for hidden in [false, true] {
+            let records = [
+                msodrawing(1, 0, false),
+                object.clone(),
+                client_textbox(),
+                rec(TXO, &base),
+                rec(CONTINUE, &[0, b'a', b'b']),
+                rec(NOTE, &le16(&[1, 0, 0, 1])),
+                if hidden { hidden_row(1) } else { Vec::new() },
+            ]
+            .concat();
+            let bytes = one_sheet(records).build();
+            let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+            let doc = parse(&ctx, &bytes).unwrap();
+            let expected = if hidden {
+                vec![in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]
+            } else {
+                vec![(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]
+            };
+            assert_eq!(reported(ctx), expected);
+            assert_eq!(doc.notes.len(), usize::from(!hidden));
+            if !hidden {
+                assert_eq!(doc.notes[0].blocks[0].plain_text(), "ab");
+            }
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(doc.notes, []);
+            let expected = if hidden {
+                vec![in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]
+            } else {
+                vec![(DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1)]
+            };
+            assert_eq!(reported(ctx), expected);
+        }
+    }
+
+    #[test]
+    fn omitted_comments_keep_unplaceable_note_declarations() {
+        for body in [vec![], le16(&[0, 256, 0, 7])] {
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &one_sheet(rec(NOTE, &body)).build()).unwrap();
+            assert_eq!(doc.notes, []);
+            assert_eq!(
+                reported(ctx),
+                [(DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1)]
+            );
+        }
+    }
+
+    fn comment_from_txo(cch: u16, chars: &[&[u8]]) -> Wb {
+        let object = rec(OBJ, &[le16(&[0x0015, 0x0012, 0x0019, 1]), vec![0; 14]].concat());
+        let base = le16(&[0, 0, 0, 0, 0, cch, 16, 0, 0]);
+        let runs = le16(&[0, 0, 0, 0, cch, 0, 0, 0]);
+        let mut records =
+            [msodrawing(0, 0, false), object, client_textbox(), rec(TXO, &base)].concat();
+        for chars in chars {
+            records.extend(rec(CONTINUE, chars));
+        }
+        records.extend(rec(CONTINUE, &runs));
+        records.extend(rec(NOTE, &le16(&[0, 0, 0, 1])));
+        one_sheet(records)
+    }
+
+    #[test]
+    fn a_comment_never_reads_a_formatting_continue_as_truncated_text() {
+        let wb = comment_from_txo(5, &[&[0, b'a', b'b']]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes[0].blocks[0].plain_text(), "ab");
+        assert_eq!(reported(ctx), [(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]);
+    }
+
+    #[test]
+    fn comment_text_continues_across_whole_records_before_its_formatting() {
+        for (label, cch, chars, expected) in [
+            ("compressed", 5, vec![vec![0, b'a', b'b'], vec![0, b'c', b'd', b'e']], "abcde"),
+            (
+                "mixed width",
+                5,
+                vec![vec![0, b'a', b'b'], vec![1, b'c', 0, b'd', 0, b'e', 0]],
+                "abcde",
+            ),
+            (
+                "sixteen-byte text record",
+                15,
+                vec![b"\0abcdefghijklmno".to_vec()],
+                "abcdefghijklmno",
+            ),
+        ] {
+            let chars: Vec<_> = chars.iter().map(Vec::as_slice).collect();
+            let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+            let doc = parse(&ctx, &comment_from_txo(cch, &chars).build()).unwrap();
+            assert_eq!(doc.notes[0].blocks[0].plain_text(), expected, "{label}");
+            assert_eq!(reported(ctx), [], "{label}");
+        }
+    }
+
+    #[test]
+    fn selected_biff5_notes_join_note_continuations_and_report_missing_tails() {
+        for (declared, losses) in [(4, 0), (5, 1)] {
+            let records = [
+                rec(NOTE, &[le16(&[0, 0, declared]), b"ab".to_vec()].concat()),
+                rec(NOTE, &[le16(&[u16::MAX, 0, 2]), b"cd".to_vec()].concat()),
+            ]
+            .concat();
+            let bytes = biff5(Some(1252), &[], &[(b"S", records)]);
+            let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(doc.notes[0].blocks[0].plain_text(), "abcd");
+            let expected = if losses == 0 {
+                Vec::new()
+            } else {
+                vec![(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]
+            };
+            assert_eq!(reported(ctx), expected);
+            let ctx = ParseCtx::default();
+            parse(&ctx, &bytes).unwrap();
+            assert_eq!(reported(ctx), [in_unit(DiagnosticCode::CommentOmitted, 1, 1)]);
+        }
+    }
+
     fn diagnose(wb: &Wb) -> Vec<Reported> {
         let parse_ctx = ParseCtx::default();
         parse(&parse_ctx, &wb.build()).unwrap();
@@ -3213,7 +3547,7 @@ mod tests {
                 in_unit(DiagnosticCode::FormControlUnread, 1, 4),
                 in_unit(DiagnosticCode::HeaderOmitted, 1, 1),
                 in_unit(DiagnosticCode::CommentOmitted, 1, 1),
-                in_unit(DiagnosticCode::HiddenOmitted, 1, 2),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 3),
             ]
         );
     }
@@ -3369,7 +3703,13 @@ mod tests {
             records.extend(client_textbox());
             records.extend(txo("Note"));
         }
-        assert_eq!(diagnose(&one_sheet(records)), [in_unit(DiagnosticCode::GraphicUnread, 1, 5)]);
+        assert_eq!(
+            diagnose(&one_sheet(records)),
+            [
+                in_unit(DiagnosticCode::GraphicUnread, 1, 5),
+                in_unit(DiagnosticCode::HiddenOmitted, 1, 1)
+            ]
+        );
     }
 
     #[test]

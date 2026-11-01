@@ -11,7 +11,8 @@ use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
 use crate::model::{
-    Cell, Cover, GridBuilder, GridLedger, Inline, Span, Sweep, Table, inlines_to_plain_text,
+    Cell, Cover, GridBuilder, GridLedger, Inline, Note, NoteKind, Span, Sweep, Table,
+    inlines_to_plain_text,
 };
 use crate::shared::header::resolve_header_rows;
 use crate::shared::hidden_runs::HiddenRuns;
@@ -130,6 +131,7 @@ pub(super) struct SheetContent {
     cells: HashMap<CellRef, String>,
     /// Form control checkboxes by the cell they are anchored in.
     pub(super) checkboxes: Checkboxes,
+    pub(super) comments: Vec<super::comments::Comment>,
     pub(super) headers_footers: Vec<(crate::model::HeaderFooterState, Vec<DiagnosticCode>)>,
     hidden_rows: Vec<Range<u64>>,
     hidden_cols: Vec<Range<u64>>,
@@ -156,6 +158,7 @@ impl SheetContent {
             grid,
             cells: HashMap::new(),
             checkboxes: Checkboxes::default(),
+            comments: Vec::new(),
             headers_footers: Vec::new(),
             hidden_rows: Vec::new(),
             hidden_cols: Vec::new(),
@@ -167,6 +170,35 @@ impl SheetContent {
             slots_left,
             max_slots,
         }
+    }
+
+    pub(super) fn comment(
+        &mut self,
+        comment: super::comments::Comment,
+    ) -> Result<(), ConvertError> {
+        self.hold()?;
+        self.comments.push(comment);
+        Ok(())
+    }
+
+    pub(super) fn visible_comments(
+        &self,
+        ctx: &ParseCtx<'_>,
+        anchors: &BTreeMap<String, Option<CellRef>>,
+    ) -> Result<BTreeSet<String>, ConvertError> {
+        ctx.charge(self.hidden_rows.len() as u64 + self.hidden_cols.len() as u64)?;
+        let hidden = Hidden {
+            rows: HiddenRuns::of(self.hidden_rows.clone()),
+            cols: HiddenRuns::of(self.hidden_cols.clone()),
+        };
+        let mut selected = BTreeSet::new();
+        for (id, at) in anchors {
+            ctx.charge(id.len() as u64 + 1)?;
+            if at.is_none_or(|at| hidden.shows(at)) {
+                selected.insert(id.clone());
+            }
+        }
+        Ok(selected)
     }
 
     /// Hold one report of `code` in `region` until the table is built.
@@ -604,9 +636,18 @@ impl CivilDate {
 /// materialize its grid: visibility filtering, the extent of the content that
 /// shows, and merges remapped onto the surviving rows and columns of that
 /// extent.
-pub(super) fn build_table(
+#[cfg(test)]
+fn build_table(
+    parse_ctx: &ParseCtx<'_>,
+    sheet: SheetContent,
+) -> Result<Option<Table>, ConvertError> {
+    build_table_with_notes(parse_ctx, sheet, &mut Vec::new())
+}
+
+pub(super) fn build_table_with_notes(
     parse_ctx: &ParseCtx<'_>,
     mut sheet: SheetContent,
+    notes: &mut Vec<Note>,
 ) -> Result<Option<Table>, ConvertError> {
     for (&(code, region), &count) in &sheet.reports {
         parse_ctx.emit_count(code, region, count);
@@ -614,6 +655,7 @@ pub(super) fn build_table(
     let hidden = Hidden::of(&mut sheet);
     let mut cells = cell_contents(&mut sheet);
     let moved = move_hidden_origins(&mut sheet.merges, &hidden, &mut cells);
+    append_comments(parse_ctx, &mut sheet, &hidden, &mut cells, notes)?;
     report_losses_and_links(parse_ctx, &sheet, &hidden, &moved, &cells)?;
     let Some(extent) = extent(parse_ctx, &mut cells, &hidden, &mut sheet.merges)? else {
         return Ok(None);
@@ -668,6 +710,50 @@ impl Hidden {
         let col = self.cols.first_shown(inclusive(range.first.col, range.last.col))?;
         Some(CellRef::new(u32::try_from(row).ok()?, u32::try_from(col).ok()?))
     }
+}
+
+fn append_comments(
+    ctx: &ParseCtx<'_>,
+    sheet: &mut SheetContent,
+    hidden: &Hidden,
+    cells: &mut HashMap<CellRef, Vec<Inline>>,
+    notes: &mut Vec<Note>,
+) -> Result<(), ConvertError> {
+    let covered = merge_covered(
+        ctx,
+        &sheet.merges,
+        sheet.comments.iter().filter_map(|comment| comment.at),
+        |merge| merge.first,
+    )?;
+    for (index, comment) in sheet.comments.drain(..).enumerate() {
+        ctx.charge(1)?;
+        let Some(at) = comment.at.filter(|&at| sheet.grid.holds(at)) else {
+            let code = if ctx.comments_requested() {
+                DiagnosticCode::PartUnreadable
+            } else {
+                DiagnosticCode::CommentOmitted
+            };
+            ctx.emit(code, Region::Comment);
+            continue;
+        };
+        if !hidden.shows(at) {
+            cells.entry(at).or_default();
+            continue;
+        }
+        if !ctx.comments_requested() {
+            ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+            continue;
+        }
+        let at = covered.get(&at).and_then(|&merge| hidden.first_shown(merge)).unwrap_or(at);
+        let unit = ctx.current_unit().map_or(0, |unit| unit.ordinal.get());
+        let id = format!("sheet-{unit}-comment-{index}");
+        cells.entry(at).or_default().push(Inline::CommentRef(id.clone()));
+        for loss in comment.losses {
+            ctx.emit(loss, Region::Comment);
+        }
+        notes.push(Note { id, kind: NoteKind::Comment, blocks: comment.blocks });
+    }
+    Ok(())
 }
 
 fn inclusive(first: u32, last: u32) -> Range<u64> {

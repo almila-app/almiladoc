@@ -1,14 +1,11 @@
-//! In-house SpreadsheetML reader (.xlsx / .xlsm): the workbook's visible
-//! sheets, shared strings, cell number formats from `xl/styles.xml`, and
-//! merge regions. Rows, columns, and sheets the source hides are omitted,
-//! and merge regions are remapped onto the surviving grid. Hyperlinks,
-//! print headers and footers follow their output policy; comments and the
-//! referenced drawing report what the grid does not carry.
+//! SpreadsheetML cells, merges, links, comments and print text. Sheets,
+//! axes and drawing objects follow the hidden-content policy.
 
 use super::controls::read_vml_checkboxes;
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, OOXML_GRID, SheetContent,
-    SheetLink, UnreadFormats, build_table, format_as_text, render_number, resolve_format,
+    SheetLink, UnreadFormats, build_table_with_notes, format_as_text, render_number,
+    resolve_format,
 };
 use crate::ctx::{AdmittedUnit, ParseCtx};
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -27,6 +24,7 @@ use std::rc::Rc;
 pub(super) const SHARED_STRINGS_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
 
+#[cfg(test)]
 const COMMENTS_REL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
 
@@ -154,7 +152,7 @@ pub(super) fn convert_sheets<T>(
         read_sheet_parts(parse_ctx, pkg, part, drawing.as_deref(), &mut content)?;
         let start = doc.blocks.len();
         super::headers::append(parse_ctx, &mut doc, &mut previous, &mut content)?;
-        let table = build_table(parse_ctx, content)?;
+        let table = build_table_with_notes(parse_ctx, content, &mut doc.notes)?;
         if table.is_none() && doc.blocks.len() == start {
             continue;
         }
@@ -171,10 +169,6 @@ pub(super) fn convert_sheets<T>(
     Ok(doc)
 }
 
-/// What a worksheet's relationships carry beside its cells: form control
-/// checkboxes, the targets of its external hyperlinks, and the comments and
-/// the drawing the sheet names, which no output holds and which are
-/// reported.
 fn read_sheet_parts(
     parse_ctx: &ParseCtx<'_>,
     pkg: &mut Package<'_>,
@@ -182,8 +176,12 @@ fn read_sheet_parts(
     drawing: Option<&str>,
     content: &mut SheetContent,
 ) -> Result<(), ConvertError> {
-    let rels = read_rels(pkg, &rels_part_for(part), Role::Content(Region::Body))?;
-    content.checkboxes = read_vml_checkboxes(parse_ctx, pkg, part, &rels)?;
+    let rels = read_rels(pkg, &rels_part_for(part), Role::DeferredContent(Region::Body))?;
+    let (checkboxes, damaged) = read_vml_checkboxes(parse_ctx, pkg, part, &rels)?;
+    content.checkboxes = checkboxes;
+    for at in damaged {
+        content.lose(at, DiagnosticCode::UnresolvedEntity)?;
+    }
     let mut targets: HashMap<String, Rc<str>> = HashMap::new();
     for link in &mut content.links {
         if let LinkTarget::Related(id) = &link.target {
@@ -196,8 +194,7 @@ fn read_sheet_parts(
             };
         }
     }
-    let comments = rels.iter().filter(|(_, rel)| rel.rel_type == COMMENTS_REL).count();
-    parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments as u64);
+    super::comments::read(parse_ctx, pkg, part, &rels, content)?;
     let Some(id) = drawing else {
         return Ok(());
     };
@@ -207,7 +204,12 @@ fn read_sheet_parts(
         }
         return Ok(());
     };
-    let Some(root) = pkg.related_xml_part(&target, Role::Content(Region::Body))? else {
+    let Some(root) = pkg.related_xml_part_streamed(
+        &target,
+        Role::Content(Region::Body),
+        &mut super::SelectedTextTree,
+    )?
+    else {
         return Ok(());
     };
     let Some(drawing) = root.find(ns::XDR, "wsDr") else {
@@ -215,7 +217,7 @@ fn read_sheet_parts(
         return Ok(());
     };
     let mut losses = Vec::new();
-    drawing_losses(parse_ctx, drawing, Branch::Other, &mut losses);
+    drawing_losses(parse_ctx, drawing, Branch::Other, false, &mut losses)?;
     for code in losses {
         parse_ctx.emit(code, Region::Body);
     }
@@ -230,26 +232,28 @@ enum Branch {
 }
 
 /// The pictures, charts and text-bearing shapes a sheet drawing places,
-/// none of which the grid holds. Hidden objects show nothing; alternate
-/// content counts its Choice, which the application shows, there leaving
+/// none of which the grid holds. Alternate content counts its Choice,
+/// there leaving
 /// out the form controls a legacy drawing also carries, or its Fallback
 /// when the Choice holds nothing counted.
 fn drawing_losses(
     parse_ctx: &ParseCtx<'_>,
     parent: &Element,
     branch: Branch,
+    reveal: bool,
     out: &mut Vec<DiagnosticCode>,
-) {
+) -> Result<(), ConvertError> {
+    parse_ctx.charge(parent.children.len() as u64)?;
     for child in parent.child_elems() {
         if child.is(ns::MC, "AlternateContent") {
             let before = out.len();
             if let Some(choice) = child.find(ns::MC, "Choice") {
-                drawing_losses(parse_ctx, choice, Branch::Choice, out);
+                drawing_losses(parse_ctx, choice, Branch::Choice, reveal, out)?;
             }
             if out.len() == before
                 && let Some(fallback) = child.find(ns::MC, "Fallback")
             {
-                drawing_losses(parse_ctx, fallback, branch, out);
+                drawing_losses(parse_ctx, fallback, branch, reveal, out)?;
             }
             continue;
         }
@@ -263,28 +267,52 @@ fn drawing_losses(
         let hidden = properties.and_then(|pr| pr.attr_unqualified("hidden")).is_some_and(bool_attr);
         let compat_control = branch == Branch::Choice
             && properties.is_some_and(|pr| pr.descendants(ns::A14, "compatExt").next().is_some());
-        match child.local.as_str() {
-            "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" => {
-                drawing_losses(parse_ctx, child, branch, out);
+        if compat_control {
+            continue;
+        }
+        if hidden && !reveal {
+            let mut declared = Vec::new();
+            drawing_object_losses(parse_ctx, child, branch, true, &mut declared)?;
+            if !declared.is_empty() {
+                out.push(DiagnosticCode::HiddenOmitted);
             }
-            _ if hidden || compat_control => {}
-            "grpSp" => drawing_losses(parse_ctx, child, branch, out),
-            "pic" => out.push(parse_ctx.unplaced_image_code()),
-            "graphicFrame" => out.push(DiagnosticCode::GraphicUnread),
-            "sp" => {
-                if child.outermost(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
-                    out.push(DiagnosticCode::GraphicUnread);
-                }
-                if child
-                    .find(ns::XDR, "spPr")
-                    .is_some_and(|pr| pr.find(ns::A, "blipFill").is_some())
-                {
-                    out.push(parse_ctx.unplaced_image_code());
-                }
-            }
-            _ => {}
+        } else {
+            drawing_object_losses(parse_ctx, child, branch, reveal, out)?;
         }
     }
+    Ok(())
+}
+
+fn drawing_object_losses(
+    ctx: &ParseCtx<'_>,
+    child: &Element,
+    branch: Branch,
+    reveal: bool,
+    out: &mut Vec<DiagnosticCode>,
+) -> Result<(), ConvertError> {
+    match child.local.as_str() {
+        "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor" | "grpSp" => {
+            drawing_losses(ctx, child, branch, reveal, out)?;
+        }
+        "pic" => out.push(ctx.unplaced_image_code()),
+        "graphicFrame" => out.push(DiagnosticCode::GraphicUnread),
+        "sp" => {
+            for text in child.outermost(ns::A, "t") {
+                if !text.checked_text(ctx)?.trim().is_empty() {
+                    out.push(DiagnosticCode::GraphicUnread);
+                    break;
+                }
+            }
+            if child
+                .find(ns::XDR, "spPr")
+                .is_some_and(|properties| properties.find(ns::A, "blipFill").is_some())
+            {
+                out.push(ctx.unplaced_image_code());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A workbook-level sibling part: the relationship of the given type when
@@ -345,18 +373,19 @@ fn shared_strings(root: &Element) -> Vec<String> {
 /// Text of an `si` or `is`: a single `t`, or rich-text `r` runs
 /// concatenated. Phonetic guides (`rPh`) are not content.
 fn rich_text(item: &Element) -> String {
-    item.child_elems()
-        .filter_map(|child| {
-            if child.is(ns::SML, "t") {
-                Some(child)
-            } else if child.is(ns::SML, "r") {
-                child.find(ns::SML, "t")
-            } else {
-                None
-            }
-        })
-        .map(Element::text)
-        .collect()
+    rich_runs(item).map(Element::text).collect()
+}
+
+pub(super) fn rich_runs(item: &Element) -> impl Iterator<Item = &Element> {
+    item.child_elems().filter_map(|child| {
+        if child.is(ns::SML, "t") {
+            Some(child)
+        } else if child.is(ns::SML, "r") {
+            child.find(ns::SML, "t")
+        } else {
+            None
+        }
+    })
 }
 
 /// `xl/styles.xml` reduced to what rendering needs: the ordered `cellXfs`
@@ -612,7 +641,7 @@ fn cell_text(
 }
 
 /// A cell reference (`C3`) as a zero-based cell inside the grid.
-fn parse_ref(r: &str) -> Option<CellRef> {
+pub(super) fn parse_ref(r: &str) -> Option<CellRef> {
     parse_coords(r).filter(|&at| OOXML_GRID.holds(at))
 }
 
@@ -655,7 +684,7 @@ pub(super) fn bool_attr(v: &str) -> bool {
 )]
 mod tests {
     use super::super::grid::MAX_COLS;
-    use super::super::test_support::{Reported, first_table, origin, reported, texts};
+    use super::super::test_support::{Reported, first_table, in_unit, origin, reported, texts};
     use super::*;
     use crate::limits::Limit;
     use crate::model::{CellSlot, Table};
@@ -773,6 +802,151 @@ mod tests {
 
     fn one_sheet(body: &str) -> Wb<'_> {
         Wb { sheets: vec![("S", "", body)], ..Wb::default() }
+    }
+
+    #[test]
+    fn omitted_comment_relationship_damage_is_not_body_loss() {
+        let rels = format!(
+            r#"<Relationships xmlns="{PKG_RELS}"><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/&unknown;.xml"/></Relationships>"#
+        );
+        let wb = Wb {
+            sheets: vec![(
+                "Sheet",
+                "",
+                "<sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>safe</t></is></c></row></sheetData>",
+            )],
+            sheet_rels: Some(&rels),
+            ..Wb::default()
+        };
+        for (policy, code) in [
+            (crate::CommentPolicy::Omit, DiagnosticCode::CommentOmitted),
+            (crate::CommentPolicy::Emit, DiagnosticCode::PartUnreadable),
+        ] {
+            let ctx = ParseCtx::default().with_comments(policy);
+            let document = super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(
+                crate::render::markdown::document_to_markdown(&document),
+                "|  |\n| --- |\n| safe |\n"
+            );
+            assert_eq!(
+                crate::shared::test_support::diagnostic_rows::<(
+                    DiagnosticCode,
+                    Region,
+                    Option<u32>,
+                    u64
+                )>(&ctx.diagnostics()),
+                [(code, Region::Comment, Some(1), 1)]
+            );
+        }
+    }
+
+    #[test]
+    fn selected_legacy_comments_anchor_even_to_empty_cells() {
+        let comments = format!(
+            r#"<comments xmlns="{SML}"><authors><author>Ada</author></authors><commentList><comment ref="C2" authorId="0"><text><r><t>review </t></r><r><t>this</t></r><rPh><t>ignored &unknown;</t></rPh><x:t xmlns:x="urn:decoy">ignored too</x:t></text></comment></commentList></comments>"#
+        );
+        let rels = format!(
+            r#"<Relationship Id="comments" Type="{COMMENTS_REL}" Target="../comments.xml"/>"#
+        );
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/comments.xml", &comments)],
+            ..one_sheet("<sheetData/>")
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes.len(), 1);
+        assert_eq!(doc.notes[0].blocks, [Block::Paragraph(vec![Inline::plain("review this")])]);
+        assert_matches!(&origin(first_table(&doc)).blocks[0], Block::Paragraph(inlines) if inlines == &[Inline::CommentRef(doc.notes[0].id.clone())]);
+        assert_eq!(reported(ctx), []);
+    }
+
+    #[test]
+    fn selected_unreadable_comments_report_comment_loss() {
+        let rels = format!(
+            r#"<Relationship Id="comments" Type="{COMMENTS_REL}" Target="../missing.xml"/>"#
+        );
+        let wb = Wb { sheet_rels: Some(&rels), ..one_sheet("<sheetData/>") };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes, []);
+        assert_eq!(reported(ctx), [(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]);
+    }
+
+    #[test]
+    fn threaded_replies_keep_their_root_and_only_matching_placeholders_disappear() {
+        let legacy = format!(
+            r#"<comments xmlns="{SML}"><authors><author>tc={{root}}</author><author>Ada</author><author>tc={{unmatched}}</author></authors><commentList><comment ref="A1" authorId="0"><text><t>compatibility message</t></text></comment><comment ref="B1" authorId="1"><text><t>genuine note</t></text></comment><comment ref="D1" authorId="2"><text><t>unmatched note</t></text></comment></commentList></comments>"#
+        );
+        let threaded = r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment id="{reply}" parentId="{root}" ref="C3" personId="{person}"><text>first reply</text></threadedComment><threadedComment id="{root}" ref="C3" personId="{person}"><text>root text</text></threadedComment><threadedComment id="{nested}" parentId="{reply}" ref="C3" personId="{person}"><text>nested reply</text></threadedComment></ThreadedComments>"#;
+        let rels = format!(
+            r#"<Relationship Id="legacy" Type="{COMMENTS_REL}" Target="../comments.xml"/><Relationship Id="threaded" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threaded.xml"/>"#
+        );
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/comments.xml", &legacy), ("xl/threaded.xml", threaded)],
+            ..one_sheet("<sheetData/>")
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes.len(), 3);
+        assert_eq!(
+            doc.notes.iter().map(|note| note.blocks[0].plain_text()).collect::<Vec<_>>(),
+            ["genuine note", "unmatched note", "root text"]
+        );
+        assert_eq!(
+            doc.notes[2].blocks,
+            [
+                Block::Paragraph(vec![Inline::plain("root text")]),
+                Block::BlockQuote(vec![
+                    Block::Paragraph(vec![Inline::plain("first reply")]),
+                    Block::BlockQuote(vec![Block::Paragraph(vec![Inline::plain("nested reply")])])
+                ])
+            ]
+        );
+        assert_eq!(first_table(&doc).grid.len(), 1);
+        assert_matches!(&origin(first_table(&doc)).blocks[0], Block::Paragraph(inlines) if inlines == &[Inline::CommentRef(doc.notes[2].id.clone())]);
+        assert_eq!(reported(ctx), []);
+    }
+
+    #[test]
+    fn threaded_cycles_missing_roots_and_duplicate_ids_are_bounded_and_reported() {
+        let threaded = r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment id="root" ref="A1" personId="person"><text>first definition</text></threadedComment><threadedComment id="root" ref="B2" personId="person"><text>duplicate &unknown;</text></threadedComment><threadedComment id="cycle1" parentId="cycle2" ref="A1" personId="person"><text>lost one</text></threadedComment><threadedComment id="cycle2" parentId="cycle1" ref="A1" personId="person"><text>lost two</text></threadedComment><threadedComment id="orphan" parentId="missing" ref="A1" personId="person"><text>lost three</text></threadedComment></ThreadedComments>"#;
+        let rels = r#"<Relationship Id="threaded" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threaded.xml"/>"#;
+        let wb = Wb {
+            sheet_rels: Some(rels),
+            extra: vec![("xl/threaded.xml", threaded)],
+            ..one_sheet("<sheetData/>")
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes.len(), 3);
+        let root = doc
+            .notes
+            .iter()
+            .find(|note| note.blocks[0].plain_text() == "first definition")
+            .unwrap();
+        assert_eq!(root.blocks, [Block::Paragraph(vec![Inline::plain("first definition")])]);
+        assert_eq!(
+            reported(ctx),
+            [
+                (DiagnosticCode::DanglingReference, Region::Comment, Some(1), 2),
+                (DiagnosticCode::DuplicateNote, Region::Comment, Some(1), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn omitted_threaded_comments_do_not_read_unusable_payloads() {
+        let rels = format!(
+            r#"<Relationship Id="legacy" Type="{COMMENTS_REL}" Target="../missing.xml"/><Relationship Id="threaded" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threaded.xml"/>"#
+        );
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/threaded.xml", "unusable")],
+            ..one_sheet("<sheetData/>")
+        };
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::CommentOmitted, 1, 2)]);
     }
 
     fn table(wb: &Wb<'_>) -> Vec<Vec<String>> {
@@ -1762,6 +1936,41 @@ mod tests {
         Wb { sheet_rels: Some(rels), extra: parts, ..one_sheet(body) }
     }
 
+    #[test]
+    fn a_hidden_drawing_group_charges_its_content_walk() {
+        let content = drawing(&format!(
+            r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr>{}</xdr:grpSp>"#,
+            sp("", "<xdr:txBody><a:p><a:r><a:t>text</a:t></a:r></a:p></xdr:txBody>")
+        ));
+        let tree =
+            crate::package::xml::parse_xml(&ParseCtx::default(), content.as_bytes(), Role::Probe)
+                .unwrap();
+        let limits = crate::Limits { max_work: 1, ..crate::Limits::default() };
+        let ctx = ParseCtx::new(&limits);
+        let root = tree.find(ns::XDR, "wsDr").unwrap();
+        assert_matches!(
+            drawing_losses(&ctx, root, Branch::Other, false, &mut Vec::new()),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 1 })
+        );
+    }
+
+    #[test]
+    fn control_caption_damage_is_reported_only_where_the_grid_shows_it() {
+        let vml = format!(
+            r#"<xml xmlns:v="{}" xmlns:x="{}"><v:shape><v:textbox>caption &unknown;</v:textbox><x:ClientData ObjectType="Checkbox"><x:Anchor>0,0,0,0,1,0,1,0</x:Anchor></x:ClientData></v:shape><v:shape><v:textbox>ignored note &other;</v:textbox><x:ClientData ObjectType="Note"/></v:shape></xml>"#,
+            ns::VML,
+            ns::X_VML
+        );
+        let rels = r#"<Relationship Id="vml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawing.vml"/>"#;
+        for (hidden, code) in
+            [(0, DiagnosticCode::UnresolvedEntity), (1, DiagnosticCode::HiddenOmitted)]
+        {
+            let body = format!(r#"<sheetData><row r="1" hidden="{hidden}"/></sheetData>"#);
+            let wb = drawing_wb(rels, &body, vec![("xl/drawing.vml", &vml)]);
+            assert_eq!(diagnose(&wb), [in_unit(code, 1, 1)]);
+        }
+    }
+
     const PIC: &str = r#"<xdr:twoCellAnchor><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="p"/></xdr:nvPicPr></xdr:pic></xdr:twoCellAnchor>"#;
     const CONTROL: &str = r#"<xdr:twoCellAnchor><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="c"><a:extLst><a:ext><a14:compatExt spid="_x0000_s1025"/></a:ext></a:extLst></xdr:cNvPr></xdr:nvSpPr><xdr:txBody><a:p><a:r><a:t>Check Box 1</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:twoCellAnchor>"#;
 
@@ -2257,12 +2466,24 @@ mod tests {
     }
 
     #[test]
+    fn undisplayed_sheet_link_targets_report_link_loss_without_entity_loss() {
+        let linked = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>www.example.org</t></is></c></row></sheetData><hyperlinks><hyperlink ref="A1" r:id="target"/></hyperlinks>"#;
+        let rels = r#"<Relationship Id="target" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.org/&unknown;" TargetMode="External"/>"#;
+        let wb = Wb { sheet_rels: Some(rels), ..one_sheet(linked) };
+        let ctx = ParseCtx::default();
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&doc),
+            "|  |\n| --- |\n| www.example.org |\n"
+        );
+        assert_eq!(reported(ctx), [(DiagnosticCode::LinkTargetUnread, Region::Body, Some(1), 1)]);
+    }
+
+    #[test]
     fn omitted_print_filter_keeps_displayed_and_attribute_damage() {
         let shown = "<sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>shown &unknown;</t></is></c></row></sheetData>";
         let shared = "<si><t>shared &unknown;</t></si>";
         let used = "<sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row></sheetData>";
-        let linked = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>www.example.org</t></is></c></row></sheetData><hyperlinks><hyperlink ref="A1" r:id="target"/></hyperlinks>"#;
-        let rels = r#"<Relationship Id="target" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.org/&unknown;" TargetMode="External"/>"#;
         let damaged_drawing = drawing(&sp(
             "",
             "<xdr:txBody><a:p><a:r><a:t>drawn &unknown;</a:t></a:r></a:p></xdr:txBody>",
@@ -2283,7 +2504,6 @@ mod tests {
                 },
             ),
             ("shared text", Wb { shared: Some(shared), ..one_sheet(used) }),
-            ("link target", Wb { sheet_rels: Some(rels), ..one_sheet(linked) }),
         ];
         for (label, wb) in cases {
             let loss: u64 = diagnose(&wb)
@@ -2330,6 +2550,7 @@ mod tests {
                 (DiagnosticCode::HeaderOmitted, Region::Header, Some(1), 1),
                 (DiagnosticCode::FooterOmitted, Region::Footer, Some(1), 1),
                 (DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1),
+                (DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 3),
             ]
         );
         let unnamed = format!(

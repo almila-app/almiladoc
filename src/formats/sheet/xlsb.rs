@@ -327,6 +327,82 @@ fn read_shared_strings(
     Ok(out)
 }
 
+pub(super) fn read_comments(
+    ctx: &ParseCtx<'_>,
+    data: &[u8],
+) -> Result<Vec<super::comments::Legacy>, ConvertError> {
+    const BEGIN_COMMENTS: u16 = 628;
+    const END_COMMENTS: u16 = 629;
+    const COMMENT_AUTHOR: u16 = 632;
+    const BEGIN_COMMENT: u16 = 635;
+    const END_COMMENT: u16 = 636;
+    const COMMENT_TEXT: u16 = 637;
+    let mut records = Records::new(ctx, data);
+    let mut authors = Vec::new();
+    let mut out = Vec::new();
+    let mut pending = None;
+    let mut recognized = false;
+    let mut ended = false;
+    while let Some((id, payload)) = records.next()? {
+        ctx.charge(payload.len() as u64 + 1)?;
+        let mut f = Fields::new(payload);
+        match id {
+            BEGIN_COMMENTS => recognized = true,
+            END_COMMENTS => ended = true,
+            COMMENT_AUTHOR => authors.push(f.wide_string()?.0),
+            BEGIN_COMMENT => {
+                if pending.is_some() {
+                    return Err(ConvertError::malformed("nested comments"));
+                }
+                pending = Some(comment_start(&mut f)?);
+            }
+            COMMENT_TEXT => {
+                f.u8()?;
+                let (text, replaced) = f.wide_string()?;
+                let Some((_, comment)) = &mut pending else {
+                    return Err(ConvertError::malformed("comment text without comment"));
+                };
+                comment.blocks =
+                    vec![crate::model::Block::Paragraph(vec![crate::model::Inline::plain(
+                        clean_text(&text),
+                    )])];
+                if replaced {
+                    comment.losses.push(DiagnosticCode::InvalidEncoding);
+                }
+            }
+            END_COMMENT => {
+                let Some((author, comment)) = pending.take() else {
+                    return Err(ConvertError::malformed("comment end without comment"));
+                };
+                let author = authors.get(author as usize);
+                if let Some(author) = author {
+                    ctx.charge(author.len() as u64)?;
+                }
+                let placeholder = author
+                    .and_then(|author: &String| author.strip_prefix("tc="))
+                    .map(str::to_ascii_lowercase);
+                out.push(super::comments::Legacy { comment, placeholder });
+            }
+            _ => {}
+        }
+    }
+    if !recognized || !ended || pending.is_some() {
+        return Err(ConvertError::malformed("incomplete comments"));
+    }
+    Ok(out)
+}
+
+fn comment_start(f: &mut Fields<'_>) -> Result<(u32, super::comments::Comment), ConvertError> {
+    let author = f.u32()?;
+    let first_row = f.u32()?;
+    let last_row = f.u32()?;
+    let first_col = f.u32()?;
+    let last_col = f.u32()?;
+    let at = (first_row == last_row && first_col == last_col)
+        .then_some(CellRef::new(first_row, first_col));
+    Ok((author, super::comments::Comment::text(at, String::new())))
+}
+
 /// One cell record, placed at the row of the preceding BrtRowHdr.
 fn read_cell(
     id: u16,
@@ -952,6 +1028,39 @@ mod tests {
             (Side::Header, Variant::Default, Some(vec![header.into()])),
             (Side::Footer, Variant::Default, Some(vec![footer.into()])),
         ]
+    }
+
+    #[test]
+    fn omitted_comment_relationship_damage_is_not_body_loss() {
+        let rels = format!(
+            r#"<Relationships xmlns="{PKG_RELS}"><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/&unknown;.bin"/></Relationships>"#
+        );
+        let mut body = row_hdr(0, false);
+        body.extend(text_cell(0, "safe"));
+        let wb = Wb {
+            extra: vec![("xl/worksheets/_rels/sheet1.bin.rels", rels.into_bytes())],
+            ..one_sheet(body)
+        };
+        for (policy, code) in [
+            (crate::CommentPolicy::Omit, DiagnosticCode::CommentOmitted),
+            (crate::CommentPolicy::Emit, DiagnosticCode::PartUnreadable),
+        ] {
+            let ctx = ParseCtx::default().with_comments(policy);
+            let document = super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(
+                crate::render::markdown::document_to_markdown(&document),
+                "|  |\n| --- |\n| safe |\n"
+            );
+            assert_eq!(
+                crate::shared::test_support::diagnostic_rows::<(
+                    DiagnosticCode,
+                    Region,
+                    Option<u32>,
+                    u64
+                )>(&ctx.diagnostics()),
+                [(code, Region::Comment, Some(1), 1)]
+            );
+        }
     }
 
     #[test]
@@ -2400,6 +2509,65 @@ mod tests {
             ]
         );
     }
+    fn comment_part(text: &str) -> Vec<u8> {
+        let cell = [0u32, 1, 1, 2, 2].into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>();
+        let rich = [vec![1], wstr(text), 0u32.to_le_bytes().to_vec()].concat();
+        [
+            rec(628, &[]),
+            rec(630, &[]),
+            rec(632, &wstr("Ada")),
+            rec(631, &[]),
+            rec(633, &[]),
+            rec(635, &[cell, vec![0; 16]].concat()),
+            rec(637, &rich),
+            rec(636, &[]),
+            rec(634, &[]),
+            rec(629, &[]),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn selected_binary_comments_anchor_to_their_declared_cell() {
+        let rels = format!(
+            r#"<Relationships xmlns="{PKG_RELS}"><Relationship Id="comment" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments.bin"/></Relationships>"#
+        );
+        let wb = Wb {
+            extra: vec![
+                ("xl/worksheets/_rels/sheet1.bin.rels", rels.into_bytes()),
+                ("xl/comments.bin", comment_part("binary note")),
+            ],
+            ..one_sheet(Vec::new())
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes.len(), 1);
+        assert_eq!(doc.notes[0].blocks[0].plain_text(), "binary note");
+        assert_matches!(&origin(first_table(&doc)).blocks[0], Block::Paragraph(inlines) if inlines == &[crate::model::Inline::CommentRef(doc.notes[0].id.clone())]);
+        assert_eq!(reported(ctx), []);
+    }
+
+    #[test]
+    fn binary_comment_record_and_work_limits_remain_fatal() {
+        let bytes = comment_part("bounded");
+        let limits = crate::Limits { max_records: 2, ..crate::Limits::default() };
+        assert_matches!(
+            read_comments(&ParseCtx::new(&limits), &bytes),
+            Err(ConvertError::ResourceLimit { limit: Limit::Records, max: 2 })
+        );
+        let limits = crate::Limits { max_work: 2, ..crate::Limits::default() };
+        assert_matches!(
+            read_comments(&ParseCtx::new(&limits), &bytes),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 2 })
+        );
+        let mut cut = bytes;
+        cut.truncate(cut.len() - rec(629, &[]).len());
+        assert_matches!(
+            read_comments(&ParseCtx::default(), &cut),
+            Err(ConvertError::Malformed { reason: "incomplete comments", .. })
+        );
+    }
+
     #[test]
     fn empty_readable_sheets_keep_their_original_positions_after_hidden_sheets() {
         let body = [row_hdr(0, false), real_cell(0, 0, 7.0)].concat();

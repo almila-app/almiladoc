@@ -205,6 +205,23 @@ impl CommentThreads {
         Ok(Self { parents, roots, selected, aliases, depths, losses, duplicates })
     }
 
+    pub(crate) fn aliases(&self) -> &BTreeMap<String, String> {
+        &self.aliases
+    }
+
+    pub(crate) fn select(
+        &mut self,
+        ctx: &ParseCtx<'_>,
+        comments: &[SourceComment],
+        selected: &BTreeSet<String>,
+    ) -> Result<(), ConvertError> {
+        if comments.len() != self.roots.len() {
+            return Err(ConvertError::Internal);
+        }
+        self.selected = selected_roots(ctx, comments, &self.roots, Some(selected))?;
+        Ok(())
+    }
+
     pub(crate) fn admit(&self, ctx: &ParseCtx<'_>) -> Result<(), ConvertError> {
         let max = ctx.limits().max_nesting_depth;
         for (index, depth) in self.depths.iter().enumerate() {
