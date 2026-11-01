@@ -65,6 +65,7 @@ pub(super) struct Assembler<'c, 'w> {
     /// The id of the note each reference CP names.
     note_refs: HashMap<usize, String>,
     pub(super) dropped_notes: RefCell<HashSet<String>>,
+    pub(super) comments: super::comments::References,
     /// The floating shape each main-document anchor CP names.
     shapes: HashMap<usize, ShapeKind>,
     counters: RefCell<Counters>,
@@ -108,7 +109,8 @@ enum Dropped {
 
 impl Dropped {
     fn of(chp: Chp) -> Option<Self> {
-        chp.deleted.then_some(Self::Revision).or_else(|| chp.hidden.then_some(Self::Hidden))
+        let revision = chp.deleted;
+        revision.then_some(Self::Revision).or_else(|| (chp.hidden).then_some(Self::Hidden))
     }
 }
 
@@ -119,6 +121,21 @@ struct DroppedRange {
 }
 
 impl DroppedRange {
+    fn observe(
+        &mut self,
+        ctx: &ParseCtx<'_>,
+        region: Region,
+        kind: Option<Dropped>,
+        c: char,
+        instruction: bool,
+    ) {
+        if is_mark(c) {
+            self.close(ctx, region);
+        } else {
+            self.extend(ctx, region, kind, || renders(c) && !instruction);
+        }
+    }
+
     /// Extend the range by a character dropped as `kind`, closing it first
     /// when the kind changes; a shown character has none.
     fn extend(
@@ -460,6 +477,7 @@ impl<'c, 'w> Assembler<'c, 'w> {
             lists,
             note_refs,
             dropped_notes: RefCell::default(),
+            comments: super::comments::References::default(),
             shapes,
             counters: RefCell::default(),
             reported: RefCell::default(),
@@ -467,6 +485,11 @@ impl<'c, 'w> Assembler<'c, 'w> {
             assets: RefCell::new(AssetSink::new(parse_ctx)),
             field_locks: RefCell::default(),
         }
+    }
+
+    pub(super) fn with_comments(mut self, comments: super::comments::References) -> Self {
+        self.comments = comments;
+        self
     }
 }
 
@@ -505,14 +528,9 @@ impl Assembler<'_, '_> {
         self.text.preflight(parse_ctx, range)?;
         let mut cursor = self.text.cursor(parse_ctx, story, range)?;
         while let Some(event) = cursor.next(parse_ctx)? {
-            let s = match event {
-                Event::Scalar(s) => s,
-                Event::Gap(gap) => {
-                    self.report([Damaged::Missing(gap.piece)], region);
-                    para.gap()?;
-                    segment = Segment::default();
-                    continue;
-                }
+            let Some(s) = self.event_scalar(event, &mut para, region)? else {
+                segment = Segment::default();
+                continue;
             };
             read = true;
             if s.cp >= segment.end {
@@ -520,16 +538,12 @@ impl Assembler<'_, '_> {
                 segment = self.segment(&s, Some(region))?;
             }
             let drop = Dropped::of(segment.chp);
-            if self.note_reference(&s, drop, &mut dropped, &mut para, region)? {
+            if self.reference(&s, drop, &mut dropped, &mut para, region)? {
                 continue;
             }
             let (c, mark) = (s.c, is_mark(s.c));
             let delimiter = matches!(c, '\u{13}' | '\u{14}' | '\u{15}');
-            if mark {
-                dropped.close(parse_ctx, region);
-            } else {
-                dropped.extend(parse_ctx, region, drop, || renders(c) && !para.in_instruction());
-            }
+            dropped.observe(parse_ctx, region, drop, c, para.in_instruction());
             if drop.is_some() && !mark && !delimiter {
                 continue;
             }
@@ -552,6 +566,35 @@ impl Assembler<'_, '_> {
         self.report(damage.into_iter().map(Damaged::Piece), region);
         let blocks = flow.finish(parse_ctx, inlines)?;
         Ok(read.then_some(blocks))
+    }
+
+    fn event_scalar(
+        &self,
+        event: Event,
+        para: &mut ParaBuilder<'_>,
+        region: Region,
+    ) -> Result<Option<Scalar>, ConvertError> {
+        match event {
+            Event::Scalar(scalar) => Ok(Some(scalar)),
+            Event::Gap(gap) => {
+                self.report([Damaged::Missing(gap.piece)], region);
+                para.gap()?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn reference(
+        &self,
+        scalar: &Scalar,
+        drop: Option<Dropped>,
+        dropped: &mut DroppedRange,
+        para: &mut ParaBuilder<'_>,
+        region: Region,
+    ) -> Result<bool, ConvertError> {
+        let note = self.note_reference(scalar, drop, dropped, para, region)?;
+        let comment = self.comment_reference(scalar, drop, dropped, para, region)?;
+        Ok(note || comment)
     }
 
     fn note_reference(
@@ -581,6 +624,56 @@ impl Assembler<'_, '_> {
             para.push_inline(Inline::NoteRef(id.clone()))?;
         }
         Ok(true)
+    }
+
+    fn comment_reference(
+        &self,
+        s: &Scalar,
+        drop: Option<Dropped>,
+        dropped: &mut DroppedRange,
+        para: &mut ParaBuilder<'_>,
+        region: Region,
+    ) -> Result<bool, ConvertError> {
+        if region != Region::Body {
+            return Ok(false);
+        }
+        let requested = self.parse_ctx.comments_requested();
+        if s.c.len_utf16() == 2
+            && self.comments.at(s.cp + 1).is_some()
+            && drop.is_none()
+            && !para.in_instruction()
+        {
+            let code = if requested {
+                DiagnosticCode::PartUnreadable
+            } else {
+                DiagnosticCode::CommentOmitted
+            };
+            self.parse_ctx.emit(code, Region::Comment);
+        }
+        let refs = self.comments.at(s.cp);
+        if refs.is_none() && s.c != '\u{5}' {
+            return Ok(false);
+        }
+        dropped.extend(self.parse_ctx, region, drop, || !para.in_instruction());
+        if drop.is_none() && !para.in_instruction() {
+            if let Some(refs) = refs {
+                if requested {
+                    for &index in refs {
+                        let id = self.comments.select(self.parse_ctx, index)?;
+                        para.push_inline(Inline::CommentRef(id))?;
+                    }
+                } else {
+                    self.parse_ctx.emit_count(
+                        DiagnosticCode::CommentOmitted,
+                        Region::Comment,
+                        refs.len() as u64,
+                    );
+                }
+            } else if requested {
+                self.parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Comment);
+            }
+        }
+        Ok(s.c == '\u{5}')
     }
 
     /// Add the character `s`, which is no paragraph mark, to `para`.

@@ -5,6 +5,7 @@
 //! units, matching the CP-indexed PLC structures.
 
 mod assemble;
+mod comments;
 mod fkp;
 mod fonts;
 mod lists;
@@ -84,9 +85,10 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         note_refs,
         shapes,
         data,
-    );
+    )
+    .with_comments(comments::References::read(parse_ctx, fib, &table)?);
     let layout = sides::Layout { fib, table: &table, word_doc: &word_doc, stories: &stories };
-    let blocks = sides::body(parse_ctx, &layout, &assembler)?;
+    let mut blocks = sides::body(parse_ctx, &layout, &assembler)?;
     let mut notes = Vec::new();
     for (range, story, id, kind) in note_ranges {
         if range.is_empty() || assembler.dropped_notes.borrow().contains(&id) {
@@ -96,6 +98,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
             notes.push(Note { id, kind, blocks });
         }
     }
+    comments::append(parse_ctx, &layout, &assembler, &mut blocks, &mut notes)?;
     let assets = assembler.assets.into_inner().assets;
     Ok(Document { blocks, notes, assets, ..Document::default() })
 }
@@ -181,6 +184,11 @@ impl Stories {
         start..start + self.hdd
     }
 
+    fn comments(&self) -> Range<usize> {
+        let start = self.text + self.ftn + self.hdd;
+        start..start + self.atn
+    }
+
     fn endnotes(&self) -> Range<usize> {
         let start = self.text + self.ftn + self.hdd + self.atn;
         start..start + self.edn
@@ -252,6 +260,7 @@ impl<'a> Fib<'a> {
     const FC_PLCFFND_REF: usize = 0xAA;
     const FC_PLCFFND_TXT: usize = 0xB2;
     const FC_PLCFAND_REF: usize = 0xBA;
+    const FC_PLCFAND_TXT: usize = 0xC2;
     const FC_PLCF_SED: usize = 0xCA;
     const FC_PLCF_HDD: usize = 0xF2;
     const FC_PLCF_BTE_CHPX: usize = 0xFA;
@@ -337,15 +346,16 @@ fn report_side_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], sto
 }
 
 /// Count the header and footer stories, which this reader renders only under
-/// `HeaderFooterPolicy::Emit`, the comments, which it does not render, and the body text-box
+/// `HeaderFooterPolicy::Emit`, the comments omitted by policy, and the body text-box
 /// stories, which it never reads; a story whose table does not read counts once.
 fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
     if !parse_ctx.headers_footers_requested() {
         report_side_stories(parse_ctx, fib, table, stories);
     }
-    if let Some(comments) = read_plc(fib, table, Fib::FC_PLCFAND_REF, 30) {
-        parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments.n as u64);
-    } else if stories.atn > 0 {
+    if !parse_ctx.comments_requested()
+        && stories.atn > 0
+        && read_plc(fib, table, Fib::FC_PLCFAND_REF, 30).is_none()
+    {
         parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
     }
     if stories.txbx > 0 {
@@ -466,6 +476,340 @@ mod tests {
     /// The Markdown `document` renders to.
     fn markdown_of_document(document: &Document) -> String {
         crate::render::markdown::document_to_markdown(document)
+    }
+
+    fn comment_doc(body: &[u8], comments: &[&[u8]], refs: &[u32]) -> DocBuilder {
+        let mut text = body.to_vec();
+        let mut cps = vec![0];
+        for comment in comments {
+            text.extend_from_slice(comment);
+            cps.push(u32::try_from(text.len() - body.len()).unwrap());
+        }
+        text.push(b'\r');
+        cps.push(u32::try_from(text.len() - body.len()).unwrap());
+        let mut anchors = refs.to_vec();
+        anchors.push(u32::try_from(body.len()).unwrap());
+        DocBuilder::new(&text)
+            .fib(0x4C, u32::try_from(body.len()).unwrap())
+            .fib(0x5C, u32::try_from(text.len() - body.len()).unwrap())
+            .table(0xBA, &[words(&anchors), vec![0; refs.len() * 30]].concat())
+            .table(0xC2, &words(&cps))
+    }
+
+    fn emitted_comments(bytes: &[u8]) -> (Document, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, bytes).unwrap();
+        let rows = diagnostic_rows(&ctx.into_diagnostics());
+        (doc, rows)
+    }
+
+    #[test]
+    fn comments_emit_rich_content_in_the_comment_namespace() {
+        let bytes = comment_doc(b"a\x05\r", &[b"\x05bold\r"], &[1])
+            .chpx_runs(&[(4, &[]), (4, &[0x35, 0x08, 1]), (2, &[])])
+            .bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!(
+            markdown_of_document(&doc),
+            "a[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: **bold**\n"
+        );
+        assert_eq!(doc.notes[0].kind, NoteKind::Comment);
+        assert_eq!(rows, vec![]);
+    }
+
+    fn comment_paragraph(text: &str) -> Block {
+        Block::Paragraph(vec![crate::model::Inline::plain(text)])
+    }
+
+    fn threaded_comments(doc: DocBuilder, tree: &[(u32, i32)]) -> DocBuilder {
+        let mut bytes = Vec::new();
+        for &(depth, parent) in tree {
+            bytes.extend_from_slice(&[0; 6]);
+            bytes.extend_from_slice(&depth.to_le_bytes());
+            bytes.extend_from_slice(&parent.to_le_bytes());
+            bytes.extend_from_slice(&[0; 4]);
+        }
+        doc.fib16(0x98, 0x88).fib16(0x4DA, 2).fib16(0x4DC, 0x0101).table(0x41A, &bytes)
+    }
+
+    #[test]
+    fn replies_nest_under_their_immediate_parent_and_references_name_the_root() {
+        use crate::model::Inline;
+        let doc = comment_doc(
+            b"\x05\x05\x05\x05\r",
+            &[b"\x05Root\r", b"\x05Child\r", b"\x05Grand\r", b"\x05Sibling\r"],
+            &[0, 1, 2, 3],
+        );
+        let bytes = threaded_comments(doc, &[(0, 0), (1, -1), (2, -1), (1, -3)]).bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        let paragraph = |s| Block::Paragraph(vec![Inline::plain(s)]);
+        assert_eq!(doc.notes.len(), 1);
+        assert_eq!(
+            doc.notes[0].blocks,
+            vec![
+                paragraph("Root"),
+                Block::BlockQuote(vec![
+                    paragraph("Child"),
+                    Block::BlockQuote(vec![paragraph("Grand")])
+                ]),
+                Block::BlockQuote(vec![paragraph("Sibling")])
+            ]
+        );
+        assert_eq!(
+            doc.blocks,
+            vec![Block::Paragraph(vec![Inline::CommentRef("doc-comment-0".into()); 4])]
+        );
+        assert!(markdown_of_document(&doc).contains("> > Grand"));
+        assert_eq!(rows, vec![]);
+    }
+
+    #[test]
+    fn comments_keep_links_tables_and_assets_in_their_own_region() {
+        let link = b"\x05\x13 HYPERLINK https://example.org \x14link\x15\r";
+        let comment = [&link[..], b"a\x07b\x07\x01\r"].concat();
+        let bytes = comment_doc(b"\x05\r", &[&comment], &[0])
+            .papx(&[(u32::try_from(link.len() + 2).unwrap(), &[]), (4, IN_TABLE), (2, &[])])
+            .chpx(PIC_LOCATION_CHPX)
+            .data(picture_data(64))
+            .bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        let markdown = markdown_of_document(&doc);
+        assert!(markdown.contains("[link](https://example.org)"), "{markdown}");
+        assert!(doc.notes[0].blocks.iter().any(|block| matches!(block, Block::Table(_))));
+        assert_eq!(doc.assets[0].bytes.len(), 64);
+        assert_matches!(doc.notes[0].blocks.last(), Some(Block::Paragraph(inlines))
+            if inlines.iter().any(|inline| matches!(inline, crate::model::Inline::Image { origin, .. } if origin.region == Region::Comment)));
+        assert_eq!(rows, vec![]);
+    }
+
+    #[test]
+    fn omitted_comments_do_not_assemble_text_or_read_thread_metadata() {
+        let bytes = threaded_comments(
+            comment_doc(b"a\x05\r", &[b"\x05\x01\r"], &[1]).chpx(PIC_LOCATION_CHPX),
+            &[(0, 0)],
+        )
+        .fib(0x41A, u32::MAX)
+        .bytes();
+        assert_eq!(
+            converted(&bytes),
+            ("a\n".into(), vec![(DiagnosticCode::CommentOmitted, Region::Comment, 1)])
+        );
+    }
+
+    type CommentReferenceCase<'a> = (&'a [u8], &'a [u8], Vec<Reported>);
+
+    #[test]
+    fn excluded_comment_references_do_not_parse_damaged_bodies_or_metadata() {
+        let cases: [CommentReferenceCase<'_>; 3] = [
+            (b"a\x05\r", HIDDEN, omitted(DiagnosticCode::HiddenOmitted, 1)),
+            (b"a\x05\r", DELETED, omitted(DiagnosticCode::RevisionOmitted, 1)),
+            (b"\x13 REF \x05 \x14a\x15\r", &[], vec![]),
+        ];
+        for (body, properties, expected) in cases {
+            let at = u32::try_from(body.iter().position(|&c| c == 5).unwrap()).unwrap();
+            let doc = comment_doc(body, &[b"\x05\x01\r"], &[at]).chpx_runs(&[
+                (at, &[]),
+                (1, properties),
+                (100, PIC_LOCATION_CHPX),
+            ]);
+            let bytes = threaded_comments(doc, &[(0, 0)]).fib(0x41A, u32::MAX).bytes();
+            for comments in [crate::CommentPolicy::Emit, crate::CommentPolicy::Omit] {
+                let ctx = ParseCtx::default().with_comments(comments);
+                let doc = parse(&ctx, &bytes).unwrap();
+                assert_eq!(markdown_of_document(&doc), "a\n");
+                assert_eq!(doc.notes, vec![]);
+                assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_notes_and_comments_can_share_a_raw_id() {
+        use crate::model::Inline;
+        let bytes = comment_doc(b"\x02\x05\rnote\r", &[b"\x05comment\r"], &[1])
+            .fib(0x4C, 3)
+            .footnote(5)
+            .bytes();
+        let (mut doc, rows) = emitted_comments(&bytes);
+        let Block::Paragraph(inlines) = &mut doc.blocks[0] else { panic!("paragraph") };
+        assert_eq!(inlines[0], Inline::NoteRef("fn0".into()));
+        assert_eq!(inlines[1], Inline::CommentRef("doc-comment-0".into()));
+        inlines[1] = Inline::CommentRef("fn0".into());
+        doc.notes[1].id = "fn0".into();
+        assert_eq!(
+            markdown_of_document(&doc),
+            "[^1][^almiladoc-comment-1]\n\n[^1]: note\n\n[^almiladoc-comment-1]: comment\n"
+        );
+        assert_eq!(rows, vec![]);
+    }
+
+    #[test]
+    fn malformed_comment_ranges_report_only_referenced_content() {
+        let cases = [(words(&[0]), ""), (words(&[0, 100, 101]), "kept"), (words(&[9, 0, 0]), "")];
+        for (cps, shown) in cases {
+            let bytes = comment_doc(b"\x05\r", &[b"\x05kept\r"], &[0]).table(0xC2, &cps).bytes();
+            let (doc, rows) = emitted_comments(&bytes);
+            assert_eq!(doc.notes.len(), 1);
+            assert_eq!(
+                doc.notes[0].blocks,
+                if shown.is_empty() { vec![] } else { vec![comment_paragraph(shown)] }
+            );
+            assert_eq!(rows, vec![(DiagnosticCode::PartUnreadable, Region::Comment, 1)]);
+        }
+        let bytes = comment_doc(b"body\r", &[b"\x05kept\r"], &[100]).fib(0xC2, u32::MAX).bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!((doc.notes.len(), rows), (0, vec![]));
+    }
+
+    #[test]
+    fn reply_depth_is_admitted_before_any_comment_body_is_parsed() {
+        let doc = comment_doc(b"\x05\x05\x05\r", &[&b"\x05\x01\r"[..]; 3], &[0, 1, 2])
+            .chpx(PIC_LOCATION_CHPX);
+        let bytes = threaded_comments(doc, &[(0, 0), (1, -1), (2, -1)]).bytes();
+        let limits = crate::limits::Limits { max_nesting_depth: 1, ..Default::default() };
+        let ctx = ParseCtx::new(&limits).with_comments(crate::CommentPolicy::Emit);
+        assert_matches!(
+            parse(&ctx, &bytes),
+            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 1 })
+        );
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), vec![]);
+    }
+
+    #[test]
+    fn selected_replies_read_their_root_even_when_its_reference_is_hidden() {
+        let doc = comment_doc(b"\x05\x05\r", &[b"\x05Root\r", b"\x05Reply\r"], &[0, 1])
+            .chpx_runs(&[(1, HIDDEN), (100, &[])]);
+        let bytes = threaded_comments(doc, &[(0, 0), (1, -1)]).bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!(doc.notes.len(), 1);
+        assert_eq!(doc.notes[0].id, "doc-comment-0");
+        assert_eq!(
+            doc.notes[0].blocks,
+            vec![comment_paragraph("Root"), Block::BlockQuote(vec![comment_paragraph("Reply")])]
+        );
+        assert_eq!(rows, omitted(DiagnosticCode::HiddenOmitted, 1));
+    }
+
+    #[test]
+    fn undeclared_or_older_fib_extensions_do_not_become_reply_metadata() {
+        for (count, version) in [(112, 0x0101), (136, 0x00D9)] {
+            let doc = comment_doc(b"\x05\x05\r", &[b"\x05Root\r", b"\x05Other\r"], &[0, 1]);
+            let bytes = threaded_comments(doc, &[(0, 0), (1, -1)])
+                .fib16(0x98, count)
+                .fib16(0x4DC, version)
+                .fib(0x41A, u32::MAX)
+                .bytes();
+            let (doc, rows) = emitted_comments(&bytes);
+            assert_eq!(doc.notes.len(), 2);
+            assert_eq!(rows, vec![]);
+        }
+    }
+
+    #[test]
+    fn malformed_selected_thread_metadata_reports_in_the_comment_region() {
+        let bytes = threaded_comments(comment_doc(b"\x05\r", &[b"\x05kept\r"], &[0]), &[(0, 0)])
+            .fib(0x41A, u32::MAX)
+            .bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!(doc.notes[0].blocks, vec![comment_paragraph("kept")]);
+        assert_eq!(rows, vec![(DiagnosticCode::PartUnreadable, Region::Comment, 1)]);
+    }
+
+    #[test]
+    fn comment_reference_indexing_is_charged_under_both_policies() {
+        let doc = comment_doc(b"\x05\r", &[b"\x05First\r", b"\x05Second\r"], &[0, 0]);
+        let fib = Fib::read(&doc.word_doc).unwrap();
+        for max_work in [0, 1, 2] {
+            let limits = crate::limits::Limits { max_work, ..Default::default() };
+            for policy in [crate::CommentPolicy::Omit, crate::CommentPolicy::Emit] {
+                let ctx = ParseCtx::new(&limits).with_comments(policy);
+                let result = comments::References::read(&ctx, fib, &doc.table);
+                if max_work == 2 {
+                    assert_eq!(result.unwrap().at(0), Some(&[0, 1][..]));
+                } else {
+                    assert_matches!(result.map(drop), Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == max_work);
+                }
+                assert_eq!(ctx.fuel(), max_work + u64::from(max_work < 2));
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_comment_anchors_preserve_each_ordinal_definition() {
+        let bytes = comment_doc(b"\x05\r", &[b"\x05First\r", b"\x05Second\r"], &[0, 0]).bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!(doc.notes.len(), 2);
+        assert_eq!(doc.notes[0].blocks, vec![comment_paragraph("First")]);
+        assert_eq!(doc.notes[1].blocks, vec![comment_paragraph("Second")]);
+        assert_eq!(rows, vec![]);
+    }
+
+    #[test]
+    fn unused_comments_do_not_report_their_broken_ranges_or_truncated_metadata() {
+        for broken_range in [false, true] {
+            let doc = comment_doc(b"\x05\x05\r", &[b"\x05First\r", b"\x05Other\r"], &[0, 1])
+                .chpx_runs(&[(1, &[]), (1, HIDDEN), (100, &[])]);
+            let doc = if broken_range {
+                doc.table(0xC2, &words(&[0, 7, 100, 101]))
+            } else {
+                threaded_comments(doc, &[(0, 0)])
+            };
+            let (doc, rows) = emitted_comments(&doc.bytes());
+            assert_eq!(doc.notes.len(), 1);
+            assert_eq!(doc.notes[0].blocks, vec![comment_paragraph("First")]);
+            assert_eq!(rows, omitted(DiagnosticCode::HiddenOmitted, 1));
+        }
+    }
+
+    #[test]
+    fn each_comment_starts_its_list_counters_independently_of_the_body() {
+        let mut level = vec![0; 28];
+        level[0] = 1;
+        level[6] = 1;
+        level.extend_from_slice(&2u16.to_le_bytes());
+        level.extend(utf16(&[0, u16::from(b'.')]));
+        let numbered = [0x0B, 0x46, 1, 0, 0x0A, 0x26, 0];
+        let bytes = comment_doc(b"body\x05\x05\r", &[b"\x05One\r", b"\x05Two\r"], &[4, 5])
+            .lists(30, &level, &words(&[1, 0, 0, 0, 0, u32::MAX]))
+            .papx(&[(100, &numbered)])
+            .bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        for blocks in std::iter::once(&doc.blocks).chain(doc.notes.iter().map(|note| &note.blocks))
+        {
+            assert_matches!(blocks.as_slice(), [Block::List(list)] if list.start == 1 && list.items.len() == 1);
+        }
+        assert_eq!(rows, vec![]);
+    }
+
+    #[test]
+    fn comment_body_resource_failures_propagate() {
+        let bytes = comment_doc(b"\x05\r", &[b"\x05\x01\r"], &[0])
+            .chpx(PIC_LOCATION_CHPX)
+            .data(picture_data(64))
+            .bytes();
+        let limits = crate::limits::Limits { max_asset_total_bytes: 63, ..Default::default() };
+        let ctx = ParseCtx::new(&limits).with_comments(crate::CommentPolicy::Emit);
+        assert_matches!(
+            parse(&ctx, &bytes),
+            Err(ConvertError::ResourceLimit { limit: Limit::AssetTotalBytes, max: 63 })
+        );
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), vec![]);
+    }
+
+    #[test]
+    fn a_comment_reference_in_a_surrogate_pair_reports_the_unread_reference() {
+        let body = utf16(&[0xD83D, 0xDE00, 0x000D]);
+        let bytes = DocBuilder::new(b"")
+            .fib(0x4C, 3)
+            .fib(0x5C, 7)
+            .pieces(&[(3, &body, true, 0), (10, b"\x05kept\r\r", false, 0)])
+            .table(0xBA, &[words(&[1, 3]), vec![0; 30]].concat())
+            .table(0xC2, &words(&[0, 6, 7]))
+            .bytes();
+        let (doc, rows) = emitted_comments(&bytes);
+        assert_eq!(markdown_of_document(&doc), "😀\n");
+        assert_eq!(doc.notes, vec![]);
+        assert_eq!(rows, vec![(DiagnosticCode::PartUnreadable, Region::Comment, 1)]);
     }
 
     #[test]
