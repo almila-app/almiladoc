@@ -61,6 +61,7 @@ pub(crate) fn resolve_anchors(
     notes: &[&Note],
     images: ImagePolicy,
     note_numbers: &HashMap<String, usize>,
+    comment_numbers: &HashMap<String, usize>,
 ) -> AnchorMap {
     let mut ids = UniqueIds::default();
     let mut resolved: HashMap<String, Resolved> = HashMap::new();
@@ -82,7 +83,7 @@ pub(crate) fn resolve_anchors(
     // inside the heading content) to those slugs.
     let mut heading = |block: &Block| {
         if let Block::Heading { anchor, content, .. } = block {
-            let label = heading_label(content, images, note_numbers);
+            let label = heading_label(content, images, note_numbers, comment_numbers);
             if !label.shown {
                 return;
             }
@@ -169,6 +170,7 @@ fn heading_label(
     inlines: &[Inline],
     images: ImagePolicy,
     note_numbers: &HashMap<String, usize>,
+    comment_numbers: &HashMap<String, usize>,
 ) -> HeadingLabel {
     let mut label = HeadingLabel::default();
     for inline in inlines {
@@ -177,7 +179,7 @@ fn heading_label(
                 (Cow::Borrowed(text.as_str()), !text.trim().is_empty())
             }
             Inline::Link { content, target } => {
-                let content = heading_label(content, images, note_numbers);
+                let content = heading_label(content, images, note_numbers, comment_numbers);
                 match url_label(target).filter(|_| !content.shown) {
                     Some(url) => (controls_to_spaces(url), true),
                     None => (Cow::Owned(content.text), content.shown),
@@ -187,6 +189,7 @@ fn heading_label(
             Inline::Checkbox(value) => (Cow::Borrowed(if *value { "[x]" } else { "[ ]" }), true),
             Inline::LineBreak => (Cow::Borrowed(" "), false),
             Inline::NoteRef(id) => (Cow::Borrowed(""), note_numbers.contains_key(id)),
+            Inline::CommentRef(id) => (Cow::Borrowed(""), comment_numbers.contains_key(id)),
             _ => continue,
         };
         label.text.push_str(&text);
@@ -411,7 +414,8 @@ mod tests {
                 &GapFills::default(),
                 &[],
                 ImagePolicy::Placeholder,
-                &HashMap::new()
+                &HashMap::new(),
+                &HashMap::new(),
             )
             .fragment("toc"),
             Some("part-one-overview")
@@ -444,6 +448,7 @@ mod tests {
             &fills,
             &[&note],
             ImagePolicy::Placeholder,
+            &HashMap::new(),
             &HashMap::new(),
         );
         assert_eq!(anchors.fragment("in-note"), Some("note-title"));

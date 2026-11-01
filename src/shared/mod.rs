@@ -9,6 +9,7 @@ pub(crate) mod binary;
 pub(crate) mod blockstyle;
 pub(crate) mod chain;
 pub(crate) mod codepage;
+pub(crate) mod comments;
 pub(crate) mod css;
 pub(crate) mod delta;
 pub(crate) mod dingbats;
@@ -45,3 +46,5 @@ pub(crate) mod test_support;
 pub(crate) mod text;
 pub(crate) mod typeface;
 pub(crate) mod uri;
+
+pub(crate) mod xml;

@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 
-use crate::config::{ConfigError, HeaderFooterPolicy, ImageOcr, ImagePolicy, PageSelection};
+use crate::config::{
+    CommentPolicy, ConfigError, HeaderFooterPolicy, ImageOcr, ImagePolicy, PageSelection,
+};
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::ledger::{CancelToken, Ledger};
@@ -21,6 +23,7 @@ pub(crate) struct ParseCtx<'a> {
     images: ImagePolicy,
     image_ocr: ImageOcr,
     headers_footers: HeaderFooterPolicy,
+    comments: CommentPolicy,
     ocr_pages: PageSelection,
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
@@ -83,6 +86,7 @@ impl<'a> ParseCtx<'a> {
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
             headers_footers: HeaderFooterPolicy::Omit,
+            comments: CommentPolicy::Omit,
             ocr_pages: PageSelection::None,
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
@@ -122,6 +126,14 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn headers_footers_requested(&self) -> bool {
         self.headers_footers == HeaderFooterPolicy::Emit
+    }
+
+    pub(crate) fn with_comments(self, comments: CommentPolicy) -> Self {
+        Self { comments, ..self }
+    }
+
+    pub(crate) fn comments_requested(&self) -> bool {
+        self.comments == CommentPolicy::Emit
     }
 
     pub(crate) fn image_ocr(&self) -> ImageOcr {
@@ -165,6 +177,14 @@ impl<'a> ParseCtx<'a> {
             (_, ImageLoss::Unplaced) => self.unplaced_image_code(),
         };
         self.emit(code, region);
+    }
+
+    pub(crate) fn image_alt_requested(&self) -> bool {
+        self.images != ImagePolicy::Omit
+    }
+
+    pub(crate) fn image_links_requested(&self) -> bool {
+        self.images == ImagePolicy::Placeholder
     }
 
     pub(crate) fn image_origin(&self, region: Region) -> ImageOrigin {
@@ -330,7 +350,8 @@ impl<'a> ParseCtx<'a> {
         self.scope(None)
     }
 
-    fn scope(&self, unit: Option<Unit>) -> ReportScope<'_> {
+    /// Report in a previously admitted unit, or across the document.
+    pub(crate) fn scope(&self, unit: Option<Unit>) -> ReportScope<'_> {
         ReportScope { unit: &self.unit, replaced: self.unit.replace(unit) }
     }
 

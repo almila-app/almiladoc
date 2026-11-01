@@ -72,6 +72,7 @@ fn trace(items: &[Norm<'_>], lines: &mut Lines) {
             | Norm::Link { .. }
             | Norm::Image { .. }
             | Norm::NoteRef(_)
+            | Norm::CommentRef(_)
             | Norm::Anchor(_)
             | Norm::Math(_)
             | Norm::Checkbox(_) => lines.mark(),
@@ -101,6 +102,7 @@ pub(super) fn nonspace(
                 Inline::Checkbox(_) => true,
                 Inline::Image { .. } => rc.images != ImagePolicy::Omit,
                 Inline::NoteRef(id) => rc.nums.contains_key(id),
+                Inline::CommentRef(id) => rc.comment_nums.contains_key(id),
                 Inline::LineBreak => ctx == InlineContext::Block,
             })
         })

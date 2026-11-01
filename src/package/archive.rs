@@ -32,6 +32,8 @@ pub(crate) enum PackageKind {
 pub(crate) enum Role {
     /// Content that renders in the region: losing it is `part_unreadable`.
     Content(Region),
+    /// Content whose selected text and attributes report their own unresolved references.
+    DeferredContent(Region),
     /// A part whose loss changes formatting alone.
     Formatting,
     /// A part whose loss the reader, or each consumer of the part, reports;
@@ -43,7 +45,9 @@ pub(crate) enum Role {
 impl Role {
     pub(crate) fn unreadable(self) -> Option<(DiagnosticCode, Region)> {
         match self {
-            Self::Content(region) => Some((DiagnosticCode::PartUnreadable, region)),
+            Self::Content(region) | Self::DeferredContent(region) => {
+                Some((DiagnosticCode::PartUnreadable, region))
+            }
             Self::Formatting => Some((DiagnosticCode::StylePartUnreadable, Region::Container)),
             Self::Reported(_) | Self::Probe => None,
         }
@@ -54,7 +58,7 @@ impl Role {
             Self::Content(region) | Self::Reported(region) => {
                 Some((DiagnosticCode::UnresolvedEntity, region))
             }
-            Self::Formatting | Self::Probe => None,
+            Self::Formatting | Self::Probe | Self::DeferredContent(_) => None,
         }
     }
 }

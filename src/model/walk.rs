@@ -8,6 +8,7 @@ use std::slice::IterMut;
 pub(crate) enum AssetPhase {
     Main,
     Side,
+    Comment,
 }
 
 enum AssetNode<'d> {
@@ -24,9 +25,15 @@ pub(crate) fn visit_asset_ids<E: From<LimitExceeded>>(
     mut charge: impl FnMut(u64) -> Result<(), E>,
     mut visit: impl FnMut(&mut AssetId) -> Result<(), E>,
 ) -> Result<(), E> {
-    asset_blocks(&mut document.blocks, phase, &mut charge, &mut visit)?;
+    if phase != AssetPhase::Comment {
+        asset_blocks(&mut document.blocks, phase, &mut charge, &mut visit)?;
+    }
     for note in &mut document.notes {
+        if (phase == AssetPhase::Comment) != (note.kind == super::NoteKind::Comment) {
+            continue;
+        }
         charge(1)?;
+        let phase = if phase == AssetPhase::Comment { AssetPhase::Main } else { phase };
         asset_blocks(&mut note.blocks, phase, &mut charge, &mut visit)?;
     }
     Ok(())

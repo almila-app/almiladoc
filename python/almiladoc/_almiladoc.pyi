@@ -11,6 +11,7 @@ from almiladoc import Format
 __all__ = [
     "CancelToken",
     "CancelledError",
+    "CommentPolicy",
     "Config",
     "ConfigError",
     "Conversion",
@@ -167,6 +168,14 @@ class ImagePolicy:
     OMIT: ClassVar[ImagePolicy]
 
 @final
+class CommentPolicy:
+    """Whether supported comments appear as isolated GFM footnotes."""
+
+    OMIT: ClassVar[CommentPolicy]
+    EMIT: ClassVar[CommentPolicy]
+    def __repr__(self) -> str: ...
+
+@final
 class HeaderFooterPolicy:
     """Whether supported headers and footers appear in the output."""
 
@@ -276,8 +285,8 @@ class Config:
     `Limits`, the threads each call runs on (1 to 64; no reader uses more
     than one), what a loss does, how images appear and which leave gaps for
     OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
-    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE` and
-    `HeaderFooterPolicy.OMIT`.
+    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
+    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`.
     A thread count out of range raises `ConfigError`."""
 
     def __new__(
@@ -289,6 +298,7 @@ class Config:
         images: ImagePolicy | None = None,
         image_ocr: ImageOcr | None = None,
         headers_footers: HeaderFooterPolicy | None = None,
+        comments: CommentPolicy | None = None,
     ) -> Config: ...
     @property
     def limits(self) -> Limits:
@@ -306,6 +316,10 @@ class Config:
     def image_ocr(self) -> ImageOcr:
         """Which images a parse leaves a gap after for OCR."""
 
+    @property
+    def comments(self) -> CommentPolicy:
+        """Whether supported source comments appear as isolated footnotes."""
+        ...
     @property
     def headers_footers(self) -> HeaderFooterPolicy:
         """Whether the page headers and footers a document declares appear."""

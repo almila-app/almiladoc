@@ -278,6 +278,7 @@ mod tests {
                 Inline::Image { source: ImageSource::Unread, .. } => "image unread",
                 Inline::Anchor(_) => "anchor",
                 Inline::NoteRef(_) => "note_ref",
+                Inline::CommentRef(_) => "comment_ref",
                 Inline::LineBreak => "line_break",
                 Inline::Math(_) => "inline math",
                 Inline::Checkbox(_) => "checkbox",
@@ -351,6 +352,14 @@ mod tests {
             })],
             ..Document::default()
         }
+    }
+
+    #[test]
+    fn comment_references_have_an_additive_wire_kind() {
+        assert_eq!(
+            serde_json::to_string(&Inline::CommentRef("source".into())).unwrap(),
+            r#"{"kind":"comment_ref","value":"source"}"#
+        );
     }
 
     #[test]
@@ -623,8 +632,8 @@ mod tests {
             names(serde_json::to_string(&kinds)),
             r#"["slide","sheet","spine_item","page"]"#
         );
-        let notes = [NoteKind::Footnote, NoteKind::Endnote];
-        assert_eq!(names(serde_json::to_string(&notes)), r#"["footnote","endnote"]"#);
+        let notes = [NoteKind::Footnote, NoteKind::Endnote, NoteKind::Comment];
+        assert_eq!(names(serde_json::to_string(&notes)), r#"["footnote","endnote","comment"]"#);
         for code in DiagnosticCode::ALL {
             assert_eq!(names(serde_json::to_string(code)), format!("\"{code}\""));
         }

@@ -19,11 +19,13 @@ use crate::shared::assets::{AssetSink, rel_image_source, retain_ole_payload};
 use crate::shared::blockstyle::{BlockStyle, Outline, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::drawingml::{self, GraphicPart};
-use crate::shared::fields::{FieldFrame, classify_rel_target, field_result, side_field_token};
+use crate::shared::fields::{
+    FieldFrame, classify_rel_target, field_result, hyperlink_target_spans, side_field_token,
+};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
-use crate::shared::math::{omath_para_to_tex, omath_to_tex};
+use crate::shared::math::{omath_para_with_damage, omath_with_damage};
 use crate::shared::mc::{self, is_picture_fill, is_text, is_vml_shape};
 use crate::shared::symbol::{self, SymbolFont, Token};
 use crate::shared::text::{clean_text, is_layout_invisible};
@@ -64,6 +66,7 @@ pub(super) struct Ctx<'a, 'b> {
     pub assets: &'b RefCell<AssetSink>,
     pub references: &'b References,
     pub moves: RefCell<Moves>,
+    pub damage: crate::shared::xml::DamageScope,
 }
 
 /// What the walk of every part saw rendered: comment references, and the notes references
@@ -72,6 +75,7 @@ pub(super) struct Ctx<'a, 'b> {
 pub(super) struct References {
     notes: RefCell<BTreeMap<String, bool>>,
     comments: Counter<u64>,
+    comment_ids: RefCell<BTreeSet<String>>,
 }
 
 impl References {
@@ -109,8 +113,13 @@ impl References {
         self.comments.get()
     }
 
-    fn comment(&self) {
+    pub(super) fn comment_ids(&self) -> Vec<String> {
+        self.comment_ids.borrow().iter().cloned().collect()
+    }
+
+    fn comment(&self, id: &str) {
         self.comments.set(self.comments.get().saturating_add(1));
+        self.comment_ids.borrow_mut().insert(id.to_owned());
     }
 }
 
@@ -130,7 +139,14 @@ impl<'b> Ctx<'_, 'b> {
     /// The same document-wide dependencies scoped to another package part
     /// (notes parts): only the relationships, base path and region change.
     pub(super) fn for_part(&self, rels: Relationships, base_part: String, region: Region) -> Self {
-        Self { rels, base_part, region, moves: RefCell::default(), ..*self }
+        Self {
+            rels,
+            base_part,
+            region,
+            moves: RefCell::default(),
+            damage: crate::shared::xml::DamageScope::default(),
+            ..*self
+        }
     }
 
     /// A header or footer part's scope: its own numbering counters and references, so nothing
@@ -141,11 +157,30 @@ impl<'b> Ctx<'_, 'b> {
         counters: &'b RefCell<Counters>,
         references: &'b References,
     ) -> Self {
-        Self { rels, base_part, region, counters, references, moves: RefCell::default(), ..*self }
+        Self {
+            rels,
+            base_part,
+            region,
+            counters,
+            references,
+            moves: RefCell::default(),
+            damage: crate::shared::xml::DamageScope::default(),
+            ..*self
+        }
     }
 
     fn in_side(&self) -> bool {
         matches!(self.region, Region::Header | Region::Footer)
+    }
+
+    fn drops_revision(element: &Element) -> bool {
+        let names = ["del", "moveFrom"];
+        element.ns.as_deref() == Some(ns::W) && names.contains(&element.local.as_str())
+    }
+
+    fn removes_property(properties: Option<&Element>, deleted: &str) -> bool {
+        let name = deleted;
+        properties.is_some_and(|properties| properties.find(ns::W, name).is_some())
     }
 
     pub(super) fn settle_moves(&self) -> Result<(), ConvertError> {
@@ -165,14 +200,15 @@ impl<'b> Ctx<'_, 'b> {
     fn move_range(&self, marker: &Element, renders: bool) -> Result<(), ConvertError> {
         let mut moves = self.moves.borrow_mut();
         let id = marker.attr(ns::W, "id").unwrap_or_default();
+        let (start, end) = ("moveFromRangeStart", "moveFromRangeEnd");
         match marker.local.as_str() {
-            "moveFromRangeStart" => {
+            local if local == start => {
                 if let Some(name) = marker.attr(ns::W, "name") {
                     self.parse_ctx.charge(id.len().saturating_add(name.len()) as u64)?;
                     moves.open.push((id.to_owned(), Rc::from(name)));
                 }
             }
-            "moveFromRangeEnd" => {
+            local if local == end => {
                 for at in (0..moves.open.len()).rev() {
                     self.parse_ctx.charge(id.len() as u64 + 1)?;
                     if moves.open.get(at).is_some_and(|(open, _)| open == id) {
@@ -341,8 +377,8 @@ fn without_hidden_text(
     elem: &Element,
     hides: bool,
 ) -> Result<Element, ConvertError> {
-    copy_with(ctx.parse_ctx, elem, |child| {
-        if child.is(ns::W, "del") || child.is(ns::W, "moveFrom") {
+    let copied = copy_with(ctx.parse_ctx, elem, |child| {
+        if Ctx::drops_revision(child) {
             return Ok(None);
         }
         if (child.is(ns::W, "r") || child.is(ns::M, "r"))
@@ -357,7 +393,8 @@ fn without_hidden_text(
             hides
         };
         without_hidden_text(ctx, child, hides).map(Some)
-    })
+    })?;
+    Ok(copied)
 }
 
 /// `elem` copied under the charges of its text, attributes and name, its element children each
@@ -390,11 +427,13 @@ fn copy_with(
     let mut attrs = Vec::with_capacity(elem.attrs.len());
     for a in &elem.attrs {
         let local = copied(parse_ctx, &a.local)?;
+        parse_ctx.charge(a.value_damage.as_deref().map_or(0, Vec::len) as u64)?;
         attrs.push(Attr {
             ns: a.ns.clone(),
             local,
             value: copied(parse_ctx, &a.value)?,
             unresolved: a.unresolved,
+            value_damage: a.value_damage.clone(),
         });
     }
     let local = copied(parse_ctx, &elem.local)?;
@@ -586,16 +625,16 @@ fn collect_blocks<'e>(
                     collect_blocks(content, ctx, blocks, runs, breaks.as_deref_mut())?;
                 }
             }
-            "customXml" | "ins" | "moveTo" => {
-                collect_blocks(child, ctx, blocks, runs, breaks.as_deref_mut())?;
-            }
-            "altChunk" => ctx.emit(DiagnosticCode::ImportedPartUnread),
-            "del" | "moveFrom" => {
+            "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
                 let mut walker = InlineWalker::outside_paragraphs(ctx)?;
                 walker.in_revision(child, |w| w.walk(child))?;
                 walker.close_range();
             }
-            "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" => {
+            "customXml" | "ins" | "del" | "moveFrom" | "moveTo" => {
+                collect_blocks(child, ctx, blocks, runs, breaks.as_deref_mut())?;
+            }
+            "altChunk" => ctx.emit(DiagnosticCode::ImportedPartUnread),
+            "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" | "moveToRangeEnd" => {
                 ctx.move_range(child, true)?;
             }
             _ => {}
@@ -648,7 +687,7 @@ fn mark_drops(
 
 /// Whether accepting revisions removes a paragraph mark: deleted or moved out.
 fn mark_removed(rpr: Option<&Element>) -> bool {
-    rpr.is_some_and(|rpr| rpr.find(ns::W, "del").is_some() || rpr.find(ns::W, "moveFrom").is_some())
+    rpr.is_some_and(|rpr| rpr.child_elems().any(Ctx::drops_revision))
 }
 
 /// Whether a mark, a math run or a run in a declined choice is hidden: a character style that
@@ -1018,6 +1057,8 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
         inner.walk(field)?;
         let (content, attachments, _) = self.rejoin(inner);
+        let damage = crate::shared::xml::attribute_damage(field, ns::W, "instr");
+        self.report_instruction_damage(instr, damage, token, &content);
         self.place_field(instr, token, content);
         self.place_blocks(attachments);
         Ok(())
@@ -1145,9 +1186,13 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         self.walk(content)?;
                     }
                 }
-                "smartTag" | "ins" | "bdo" | "dir" | "moveTo" | "customXml" => self.walk(child)?,
-                "del" | "moveFrom" => self.in_revision(child, |w| w.walk(child))?,
-                "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" => {
+                "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
+                    self.in_revision(child, |w| w.walk(child))?;
+                }
+                "smartTag" | "ins" | "del" | "moveFrom" | "bdo" | "dir" | "moveTo"
+                | "customXml" => self.walk(child)?,
+                "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart"
+                | "moveToRangeEnd" => {
                     self.ctx.move_range(child, dropping.is_none() && self.shown())?;
                 }
                 "subDoc" => match &dropping {
@@ -1164,10 +1209,11 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         let mut inner = self.inner()?;
         inner.walk(link)?;
         let (content, attachments, dropped) = self.rejoin(inner);
-        let target = self.hyperlink_link_target(link);
+        let (target, damaged) = self.hyperlink_link_target(link);
         if (dropped || dropping) && inlines_are_empty(&content) {
             self.place_all(content);
         } else {
+            self.ctx.damage.report(self.ctx.parse_ctx, self.ctx.region, damaged && self.shown());
             let unknown = target.is_none()
                 && link
                     .attr_qualified(ns::R, "id")
@@ -1213,10 +1259,12 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         } else {
             math
         };
-        let (blocks, tex) = if display {
-            (omath_para_to_tex(shown_math), String::new())
+        let (blocks, tex, damaged) = if display {
+            let (blocks, damaged) = omath_para_with_damage(shown_math);
+            (blocks, String::new(), damaged)
         } else {
-            (Vec::new(), omath_to_tex(shown_math))
+            let (tex, damaged) = omath_with_damage(shown_math);
+            (Vec::new(), tex, damaged)
         };
         let renders = !blocks.is_empty() || !tex.is_empty();
         if let Some(kind) = dropping {
@@ -1226,6 +1274,11 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             }
             return Ok(());
         }
+        self.ctx.damage.report(
+            self.ctx.parse_ctx,
+            self.ctx.region,
+            damaged && renders && self.math_rendered(display),
+        );
         if runs.alternate && self.math_rendered(display) {
             self.report_declined(math)?;
         }
@@ -1277,10 +1330,11 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 self.walk_math_runs(child, display, runs)?;
             } else {
                 match child.local.as_str() {
-                    "del" | "moveFrom" => {
+                    "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
                         self.in_revision(child, |w| w.walk_math_runs(child, display, runs))?;
                     }
-                    "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" => {
+                    "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart"
+                    | "moveToRangeEnd" => {
                         let renders = self.revision.is_none() && self.math_rendered(display);
                         self.ctx.move_range(child, renders)?;
                     }
@@ -1300,7 +1354,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 if let Some(branch) = self.ctx.math_branch(child, self.hides)? {
                     self.report_declined(branch)?;
                 }
-            } else if !child.is(ns::W, "del") && !child.is(ns::W, "moveFrom") {
+            } else if !Ctx::drops_revision(child) {
                 self.report_declined(child)?;
             }
         }
@@ -1323,17 +1377,21 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     /// The equation as it renders: without its hidden runs, and alternate content replaced by
     /// its selected branch.
     fn without_hidden_runs(&self, elem: &Element) -> Result<Element, ConvertError> {
-        copy_with(self.ctx.parse_ctx, elem, |child| {
+        let copied = copy_with(self.ctx.parse_ctx, elem, |child| {
             if child.is(ns::MC, "AlternateContent") {
                 let branch = omitted_branch(child);
                 return branch.map(|branch| self.without_hidden_runs(branch)).transpose();
+            }
+            if Ctx::drops_revision(child) {
+                return Ok(None);
             }
             let rpr = child.find(ns::W, "rPr");
             if child.is(ns::M, "r") && hidden_beside_runs(self.ctx, rpr, self.base, self.hides)? {
                 return Ok(None);
             }
             self.without_hidden_runs(child).map(Some)
-        })
+        })?;
+        Ok(copied)
     }
 
     /// The content of a deleted row or cell: each paragraph under its own style's fonts, the
@@ -1364,14 +1422,14 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
-    /// Runs `walk` within a deletion or move out, whose runs all drop: a deletion wins over any
-    /// move it holds.
     fn in_revision(
         &mut self,
         revision: &Element,
         walk: impl FnOnce(&mut Self) -> Result<(), ConvertError>,
     ) -> Result<(), ConvertError> {
-        let kind = if revision.local == "del" || self.revision == Some(Dropped::Revision) {
+        let kind = if matches!(revision.local.as_str(), "del" | "ins")
+            || self.revision == Some(Dropped::Revision)
+        {
             Dropped::Revision
         } else {
             self.ctx.move_source()
@@ -1382,13 +1440,17 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         walked
     }
 
-    fn hyperlink_link_target(&self, link: &Element) -> Option<LinkTarget> {
+    fn hyperlink_link_target(&self, link: &Element) -> (Option<LinkTarget>, bool) {
         if let Some(id) = link.attr_qualified(ns::R, "id")
             && let Some(rel) = self.ctx.rels.get(id)
         {
-            return Some(classify_rel_target(rel.mode == TargetMode::External, &rel.target));
+            let target = classify_rel_target(rel.mode == TargetMode::External, &rel.target);
+            let damaged = rel.unresolved_target
+                && matches!(&target, LinkTarget::External(url) | LinkTarget::Relative(url)
+                    if crate::shared::uri::is_safe_link(url));
+            return (Some(target), damaged);
         }
-        link.attr(ns::W, "anchor").map(|a| LinkTarget::anchor(a.to_string()))
+        (link.attr(ns::W, "anchor").map(|a| LinkTarget::anchor(a.to_string())), false)
     }
 
     fn walk_run(&mut self, run: &Element) -> Result<(), ConvertError> {
@@ -1467,8 +1529,10 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     "sym" | "noBreakHyphen" | "contentPart" | "pgNum" | "dayShort" | "dayLong"
                     | "monthShort" | "monthLong" | "yearShort" | "yearLong" => true,
                     "fldChar" => self.field_char(child)?,
-                    "instrText" => {
-                        self.instr_text(child);
+                    "instrText" | "delInstrText" => {
+                        if self.revision.is_none() {
+                            self.instr_text(child)?;
+                        }
                         false
                     }
                     _ => false,
@@ -1516,13 +1580,24 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
+    fn comment_reference(&mut self, child: &Element) -> Result<(), ConvertError> {
+        if self.shown() {
+            let id = child.attr(ns::W, "id").unwrap_or_default();
+            self.ctx.parse_ctx.charge(id.len() as u64)?;
+            self.ctx.references.comment(id);
+            if self.ctx.parse_ctx.comments_requested() {
+                self.push(Inline::CommentRef(id.to_owned()));
+            }
+        }
+        Ok(())
+    }
+
     fn walk_run_content(
         &mut self,
         run: &Element,
         style: Style,
         fonts: RunFonts<'_>,
     ) -> Result<(), ConvertError> {
-        let route = fonts.route();
         for child in run.child_elems() {
             if child.is(ns::MC, "AlternateContent") {
                 if let Some(branch) =
@@ -1537,14 +1612,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             }
             match child.local.as_str() {
                 "t" => {
-                    // Run edges carry the spacing between words in documents
-                    // that never mark xml:space, and XML leaves unmarked
-                    // whitespace to the application, so it is kept.
-                    let text = child.text();
-                    match route {
-                        Some(route) => self.push_symbol_text(&text, style, |c| route.font_of(c)),
-                        None => self.push_text(&text, style),
-                    }
+                    self.push_run_text(child, style, fonts.route());
                 }
                 "tab" | "ptab" => self.push(Inline::Text { text: " ".into(), style: Style::PLAIN }),
                 "noBreakHyphen" => self.push(Inline::Text { text: "-".into(), style }),
@@ -1568,11 +1636,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         self.push(Inline::NoteRef(id));
                     }
                 }
-                "commentReference" => {
-                    if self.shown() {
-                        self.ctx.references.comment();
-                    }
-                }
+                "commentReference" => self.comment_reference(child)?,
                 "drawing" | "pict" | "object" => self.walk_drawing(child)?,
                 "fldChar" => {
                     let shown = self.shown();
@@ -1580,11 +1644,26 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         self.ctx.emit(DiagnosticCode::FormControlUnread);
                     }
                 }
-                "instrText" => self.instr_text(child),
+                "instrText" => {
+                    self.instr_text(child)?;
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    fn push_run_text(&mut self, child: &Element, style: Style, route: Option<FontRoute>) {
+        let text = child.text();
+        self.ctx.damage.report(
+            self.ctx.parse_ctx,
+            self.ctx.region,
+            self.shown() && child.unresolved_text && text_renders(&text, route),
+        );
+        match route {
+            Some(route) => self.push_symbol_text(&text, style, |c| route.font_of(c)),
+            None => self.push_text(&text, style),
+        }
     }
 
     /// Opens, separates or closes a complex field at its delimiter; true where it begins a
@@ -1610,12 +1689,15 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
             }
             Some("end") => {
-                if let Some(FieldFrame { instr, inlines, token, locked, .. }) = self.fields.pop() {
+                if let Some(FieldFrame { instr, unresolved, inlines, token, locked, .. }) =
+                    self.fields.pop()
+                {
                     let token = match token {
                         Some(token) => Some(token),
                         None if inlines.is_empty() => self.side_token(&instr, locked)?,
                         None => None,
                     };
+                    self.report_instruction_damage(&instr, &unresolved, token, &inlines);
                     self.place_field(&instr, token, inlines);
                 }
             }
@@ -1635,10 +1717,38 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    fn instr_text(&mut self, instr: &Element) {
-        if let Some(f) = self.fields.last_mut() {
-            f.instr.push_str(&instr.text());
+    fn instr_text(&mut self, instr: &Element) -> Result<(), ConvertError> {
+        if let Some(field) = self.fields.last_mut() {
+            let (text, damage) = instr.checked_text_with_damage(self.ctx.parse_ctx)?;
+            let offset = field.instr.len();
+            field
+                .unresolved
+                .extend(damage.into_iter().map(|span| offset + span.start..offset + span.end));
+            field.instr.push_str(&text);
         }
+        Ok(())
+    }
+
+    fn report_instruction_damage(
+        &self,
+        instr: &str,
+        damage: &[std::ops::Range<usize>],
+        token: Option<&str>,
+        result: &[Inline],
+    ) {
+        if !self.shown() || token.is_some() || inlines_are_empty(result) {
+            return;
+        }
+        let Some((target, spans)) = hyperlink_target_spans(instr) else {
+            return;
+        };
+        if matches!(target, LinkTarget::Anchor { .. } | LinkTarget::Unit(_)) {
+            return;
+        }
+        let damaged = damage
+            .iter()
+            .any(|lost| spans.iter().any(|span| lost.start < span.end && span.start < lost.end));
+        self.ctx.damage.report(self.ctx.parse_ctx, self.ctx.region, damaged);
     }
 
     /// Inside a field's instruction only text boxes, charts and diagrams are read or
@@ -1672,11 +1782,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             return Ok(());
         }
 
-        let descr = elem
-            .first_descendant(ns::WP, "docPr")
-            .and_then(|d| d.attr(ns::WP, "descr"))
-            .map(clean_text)
-            .unwrap_or_default();
+        let descr = ImageLabel::attribute(elem.first_descendant(ns::WP, "docPr"), ns::WP, "descr");
         let preview = read.and_then(|index| previews.get(index)).copied().unwrap_or_default();
         self.read_graphic(&graphics, preview, read, descr)
     }
@@ -1686,7 +1792,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         graphics: &[Graphic<'_>],
         preview: Preview<'_>,
         read: Option<usize>,
-        descr: String,
+        descr: ImageLabel,
     ) -> Result<(), ConvertError> {
         match read.and_then(|index| graphics.get(index)) {
             Some(Graphic::Chart(Some(rel_id))) => {
@@ -1729,7 +1835,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         held: &Graphic<'_>,
         graphics: &[Graphic<'_>],
         preview: Preview<'_>,
-        descr: String,
+        descr: ImageLabel,
     ) -> Result<(), ConvertError> {
         match held {
             Graphic::Object { rel_id, .. } => self.embedded_object(*rel_id)?,
@@ -1744,8 +1850,8 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
-    fn stand_in(&mut self, descr: String) {
-        if !descr.trim().is_empty() {
+    fn stand_in(&mut self, descr: ImageLabel) {
+        if !descr.text.trim().is_empty() {
             self.push_image(descr, ImageSource::Unavailable);
         }
     }
@@ -1788,20 +1894,29 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
 
     /// A picture: an external-mode target (`r:link`) becomes an external
     /// source, and an embedded one is retained as an asset.
-    fn picture(&mut self, rel_id: Option<&str>, descr: String) -> Result<(), ConvertError> {
+    fn picture(&mut self, rel_id: Option<&str>, descr: ImageLabel) -> Result<(), ConvertError> {
         let ctx = self.ctx;
         let source = rel_id
             .map(|id| rel_image_source(ctx.pkg, &ctx.rels, &ctx.base_part, ctx.assets, id))
             .transpose()?
             .flatten()
             .unwrap_or(ImageSource::Unread);
+        ctx.damage.report(ctx.parse_ctx, ctx.region,
+            self.shown() && ctx.parse_ctx.image_links_requested()
+                && matches!(&source, ImageSource::External(url) if crate::shared::uri::is_safe_link(url))
+                && rel_id.and_then(|id| ctx.rels.get(id)).is_some_and(|rel| rel.unresolved_target));
         self.push_image(descr, source);
         Ok(())
     }
 
-    fn push_image(&mut self, alt: String, source: ImageSource) {
+    fn push_image(&mut self, alt: ImageLabel, source: ImageSource) {
         let origin = self.ctx.parse_ctx.image_origin(self.ctx.region);
-        self.push(Inline::Image { origin, alt, source });
+        self.ctx.damage.report(
+            self.ctx.parse_ctx,
+            self.ctx.region,
+            self.shown() && self.ctx.parse_ctx.image_alt_requested() && alt.unresolved,
+        );
+        self.push(Inline::Image { origin, alt: alt.text, source });
     }
 
     fn push_text(&mut self, text: &str, style: Style) {
@@ -1976,12 +2091,33 @@ fn pair_previews<'e>(
         .collect()
 }
 
-fn shape_alt(shape: &Element) -> Option<String> {
-    let alt = clean_text(shape.attr_unqualified("alt")?);
-    (!alt.trim().is_empty()).then_some(alt)
+#[derive(Default)]
+struct ImageLabel {
+    text: String,
+    unresolved: bool,
 }
 
-fn labelled(shape: Option<&Element>, descr: String) -> String {
+impl ImageLabel {
+    fn attribute(element: Option<&Element>, namespace: &str, name: &str) -> Self {
+        let Some(element) = element else { return Self::default() };
+        let value = if namespace.is_empty() {
+            element.attr_unqualified(name)
+        } else {
+            element.attr(namespace, name)
+        };
+        Self {
+            text: value.map(clean_text).unwrap_or_default(),
+            unresolved: crate::shared::xml::attribute_unresolved(element, namespace, name),
+        }
+    }
+}
+
+fn shape_alt(shape: &Element) -> Option<ImageLabel> {
+    let alt = ImageLabel::attribute(Some(shape), "", "alt");
+    (!alt.text.trim().is_empty()).then_some(alt)
+}
+
+fn labelled(shape: Option<&Element>, descr: ImageLabel) -> ImageLabel {
     shape.and_then(shape_alt).unwrap_or(descr)
 }
 
@@ -2254,7 +2390,7 @@ fn collect_rows<'e>(
             if child.first_descendant(ns::W, "tr").is_some() {
                 ctx.emit(DiagnosticCode::BlockUnread);
             }
-        } else if child.find(ns::W, "trPr").and_then(|p| p.find(ns::W, "del")).is_some() {
+        } else if Ctx::removes_property(child.find(ns::W, "trPr"), "del") {
             deleted.push((rows.len(), child));
         } else {
             rows.push(child);
@@ -2304,10 +2440,7 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx<'_, '_>, row: &mut RowIn
             local
                 if is_move_marker(child)
                     || (local == "tc"
-                        && child
-                            .find(ns::W, "tcPr")
-                            .and_then(|p| p.find(ns::W, "cellDel"))
-                            .is_some()) =>
+                        && Ctx::removes_property(child.find(ns::W, "tcPr"), "cellDel")) =>
             {
                 let folded = row.cells.last().map_or(0, |last| last.merged.len());
                 row.deleted.push(((row.cells.len(), folded), child));
@@ -2357,7 +2490,7 @@ fn is_move_marker(elem: &Element) -> bool {
     elem.ns.as_deref() == Some(ns::W)
         && matches!(
             elem.local.as_str(),
-            "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart"
+            "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart" | "moveToRangeEnd"
         )
 }
 
@@ -2472,6 +2605,7 @@ mod tests {
             assets: &assets,
             references: &references,
             moves: RefCell::default(),
+            damage: crate::shared::xml::DamageScope::default(),
         })
     }
 

@@ -13,6 +13,7 @@ from typing import Literal
 from almiladoc._almiladoc import (
     CancelledError,
     CancelToken,
+    CommentPolicy,
     Config,
     ConfigError,
     Conversion,
@@ -55,6 +56,7 @@ through `sniff`, or through the extension in `Converter.convert_path`."""
 __all__ = [
     "CancelToken",
     "CancelledError",
+    "CommentPolicy",
     "Config",
     "ConfigError",
     "Conversion",

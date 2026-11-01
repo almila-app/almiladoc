@@ -22,7 +22,10 @@ pub(crate) fn leave_image_gaps(
 ) -> Result<(), ConvertError> {
     let Document { blocks, notes, assets, .. } = document;
     let mut ids = HashSet::new();
-    let selected: Vec<bool> = notes.iter().map(|note| ids.insert(note.id.as_str())).collect();
+    let selected: Vec<bool> = notes
+        .iter()
+        .map(|note| ids.insert((note.kind == crate::model::NoteKind::Comment, note.id.as_str())))
+        .collect();
     let notes =
         notes.iter_mut().zip(selected).filter_map(|(note, kept)| kept.then_some(&mut note.blocks));
     let mut next = BTreeMap::new();
@@ -221,6 +224,22 @@ mod tests {
         let parse_ctx = ParseCtx::new(&limits);
         leave_image_gaps(&parse_ctx, document).unwrap();
         parse_ctx.into_diagnostics()
+    }
+
+    #[test]
+    fn comments_and_notes_with_the_same_id_both_receive_image_gaps() {
+        let mut comment = note("same", vec![para(vec![image(1, Region::Comment, None)])]);
+        comment.kind = NoteKind::Comment;
+        let mut document = Document {
+            notes: vec![note("same", vec![para(vec![image(0, Region::Note, None)])]), comment],
+            assets: assets(&[PNG, JPEG]),
+            ..Document::default()
+        };
+        assert_eq!(left(&mut document).iter().count(), 0);
+        assert_eq!(
+            crate::ocr::gaps(&document).map(|located| located.region).collect::<Vec<_>>(),
+            [Region::Note, Region::Comment]
+        );
     }
 
     #[test]

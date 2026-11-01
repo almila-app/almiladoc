@@ -28,7 +28,194 @@ const STRIKE: Style = Style { strike: true, ..Style::PLAIN };
 const CODE: Style = Style { code: true, ..Style::PLAIN };
 const SUP: Style = Style { position: VerticalPosition::Superscript, ..Style::PLAIN };
 const SUB: Style = Style { position: VerticalPosition::Subscript, ..Style::PLAIN };
-const READ: Unread<'static> = Unread { notes: false, targets: None };
+const READ: Unread<'static> = Unread { notes: false, comments: false, targets: None };
+
+#[test]
+fn comments_and_notes_with_the_same_id_keep_separate_labels_and_scopes() {
+    let linked = |id: &str| Inline::Link {
+        content: vec![Inline::plain(id)],
+        target: LinkTarget::Anchor { id: id.into(), unit: None },
+    };
+    let paragraph = |inlines| Block::Paragraph(inlines);
+    let doc = Document {
+        blocks: vec![paragraph(vec![
+            Inline::Anchor("body".into()),
+            Inline::CommentRef("same".into()),
+            Inline::NoteRef("same".into()),
+        ])],
+        notes: vec![
+            Note {
+                id: "same".into(),
+                kind: NoteKind::Comment,
+                blocks: vec![paragraph(vec![
+                    Inline::Anchor("local".into()),
+                    linked("local"),
+                    linked("body"),
+                    Inline::NoteRef("same".into()),
+                ])],
+            },
+            Note { id: "same".into(), kind: NoteKind::Footnote, blocks: vec![text("Note")] },
+        ],
+        ..Document::default()
+    };
+    assert_eq!(
+        document_to_markdown(&doc),
+        "[^almiladoc-comment-1][^1]\n\n[^1]: Note\n\n[^almiladoc-comment-1]: <a id=\"almiladoc-comment-1:local\"></a>[local](#almiladoc-comment-1:local)body\n"
+    );
+    let losses = super::render_losses(
+        &doc,
+        READ,
+        Placeholder,
+        &Meter::new(&Ledger::new(u64::MAX, None), u64::MAX),
+    )
+    .unwrap();
+    assert_eq!(losses, [(DiagnosticCode::DanglingReference, Region::Comment, None, 2)]);
+}
+
+#[test]
+fn an_image_omitted_comment_has_no_empty_footnote_or_dangling_reference() {
+    let doc = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::CommentRef("image".into())])],
+        notes: vec![Note {
+            id: "image".into(),
+            kind: NoteKind::Comment,
+            blocks: vec![Block::Paragraph(vec![Inline::Image {
+                alt: "alt".into(),
+                source: ImageSource::Unavailable,
+                origin: ImageOrigin::new(Region::Comment, None),
+            }])],
+        }],
+        ..Document::default()
+    };
+    let ledger = Ledger::new(u64::MAX, None);
+    let meter = Meter::new(&ledger, u64::MAX);
+    assert_eq!(render(&doc, &GapFills::default(), &meter, Omit).unwrap().markdown, "");
+    assert_eq!(
+        super::render_losses(&doc, READ, Omit, &meter).unwrap(),
+        [(DiagnosticCode::ImageOmitted, Region::Comment, None, 1)]
+    );
+}
+
+#[test]
+fn live_comments_keep_an_ordinary_image_note_under_omit() {
+    let doc = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::plain("Body"), Inline::NoteRef("n".into())])],
+        notes: vec![
+            Note {
+                id: "n".into(),
+                kind: NoteKind::Footnote,
+                blocks: vec![Block::Paragraph(vec![
+                    Inline::Image {
+                        alt: "picture".into(),
+                        source: ImageSource::Unavailable,
+                        origin: ImageOrigin::new(Region::Note, None),
+                    },
+                    Inline::CommentRef("c".into()),
+                ])],
+            },
+            Note {
+                id: "c".into(),
+                kind: NoteKind::Comment,
+                blocks: vec![Block::Paragraph(vec![Inline::plain("Comment")])],
+            },
+        ],
+        ..Document::default()
+    };
+    let ledger = Ledger::new(u64::MAX, None);
+    let meter = Meter::new(&ledger, u64::MAX);
+    assert_eq!(
+        render(&doc, &GapFills::default(), &meter, Omit).unwrap().markdown,
+        "Body[^1]\n\n[^1]: [^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: Comment\n"
+    );
+    assert_eq!(
+        super::render_losses(&doc, READ, Omit, &meter).unwrap(),
+        [(DiagnosticCode::ImageOmitted, Region::Note, None, 1)]
+    );
+}
+
+#[test]
+fn absent_comment_references_report_their_loss_unless_the_part_already_did() {
+    let doc = Document {
+        blocks: vec![Block::Paragraph(vec![Inline::CommentRef("absent".into())])],
+        ..Document::default()
+    };
+    let ledger = Ledger::new(u64::MAX, None);
+    let meter = Meter::new(&ledger, u64::MAX);
+    assert_eq!(
+        super::render_losses(&doc, READ, Placeholder, &meter).unwrap(),
+        [(DiagnosticCode::DanglingReference, Region::Body, None, 1)]
+    );
+    let ctx = ParseCtx::default();
+    ctx.emit(DiagnosticCode::PartUnreadable, Region::Comment);
+    let diagnostics = ctx.into_diagnostics();
+    assert_eq!(
+        super::render_losses(&doc, Unread::of(&diagnostics), Placeholder, &meter).unwrap(),
+        []
+    );
+}
+
+#[test]
+fn comment_losses_keep_the_first_reference_unit_through_notes_and_sides() {
+    let unit = Unit::new(UnitKind::Slide, NonZeroU32::new(2).unwrap());
+    let missing = Inline::Link {
+        content: vec![Inline::plain("link")],
+        target: LinkTarget::anchor("body".to_string()),
+    };
+    let doc = Document {
+        blocks: vec![
+            Block::UnitStart(unit),
+            Block::Paragraph(vec![Inline::NoteRef("note".into())]),
+        ],
+        notes: vec![
+            Note {
+                id: "note".into(),
+                kind: NoteKind::Footnote,
+                blocks: vec![Block::Paragraph(vec![Inline::CommentRef("comment".into())])],
+            },
+            Note {
+                id: "comment".into(),
+                kind: NoteKind::Comment,
+                blocks: vec![Block::Paragraph(vec![missing])],
+            },
+        ],
+        ..Document::default()
+    };
+    let ledger = Ledger::new(u64::MAX, None);
+    assert_eq!(
+        super::render_losses(&doc, READ, Placeholder, &Meter::new(&ledger, u64::MAX)).unwrap(),
+        [(DiagnosticCode::DanglingReference, Region::Comment, Some(unit), 1)]
+    );
+}
+
+#[test]
+fn unreferenced_definitions_keep_their_own_namespace_source_order() {
+    let note = |id: &str, kind, text| Note {
+        id: id.into(),
+        kind,
+        blocks: vec![Block::Paragraph(vec![Inline::plain(text)])],
+    };
+    let cases = [
+        (
+            vec![
+                note("b", NoteKind::Comment, "CB"),
+                note("a", NoteKind::Footnote, "NA"),
+                note("b", NoteKind::Footnote, "NB"),
+            ],
+            "[^1]: NA\n\n[^2]: NB\n\n[^almiladoc-comment-1]: CB\n",
+        ),
+        (
+            vec![
+                note("b", NoteKind::Footnote, "NB"),
+                note("a", NoteKind::Comment, "CA"),
+                note("b", NoteKind::Comment, "CB"),
+            ],
+            "[^1]: NB\n\n[^almiladoc-comment-1]: CA\n\n[^almiladoc-comment-2]: CB\n",
+        ),
+    ];
+    for (notes, expected) in cases {
+        assert_eq!(with_notes(vec![], notes), expected);
+    }
+}
 
 fn with_notes(blocks: Vec<Block>, notes: Vec<Note>) -> String {
     document_to_markdown(&Document { blocks, notes, assets: Vec::new(), ..Document::default() })
@@ -997,7 +1184,7 @@ fn rendering_reports_what_it_loses() {
             "references whose notes part the parse counted unreadable",
             vec![Block::Paragraph(vec![note_ref("missing"), to("nowhere")])],
             vec![note("a", vec![Block::Paragraph(vec![Inline::plain("Body"), note_ref("x")])])],
-            Unread { notes: true, targets: None },
+            Unread { notes: true, comments: false, targets: None },
             vec![(DANGLING, Region::Body, None, 1)],
         ),
         (
@@ -1794,7 +1981,7 @@ fn side_content_resolves_nothing_of_the_body_and_reports_what_it_loses() {
             styled("rich", BOLD),
             Inline::Anchor("side".into()),
             Inline::NoteRef("n".into()),
-            link(vec![plain(" local")], LinkTarget::anchor("body".into())),
+            link(vec![plain(" local")], LinkTarget::anchor("body".to_string())),
         ])])]),
     });
     let source = Document {

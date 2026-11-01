@@ -201,7 +201,8 @@ fn charge_inline_fields<E>(
         Inline::Text { text: value, .. }
         | Inline::Math(value)
         | Inline::Anchor(value)
-        | Inline::NoteRef(value) => charge(text_work(value))?,
+        | Inline::NoteRef(value)
+        | Inline::CommentRef(value) => charge(text_work(value))?,
         Inline::Link { target, .. } => match target {
             LinkTarget::External(value)
             | LinkTarget::Relative(value)

@@ -159,7 +159,7 @@ pub(crate) struct Located<'d> {
 /// its own region.
 pub(crate) fn gaps(document: &Document) -> impl Iterator<Item = Located<'_>> {
     let body = std::iter::once((Region::Body, document.blocks.as_slice()));
-    let notes = document.notes.iter().map(|note| (Region::Note, note.blocks.as_slice()));
+    let notes = document.notes.iter().map(|note| (note.kind.region(), note.blocks.as_slice()));
     body.chain(notes).flat_map(|(region, blocks)| Walk {
         stack: vec![(Frame::Blocks(blocks.iter()), 0, region)],
     })

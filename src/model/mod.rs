@@ -43,31 +43,32 @@ pub(crate) use table::{Cover, GridBuilder, GridLedger, Span, Sweep};
 pub struct Document {
     /// Body content in reading order.
     pub blocks: Vec<Block>,
-    /// Note bodies, in the order the document defines them. Text refers to
-    /// them by id through [`Inline::NoteRef`].
+    /// Note and comment bodies in source order, referenced through [`Inline::NoteRef`]
+    /// and [`Inline::CommentRef`] in separate id namespaces.
     pub notes: Vec<Note>,
     /// Embedded assets indexed by [`AssetId`], in first-reference order across body, stored
-    /// notes, then headers and footers; unreferenced payloads follow in source retention order.
+    /// notes, headers and footers, then comments; unreferenced payloads follow in source
+    /// retention order.
     pub assets: Vec<Asset>,
     /// Source-declared descriptive values; absent metadata is omitted from JSON.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub metadata: Option<DocumentMeta>,
 }
 
-/// Footnote or endnote body, referenced from text by [`Inline::NoteRef`].
+/// A footnote or endnote referenced by [`Inline::NoteRef`], or a comment by [`Inline::CommentRef`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct Note {
-    /// Document-scoped id the referencing [`Inline::NoteRef`] carries.
+    /// Id in the ordinary-note or comment reference namespace, according to `kind`.
     pub id: String,
-    /// Whether the source placed this note on the page or at the end.
+    /// The source note or comment category.
     pub kind: NoteKind,
     /// The note's own content.
     pub blocks: Vec<Block>,
 }
 
-/// Where the source document places a note.
+/// The source note or comment category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize), serde(rename_all = "snake_case"))]
 #[non_exhaustive]
@@ -76,6 +77,14 @@ pub enum NoteKind {
     Footnote,
     /// Collected at the end of the document or section.
     Endnote,
+    /// An isolated source comment, whose replies belong inside its body.
+    Comment,
+}
+
+impl NoteKind {
+    pub(crate) fn region(self) -> Region {
+        if self == Self::Comment { Region::Comment } else { Region::Note }
+    }
 }
 
 /// Descriptive values preserved from the source, without inferred names or dates.

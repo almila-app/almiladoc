@@ -890,6 +890,35 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(len({omitted, emitted}), 2)
         self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
 
+    def test_comment_policy_reaches_the_model_and_markdown(self):
+        ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        source = archive(
+            {
+                "word/document.xml": f'<w:document xmlns:w="{ns}"><w:body><w:p><w:r>'
+                '<w:t>Body</w:t><w:commentReference w:id="7"/></w:r></w:p></w:body></w:document>',
+                "word/comments.xml": f'<w:comments xmlns:w="{ns}"><w:comment w:id="7"><w:p>'
+                "<w:r><w:t>Remark</w:t></w:r></w:p></w:comment></w:comments>",
+            }
+        )
+        engine = almiladoc.Converter(almiladoc.Config(comments=almiladoc.CommentPolicy.EMIT))
+        parsed = engine.parse(source, format="docx")
+        model = json.loads(parsed.to_json())["document"]
+        self.assertEqual(model["notes"][0]["kind"], "comment")
+        self.assertEqual(model["blocks"][0]["value"][1], {"kind": "comment_ref", "value": "7"})
+        self.assertEqual(
+            parsed.render().markdown,
+            "Body[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: Remark\n",
+        )
+
+    def test_comment_policy_is_frozen_and_fingerprinted(self):
+        omitted = almiladoc.Config()
+        emitted = almiladoc.Config(comments=almiladoc.CommentPolicy.EMIT)
+        self.assertEqual(omitted.comments, almiladoc.CommentPolicy.OMIT)
+        self.assertEqual(almiladoc.Config(comments=None), omitted)
+        self.assertEqual(repr(emitted.comments), "CommentPolicy.EMIT")
+        self.assertEqual(len({omitted, emitted}), 2)
+        self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
+
     def test_defaults_are_almiladocs(self):
         limits = almiladoc.Limits()
         self.assertEqual(limits.max_input_bytes, 256 << 20)
@@ -906,7 +935,8 @@ class ConfigTest(unittest.TestCase):
             r"^Config\(limits=Limits\(max_entry_bytes=134217728, .*, max_work=536870912, "
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
-            r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT\)$",
+            r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT, "
+            r"comments=CommentPolicy\.OMIT\)$",
         )
 
     def test_limits_and_config_are_frozen_keyword_only_values(self):

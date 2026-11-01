@@ -8,19 +8,35 @@ use super::{DROPPED, GUESSED};
 use crate::package::xml::{Element, Node, ns};
 
 /// One `m:oMath` as LaTeX source without delimiters.
+#[cfg(test)]
 pub(crate) fn omath_to_tex(omath: &Element) -> String {
-    children_tex(omath, Mode::Math).finish()
+    omath_with_damage(omath).0
+}
+
+pub(crate) fn omath_with_damage(omath: &Element) -> (String, bool) {
+    children_tex(omath, Mode::Math).finish_with_damage()
 }
 
 /// The equations of an `m:oMathPara`, one per `m:oMath` line.
 pub(crate) fn omath_para_to_tex(para: &Element) -> Vec<String> {
-    let lines: Vec<String> =
-        para.find_all(ns::M, "oMath").map(omath_to_tex).filter(|t| !t.is_empty()).collect();
+    omath_para_with_damage(para).0
+}
+
+pub(crate) fn omath_para_with_damage(para: &Element) -> (Vec<String>, bool) {
+    let mut damaged = false;
+    let lines: Vec<String> = para
+        .find_all(ns::M, "oMath")
+        .filter_map(|math| {
+            let (line, unresolved) = omath_with_damage(math);
+            damaged |= unresolved && !line.is_empty();
+            (!line.is_empty()).then_some(line)
+        })
+        .collect();
     if lines.is_empty() {
-        let whole = omath_to_tex(para);
-        return if whole.is_empty() { Vec::new() } else { vec![whole] };
+        let (whole, unresolved) = omath_with_damage(para);
+        return if whole.is_empty() { (Vec::new(), false) } else { (vec![whole], unresolved) };
     }
-    lines
+    (lines, damaged)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -49,7 +65,10 @@ fn walk_elem(e: &Element, tex: &mut Tex, mode: Mode) {
     }
     match e.local.as_str() {
         "r" => run(e, tex, mode),
-        "t" => tex.push_math_text(&e.text()),
+        "t" => {
+            tex.push_math_text(&e.text());
+            tex.mark_unresolved(e.unresolved_text);
+        }
         "f" => fraction(e, tex),
         "sSup" | "sSub" | "sSubSup" | "sPre" => scripts(e, tex),
         "rad" => {
@@ -71,9 +90,7 @@ fn walk_elem(e: &Element, tex: &mut Tex, mode: Mode) {
             tex.push_group(&arg(e, "e", Mode::Math));
         }
         "acc" => {
-            let chr = marked_prop(e, "accPr", "chr")
-                .and_then(|v| prop_char(&v, tex))
-                .unwrap_or('\u{302}');
+            let chr = char_property(e, "accPr", "chr", tex).unwrap_or('\u{302}');
             tex.push_command(accent(chr).unwrap_or("\\hat"), &arg(e, "e", Mode::Math));
         }
         "bar" => {
@@ -160,6 +177,35 @@ fn prop_char(value: &str, tex: &mut Tex) -> Option<char> {
     None
 }
 
+fn char_property(parent: &Element, pr: &str, name: &str, tex: &mut Tex) -> Option<char> {
+    let property = parent.find(ns::M, pr)?.find(ns::M, name)?;
+    let value = val_or_text(property);
+    let character = prop_char(&value, tex)?;
+    let at = value.char_indices().find(|(_, c)| !is_marker(*c))?.0;
+    let damage = if property.attr(ns::M, "val").is_some() {
+        crate::shared::xml::attribute_damage(property, ns::M, "val")
+            .iter()
+            .any(|span| span.contains(&at))
+    } else {
+        let direct = direct_text(property);
+        let selected = direct.len() - direct.trim_start().len() + at;
+        let mut offset = 0;
+        property.children.iter().enumerate().any(|(index, node)| {
+            let Node::Text(text) = node else { return false };
+            let damaged = property.text_damage().iter().any(|(child, span)| {
+                *child == index
+                    && span.contains(&selected.saturating_sub(offset))
+                    && selected >= offset
+                    && selected < offset + text.len()
+            });
+            offset += text.len();
+            damaged
+        })
+    };
+    tex.mark_unresolved(damage);
+    Some(character)
+}
+
 fn is_marker(c: char) -> bool {
     c == GUESSED || c == DROPPED
 }
@@ -199,6 +245,11 @@ fn run(r: &Element, tex: &mut Tex, mode: Mode) {
     if text.is_empty() {
         return;
     }
+    tex.mark_unresolved(if r.find(ns::M, "t").is_some() {
+        r.find_all(ns::M, "t").any(|text| text.unresolved_text)
+    } else {
+        !r.text_damage().is_empty()
+    });
     // Run properties sit under `m:rPr`; rtf writes them on the run itself,
     // with `sty` and `scr` as numbers in their enumeration order.
     let value = |name: &str| {
@@ -262,7 +313,7 @@ fn delimited(e: &Element, tex: &mut Tex) {
     // An explicitly empty character means no delimiter on that side.
     let chr = |name: &str, default: char, tex: &mut Tex| -> Option<char> {
         match marked_prop(e, "dPr", name) {
-            Some(v) => prop_char(&v, tex),
+            Some(_) => char_property(e, "dPr", name, tex),
             None => Some(default),
         }
     };
@@ -286,7 +337,7 @@ fn delimited(e: &Element, tex: &mut Tex) {
 }
 
 fn nary(e: &Element, tex: &mut Tex) {
-    let chr = marked_prop(e, "naryPr", "chr").and_then(|v| prop_char(&v, tex)).unwrap_or('∫');
+    let chr = char_property(e, "naryPr", "chr", tex).unwrap_or('∫');
     match symbol(chr) {
         Some(op) if op.starts_with('\\') => tex.push_macro(op),
         _ => {
@@ -318,8 +369,7 @@ fn nary(e: &Element, tex: &mut Tex) {
 }
 
 fn group_char(e: &Element, tex: &mut Tex) {
-    let chr =
-        marked_prop(e, "groupChrPr", "chr").and_then(|v| prop_char(&v, tex)).unwrap_or('\u{23df}');
+    let chr = char_property(e, "groupChrPr", "chr", tex).unwrap_or('\u{23df}');
     let top = prop(e, "groupChrPr", "pos").is_some_and(|p| p == "top");
     let body = arg(e, "e", Mode::Math);
     if let Some(cmd) = accent(chr) {

@@ -37,6 +37,8 @@ pub enum Inline {
     Anchor(AnchorId),
     /// A reference to the [`Note`](crate::model::Note) with this id.
     NoteRef(String),
+    /// A reference to an isolated comment stored as [`NoteKind::Comment`](crate::model::NoteKind).
+    CommentRef(String),
     /// A line break inside a block, not a new block.
     LineBreak,
     /// An inline formula, as LaTeX math without delimiters.
@@ -70,7 +72,7 @@ fn collect_plain_text(inlines: &[Inline], out: &mut String) {
             Inline::Image { alt, .. } => out.push_str(alt),
             Inline::Math(tex) => out.push_str(tex),
             Inline::Checkbox(checked) => out.push_str(if *checked { "[x]" } else { "[ ]" }),
-            Inline::Anchor(_) | Inline::NoteRef(_) => {}
+            Inline::Anchor(_) | Inline::NoteRef(_) | Inline::CommentRef(_) => {}
             Inline::LineBreak => out.push('\n'),
         }
     }
@@ -84,7 +86,9 @@ pub fn inlines_are_empty(inlines: &[Inline]) -> bool {
     inlines.iter().all(|i| match i {
         Inline::Text { text, .. } => text.trim().is_empty(),
         Inline::Link { content, target } => target.is_empty() && inlines_are_empty(content),
-        Inline::Image { .. } | Inline::NoteRef(_) | Inline::Checkbox(_) => false,
+        Inline::Image { .. } | Inline::NoteRef(_) | Inline::CommentRef(_) | Inline::Checkbox(_) => {
+            false
+        }
         Inline::Math(tex) => tex.trim().is_empty(),
         Inline::Anchor(_) | Inline::LineBreak => true,
     })

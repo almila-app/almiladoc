@@ -9,6 +9,7 @@ pub(super) struct Tex {
     /// The output ends in a letter-named control word, which would swallow
     /// a letter appended directly after it.
     after_macro: bool,
+    unresolved: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +57,7 @@ impl Tex {
         if other.out.is_empty() {
             return;
         }
+        self.unresolved |= other.unresolved;
         self.push_str(&other.out);
         self.after_macro = other.after_macro;
     }
@@ -205,6 +207,15 @@ impl Tex {
             }
         }
         self.push_command("\\text", &inner);
+    }
+
+    pub(super) fn mark_unresolved(&mut self, unresolved: bool) {
+        self.unresolved |= unresolved;
+    }
+
+    pub(super) fn finish_with_damage(self) -> (String, bool) {
+        let damaged = self.unresolved;
+        (self.finish(), damaged)
     }
 
     pub(super) fn finish(self) -> String {

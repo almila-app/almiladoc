@@ -8,6 +8,7 @@ use std::ops::Range;
 #[derive(Default)]
 pub(crate) struct FieldFrame {
     pub instr: String,
+    pub unresolved: Vec<Range<usize>>,
     pub in_result: bool,
     pub inlines: Vec<Inline>,
     /// The token a header or footer writes in place of the result, which is not read.

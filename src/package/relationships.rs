@@ -35,6 +35,7 @@ pub(crate) struct Relationship {
     pub target: String,
     pub rel_type: String,
     pub mode: TargetMode,
+    pub unresolved_target: bool,
 }
 
 #[derive(Debug, Default)]
@@ -56,7 +57,15 @@ impl Relationships {
             };
             let rel_type = rel.attr_any("Type").unwrap_or("");
             let rel_type = normalize_ooxml_uri(rel_type).unwrap_or_else(|| rel_type.to_string());
-            map.insert(id.to_string(), Relationship { target: target.to_string(), rel_type, mode });
+            let unresolved_target = rel
+                .attrs
+                .iter()
+                .find(|attr| attr.local == "Target")
+                .is_some_and(|attr| attr.unresolved);
+            map.insert(
+                id.to_string(),
+                Relationship { target: target.to_string(), rel_type, mode, unresolved_target },
+            );
         }
         Self { map, reported: false }
     }

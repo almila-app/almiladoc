@@ -288,6 +288,7 @@ impl Converter {
             .with_images(self.config.images)
             .with_image_ocr(self.config.image_ocr)
             .with_headers_footers(self.config.headers_footers)
+            .with_comments(self.config.comments)
             .with_cancel(cancel);
         #[cfg(test)]
         let parse_ctx = parse_ctx.with_detection_counter(&self.detections);

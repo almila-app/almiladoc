@@ -344,7 +344,7 @@ fn inline_bytes(inlines: &[Inline]) -> u64 {
             Inline::Link { content, target } => inline_bytes(content) + target_bytes(target),
             Inline::Image { alt, source, .. } => text_bytes(alt) + source_bytes(source),
             Inline::Math(tex) => text_bytes(tex),
-            Inline::Anchor(id) | Inline::NoteRef(id) => text_bytes(id),
+            Inline::Anchor(id) | Inline::NoteRef(id) | Inline::CommentRef(id) => text_bytes(id),
             Inline::Checkbox(_) => 3,
             Inline::LineBreak => 1,
         })

@@ -51,6 +51,26 @@ impl HeaderFooterPolicy {
     }
 }
 
+/// Whether supported comments appear as isolated GFM footnotes.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct CommentPolicy(almiladoc::CommentPolicy);
+
+#[pymethods]
+impl CommentPolicy {
+    #[classattr]
+    const OMIT: Self = Self(almiladoc::CommentPolicy::Omit);
+    #[classattr]
+    const EMIT: Self = Self(almiladoc::CommentPolicy::Emit);
+    fn __repr__(&self) -> &'static str {
+        match self.0 {
+            almiladoc::CommentPolicy::Omit => "CommentPolicy.OMIT",
+            almiladoc::CommentPolicy::Emit => "CommentPolicy.EMIT",
+            _ => "CommentPolicy.<unknown>",
+        }
+    }
+}
+
 /// How images appear in Markdown without fetching their content.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
@@ -200,7 +220,8 @@ impl Hash for Limits {
 /// `Limits`, the threads each call runs on (1 to 64; no reader uses more
 /// than one), what a loss does, how images appear and which leave gaps for
 /// OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
-/// 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE` and `HeaderFooterPolicy.OMIT`.
+/// 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
+/// `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`.
 /// A thread count out of range raises `ConfigError`.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq)]
@@ -209,7 +230,11 @@ pub(crate) struct Config(pub(crate) almiladoc::Config);
 #[pymethods]
 impl Config {
     #[new]
-    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, headers_footers = None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Python keywords mirror the core configuration fields"
+    )]
+    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, headers_footers = None, comments = None))]
     fn new(
         py: Python<'_>,
         limits: Option<&Bound<'_, Limits>>,
@@ -218,6 +243,7 @@ impl Config {
         images: Option<&Bound<'_, ImagePolicy>>,
         image_ocr: Option<&Bound<'_, ImageOcr>>,
         headers_footers: Option<&Bound<'_, HeaderFooterPolicy>>,
+        comments: Option<&Bound<'_, CommentPolicy>>,
     ) -> PyResult<Self> {
         let mut config = almiladoc::Config::default();
         if let Some(limits) = limits {
@@ -232,6 +258,9 @@ impl Config {
         }
         if let Some(image_ocr) = image_ocr {
             config.image_ocr = image_ocr.get().0;
+        }
+        if let Some(policy) = comments {
+            config.comments = policy.get().0;
         }
         if let Some(policy) = headers_footers {
             config.headers_footers = policy.get().0;
@@ -276,15 +305,22 @@ impl Config {
         HeaderFooterPolicy(self.0.headers_footers)
     }
 
+    /// Whether supported source comments appear as isolated footnotes.
+    #[getter]
+    fn comments(&self) -> CommentPolicy {
+        CommentPolicy(self.0.comments)
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, headers_footers={})",
+            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, headers_footers={}, comments={})",
             self.limits().__repr__(),
             self.0.threads,
             self.on_loss().__repr__(),
             self.images().__repr__(),
             self.image_ocr().__repr__(),
-            self.headers_footers().__repr__()
+            self.headers_footers().__repr__(),
+            self.comments().__repr__(),
         )
     }
 }
@@ -297,5 +333,6 @@ impl Hash for Config {
         self.0.images.hash(state);
         self.0.image_ocr.hash(state);
         self.0.headers_footers.hash(state);
+        self.0.comments.hash(state);
     }
 }

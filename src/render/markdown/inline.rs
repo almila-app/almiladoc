@@ -31,6 +31,7 @@ pub(crate) enum Norm<'a> {
     },
     Anchor(&'a str),
     NoteRef(&'a str),
+    CommentRef(&'a str),
     LineBreak,
     Math(&'a str),
     Checkbox(bool),
@@ -125,6 +126,9 @@ impl<'a> Flatten<'a, '_, '_> {
                 Inline::Anchor(id) if self.rc.anchors.html_id(id).is_some() => {
                     self.push(owner, Norm::Anchor(id));
                 }
+                Inline::CommentRef(id) if self.rc.comment_nums.contains_key(id) => {
+                    self.push(owner, Norm::CommentRef(id));
+                }
                 Inline::NoteRef(id) if self.rc.nums.contains_key(id) => {
                     self.push(owner, Norm::NoteRef(id));
                 }
@@ -136,7 +140,10 @@ impl<'a> Flatten<'a, '_, '_> {
                     self.push(owner, Norm::Math(tex.trim()));
                 }
                 Inline::Checkbox(checked) => self.push(owner, Norm::Checkbox(*checked)),
-                Inline::Anchor(_) | Inline::NoteRef(_) | Inline::Math(_) => {}
+                Inline::Anchor(_)
+                | Inline::NoteRef(_)
+                | Inline::CommentRef(_)
+                | Inline::Math(_) => {}
             }
         }
         Ok(())
@@ -412,7 +419,20 @@ fn last_side(item: &Norm<'_>) -> Side {
     }
 }
 
-/// Render one scope's pieces: a paragraph, heading or cell part, or one link label.
+fn write_note_ref(
+    id: &str,
+    comment: bool,
+    rc: &Ctx<'_>,
+    out: &mut Text<'_>,
+) -> Result<(), ConvertError> {
+    let nums = if comment { &*rc.comment_nums } else { &rc.nums };
+    if let Some(num) = nums.get(id) {
+        let label = if comment { format!("almiladoc-comment-{num}") } else { num.to_string() };
+        out.push_note_ref(&format!("[^{label}]"))?;
+    }
+    Ok(())
+}
+
 fn render_scope(
     items: &[Norm<'_>],
     scope: Scope,
@@ -450,11 +470,8 @@ fn render_scope(
                 };
                 write_text(text, ctx, opts, ends, out)?;
             }
-            Norm::NoteRef(id) => {
-                if let Some(num) = rc.nums.get(*id) {
-                    out.push_note_ref(&format!("[^{num}]"))?;
-                }
-            }
+            Norm::NoteRef(id) => write_note_ref(id, false, rc, out)?,
+            Norm::CommentRef(id) => write_note_ref(id, true, rc, out)?,
             Norm::Link { label, target } => render_link(label, target, scope, rc, out)?,
             Norm::Image { alt, presentation } => render_image(alt, *presentation, scope, out)?,
             Norm::Anchor(id) => {
@@ -483,7 +500,13 @@ fn render_scope(
 fn trailing(follower: Option<&Norm<'_>>) -> EscapeOpts {
     EscapeOpts {
         trailing_active: match follower {
-            Some(Norm::Link { .. } | Norm::Image { .. } | Norm::NoteRef(_) | Norm::Math(_)) => true,
+            Some(
+                Norm::Link { .. }
+                | Norm::Image { .. }
+                | Norm::NoteRef(_)
+                | Norm::CommentRef(_)
+                | Norm::Math(_),
+            ) => true,
             Some(Norm::Text { style, .. }) => *style != Style::PLAIN,
             _ => false,
         },
@@ -635,6 +658,7 @@ fn delims_of(item: &Norm<'_>) -> Delims {
             }
         }
         Norm::NoteRef(_)
+        | Norm::CommentRef(_)
         | Norm::Anchor(_)
         | Norm::LineBreak
         | Norm::Math(_)

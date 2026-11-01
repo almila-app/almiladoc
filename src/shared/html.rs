@@ -306,7 +306,11 @@ fn at_space_boundary(inlines: &[Inline], start: bool) -> bool {
             }
             Inline::LineBreak => return true,
             Inline::Anchor(_) | Inline::Text { .. } | Inline::Link { .. } => {}
-            Inline::Image { .. } | Inline::NoteRef(_) | Inline::Math(_) | Inline::Checkbox(_) => {
+            Inline::Image { .. }
+            | Inline::NoteRef(_)
+            | Inline::CommentRef(_)
+            | Inline::Math(_)
+            | Inline::Checkbox(_) => {
                 return false;
             }
         }

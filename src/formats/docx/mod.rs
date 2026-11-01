@@ -1,5 +1,6 @@
 //! OOXML WordprocessingML (.docx / .docm).
 
+mod comments;
 mod content;
 mod numbering;
 mod sides;
@@ -30,7 +31,8 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
 
     let main_part = read_main_part(parse_ctx, &pkg, &[MAIN_PART])?
         .ok_or_else(|| ConvertError::missing_part(MAIN_PART))?;
-    let doc_rels = read_rels(&pkg, &rels_part_for(&main_part), Role::Content(Region::Body))?;
+    let doc_rels =
+        read_rels(&pkg, &rels_part_for(&main_part), Role::DeferredContent(Region::Body))?;
 
     let typed =
         |rel_type, fallback| typed_part_path(parse_ctx, &doc_rels, &main_part, rel_type, fallback);
@@ -43,7 +45,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let (numbering, numbering_reported) =
         read_numbering(parse_ctx, &pkg, &numbering_part, &styles)?;
 
-    let doc_tree = pkg.required_xml_part(&main_part, Role::Content(Region::Body))?;
+    let doc_tree = pkg.required_xml_part(&main_part, Role::DeferredContent(Region::Body))?;
     let body = doc_tree
         .find(ns::W, "document")
         .and_then(|d| d.find(ns::W, "body"))
@@ -54,6 +56,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     }
 
     let side_scopes = sides::SideScopes::new();
+    let comment_scopes = comments::Scopes::default();
     let counters = RefCell::new(Counters::default());
     let assets = RefCell::new(AssetSink::new(parse_ctx));
     let references = References::default();
@@ -74,8 +77,9 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         assets: &assets,
         references: &references,
         moves: RefCell::default(),
+        damage: crate::shared::xml::DamageScope::default(),
     };
-    let blocks = if emit_sides {
+    let mut blocks = if emit_sides {
         let (blocks, breaks) = content::parse_body(body, &ctx)?;
         ctx.settle_moves()?;
         sides::interleave(&ctx, &side_scopes, body, blocks, &breaks)?
@@ -85,8 +89,8 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         blocks
     };
 
-    let notes = parse_notes(&ctx, footnotes_part, endnotes_part)?;
-    parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, references.comments());
+    let mut notes = parse_notes(&ctx, footnotes_part, endnotes_part)?;
+    comments::append(&ctx, &comment_scopes, side_scopes.comment_ids(), &mut blocks, &mut notes)?;
 
     let assets = assets.into_inner().assets;
     Ok(Document { blocks, notes, assets, ..Document::default() })
@@ -114,7 +118,7 @@ fn parse_notes(
     endnotes: TypedPart,
 ) -> Result<Vec<Note>, ConvertError> {
     let (parse_ctx, pkg, references) = (ctx.parse_ctx, ctx.pkg, ctx.references);
-    let role = Role::Content(Region::Note);
+    let role = Role::DeferredContent(Region::Note);
     let mut notes = Vec::new();
     for (part, root_name, elem_name, prefix, kind) in [
         (footnotes, "footnotes", "footnote", "fn", NoteKind::Footnote),
@@ -342,6 +346,331 @@ mod tests {
     };
     use std::assert_matches;
     use std::fmt::Debug;
+
+    #[test]
+    fn comments_emit_in_a_reserved_footnote_space() {
+        let body = run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/>"#);
+        let comments = format!(
+            r#"<w:comments {NS}><w:comment w:id="7">{}</w:comment></w:comments>"#,
+            run("<w:t>Remark</w:t>")
+        );
+        let bytes =
+            zip_package(&[("word/document.xml", document(&body)), ("word/comments.xml", comments)]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let parsed = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&parsed),
+            "Body[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: Remark\n"
+        );
+        assert_eq!(ctx.diagnostics().iter().count(), 0);
+    }
+
+    fn commented(body: &str, comments: &str) -> Vec<u8> {
+        zip_package(&[
+            ("word/document.xml", document(body)),
+            ("word/comments.xml", comments.into()),
+        ])
+    }
+
+    #[test]
+    fn omitted_comments_never_read_their_body_or_reply_metadata() {
+        let body =
+            run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/><w:commentReference w:id="8"/>"#);
+        let bytes = zip_package(&[
+            ("word/document.xml", document(&body)),
+            ("word/comments.xml", "<broken".into()),
+            ("word/commentsExtended.xml", "<broken metadata".into()),
+        ]);
+        let omitted = ParseCtx::default();
+        assert_eq!(document_to_markdown(&parse(&omitted, &bytes).unwrap()), "Body\n");
+        assert_eq!(
+            omitted.diagnostics().iter().map(|d| (d.code, d.count)).collect::<Vec<_>>(),
+            [(DiagnosticCode::CommentOmitted, 2)]
+        );
+        let absent = ParseCtx::default();
+        parse(&absent, &zip_package(&[("word/document.xml", document(&body))])).unwrap();
+        assert_eq!(omitted.archive_bytes(), absent.archive_bytes());
+    }
+
+    #[test]
+    fn selected_comments_report_unreadable_and_missing_bodies() {
+        let body = run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/>"#);
+        for comments in ["<broken", "<other/>"] {
+            let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+            parse(&ctx, &commented(&body, comments)).unwrap();
+            assert_eq!(
+                ctx.diagnostics()
+                    .iter()
+                    .filter(|d| d.code == DiagnosticCode::PartUnreadable)
+                    .map(|d| (d.region, d.count))
+                    .collect::<Vec<_>>(),
+                [(Region::Comment, 1)]
+            );
+        }
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        parse(&ctx, &zip_package(&[("word/document.xml", document(&body))])).unwrap();
+        assert_eq!(
+            ctx.diagnostics()
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::PartUnreadable)
+                .map(|d| d.region)
+                .collect::<Vec<_>>(),
+            [Region::Comment]
+        );
+    }
+
+    #[test]
+    fn replies_use_the_final_paragraph_id_and_stay_inside_the_parent() {
+        let body = run(r#"<w:t>Body</w:t><w:commentReference w:id="8"/>"#);
+        let comments = format!(
+            r#"<w:comments {NS} xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:comment w:id="4">{}</w:comment><w:comment w:id="8"><w:p w14:paraId="REPLY"><w:r><w:t>Reply</w:t></w:r></w:p></w:comment><w:comment w:id="7"><w:p w14:paraId="FIRST"><w:r><w:t>First</w:t></w:r></w:p><w:p w14:paraId="PARENT"><w:r><w:t>Last</w:t></w:r></w:p></w:comment></w:comments>"#,
+            run("<w:t>Decoy</w:t>")
+        );
+        let extended = r#"<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="REPLY" w15:paraIdParent="PARENT"/></w15:commentsEx>"#;
+        let bytes = zip_package(&[
+            ("word/document.xml", document(&body)),
+            ("word/comments.xml", comments),
+            ("word/commentsExtended.xml", extended.into()),
+        ]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let parsed = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&parsed),
+            "Body[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: First\n\n    Last\n\n    > Reply\n"
+        );
+        assert_eq!(parsed.notes.len(), 1);
+    }
+
+    #[test]
+    fn header_comment_refs_resolve_shared_definitions_in_first_reference_order() {
+        let body = format!(
+            "{}<w:sectPr><w:headerReference w:type=\"default\" r:id=\"h\"/></w:sectPr>",
+            run(r#"<w:t>Body</w:t><w:commentReference w:id="8"/><w:commentReference w:id="7"/>"#)
+        );
+        let header = format!(
+            "<w:hdr {NS}>{}</w:hdr>",
+            run(r#"<w:t>Head</w:t><w:commentReference w:id="7"/>"#)
+        );
+        let comments = format!(
+            r#"<w:comments {NS}><w:comment w:id="8">{}</w:comment><w:comment w:id="7">{}</w:comment></w:comments>"#,
+            run("<w:t>Second</w:t>"),
+            run("<w:t>First</w:t>")
+        );
+        let bytes = zip_package(&[
+            ("word/document.xml", document(&body)),
+            ("word/_rels/document.xml.rels", relationships(&[("h", "header", "header.xml")])),
+            ("word/header.xml", header),
+            ("word/comments.xml", comments),
+        ]);
+        let ctx = ParseCtx::default()
+            .with_comments(crate::CommentPolicy::Emit)
+            .with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            concat!(
+                "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n",
+                "> Head[^almiladoc-comment-1]\n\nBody[^almiladoc-comment-2][^almiladoc-comment-1]\n\n",
+                "[^almiladoc-comment-1]: First\n\n[^almiladoc-comment-2]: Second\n"
+            )
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(
+                &diagnostics_of(ctx, &doc, ImagePolicy::Placeholder).unwrap()
+            ),
+            []
+        );
+    }
+
+    #[test]
+    fn header_only_comment_refs_are_selected_only_when_headers_emit() {
+        let body = document(&format!(
+            "{}<w:sectPr><w:headerReference w:type=\"default\" r:id=\"h\"/></w:sectPr>",
+            run("<w:t>Body</w:t>")
+        ));
+        let header = format!(
+            "<w:hdr {NS}>{}</w:hdr>",
+            run(r#"<w:t>Head</w:t><w:commentReference w:id="7"/>"#)
+        );
+        let comments = format!(
+            r#"<w:comments {NS}><w:comment w:id="7">{}</w:comment></w:comments>"#,
+            run("<w:t>Remark</w:t>")
+        );
+        let bytes = zip_package(&[
+            ("word/document.xml", body),
+            ("word/header.xml", header),
+            ("word/_rels/document.xml.rels", relationships(&[("h", "header", "header.xml")])),
+            ("word/comments.xml", comments),
+        ]);
+        let ctx = ParseCtx::default()
+            .with_comments(crate::CommentPolicy::Emit)
+            .with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            concat!(
+                "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n",
+                "> Head[^almiladoc-comment-1]\n\nBody\n\n[^almiladoc-comment-1]: Remark\n"
+            )
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(
+                &diagnostics_of(ctx, &doc, ImagePolicy::Placeholder).unwrap()
+            ),
+            []
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(document_to_markdown(&doc), "Body\n");
+        assert_eq!(doc.notes.len(), 0);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::HeaderOmitted, Region::Header, 1)]
+        );
+    }
+
+    #[test]
+    fn comment_relationships_use_the_comment_part_and_ignore_loser_bodies() {
+        let body = document(&run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/>"#));
+        let first = run(r#"<w:drawing><a:blip r:embed="i"/></w:drawing>"#);
+        let link = r#"<w:p><w:hyperlink r:id="l"><w:r><w:t>www.example.org</w:t></w:r></w:hyperlink></w:p>"#;
+        let comments = format!(
+            r#"<w:comments {NS}><w:comment w:id="7" w:author="&ignored;">{first}{link}</w:comment><w:comment w:id="7">{}</w:comment><w:comment w:id="9">{}</w:comment></w:comments>"#,
+            run(r#"<w:t>loser &bad;</w:t><w:drawing><a:blip r:embed="missing"/></w:drawing>"#),
+            run("<w:t>unused &bad;</w:t>")
+        );
+        let rels = relationships(&[
+            ("c", "comments", "comments/thread.xml"),
+            ("i", "image", "missing.png"),
+        ]);
+        let comment_rels = relationships(&[
+            ("i", "image", "../media/comment.png"),
+            ("l", "hyperlink", "https://www.example.org/"),
+        ]);
+        let bytes = zip_package(&[
+            ("word/document.xml", body.into_bytes()),
+            ("word/_rels/document.xml.rels", rels.into_bytes()),
+            ("word/comments/thread.xml", comments.into_bytes()),
+            ("word/comments/_rels/thread.xml.rels", comment_rels.into_bytes()),
+            ("word/media/comment.png", vec![1, 2, 3]),
+        ]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(doc.assets.len(), 1);
+        assert_eq!(doc.assets[0].origin_part.as_str(), "word/media/comment.png");
+        assert_eq!(
+            document_to_markdown(&doc),
+            "Body[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: ![Image](asset:0)\n\n    [www.example.org](https://www.example.org/)\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::DuplicateNote, Region::Comment, 1)]
+        );
+    }
+
+    #[test]
+    fn unselected_comment_definitions_do_not_read_reply_metadata() {
+        let body = document(&run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/>"#));
+        let comments = format!(
+            r#"<w:comments {NS}><w:comment w:id="9">{}</w:comment></w:comments>"#,
+            run("<w:t>unused</w:t>")
+        );
+        let bytes = zip_package(&[
+            ("word/document.xml", body),
+            ("word/comments.xml", comments),
+            ("word/commentsExtended.xml", "<broken metadata".into()),
+        ]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(document_to_markdown(&doc), "Body\n");
+        assert_eq!(
+            diagnostic_rows::<Reported>(
+                &diagnostics_of(ctx, &doc, ImagePolicy::Placeholder).unwrap()
+            ),
+            [(DiagnosticCode::DanglingReference, Region::Body, 1)]
+        );
+    }
+
+    #[test]
+    fn duplicate_comment_and_reply_metadata_cannot_reparent_the_winner() {
+        let body = document(&run(r#"<w:t>Body</w:t><w:commentReference w:id="8"/>"#));
+        let comments = format!(
+            r#"<w:comments {NS} xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:comment w:id="7"><w:p w14:paraId="P"><w:r><w:t>Root</w:t></w:r></w:p></w:comment><w:comment w:id="8"><w:p w14:paraId="R"><w:r><w:t>Reply</w:t></w:r></w:p></w:comment><w:comment w:id="8"><w:p w14:paraId="BAD"><w:r><w:t>Loser</w:t></w:r></w:p></w:comment></w:comments>"#
+        );
+        let extended = r#"<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="R" w15:paraIdParent="P"/><w15:commentEx w15:paraId="R" w15:paraIdParent="missing"/><w15:commentEx w15:paraId="BAD" w15:paraIdParent="missing"/></w15:commentsEx>"#;
+        let bytes = zip_package(&[
+            ("word/document.xml", body),
+            ("word/comments.xml", comments),
+            ("word/commentsExtended.xml", extended.into()),
+        ]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            "Body[^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: Root\n\n    > Reply\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::DuplicateNote, Region::Comment, 1)]
+        );
+    }
+
+    #[test]
+    fn body_comments_and_replies_keep_independent_list_counters() {
+        let item = |text: &str| {
+            format!(
+                "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>{}</w:p>",
+                shown(text)
+            )
+        };
+        let body = document(&format!(
+            "{}{}{}",
+            item("body-one"),
+            run(r#"<w:commentReference w:id="8"/>"#),
+            item("body-two")
+        ));
+        let comments = format!(
+            r#"<w:comments {NS} xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:comment w:id="7">{}{}<w:p w14:paraId="P"/></w:comment><w:comment w:id="8">{}<w:p w14:paraId="R"/></w:comment></w:comments>"#,
+            item("comment-one"),
+            item("comment-two"),
+            item("reply-one")
+        );
+        let numbering = format!(
+            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+        );
+        let extended = r#"<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="R" w15:paraIdParent="P"/></w15:commentsEx>"#;
+        let bytes = zip_package(&[
+            ("word/document.xml", body),
+            ("word/comments.xml", comments),
+            ("word/numbering.xml", numbering),
+            ("word/commentsExtended.xml", extended.into()),
+        ]);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            concat!(
+                "1. body-one\n\n[^almiladoc-comment-1]\n\n2. body-two\n\n",
+                "[^almiladoc-comment-1]: 1. comment-one\n    2. comment-two\n\n    > 1. reply-one\n"
+            )
+        );
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), []);
+    }
+
+    #[test]
+    fn unread_comments_report_one_cause_without_late_dangling_refs() {
+        let body =
+            run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/><w:commentReference w:id="8"/>"#);
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &commented(&body, "<broken")).unwrap();
+        assert_eq!(document_to_markdown(&doc), "Body\n");
+        assert_eq!(
+            diagnostic_rows::<Reported>(
+                &diagnostics_of(ctx, &doc, ImagePolicy::Placeholder).unwrap()
+            ),
+            [(DiagnosticCode::PartUnreadable, Region::Comment, 1)]
+        );
+    }
 
     #[test]
     fn linked_image_relationship_becomes_an_external_source() {
@@ -1658,6 +1987,159 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unretained_hyperlink_labels_do_not_report_target_damage() {
+        let labels = [hidden("hidden"), deleted("deleted")];
+        for label in labels {
+            let body =
+                document(&p("", &format!(r#"<w:hyperlink r:id="bad">{label}</w:hyperlink>"#)));
+            let rels = relationships(&[("bad", "hyperlink", "https://www.example.org/&unknown;")]);
+            let bytes =
+                zip_package(&[("word/document.xml", body), ("word/_rels/document.xml.rels", rels)]);
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(document_to_markdown(&doc), "");
+            let losses = diagnostic_rows::<Reported>(&ctx.into_diagnostics());
+            assert_eq!(
+                losses,
+                if label.contains("<w:del") {
+                    vec![(DiagnosticCode::RevisionOmitted, Region::Body, 1)]
+                } else {
+                    vec![(DiagnosticCode::HiddenOmitted, Region::Body, 1)]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hyperlink_entity_damage_reports_only_literal_retained_destinations() {
+        for (mode, target, damaged) in [
+            ("External", "#&unknown;", false),
+            ("External", "https://example.org/&unknown;", true),
+            ("Internal", "relative/&unknown;", true),
+            ("External", "javascript:&unknown;", false),
+        ] {
+            let body = document(&p(
+                "",
+                &format!(r#"<w:hyperlink r:id="link">{}</w:hyperlink>"#, shown("label")),
+            ));
+            let rels = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{target}" TargetMode="{mode}"/></Relationships>"#
+            );
+            let bytes =
+                zip_package(&[("word/document.xml", body), ("word/_rels/document.xml.rels", rels)]);
+            let ctx = ParseCtx::default();
+            parse(&ctx, &bytes).unwrap();
+            let expected: Vec<Reported> = if damaged {
+                vec![(DiagnosticCode::UnresolvedEntity, Region::Body, 1)]
+            } else {
+                vec![]
+            };
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), expected);
+        }
+    }
+
+    #[test]
+    fn picture_entity_damage_follows_only_its_displayed_alt_and_link() {
+        let cases = [
+            ("&label;", "https://www.example.org/ok", ImagePolicy::Placeholder, true),
+            ("&label;", "https://www.example.org/ok", ImagePolicy::AltText, true),
+            ("plain", "https://www.example.org/&target;", ImagePolicy::Placeholder, true),
+            ("plain", "https://www.example.org/&target;", ImagePolicy::AltText, false),
+            ("&label;", "https://www.example.org/&target;", ImagePolicy::Omit, false),
+        ];
+        for (label, target, images, damaged) in cases {
+            let picture = format!(
+                r#"<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:docPr id="1" name="&metadata;" descr="{label}"/><a:blip r:link="i"/></wp:inline></w:drawing>"#
+            );
+            let rels = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="i" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}" TargetMode="External"/></Relationships>"#
+            );
+            let bytes = zip_package(&[
+                ("word/document.xml", document(&run(&picture))),
+                ("word/_rels/document.xml.rels", rels),
+            ]);
+            let ctx = ParseCtx::default().with_images(images);
+            parse(&ctx, &bytes).unwrap();
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                if damaged {
+                    vec![(DiagnosticCode::UnresolvedEntity, Region::Body, 1)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn xml_entity_damage_is_judged_on_the_retained_field_target() {
+        let cases = [
+            (r"HYPERLINK &quot;https://www.example.org/&target;&quot; \o &quot;tip&quot;", true),
+            (
+                r"HYPERLINK &quot;https://www.example.org/&amp;same;&quot; \o &quot;&same;&quot;",
+                false,
+            ),
+            (r"HYPERLINK &quot;https://www.example.org/ok&quot; \o &quot;&tooltip;&quot;", false),
+        ];
+        for (instruction, damaged) in cases {
+            let body = document(&format!(
+                r#"<w:p><w:fldSimple w:instr="{instruction}">{}</w:fldSimple></w:p>"#,
+                shown("www.example.org")
+            ));
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &zip_package(&[("word/document.xml", body)])).unwrap();
+            assert!(
+                matches!(&doc.blocks[0], Block::Paragraph(inlines) if matches!(&inlines[0], Inline::Link { .. }))
+            );
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                if damaged {
+                    vec![(DiagnosticCode::UnresolvedEntity, Region::Body, 1)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn math_entity_damage_follows_the_tex_selected_text_and_character() {
+        let cases = [
+            (
+                r#"<m:nary><m:naryPr><m:supHide m:val="1"/></m:naryPr><m:sup><m:r><m:t>&lost;</m:t></m:r></m:sup><m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary>"#,
+                false,
+            ),
+            (
+                r#"<m:d><m:dPr><m:begChr m:val="&lost;"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>"#,
+                true,
+            ),
+            (
+                r#"<m:d><m:dPr><m:begChr m:val="(&lost;"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>"#,
+                false,
+            ),
+            ("<m:r><m:t>&lost;</m:t></m:r>", true),
+        ];
+        for (math, damaged) in cases {
+            let body = document(&format!("<w:p><m:oMath>{math}</m:oMath></w:p>"));
+            let bytes = zip_package(&[("word/document.xml", &body)]);
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_ne!(document_to_markdown(&doc), "");
+            assert_eq!(
+                diagnostic_rows::<(DiagnosticCode, Region, Option<u32>, u64)>(
+                    &ctx.into_diagnostics()
+                ),
+                if damaged {
+                    vec![(DiagnosticCode::UnresolvedEntity, Region::Body, None, 1)]
+                } else {
+                    vec![]
+                },
+                "{math}"
+            );
+        }
+    }
+
     const HIDE: &str = "<w:rPr><w:vanish/></w:rPr>";
     const SHOW: &str = r#"<w:rPr><w:vanish w:val="0"/></w:rPr>"#;
     const LINK_RELS: &str = concat!(
@@ -1670,7 +2152,7 @@ mod tests {
         r#"<w:style w:type="paragraph" w:styleId="HidePara"><w:rPr><w:vanish/></w:rPr>"#,
         "</w:style>",
         r#"<w:style w:type="paragraph" w:styleId="HideTwice"><w:basedOn w:val="HidePara"/>"#,
-        r#"<w:rPr><w:vanish/></w:rPr></w:style>"#,
+        "<w:rPr><w:vanish/></w:rPr></w:style>",
         r#"<w:style w:type="paragraph" w:styleId="FalseAdds"><w:basedOn w:val="HidePara"/>"#,
         r#"<w:rPr><w:vanish w:val="0"/></w:rPr></w:style>"#,
         r#"<w:style w:type="character" w:styleId="HideChar"><w:rPr><w:vanish/></w:rPr>"#,
@@ -3439,7 +3921,7 @@ mod tests {
                     concat!(
                         r#"<w:moveFromRangeStart w:id="1" w:name="m"/>"#,
                         r#"<w:del w:id="5"><w:moveFrom w:id="2">"#,
-                        r#"<w:r><w:t>gone</w:t></w:r></w:moveFrom></w:del>"#,
+                        "<w:r><w:t>gone</w:t></w:r></w:moveFrom></w:del>",
                         r#"<w:moveFromRangeEnd w:id="1"/>"#,
                     ),
                     &move_destination("m", "moved"),

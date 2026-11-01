@@ -18,9 +18,7 @@ pub struct EngineIdentity {
     /// The crate version.
     pub version: &'static str,
     /// The lowercase hex SHA-256 of `key=value;` pairs, one per output-shaping [`Config`]
-    /// field in declaration order, omitting default header/footer policy for compatibility,
-    /// and leaving out `limits` and `threads`, which
-    /// never change output that converts.
+    /// field in declaration order; default content policies, `limits` and `threads` are omitted.
     pub config_fingerprint: String,
 }
 
@@ -34,16 +32,19 @@ impl EngineIdentity {
 }
 
 fn fingerprinted(config: &Config) -> String {
-    let Config { limits: _, threads: _, on_loss, images, image_ocr, headers_footers } = config;
+    let Config { limits: _, threads: _, on_loss, images, image_ocr, headers_footers, comments } =
+        config;
     let mut fields = format!(
         "on_loss={};images={};image_ocr={};",
         on_loss.as_str(),
         images.as_str(),
         image_ocr.as_str()
     );
-    match headers_footers {
-        crate::HeaderFooterPolicy::Omit => {}
-        crate::HeaderFooterPolicy::Emit => fields.push_str("headers_footers=emit;"),
+    if *headers_footers == crate::HeaderFooterPolicy::Emit {
+        fields.push_str("headers_footers=emit;");
+    }
+    if *comments == crate::CommentPolicy::Emit {
+        fields.push_str("comments=emit;");
     }
     fields
 }
@@ -52,6 +53,19 @@ fn fingerprinted(config: &Config) -> String {
 mod tests {
     use super::*;
     use crate::diagnostics::OnLoss;
+
+    #[test]
+    fn content_policies_follow_declaration_order_and_omit_defaults() {
+        let config = Config {
+            headers_footers: crate::HeaderFooterPolicy::Emit,
+            comments: crate::CommentPolicy::Emit,
+            ..Config::default()
+        };
+        assert_eq!(
+            fingerprinted(&config),
+            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;"
+        );
+    }
 
     #[test]
     fn the_default_fingerprint_is_pinned() {
@@ -78,6 +92,13 @@ mod tests {
         assert_ne!(
             EngineIdentity::of(&Config {
                 headers_footers: crate::HeaderFooterPolicy::Emit,
+                ..Config::default()
+            }),
+            fail
+        );
+        assert_ne!(
+            EngineIdentity::of(&Config {
+                comments: crate::CommentPolicy::Emit,
                 ..Config::default()
             }),
             fail

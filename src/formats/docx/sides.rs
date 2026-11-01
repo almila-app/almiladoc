@@ -36,6 +36,10 @@ pub(super) struct SideScopes {
 }
 
 impl SideScopes {
+    pub(super) fn comment_ids(&self) -> Vec<String> {
+        self.references.comment_ids()
+    }
+
     pub(super) fn new() -> Self {
         Self { counters: RefCell::default(), references: References::default() }
     }
@@ -180,7 +184,7 @@ impl Stories<'_, '_, '_> {
     fn read_part(&self, path: &str, side: Side) -> Result<Option<Vec<Block>>, ConvertError> {
         let (parse_ctx, pkg) = (self.ctx.parse_ctx, self.ctx.pkg);
         let region = side.region();
-        let role = Role::Content(region);
+        let role = Role::DeferredContent(region);
         let root_name =
             SIDES.iter().find(|(s, _, _)| *s == side).map_or("hdr", |(_, _, root)| root);
         let Some(tree) = pkg.related_xml_part(path, role)? else { return Ok(None) };
@@ -199,7 +203,9 @@ impl Stories<'_, '_, '_> {
         let blocks = content::parse_blocks(root, &side_ctx)?;
         side_ctx.settle_moves()?;
         let comments = self.scopes.references.comments().saturating_sub(comments);
-        parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments);
+        if !parse_ctx.comments_requested() {
+            parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments);
+        }
         Ok(Some(blocks))
     }
 }

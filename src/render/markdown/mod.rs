@@ -17,7 +17,7 @@ use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::model::Node;
 use crate::model::{
-    Block, Cell, Document, Gap, HeaderFooter, Inline, LinkTarget, List, MarkerKind, Note,
+    Block, Cell, Document, Gap, HeaderFooter, Inline, LinkTarget, List, MarkerKind, Note, NoteKind,
     OcrOrigin, Table, Unit, UnitKind, inlines_are_empty,
 };
 use crate::ocr::{GapFills, GapState};
@@ -32,6 +32,7 @@ use sink::{Sink, Text};
 use std::borrow::Cow;
 use std::cell::Cell as StateCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 /// Footnote id -> rendered number, shared by all render functions.
 type NoteNumbers = HashMap<String, usize>;
@@ -40,12 +41,16 @@ pub(crate) struct Ctx<'d> {
     preserve_spans: StateCell<bool>,
     fills: &'d GapFills,
     nums: NoteNumbers,
+    comment_nums: Rc<NoteNumbers>,
+    comment_units: BTreeMap<&'d str, Option<Unit>>,
     anchors: AnchorMap,
     shapes: Shapes,
     images: ImagePolicy,
     selected_notes: Vec<&'d Note>,
     defined_notes: HashSet<&'d str>,
     omitted_notes: HashSet<&'d str>,
+    omitted_comments: HashSet<&'d str>,
+    defined_comments: Rc<HashSet<&'d str>>,
     duplicate_notes: u64,
     side_index: StateCell<usize>,
     in_side: bool,
@@ -59,40 +64,155 @@ impl<'d> Ctx<'d> {
         meter: &Meter<'_>,
     ) -> Result<Self, ConvertError> {
         let mut defined_notes = HashSet::new();
-        let selected_notes: Vec<&Note> =
-            doc.notes.iter().filter(|note| defined_notes.insert(note.id.as_str())).collect();
+        let selected_notes: Vec<&Note> = doc
+            .notes
+            .iter()
+            .filter(|note| defined_notes.insert((note.kind == NoteKind::Comment, note.id.as_str())))
+            .collect();
         let duplicate_notes =
             u64::try_from(doc.notes.len() - selected_notes.len()).unwrap_or(u64::MAX);
         let mut ctx = Self::empty(fills, images, 0);
-        ctx.selected_notes = selected_notes;
-        ctx.defined_notes = defined_notes;
+        ctx.defined_comments = Rc::new(
+            selected_notes
+                .iter()
+                .filter(|note| note.kind == NoteKind::Comment)
+                .map(|note| note.id.as_str())
+                .collect(),
+        );
+        ctx.selected_notes.clone_from(&selected_notes);
+        ctx.defined_notes = selected_notes
+            .iter()
+            .filter(|note| note.kind != NoteKind::Comment)
+            .map(|note| note.id.as_str())
+            .collect();
         ctx.duplicate_notes = duplicate_notes;
+        ctx.select_comments(meter)?;
         if images == ImagePolicy::Omit {
             ctx.omit_image_notes(meter)?;
         }
-        ctx.nums = number_notes(&doc.blocks, &ctx.selected_notes, &ctx.omitted_notes, fills);
-        let notes: Vec<&Note> = numbered_notes(&ctx).into_iter().map(|(note, _)| note).collect();
-        ctx.anchors =
-            resolve_anchors(&doc.blocks, AnchorScope::Body, fills, &notes, images, &ctx.nums);
+        ctx.nums = number_notes(
+            [doc.blocks.as_slice()],
+            &ctx.selected_notes,
+            &ctx.omitted_notes,
+            fills,
+            false,
+        );
+        ctx.number_comments(doc, meter)?;
+        let notes: Vec<&Note> = numbered_notes(&ctx)
+            .into_iter()
+            .map(|(note, _)| note)
+            .filter(|note| note.kind != NoteKind::Comment)
+            .collect();
+        ctx.anchors = resolve_anchors(
+            &doc.blocks,
+            AnchorScope::Body,
+            fills,
+            &notes,
+            images,
+            &ctx.nums,
+            &ctx.comment_nums,
+        );
         Ok(ctx)
     }
 
-    /// The scope of one side story: its own anchors under `prefix`, and no notes, its owned
+    fn select_comments(&mut self, meter: &Meter<'_>) -> Result<(), ConvertError> {
+        for note in self.selected_notes.iter().filter(|note| note.kind == NoteKind::Comment) {
+            meter.charge(note.id.len() as u64)?;
+            let comment = self.comment(note, 0, meter)?;
+            if !shape::any(&note.blocks, |block| shape::shows(block, &comment, meter))? {
+                self.omitted_comments.insert(note.id.as_str());
+            }
+        }
+        if self.images == ImagePolicy::Omit && !self.defined_comments.is_empty() {
+            for note in self.selected_notes.iter().filter(|note| note.kind == NoteKind::Comment) {
+                meter.charge(note.id.len() as u64)?;
+            }
+            self.comment_nums = Rc::new(number_notes(
+                std::iter::empty(),
+                &self.selected_notes,
+                &self.omitted_comments,
+                self.fills,
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    fn number_comments(
+        &mut self,
+        doc: &'d Document,
+        meter: &Meter<'_>,
+    ) -> Result<(), ConvertError> {
+        if !self.defined_comments.is_empty() {
+            let groups = std::iter::once(doc.blocks.as_slice()).chain(
+                numbered_notes(self)
+                    .into_iter()
+                    .filter(|(note, _)| note.kind != NoteKind::Comment)
+                    .map(|(note, _)| note.blocks.as_slice()),
+            );
+            self.comment_nums = Rc::new(number_notes(
+                groups,
+                &self.selected_notes,
+                &self.omitted_comments,
+                self.fills,
+                true,
+            ));
+            self.comment_units = comment_units(doc, self.fills, meter)?;
+        }
+        Ok(())
+    }
+
+    /// The scope of one side story: its own anchors under `prefix`, and no ordinary notes, its owned
     /// keys charged to `meter` before they are resolved.
     fn side(
+        &self,
         value: &HeaderFooter,
-        fills: &'d GapFills,
-        images: ImagePolicy,
         (side_index, prefix): (usize, &str),
         meter: &Meter<'_>,
     ) -> Result<Self, ConvertError> {
         value.charge_copy(|work| meter.charge(work))?;
-        let mut ctx = Self::empty(fills, images, side_index);
+        let mut ctx = Self::empty(self.fills, self.images, side_index);
+        if !self.defined_comments.is_empty() {
+            meter.charge(1)?;
+            ctx.comment_nums = Rc::clone(&self.comment_nums);
+            ctx.defined_comments = Rc::clone(&self.defined_comments);
+        }
         ctx.in_side = true;
         let content = value.content.as_deref().unwrap_or_default();
-        ctx.anchors =
-            resolve_anchors(content, AnchorScope::Side(prefix), fills, &[], images, &ctx.nums);
+        ctx.anchors = resolve_anchors(
+            content,
+            AnchorScope::Side(prefix),
+            self.fills,
+            &[],
+            self.images,
+            &ctx.nums,
+            &ctx.comment_nums,
+        );
         Ok(ctx)
+    }
+
+    fn comment(&self, note: &Note, num: usize, meter: &Meter<'_>) -> Result<Self, ConvertError> {
+        crate::model::charge_blocks_copy(&note.blocks, |work| meter.charge(work))?;
+        let mut ctx = Self::empty(self.fills, self.images, 0);
+        ctx.in_side = true;
+        ctx.anchors = resolve_anchors(
+            &note.blocks,
+            AnchorScope::Side(&format!("almiladoc-comment-{num}")),
+            self.fills,
+            &[],
+            self.images,
+            &ctx.nums,
+            &ctx.comment_nums,
+        );
+        Ok(ctx)
+    }
+
+    fn note_label(note: &Note, num: usize) -> String {
+        if note.kind == NoteKind::Comment {
+            format!("almiladoc-comment-{num}")
+        } else {
+            num.to_string()
+        }
     }
 
     fn empty(fills: &'d GapFills, images: ImagePolicy, side_index: usize) -> Self {
@@ -100,12 +220,16 @@ impl<'d> Ctx<'d> {
             preserve_spans: StateCell::new(false),
             fills,
             nums: HashMap::new(),
+            comment_nums: Rc::default(),
+            comment_units: BTreeMap::new(),
             anchors: AnchorMap::default(),
             shapes: Shapes::default(),
             images,
             selected_notes: Vec::new(),
             defined_notes: HashSet::new(),
             omitted_notes: HashSet::new(),
+            omitted_comments: HashSet::new(),
+            defined_comments: Rc::default(),
             duplicate_notes: 0,
             side_index: StateCell::new(side_index),
             in_side: false,
@@ -118,7 +242,9 @@ impl<'d> Ctx<'d> {
             .selected_notes
             .iter()
             .enumerate()
-            .filter(|(_, note)| !note.blocks.iter().all(block_is_blank))
+            .filter(|(_, note)| {
+                note.kind != NoteKind::Comment && !note.blocks.iter().all(block_is_blank)
+            })
             .map(|(i, note)| (note.id.as_str(), i))
             .collect();
         let mut base = vec![false; count];
@@ -126,6 +252,9 @@ impl<'d> Ctx<'d> {
         let mut refs = vec![0_usize; count];
         let mut reverse = vec![Vec::new(); count];
         for (i, note) in self.selected_notes.iter().enumerate() {
+            if note.kind == NoteKind::Comment {
+                continue;
+            }
             base[i] = shape::any(&note.blocks, |block| shape::shows(block, self, meter))?;
             visit_inlines(&note.blocks, self, &mut |inline, _| match inline {
                 Inline::Image { .. } => images[i] = true,
@@ -188,9 +317,14 @@ pub(crate) fn render(
             sink.gap(2);
         }
         let mut label = Text::new(meter);
-        label.push_str(&format!("[^{num}]: "))?;
+        label.push_str(&format!("[^{}]: ", Ctx::note_label(note, num)))?;
         sink.push_marker(label, 4);
-        write_blocks(&note.blocks, &rc, &mut sink, None)?;
+        if note.kind == NoteKind::Comment {
+            let comment = rc.comment(note, num, meter)?;
+            write_blocks(&note.blocks, &comment, &mut sink, None)?;
+        } else {
+            write_blocks(&note.blocks, &rc, &mut sink, None)?;
+        }
         sink.pop();
     }
     Ok(Rendered { markdown: sink.finish()?, units })
@@ -210,6 +344,7 @@ pub(crate) fn document_to_markdown(doc: &Document) -> String {
 pub(crate) struct Unread<'a> {
     /// A notes part did not read, so references to its notes dangle.
     pub(crate) notes: bool,
+    comments: bool,
     targets: Option<&'a BTreeSet<Unit>>,
 }
 
@@ -220,6 +355,9 @@ impl<'a> Unread<'a> {
             notes: diagnostics
                 .iter()
                 .any(|d| d.code == DiagnosticCode::PartUnreadable && d.region == Region::Note),
+            comments: diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::PartUnreadable && d.region == Region::Comment),
             targets: None,
         }
     }
@@ -248,7 +386,7 @@ pub(crate) fn render_losses(
     let fills = GapFills::default();
     let rc = Ctx::of(doc, &fills, images, meter)?;
     let mut notes = LossCounts::default();
-    for note in &rc.selected_notes {
+    for note in rc.selected_notes.iter().filter(|note| note.kind != NoteKind::Comment) {
         let omitted = rc.omitted_notes.contains(note.id.as_str());
         if omitted || shape::any(&note.blocks, |block| shape::shows(block, &rc, meter))? {
             visit_inlines(&note.blocks, &rc, &mut |inline, in_label| {
@@ -263,9 +401,13 @@ pub(crate) fn render_losses(
         body.tally(inline, &rc, unread, in_label);
     });
     let dangling = |found: &LossCounts| {
-        found.links.saturating_add(if unread.notes { 0 } else { found.note_refs })
+        found
+            .links
+            .saturating_add(if unread.notes { 0 } else { found.note_refs })
+            .saturating_add(if unread.comments { 0 } else { found.comment_refs })
     };
-    let sides = side_losses(doc, &rc, unread, meter)?;
+    let mut sides = side_losses(doc, &rc, unread, meter)?;
+    sides.extend(comment_losses(&rc, unread, meter)?);
     let mut losses: Vec<RenderLoss> = [
         (DiagnosticCode::DuplicateNote, Region::Note, None, rc.duplicate_notes),
         (DiagnosticCode::DanglingReference, Region::Body, None, dangling(&body)),
@@ -296,6 +438,41 @@ pub(crate) fn render_losses(
     Ok(losses)
 }
 
+fn comment_units<'d>(
+    doc: &'d Document,
+    fills: &'d GapFills,
+    meter: &Meter<'_>,
+) -> Result<BTreeMap<&'d str, Option<Unit>>, ConvertError> {
+    Ok(crate::shared::comments::reference_units(
+        &doc.blocks,
+        &doc.notes,
+        |gap| fills.filled(gap),
+        |work| meter.charge(work),
+    )?
+    .into_iter()
+    .map(|(id, units)| (id, units.first))
+    .collect())
+}
+
+fn comment_losses(
+    rc: &Ctx<'_>,
+    unread: Unread<'_>,
+    meter: &Meter<'_>,
+) -> Result<Vec<(Region, Option<Unit>, LossCounts)>, ConvertError> {
+    let mut losses = Vec::new();
+    for note in rc.selected_notes.iter().filter(|note| note.kind == NoteKind::Comment) {
+        let num = rc.comment_nums.get(&note.id).copied().unwrap_or_default();
+        let comment = rc.comment(note, num, meter)?;
+        let mut found = LossCounts::default();
+        visit_inlines(&note.blocks, &comment, &mut |inline, in_label| {
+            found.tally(inline, &comment, unread, in_label);
+        });
+        let unit = rc.comment_units.get(note.id.as_str()).copied().flatten();
+        losses.push((Region::Comment, unit, found));
+    }
+    Ok(losses)
+}
+
 /// What each side story loses where it renders, in its own scope, with its region and unit.
 fn side_losses(
     doc: &Document,
@@ -305,7 +482,7 @@ fn side_losses(
 ) -> Result<Vec<(Region, Option<Unit>, LossCounts)>, ConvertError> {
     let mut sides = Vec::new();
     for (value, unit) in side_stories(doc, rc) {
-        let side = Ctx::side(value, rc.fills, rc.images, (0, ""), meter)?;
+        let side = rc.side(value, (0, ""), meter)?;
         let mut found = LossCounts::default();
         let content = value.content.as_deref().unwrap_or_default();
         visit_inlines(content, &side, &mut |inline, in_label| {
@@ -354,6 +531,7 @@ fn side_stories<'d>(doc: &'d Document, rc: &Ctx<'d>) -> Vec<(&'d HeaderFooter, O
 struct LossCounts {
     links: u64,
     note_refs: u64,
+    comment_refs: u64,
     unsafe_links: u64,
     images: BTreeMap<(DiagnosticCode, crate::model::ImageOrigin), u64>,
 }
@@ -382,6 +560,9 @@ impl LossCounts {
                 target: LinkTarget::External(url) | LinkTarget::Relative(url), ..
             } if !is_safe_link(url) => {
                 self.unsafe_links = self.unsafe_links.saturating_add(1);
+            }
+            Inline::CommentRef(id) if !rc.defined_comments.contains(id.as_str()) => {
+                self.comment_refs = self.comment_refs.saturating_add(1);
             }
             Inline::NoteRef(id) if !rc.defined_notes.contains(id.as_str()) => {
                 self.note_refs = self.note_refs.saturating_add(1);
@@ -423,35 +604,43 @@ fn numbered_notes<'d>(rc: &Ctx<'d>) -> Vec<(&'d Note, usize)> {
     let mut ordered: Vec<_> = rc
         .selected_notes
         .iter()
-        .filter_map(|&note| rc.nums.get(&note.id).map(|&num| (note, num)))
+        .filter_map(|&note| {
+            let nums = if note.kind == NoteKind::Comment { &rc.comment_nums } else { &rc.nums };
+            nums.get(&note.id).map(|&num| (note, num))
+        })
         .collect();
-    ordered.sort_by_key(|(_, num)| *num);
+    ordered.sort_by_key(|(note, num)| (note.kind == NoteKind::Comment, *num));
     ordered
 }
 
 fn number_notes<'d>(
-    blocks: &'d [Block],
+    groups: impl IntoIterator<Item = &'d [Block]>,
     notes: &[&'d Note],
     omitted: &HashSet<&str>,
     fills: &'d GapFills,
+    comments: bool,
 ) -> NoteNumbers {
     let valid: HashMap<&str, &Note> = notes
         .iter()
         .copied()
         .filter(|note| {
-            !omitted.contains(note.id.as_str()) && !note.blocks.iter().all(block_is_blank)
+            (note.kind == NoteKind::Comment) == comments
+                && !omitted.contains(note.id.as_str())
+                && !note.blocks.iter().all(block_is_blank)
         })
         .map(|note| (note.id.as_str(), note))
         .collect();
     let mut order = Vec::new();
     let mut seen = HashSet::new();
-    collect_note_refs(blocks, &valid, &mut order, &mut seen, fills);
-    for note in notes {
+    for blocks in groups {
+        collect_note_refs(blocks, &valid, &mut order, &mut seen, fills, comments);
+    }
+    for note in notes.iter().filter(|note| (note.kind == NoteKind::Comment) == comments) {
         if valid.contains_key(note.id.as_str()) && seen.insert(note.id.as_str()) {
             order.push(note.id.as_str());
         }
     }
-    order.into_iter().enumerate().map(|(i, id)| (id.to_owned(), i + 1)).collect()
+    order.into_iter().enumerate().map(|(index, id)| (id.to_owned(), index + 1)).collect()
 }
 
 fn block_is_blank(block: &Block) -> bool {
@@ -470,6 +659,7 @@ fn collect_note_refs<'d>(
     order: &mut Vec<&'d str>,
     seen: &mut HashSet<&'d str>,
     fills: &'d GapFills,
+    comments: bool,
 ) {
     let mut stack: Vec<Node<'_>> = vec![Node::Blocks(blocks)];
     while let Some(node) = stack.pop() {
@@ -479,19 +669,28 @@ fn collect_note_refs<'d>(
                     stack.push(Node::Inline(inline));
                 }
             }
-            Node::Inline(Inline::NoteRef(id)) => {
+            Node::Inline(Inline::NoteRef(id) | Inline::CommentRef(id))
+                if matches!(node, Node::Inline(Inline::CommentRef(_))) == comments =>
+            {
                 if let Some(note) = valid.get(id.as_str())
                     && seen.insert(id.as_str())
                 {
                     order.push(id.as_str());
-                    stack.push(Node::Blocks(&note.blocks));
+                    if note.kind != NoteKind::Comment {
+                        stack.push(Node::Blocks(&note.blocks));
+                    }
                 }
             }
             Node::Inline(Inline::Link { content, .. }) => stack.push(Node::Inlines(content)),
             Node::Inline(_) => {}
             Node::Blocks(blocks) => {
                 for block in blocks.iter().rev() {
-                    stack.extend(children(block, fills).into_iter().rev());
+                    let nested = if comments {
+                        crate::model::children(block, &|gap| fills.filled(gap))
+                    } else {
+                        children(block, fills)
+                    };
+                    stack.extend(nested.into_iter().rev());
                 }
             }
             Node::Cells(mut cells) => {
@@ -756,7 +955,7 @@ fn write_header_footer(
     }
     sink.write(":")?;
     if let Some(content) = &value.content {
-        let side = Ctx::side(value, rc.fills, rc.images, (number, &prefix), sink.meter())?;
+        let side = rc.side(value, (number, &prefix), sink.meter())?;
         sink.gap(2);
         write_blocks(content, &side, sink, None)?;
         rc.side_index.set(side.side_index.get());

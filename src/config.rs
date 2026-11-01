@@ -55,6 +55,8 @@ pub struct Config {
     pub image_ocr: ImageOcr,
     /// Whether the page headers and footers a document declares appear.
     pub headers_footers: HeaderFooterPolicy,
+    /// Whether supported source comments appear as isolated footnotes.
+    pub comments: CommentPolicy,
 }
 
 impl Config {
@@ -108,6 +110,7 @@ impl Default for Config {
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
             headers_footers: HeaderFooterPolicy::Omit,
+            comments: CommentPolicy::Omit,
         }
     }
 }
@@ -120,6 +123,17 @@ pub enum HeaderFooterPolicy {
     #[default]
     Omit,
     /// Preserve their content, page-dependent fields as fixed tokens, in labelled blockquotes.
+    Emit,
+}
+
+/// Whether supported source comments appear in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum CommentPolicy {
+    /// Count source references without reading comment parts.
+    #[default]
+    Omit,
+    /// Preserve comments as GFM footnotes, with replies inside their parent.
     Emit,
 }
 

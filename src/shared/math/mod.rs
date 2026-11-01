@@ -5,8 +5,11 @@ mod mathml;
 mod omml;
 mod tex;
 
+#[cfg(test)]
+pub(crate) use omml::omath_to_tex;
+
 pub(crate) use mathml::{MathTex, mathml_is_display, mathml_to_tex};
-pub(crate) use omml::{omath_para_to_tex, omath_to_tex};
+pub(crate) use omml::{omath_para_to_tex, omath_para_with_damage, omath_with_damage};
 
 use crate::model::Inline;
 

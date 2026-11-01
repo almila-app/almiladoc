@@ -25,7 +25,7 @@ pub(crate) fn order_assets(
             return Err(ConvertError::Internal);
         }
     }
-    for phase in [AssetPhase::Main, AssetPhase::Side] {
+    for phase in [AssetPhase::Main, AssetPhase::Side, AssetPhase::Comment] {
         visit_asset_ids(document, phase, |work| ctx.charge(work), |id| order.assign(ctx, id))?;
     }
     for index in 0..document.assets.len() {
@@ -239,6 +239,19 @@ mod tests {
         for (asset, old) in document.assets.iter().zip(order) {
             assert_eq!(asset.bytes.as_ptr(), pointers[*old]);
         }
+    }
+
+    #[test]
+    fn comment_assets_follow_headers_footers_and_stored_notes() {
+        let mut comment =
+            note("comment", vec![images(&[1]), Block::BlockQuote(vec![images(&[0])])]);
+        comment.kind = NoteKind::Comment;
+        let mut doc = document(
+            vec![side(Some(vec![images(&[2])])), images(&[4])],
+            vec![comment, note("note", vec![images(&[3])])],
+            5,
+        );
+        assert_order(&mut doc, &[4, 3, 2, 1, 0]);
     }
 
     #[test]

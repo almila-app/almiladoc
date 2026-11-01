@@ -96,6 +96,8 @@ pub(crate) struct Attr {
     pub local: String,
     pub value: String,
     pub unresolved: bool,
+    #[expect(clippy::box_collection, reason = "absent provenance occupies one word per attribute")]
+    pub value_damage: Option<Box<Vec<Range<usize>>>>,
 }
 
 impl Element {
@@ -216,6 +218,45 @@ impl Element {
             }
         }
         Ok(text)
+    }
+
+    pub(crate) fn checked_text_with_damage(
+        &self,
+        ctx: &ParseCtx<'_>,
+    ) -> Result<(String, Vec<Range<usize>>), ConvertError> {
+        let mut text = String::new();
+        let mut damage = Vec::new();
+        let mut pending = vec![(self, 0, 0)];
+        self.validate_text_damage(ctx)?;
+        while let Some((element, index, mark)) = pending.last_mut() {
+            let Some(node) = element.children.get(*index) else {
+                pending.pop();
+                continue;
+            };
+            let at = *index;
+            *index += 1;
+            ctx.charge(1)?;
+            match node {
+                Node::Text(value) => {
+                    let offset = text.len();
+                    ctx.charge(value.len() as u64)?;
+                    text.push_str(value);
+                    while let Some((owner, span)) = element.text_damage().get(*mark) {
+                        if *owner != at {
+                            break;
+                        }
+                        ctx.charge(1)?;
+                        damage.push(offset + span.start..offset + span.end);
+                        *mark += 1;
+                    }
+                }
+                Node::Elem(child) => {
+                    child.validate_text_damage(ctx)?;
+                    pending.push((child, 0, 0));
+                }
+            }
+        }
+        Ok((text, damage))
     }
 
     pub(crate) fn validate_text_damage(&self, ctx: &ParseCtx<'_>) -> Result<(), ConvertError> {
@@ -764,6 +805,8 @@ fn start_to_element(
         }
         let (res, alocal) = reader.resolver().resolve_attribute(attr.key);
         let ans = bound(interner, &res, dialect, marks)?;
+        let spans = attribute_damage(&attr.value, dialect);
+        let value_damage = (!spans.is_empty()).then(|| Box::new(spans));
         let mut damage = Marks::default();
         let value = attribute_value(attr, dialect, &mut damage)?;
         marks.unresolved |= damage.unresolved;
@@ -776,6 +819,7 @@ fn start_to_element(
             local: alocal.as_ref().to_owned(),
             value,
             unresolved: damage.unresolved,
+            value_damage,
         });
     }
     check_expanded_names(&names, &attrs)?;
@@ -862,6 +906,47 @@ fn attribute_value(
     Ok(value.into_owned())
 }
 
+fn attribute_damage(mut raw: &str, dialect: Dialect) -> Vec<Range<usize>> {
+    let mut offset = 0;
+    let mut spans = Vec::new();
+    while !raw.is_empty() {
+        if let Some(after) = raw.strip_prefix('&') {
+            let name = after
+                .find([';', '&'])
+                .filter(|end| after.as_bytes().get(*end) == Some(&b';'))
+                .and_then(|end| after.get(..end));
+            if let Some(name) = name {
+                let bytes = name.len() + 2;
+                let length = match dialect.reference(name) {
+                    Reference::Char(character) => Some(character.len_utf8()),
+                    Reference::Named(value) => Some(value.len()),
+                    Reference::Unresolved => {
+                        spans.push(offset..offset + bytes);
+                        Some(bytes)
+                    }
+                    Reference::Literal => None,
+                };
+                if let Some(length) = length {
+                    offset += length;
+                    raw = raw.get(bytes..).unwrap_or_default();
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = raw.strip_prefix("\r\n") {
+            raw = rest;
+            offset += 1;
+            continue;
+        }
+        let Some(character) = raw.chars().next() else {
+            break;
+        };
+        offset += character.len_utf8();
+        raw = raw.get(character.len_utf8()..).unwrap_or_default();
+    }
+    spans
+}
+
 /// `raw` with every `&` that begins no reference the dialect reads written
 /// as `&amp;`, so the normalization keeps it literally.
 fn escape_unread_references<'v>(
@@ -927,6 +1012,21 @@ mod tests {
     }
 
     #[test]
+    fn attribute_provenance_keeps_literal_and_unresolved_twins_separate() {
+        let ctx = ParseCtx::default();
+        let xml = r#"<r a="é&#10; HYPERLINK &#34;http://x/&amp;same;&#34; \o &#34;&same;&#34;"/>"#
+            .as_bytes();
+        let tree = parse_xml(&ctx, xml, Role::Probe).unwrap();
+        let attribute = &tree.child_elems().next().unwrap().attrs[0];
+        let start = attribute.value.rfind("&same;").unwrap();
+        assert_eq!(
+            attribute.value_damage.as_deref().unwrap().as_slice(),
+            one_span(start..start + "&same;".len())
+        );
+        assert_ne!(attribute.value.find("&same;"), Some(start));
+    }
+
+    #[test]
     fn suppressed_aggregate_text_damage_keeps_element_provenance() {
         struct Quiet;
         impl NodeSink for Quiet {
@@ -985,12 +1085,15 @@ mod tests {
     }
 
     #[test]
-    fn reference_free_elements_keep_one_word_without_provenance_allocation() {
+    fn absent_provenance_and_view_state_each_use_one_word_without_allocation() {
         let parsed =
             parse(&ParseCtx::default(), b"<r>plain&amp;<c/></r>", Dialect::Xml, &mut WholeTree)
                 .unwrap();
         for element in std::iter::once(&parsed.root).chain(parsed.root.descendant_elems()) {
             assert!(element.text_damage.is_none());
+            for attribute in &element.attrs {
+                assert!(attribute.value_damage.is_none());
+            }
             assert_eq!(size_of_val(&element.text_damage), size_of::<usize>());
         }
         assert_eq!(
@@ -999,7 +1102,7 @@ mod tests {
         );
         assert_eq!(
             size_of::<Attr>(),
-            size_of::<Option<Rc<str>>>() + 2 * size_of::<String>() + size_of::<usize>(),
+            size_of::<Option<Rc<str>>>() + 2 * size_of::<String>() + 2 * size_of::<usize>(),
         );
     }
 
@@ -1935,6 +2038,7 @@ mod tests {
                     .enumerate()
                     .map(|(index, attribute)| Attr {
                         unresolved: false,
+                        value_damage: None,
                         ns: attribute.prefix.map(|at| namespace(scope[at])),
                         local: format!("{}{index}", LOCALS[index % LOCALS.len()]),
                         value: attribute.value.iter().map(|piece| piece.shown(true)).collect(),
