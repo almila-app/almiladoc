@@ -95,6 +95,7 @@ path = [
     "src/formats/ppt/tests/page_side_emit.rs",
     "src/formats/ppt/tests/page_side_reads.rs",
     "src/formats/rtf/sides.rs",
+    "src/formats/rtf/comments.rs",
     "src/identity.rs",
     "src/inspect.rs",
     "src/json.rs",

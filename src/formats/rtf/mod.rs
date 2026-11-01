@@ -4,6 +4,7 @@
 //! from label text. Page headers and footers are skipped where they stand and read where a
 //! section shows them (`sides`).
 
+mod comments;
 mod lexer;
 mod sides;
 mod table;
@@ -53,6 +54,7 @@ enum Capture {
     ListText,
     FieldInstr,
     Bookmark,
+    CommentMetadata,
     /// Inside a `\pict` destination: bytes route to the picture collector.
     Pict,
     PicturePropertyName,
@@ -83,6 +85,7 @@ struct CharState {
     omit: bool,
     /// Text marked deleted, which accepted revisions drop.
     deleted: bool,
+    inserted: bool,
     /// Hidden text, which the output leaves out.
     hidden: bool,
     capture: Capture,
@@ -119,6 +122,7 @@ impl Default for CharState {
             suppress: false,
             omit: false,
             deleted: false,
+            inserted: false,
             hidden: false,
             capture: Capture::None,
             in_note: false,
@@ -640,6 +644,9 @@ struct Parser<'a> {
     assets: AssetSink,
     /// Under `HeaderFooterPolicy::Emit`, the headers and footers each section shows.
     sides: Option<sides::Sections>,
+    comments: comments::Comments,
+    comment_story: bool,
+    source_offset: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -671,6 +678,9 @@ impl<'a> Parser<'a> {
             dest: Destinations::default(),
             assets: AssetSink::new(parse_ctx),
             sides: parse_ctx.headers_footers_requested().then(sides::Sections::new),
+            comments: comments::Comments::default(),
+            comment_story: false,
+            source_offset: 0,
         }
     }
 
@@ -679,7 +689,9 @@ impl<'a> Parser<'a> {
     fn run(&mut self) -> Result<(), ConvertError> {
         while let Some(token) = self.lexer.next_token()? {
             let depth = self.stack.len() + usize::from(matches!(token, Token::Open));
-            if let Some((table, body)) = self.tables.token(&token, depth, self.lexer.pos()) {
+            if !self.comments.capturing()
+                && let Some((table, body)) = self.tables.token(&token, depth, self.lexer.pos())
+            {
                 let group = self.bytes.get(body).unwrap_or_default();
                 let codepage = self.decoder.default_encoding;
                 self.prelude.read(self.parse_ctx, table, group, codepage)?;
@@ -719,9 +731,14 @@ impl<'a> Parser<'a> {
             }
         }
         if !self.stack.is_empty() {
-            self.parse_ctx.emit(DiagnosticCode::UnclosedStructure, Region::Body);
+            self.parse_ctx.emit(DiagnosticCode::UnclosedStructure, self.region());
         }
         self.flush_pending();
+        self.comments.close(
+            self.parse_ctx,
+            0,
+            self.source_offset.saturating_add(self.lexer.pos()),
+        )?;
         self.finish_math();
         self.end_paragraph()
     }
@@ -733,6 +750,11 @@ impl<'a> Parser<'a> {
             None => self.parse_ctx.emit(DiagnosticCode::UnmatchedClose, Region::Body),
         }
         let depth = self.stack.len();
+        self.comments.close(
+            self.parse_ctx,
+            depth,
+            self.source_offset.saturating_add(self.lexer.pos()).saturating_sub(1),
+        )?;
         if let Some(sections) = &mut self.sides {
             sections.close(depth, self.lexer.pos().saturating_sub(1));
         }
@@ -767,15 +789,26 @@ impl<'a> Parser<'a> {
         !self.state.omit && (self.state.capture != Capture::None || !self.state.suppress)
     }
 
+    fn revision_drops(&self) -> bool {
+        if self.parse_ctx.reject_revisions() { self.state.inserted } else { self.state.deleted }
+    }
+
+    fn hides(&self) -> bool {
+        self.state.hidden
+    }
+
     /// Whether body text in the current state reaches the output.
     fn renders(&self) -> bool {
         self.state.capture == Capture::None
             && !self.state.suppress
-            && !self.state.deleted
-            && !self.state.hidden
+            && !self.revision_drops()
+            && !self.hides()
     }
 
     fn region(&self) -> Region {
+        if self.comment_story {
+            return Region::Comment;
+        }
         match self.state.side {
             Some(side) => side.region(),
             None if self.state.in_note => Region::Note,
@@ -806,6 +839,7 @@ impl<'a> Parser<'a> {
             Capture::None
             | Capture::FieldInstr
             | Capture::Bookmark
+            | Capture::CommentMetadata
             | Capture::Pict
             | Capture::PicturePropertyName
             | Capture::PicturePropertyValue
@@ -816,13 +850,13 @@ impl<'a> Parser<'a> {
     /// Whether the current capture takes deleted text, which accepted
     /// revisions drop from a field instruction and an equation.
     fn captures_deleted(&self) -> bool {
-        self.state.deleted && matches!(self.state.capture, Capture::FieldInstr | Capture::Math)
+        self.revision_drops() && matches!(self.state.capture, Capture::FieldInstr | Capture::Math)
     }
 
     /// Whether the current capture takes hidden text, which an equation
     /// drops and a field instruction keeps.
     fn captures_hidden(&self) -> bool {
-        self.state.hidden && self.state.capture == Capture::Math
+        self.hides() && self.state.capture == Capture::Math
     }
 
     /// Account for a character dropped because it did not decode.
@@ -869,7 +903,7 @@ impl<'a> Parser<'a> {
     /// Leave out a structure that opens in deleted text, reporting its
     /// range, and whether it did.
     fn omit_deleted(&mut self) -> bool {
-        self.state.deleted && self.omit(Self::drop_deleted)
+        self.revision_drops() && self.omit(Self::drop_deleted)
     }
 
     fn omit(&mut self, drop_range: fn(&mut Self)) -> bool {
@@ -906,7 +940,7 @@ impl<'a> Parser<'a> {
     /// Leave out a structure that opens in hidden text, reporting its
     /// range, and whether it did; deleted text is left to `omit_deleted`.
     fn omit_hidden(&mut self) -> bool {
-        self.state.hidden && !self.state.deleted && self.omit(Self::drop_hidden)
+        self.hides() && !self.revision_drops() && self.omit(Self::drop_hidden)
     }
 
     fn close_ranges(&mut self) {
@@ -929,10 +963,12 @@ impl<'a> Parser<'a> {
             "object" => (DiagnosticCode::EmbeddedObject, self.region()),
             _ => return false,
         };
-        // A comment's group is not suppressed by its hidden anchor, so the
-        // holder test alone would report a hidden comment.
-        let anchored_hidden = code == DiagnosticCode::CommentOmitted && self.state.hidden;
-        if self.stack.last().is_some_and(|holder| !holder.suppress) && !anchored_hidden {
+        let eligible = if code == DiagnosticCode::CommentOmitted {
+            self.comment_anchor_selected()
+        } else {
+            self.stack.last().is_some_and(|holder| !holder.suppress)
+        };
+        if eligible {
             self.parse_ctx.emit(code, region);
         }
         code != DiagnosticCode::EmbeddedObject
@@ -990,7 +1026,8 @@ impl<'a> Parser<'a> {
     /// Dispatch a control word to its subsystem handler; unhandled words
     /// that name a suppressed destination silence their group.
     fn control_word(&mut self, word: &str, param: Option<i32>) -> Result<(), ConvertError> {
-        let handled = self.side_control(word, param)?
+        let handled = self.comment_control(word, param)?
+            || self.side_control(word, param)?
             || self.codepage_control(word, param)
             || self.picture_property_control(word)
             || self.math_control(word, param)
@@ -1015,6 +1052,7 @@ impl<'a> Parser<'a> {
     /// read where a section shows it, and follow the settings that choose its pages.
     fn side_control(&mut self, word: &str, param: Option<i32>) -> Result<bool, ConvertError> {
         let in_body = self.renders() && self.state.side.is_none() && !self.state.omit;
+        let reject = self.parse_ctx.reject_revisions();
         let Some(sections) = &mut self.sides else { return Ok(false) };
         let on = param != Some(0);
         match word {
@@ -1027,7 +1065,7 @@ impl<'a> Parser<'a> {
                 let holder_shows = self.stack.last().is_some_and(|holder| {
                     !holder.suppress
                         && !holder.omit
-                        && !holder.deleted
+                        && !if reject { holder.inserted } else { holder.deleted }
                         && !holder.hidden
                         && holder.capture == Capture::None
                         && holder.side.is_none()
@@ -1104,7 +1142,12 @@ impl<'a> Parser<'a> {
                 self.state.style = Style::PLAIN;
                 self.state.font = None;
                 self.state.deleted = false;
+                self.state.inserted = false;
                 self.state.hidden = false;
+            }
+            "revised" => {
+                self.flush_pending();
+                self.state.inserted = on;
             }
             "deleted" => {
                 self.flush_pending();
@@ -1150,9 +1193,9 @@ impl<'a> Parser<'a> {
             "line" | "lbr" | "page" | "column" => {
                 self.flush_pending();
                 if !self.state.suppress {
-                    if self.state.deleted {
+                    if self.revision_drops() {
                         self.drop_deleted();
-                    } else if !self.state.hidden {
+                    } else if !self.hides() {
                         if matches!(word, "page" | "column") && !self.state.in_note {
                             self.release_held(None)?;
                         }
@@ -1185,11 +1228,11 @@ impl<'a> Parser<'a> {
     /// mark other than a section break, joining the next paragraph.
     fn paragraph_mark(&mut self, section: bool) -> Result<(), ConvertError> {
         self.flush_pending();
-        let dropped = self.state.deleted || self.state.hidden;
+        let dropped = self.revision_drops() || self.hides();
         if dropped && self.state.suppress {
             return Ok(());
         }
-        if self.state.deleted {
+        if self.revision_drops() {
             self.drop_deleted();
         }
         if !self.state.suppress {
@@ -1203,7 +1246,11 @@ impl<'a> Parser<'a> {
             self.inlines.push(Inline::LineBreak);
         } else if !self.state.suppress {
             self.end_paragraph()?;
-            if section && !self.state.deleted && self.state.side.is_none() && self.sides.is_some() {
+            if section
+                && !self.revision_drops()
+                && self.state.side.is_none()
+                && self.sides.is_some()
+            {
                 self.flush_runs();
                 let begin = self.blocks.len();
                 if let Some(sections) = &mut self.sides {
@@ -1333,7 +1380,7 @@ impl<'a> Parser<'a> {
             locked: false,
             losses: Vec::new(),
             start: self.inlines.len(),
-            opened_hidden: self.state.hidden,
+            opened_hidden: self.hides(),
         });
         Ok(())
     }
@@ -1385,6 +1432,7 @@ impl<'a> Parser<'a> {
                     frame.locked = true;
                 }
             }
+            "footnote" if self.side_note_reference()? => {}
             "footnote" => {
                 self.flush_pending();
                 self.omit_hidden();
@@ -1462,10 +1510,10 @@ impl<'a> Parser<'a> {
         match word.strip_prefix('m') {
             Some(name) if OMML_NAMES.contains(&name) => {
                 self.flush_pending();
-                if self.state.deleted && !self.state.omit {
+                if self.revision_drops() && !self.state.omit {
                     self.drop_deleted();
                     self.state.omit = true;
-                } else if self.state.hidden && !self.state.omit {
+                } else if self.hides() && !self.state.omit {
                     self.drop_hidden();
                     self.state.omit = true;
                 }
@@ -1664,7 +1712,7 @@ impl<'a> Parser<'a> {
         if matches!(self.state.capture, Capture::FieldInstr | Capture::Math) {
             if !text.is_empty() {
                 self.deleted_range = None;
-                if !self.state.hidden {
+                if !self.hides() {
                     self.hidden_range = None;
                 }
             }
@@ -1688,6 +1736,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Capture::Bookmark => self.dest.bookmark.push_str(&text),
+            Capture::CommentMetadata => self.comments.push_text(&text),
             Capture::PicturePropertyName | Capture::PicturePropertyValue => {
                 if let Some(pict) = &mut self.dest.pict {
                     if self.state.capture == Capture::PicturePropertyName {
@@ -1717,11 +1766,11 @@ impl<'a> Parser<'a> {
         if (tokens.is_empty() && unmapped == 0) || self.state.suppress {
             return;
         }
-        if self.state.deleted {
+        if self.revision_drops() {
             self.drop_deleted();
             return;
         }
-        if self.state.hidden {
+        if self.hides() {
             self.drop_hidden_text(&tokens, unmapped);
             return;
         }
@@ -1904,6 +1953,7 @@ impl<'a> Parser<'a> {
         if let Some(sections) = self.sides.take() {
             blocks = self.with_sides(sections, blocks)?;
         }
+        self.read_comments(&mut blocks)?;
         Ok(Document {
             blocks,
             notes: self.dest.notes,
@@ -1998,6 +2048,7 @@ impl<'a> Parser<'a> {
         let bytes = self.bytes.get(definition.bytes()).unwrap_or_default();
         let mut story = Parser::new(self.parse_ctx, bytes);
         story.sides = None;
+        story.source_offset = self.source_offset.saturating_add(definition.range.0);
         story.prelude = std::mem::take(&mut self.prelude);
         story.assets = std::mem::replace(&mut self.assets, AssetSink::new(self.parse_ctx));
         story.decoder.default_encoding = self.decoder.default_encoding;
@@ -2011,7 +2062,9 @@ impl<'a> Parser<'a> {
             in_note: false,
             ..definition.state
         };
-        let read = story.run().and_then(|()| story.finish_blocks());
+        let read = story.run().and_then(|()| story.finish_blocks()).inspect(|_| {
+            self.import_comments(&mut story);
+        });
         self.prelude = std::mem::take(&mut story.prelude);
         self.assets = std::mem::replace(&mut story.assets, AssetSink::new(self.parse_ctx));
         read
@@ -2033,6 +2086,79 @@ mod tests {
     use super::lexer::fuel;
     use super::*;
     use crate::shared::test_support::diagnostic_rows;
+
+    fn policy_converted(source: &str, revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_revisions(revisions);
+        let doc = parse(&ctx, source.as_bytes()).unwrap();
+        (
+            crate::render::markdown::document_to_markdown(&doc),
+            diagnostic_rows(&ctx.into_diagnostics()),
+        )
+    }
+
+    #[test]
+    fn rejected_revisions_restore_deleted_text_and_drop_inserted_paragraph_marks() {
+        for (source, expected, count) in [
+            (r"{\rtf1 a{\revised new}{\deleted old}b\par}", "aoldb\n", 1),
+            (r"{\rtf1 one\revised\par\revised0 two\par}", "onetwo\n", 1),
+            (r"{\rtf1 one\deleted\par\deleted0 two\par}", "one\n\ntwo\n", 0),
+            (r"{\rtf1 {\revised a\revised0 b}\plain c{\deleted d}}", "bcd\n", 1),
+        ] {
+            let diagnostics = if count == 0 {
+                vec![]
+            } else {
+                vec![(DiagnosticCode::RevisionOmitted, Region::Body, count)]
+            };
+            assert_eq!(
+                policy_converted(source, crate::RevisionPolicy::Reject),
+                (expected.into(), diagnostics),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_emit_preserves_word_hidden_wrappers_paragraphs_and_replies() {
+        let source = r"{\rtf1 Body{\v{\*\atnid root}{\*\annotation First\par Last}}{\*\atnid reply}{\*\annotation {\*\atnparent root}Reply}\par}";
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, source.as_bytes()).unwrap();
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&document),
+            "Body[^almiladoc-comment-1][^almiladoc-comment-1]\n\n[^almiladoc-comment-1]: First\n\n    Last\n\n    > Reply\n"
+        );
+        assert_eq!(ctx.diagnostics().iter().count(), 0);
+    }
+
+    #[test]
+    fn omitted_comments_keep_word_hidden_wrappers_eligible_without_reading_content() {
+        let source =
+            r"{\rtf1 Body{\v{\*\atnid root}{\*\annotation {\pict\macpict 01}\u56320?Unread}}}";
+        assert_eq!(
+            converted(source),
+            ("Body\n".into(), vec![(DiagnosticCode::CommentOmitted, Region::Comment, 1)])
+        );
+    }
+
+    #[test]
+    fn comments_in_unselected_revisions_never_read_their_content() {
+        for (source, revisions) in [
+            (
+                r"{\rtf1 Body{\deleted{\*\annotation {\pict\macpict 01}Unread}}}",
+                crate::RevisionPolicy::Accept,
+            ),
+            (
+                r"{\rtf1 Body{\revised{\*\annotation {\pict\macpict 01}Unread}}}",
+                crate::RevisionPolicy::Reject,
+            ),
+        ] {
+            for comments in [crate::CommentPolicy::Emit, crate::CommentPolicy::Omit] {
+                let ctx = ParseCtx::default().with_comments(comments).with_revisions(revisions);
+                let document = parse(&ctx, source.as_bytes()).unwrap();
+                assert_eq!(crate::render::markdown::document_to_markdown(&document), "Body\n");
+                assert_eq!(ctx.diagnostics().iter().count(), 0);
+            }
+        }
+    }
 
     #[test]
     fn vertical_position_controls_follow_group_scope_and_resets() {
@@ -3267,7 +3393,7 @@ mod tests {
             ("\\v inside an unknown destination", r"{\rtf1 a{\*\x \v t}b\par}".into(), Some("ab\n"), vec![]),
             ("\\v inside the document information", r"{\rtf1 {\info{\title \v t}}a\par}".into(), Some("a\n"), vec![]),
             ("\\v inside a list label", r"{\rtf1 \pard{\listtext \v 1.\tab}a\par}".into(), Some("- 1\\. a\n"), vec![]),
-            ("a hidden comment", r"{\rtf1 a{\v{\*\atnid x}{\*\annotation c}}\par}".into(), Some("a\n"), vec![]),
+            ("a hidden comment", r"{\rtf1 a{\v{\*\atnid x}{\*\annotation c}}\par}".into(), Some("a\n"), vec![(DiagnosticCode::CommentOmitted, Region::Comment, 1)]),
             ("a hidden page number", r"{\rtf1 a{\v\chpgn}\par}".into(), Some("a\n"), vec![]),
             ("a hidden object", r"{\rtf1 a{\v{\object{\*\objdata 01}{\result x}}}\par}".into(), Some("a\n"), vec![hidden(Body, 1)]),
             ("a hidden field", r#"{\rtf1 a{\v{\field{\*\fldinst HYPERLINK "http://x/"}{\fldrslt b}}}\par}"#.into(), Some("a\n"), vec![hidden(Body, 1)]),
