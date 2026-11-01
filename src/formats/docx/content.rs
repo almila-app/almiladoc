@@ -451,6 +451,7 @@ fn copy_with(
         });
     }
     let local = copied(parse_ctx, &elem.local)?;
+    parse_ctx.charge(u64::from(elem.selection.is_some()))?;
     Ok(Element {
         ns: elem.ns.clone(),
         local,
@@ -458,6 +459,7 @@ fn copy_with(
         children,
         unresolved_text: elem.unresolved_text,
         text_damage: (!text_damage.is_empty()).then(|| Box::new(text_damage)),
+        selection: elem.selection.clone(),
     })
 }
 

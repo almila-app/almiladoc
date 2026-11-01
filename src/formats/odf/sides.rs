@@ -87,7 +87,7 @@ impl<'c, 'a, 'b> MasterSides<'c, 'a, 'b> {
     fn publish_one(
         &mut self,
         (side, variant): (Side, Variant),
-        shown: &Shown<'_>,
+        shown: &Shown<'b>,
         name: &str,
         blocks: &mut Vec<Block>,
     ) -> Result<(), ConvertError> {
@@ -144,7 +144,9 @@ fn variant_shown(side: Option<&Element>) -> Shown<'_> {
 }
 
 /// A side's content: its left, center and right regions in turn where it has them.
-fn side_blocks(side: &Element, ctx: &Ctx<'_, '_>) -> Result<Vec<Block>, ConvertError> {
+fn side_blocks<'b>(side: &'b Element, ctx: &Ctx<'_, 'b>) -> Result<Vec<Block>, ConvertError> {
+    let selected = ctx.selected_story(side)?;
+    let side = selected.as_ref().unwrap_or(side);
     let regions: Vec<&Element> =
         REGIONS.iter().filter_map(|name| side.find(ns::STYLE, name)).collect();
     if regions.is_empty() {
@@ -209,7 +211,7 @@ fn walk_masters<'b>(
         }
         let segment = children.get(start..position).unwrap_or_default();
         blocks.extend(parse_children(segment.iter().copied(), ctx)?);
-        if flattened(child) {
+        if flattened(child, ctx) {
             walk_masters(child, ctx, sides, blocks)?;
             start = position + 1;
         } else {
@@ -239,7 +241,7 @@ fn in_flow<'e>(
             if !hidden && !visit(elem)? {
                 return Ok(());
             }
-        } else if flattened(elem) || is_list_part(elem) {
+        } else if flattened(elem, ctx) || is_list_part(elem) {
             let start = pending.len();
             pending.extend(elem.child_elems());
             pending.get_mut(start..).unwrap_or_default().reverse();
@@ -274,10 +276,12 @@ fn applied<'b>(elem: &Element, ctx: &Ctx<'_, 'b>) -> Result<Option<&'b Element>,
 }
 
 /// Whether the body writes a container's children in its place, as `parse_block_elem` does.
-fn flattened(elem: &Element) -> bool {
+fn flattened(elem: &Element, ctx: &Ctx<'_, '_>) -> bool {
     elem.ns.as_deref() == Some(ns::TEXT)
         && match elem.local.as_str() {
-            "section" => elem.attr(ns::TEXT, "display") != Some("none"),
+            "section" => {
+                ctx.parse_ctx.hidden_requested() || elem.attr(ns::TEXT, "display") != Some("none")
+            }
             "index-body" | "index-title" | "table-of-content" | "alphabetical-index"
             | "bibliography" | "illustration-index" | "table-index" | "object-index"
             | "user-index" => true,

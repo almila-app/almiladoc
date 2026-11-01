@@ -86,6 +86,8 @@ path = [
     "src/formats/pptx/comments.rs",
     "src/formats/odf/datastyle.rs",
     "src/formats/odf/sides.rs",
+    "src/formats/odf/comments.rs",
+    "src/formats/odf/revisions.rs",
     "src/formats/ppt/fonts.rs",
     "src/formats/ppt/hidden.rs",
     "src/formats/ppt/records.rs",

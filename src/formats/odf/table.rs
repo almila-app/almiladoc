@@ -689,7 +689,9 @@ fn cell_blocks(
     if has_content || ctx.dropped() != dropped {
         return Ok(blocks);
     }
-    let Some(text) = fallback_text(cell) else {
+    let fallback = fallback_text(cell);
+    fallback_damage(cell, ctx, fallback.is_some());
+    let Some(text) = fallback else {
         return Ok(Vec::new());
     };
     if let Some(code) = unapplied_format(cell, ctx, site)?.code() {
@@ -731,6 +733,31 @@ fn unapplied_format(
 fn format_cost(ctx: &Ctx<'_, '_>, style: &str, shown: Shown) -> Result<FormatCost, ConvertError> {
     ctx.parse_ctx.charge(u64::try_from(style.len()).unwrap_or(u64::MAX).max(1))?;
     ctx.styles.format_cost(ctx.parse_ctx, style, shown)
+}
+
+fn fallback_damage(cell: &Element, ctx: &Ctx<'_, '_>, shown: bool) {
+    if !shown && cell.child_elems().any(|e| e.is(ns::TEXT, "p") || e.is(ns::TEXT, "h")) {
+        return;
+    }
+    let kind = cell.attr(ns::OFFICE, "value-type");
+    let attribute = match kind {
+        Some("string") => "string-value",
+        Some("date") => "date-value",
+        Some("time") => "time-value",
+        Some("boolean") => "boolean-value",
+        _ => "value",
+    };
+    let damaged = crate::shared::xml::attribute_unresolved(cell, ns::OFFICE, attribute);
+    if damaged && shown && matches!(kind, Some("string" | "date")) {
+        ctx.unresolved(true);
+    } else if damaged || crate::shared::xml::attribute_unresolved(cell, ns::OFFICE, "value-type") {
+        ctx.emit(DiagnosticCode::CellValueUnreadable);
+    }
+    ctx.unresolved(
+        shown
+            && kind == Some("currency")
+            && crate::shared::xml::attribute_unresolved(cell, ns::OFFICE, "currency"),
+    );
 }
 
 fn value_text(cell: &Element) -> Option<String> {
@@ -840,7 +867,10 @@ pub(super) fn parse_spreadsheet(
         .filter(|e| e.is(ns::TABLE, "table"))
         .map(|table| {
             let style = table.attr(ns::TABLE, "style-name");
-            Ok((table, ctx.styles.table_shown(ctx.parse_ctx, style)?))
+            Ok((
+                table,
+                ctx.parse_ctx.hidden_requested() || ctx.styles.table_shown(ctx.parse_ctx, style)?,
+            ))
         })
         .collect::<Result<Vec<(&Element, bool)>, ConvertError>>()?;
     let multi_sheet = tables.iter().filter(|(_, shown)| *shown).count() > 1;
@@ -848,6 +878,7 @@ pub(super) fn parse_spreadsheet(
     let mut sides = ctx.parse_ctx.headers_footers_requested().then(|| MasterSides::new(ctx));
     for (position, (table, shown)) in tables.into_iter().enumerate() {
         let unit = ctx.parse_ctx.begin_unit(crate::model::UnitKind::Sheet, position)?;
+        ctx.damage.reset();
         if !shown {
             ctx.emit(DiagnosticCode::HiddenOmitted);
             continue;
@@ -862,7 +893,12 @@ pub(super) fn parse_spreadsheet(
             super::report_running(master, ctx.parse_ctx);
         }
         let name = table.attr(ns::TABLE, "name").unwrap_or("");
-        let content = build_table(table, ctx, Visibility::Applied)?;
+        let visibility = if ctx.parse_ctx.hidden_requested() {
+            Visibility::Ignored
+        } else {
+            Visibility::Applied
+        };
+        let content = build_table(table, ctx, visibility)?;
         blocks.push(Block::UnitStart(unit.unit().model()));
         let start = blocks.len();
         if let (Some(sides), Some(master)) = (sides.as_mut(), master) {

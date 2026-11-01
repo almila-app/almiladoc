@@ -27,6 +27,9 @@ pub(super) struct Ctx<'a, 'b> {
     pub pkg: &'b Package<'a>,
     pub assets: &'b RefCell<AssetSink>,
     pub notes: RefCell<Vec<Note>>,
+    pub comments: RefCell<super::comments::Comments<'b>>,
+    revisions: RefCell<super::revisions::StoryViews<'b, 'b>>,
+    pub damage: crate::shared::xml::DamageScope,
     note_ids: RefCell<std::collections::HashSet<String>>,
     /// Continuation counters per (list style, depth): the next number a
     /// `text:continue-numbering` list resumes at.
@@ -38,6 +41,7 @@ pub(super) struct Ctx<'a, 'b> {
     region: Cell<Region>,
     held: Cell<Held>,
     dropped: Cell<u64>,
+    accepted_deletions: std::collections::HashSet<*const Element>,
 }
 
 impl<'a, 'b> Ctx<'a, 'b> {
@@ -46,6 +50,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
         styles: &'b OdfStyles<'b>,
         pkg: &'b Package<'a>,
         assets: &'b RefCell<AssetSink>,
+        accepted_deletions: std::collections::HashSet<*const Element>,
+        comments: super::comments::Comments<'b>,
+        revisions: super::revisions::StoryViews<'b, 'b>,
     ) -> Self {
         Self {
             parse_ctx,
@@ -53,6 +60,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
             pkg,
             assets,
             notes: RefCell::new(Vec::new()),
+            comments: RefCell::new(comments),
+            revisions: RefCell::new(revisions),
+            damage: crate::shared::xml::DamageScope::default(),
             note_ids: RefCell::default(),
             list_counters: RefCell::default(),
             list_ids: RefCell::default(),
@@ -60,11 +70,23 @@ impl<'a, 'b> Ctx<'a, 'b> {
             region: Cell::new(Region::Body),
             held: Cell::default(),
             dropped: Cell::default(),
+            accepted_deletions,
         }
+    }
+
+    pub(super) fn selected_story(
+        &self,
+        source: &'b Element,
+    ) -> Result<Option<Element>, ConvertError> {
+        self.revisions.borrow_mut().selected(source)
     }
 
     pub(super) fn emit(&self, code: DiagnosticCode) {
         self.emit_count(code, 1);
+    }
+
+    pub(super) fn unresolved(&self, damaged: bool) {
+        self.damage.report(self.parse_ctx, self.region.get(), damaged);
     }
 
     pub(super) fn emit_count(&self, code: DiagnosticCode, count: u64) {
@@ -99,11 +121,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let lists = self.list_counters.take();
         let ids = self.list_ids.take();
         let headings = self.heading_counters.take();
-        let (out, _) = self.holding(|| self.in_region(region, f));
+        let (out, _) = self.damage.isolated(|| self.holding(|| self.in_region(region, f)));
         self.list_counters.replace(lists);
         self.list_ids.replace(ids);
         self.heading_counters.replace(headings);
         out
+    }
+
+    pub(super) fn comment_reference(&self, elem: &Element) -> Result<Option<Inline>, ConvertError> {
+        if !self.parse_ctx.comments_requested() {
+            self.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+            return Ok(None);
+        }
+        self.comments.borrow_mut().reference(self.parse_ctx, elem).map(Some)
+    }
+
+    fn revision_omitted(&self, elem: &Element) -> bool {
+        self.accepted_deletions.contains(&std::ptr::from_ref(elem))
+            || (self.parse_ctx.reject_revisions() && super::revisions::omitted(elem))
     }
 
     fn in_side_region(&self) -> bool {
@@ -151,6 +186,17 @@ fn parse_blocks<'e>(
     let mut run = StyledRun::default();
     let mut after_list = false;
     for child in children {
+        if let Some(crate::package::xml::ContentSelection::Hidden(count)) =
+            child.selection.as_deref()
+        {
+            ctx.parse_ctx.emit_count(DiagnosticCode::HiddenOmitted, ctx.region.get(), *count);
+            ctx.mark_dropped();
+            after_list = false;
+            continue;
+        }
+        if let Some(fault) = super::revisions::fault(child) {
+            return Err(fault.error());
+        }
         after_list = if child.is(ns::TEXT, "list") {
             run.flush(&mut blocks);
             parse_list(child, ctx, depth, style_name, ancestors, after_list, &mut blocks)?
@@ -174,25 +220,7 @@ fn parse_block_elem(
             run.flush(blocks);
         }
         match elem.local.as_str() {
-            "h" => {
-                let level = elem
-                    .attr(ns::TEXT, "outline-level")
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .unwrap_or(1);
-                if let Some((mut inlines, boxes)) = parse_inline_content(elem, ctx)? {
-                    if !inlines_are_empty(&inlines) {
-                        rebase_emphasis(&mut inlines, paragraph_base(elem, ctx)?.resolve());
-                        // ODF outline links target headings by their text; carry
-                        // it as the heading's anchor id (without the number).
-                        let anchor = Some(crate::model::inlines_to_plain_text(&inlines));
-                        if let Some(label) = heading_label(elem, level, ctx) {
-                            inlines.insert(0, Inline::plain(label));
-                        }
-                        blocks.push(Block::Heading { level, anchor, content: inlines });
-                    }
-                    blocks.extend(boxes);
-                }
-            }
+            "h" => parse_heading(elem, ctx, blocks)?,
             "p" => {
                 if let Some((inlines, boxes)) = parse_inline_content(elem, ctx)? {
                     let style = elem
@@ -214,33 +242,66 @@ fn parse_block_elem(
             }
             // ODF 1.3 Part 3 19.802.6: `condition` defers to `text:condition`,
             // which is never evaluated, so only `none` hides.
-            "section" if elem.attr(ns::TEXT, "display") == Some("none") => ctx.drop_block(elem),
+            "section"
+                if !ctx.parse_ctx.hidden_requested()
+                    && elem.attr(ns::TEXT, "display") == Some("none") =>
+            {
+                ctx.drop_block(elem);
+            }
             "section" | "index-body" | "index-title" | "table-of-content"
             | "alphabetical-index" | "bibliography" | "illustration-index" | "table-index"
             | "object-index" | "user-index" => blocks.extend(parse_container(elem, ctx)?),
             "numbered-paragraph" => ctx.emit(DiagnosticCode::BlockUnread),
-            "tracked-changes" => report_deletions(elem, ctx),
+            "change" | "change-start" if ctx.revision_omitted(elem) => {
+                ctx.emit(DiagnosticCode::RevisionOmitted);
+            }
             _ => {}
         }
     } else if elem.is(ns::TABLE, "table") {
         run.flush(blocks);
         blocks.extend(parse_table(elem, ctx)?);
-    } else if elem.is(ns::OFFICE, "annotation") {
-        ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+    } else if super::comments::is_annotation(elem) {
+        parse_annotation(elem, ctx, blocks, run)?;
     } else {
         report_unplaced(elem, ctx)?;
     }
     Ok(())
 }
 
-/// Report the deleted text a `text:tracked-changes` holds, which accepted
-/// revisions leave out.
-fn report_deletions(changes: &Element, ctx: &Ctx<'_, '_>) {
-    let deletions =
-        changes.descendants(ns::TEXT, "deletion").fold(0u64, |n, _| n.saturating_add(1));
-    if deletions > 0 {
-        ctx.emit_count(DiagnosticCode::RevisionOmitted, deletions);
+fn parse_heading(
+    elem: &Element,
+    ctx: &Ctx<'_, '_>,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConvertError> {
+    let level =
+        elem.attr(ns::TEXT, "outline-level").and_then(|v| v.parse::<u8>().ok()).unwrap_or(1);
+    if let Some((mut inlines, boxes)) = parse_inline_content(elem, ctx)? {
+        if !inlines_are_empty(&inlines) {
+            rebase_emphasis(&mut inlines, paragraph_base(elem, ctx)?.resolve());
+            // ODF outline links target headings by their text; carry
+            // it as the heading's anchor id (without the number).
+            let anchor = Some(crate::model::inlines_to_plain_text(&inlines));
+            if let Some(label) = heading_label(elem, level, ctx) {
+                inlines.insert(0, Inline::plain(label));
+            }
+            blocks.push(Block::Heading { level, anchor, content: inlines });
+        }
+        blocks.extend(boxes);
     }
+    Ok(())
+}
+
+fn parse_annotation(
+    elem: &Element,
+    ctx: &Ctx<'_, '_>,
+    blocks: &mut Vec<Block>,
+    run: &mut StyledRun,
+) -> Result<(), ConvertError> {
+    if let Some(reference) = ctx.comment_reference(elem)? {
+        run.flush(blocks);
+        blocks.push(Block::Paragraph(vec![reference]));
+    }
+    Ok(())
 }
 
 /// Report a drawing a container holds outside its text, which no output
@@ -342,6 +403,10 @@ pub(super) fn holds_content(elem: &Element) -> bool {
     while let Some(parent) = pending.pop() {
         for node in &parent.children {
             match node {
+                Node::Elem(e) if matches!(e.selection.as_deref(), Some(crate::package::xml::ContentSelection::Hidden(count)) if *count > 0) =>
+                {
+                    return true;
+                }
                 Node::Text(text) if renders(text) => return true,
                 Node::Text(_) => {}
                 Node::Elem(e) if is_graphic(e) || e.is(ns::TEXT, "note") => return true,
@@ -602,7 +667,7 @@ fn parse_inline_content(
     elem: &Element,
     ctx: &Ctx<'_, '_>,
 ) -> Result<Option<ParagraphContent>, ConvertError> {
-    if hidden_by_fields(elem, ctx.parse_ctx)? {
+    if !ctx.parse_ctx.hidden_requested() && hidden_by_fields(elem, ctx.parse_ctx)? {
         ctx.drop_block(elem);
         return Ok(None);
     }
@@ -621,23 +686,44 @@ fn parse_inline_content(
 
 /// Whether the body leaves a paragraph or heading out whole: hidden by its fields or its style.
 pub(super) fn block_hidden(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<bool, ConvertError> {
-    Ok(hidden_by_fields(elem, ctx.parse_ctx)? || paragraph_base(elem, ctx)?.hidden == Some(true))
+    Ok(!ctx.parse_ctx.hidden_requested()
+        && (hidden_by_fields(elem, ctx.parse_ctx)?
+            || paragraph_base(elem, ctx)?.hidden == Some(true)))
 }
 
 /// Whether the `text:hidden-paragraph` fields of a paragraph hide it. ODF 1.3
 /// Part 3 7.7.11: one whose condition holds hides it unless another's fails;
 /// each condition is read from its cached `text:is-hidden` (19.821), never
 /// evaluated, so an absent value shows.
-fn hidden_by_fields(paragraph: &Element, parse_ctx: &ParseCtx<'_>) -> Result<bool, ConvertError> {
+pub(super) fn hidden_by_fields(
+    paragraph: &Element,
+    parse_ctx: &ParseCtx<'_>,
+) -> Result<bool, ConvertError> {
     let mut fields = Fields::default();
     paragraph_fields(paragraph, parse_ctx, &mut fields)?;
-    Ok(fields.hide && !fields.show)
+    Ok(fields.hides())
 }
 
-#[derive(Default)]
-struct Fields {
+#[derive(Clone, Copy, Default)]
+pub(super) struct Fields {
     hide: bool,
     show: bool,
+}
+
+impl Fields {
+    pub(super) fn include(&mut self, field: &Element) {
+        let hide = field.attr(ns::TEXT, "is-hidden") == Some("true");
+        self.merge(Self { hide, show: !hide });
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        self.hide |= other.hide;
+        self.show |= other.show;
+    }
+
+    pub(super) fn hides(self) -> bool {
+        self.hide && !self.show
+    }
 }
 
 /// Record what the `text:hidden-paragraph` fields under `elem` say, through
@@ -651,11 +737,7 @@ fn paragraph_fields(
     for child in elem.child_elems() {
         parse_ctx.charge(1)?;
         if child.is(ns::TEXT, "hidden-paragraph") {
-            if child.attr(ns::TEXT, "is-hidden") == Some("true") {
-                fields.hide = true;
-            } else {
-                fields.show = true;
-            }
+            fields.include(child);
         } else if child.ns.as_deref() == Some(ns::TEXT)
             && matches!(
                 child.local.as_str(),
@@ -698,7 +780,45 @@ impl Hidden {
 /// The style a paragraph's runs cascade from. An unstyled paragraph still sits
 /// on the family's default style.
 fn paragraph_base(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<StyleDelta, ConvertError> {
-    ctx.styles.delta(ctx.parse_ctx, "paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))
+    element_delta(elem, ctx.parse_ctx, ctx.styles, StyleDelta::default())
+}
+
+pub(super) fn element_delta(
+    elem: &Element,
+    parse_ctx: &ParseCtx<'_>,
+    styles: &OdfStyles<'_>,
+    inherited: StyleDelta,
+) -> Result<StyleDelta, ConvertError> {
+    if elem.is(ns::TEXT, "p") || elem.is(ns::TEXT, "h") {
+        styles.delta(parse_ctx, "paragraph", elem.attr(ns::TEXT, "style-name").unwrap_or(""))
+    } else if elem.is(ns::TEXT, "span") {
+        elem.attr(ns::TEXT, "style-name")
+            .map(|name| styles.delta(parse_ctx, "text", name))
+            .transpose()
+            .map(|named| named.map_or(inherited, |delta| inherited.merge(delta)))
+    } else {
+        Ok(inherited)
+    }
+}
+
+fn projected_selection(
+    element: &Element,
+    hides: bool,
+    hidden: &mut Hidden,
+) -> Result<bool, ConvertError> {
+    if let Some(crate::package::xml::ContentSelection::Hidden(count)) = element.selection.as_deref()
+    {
+        hidden.hide(*count > 0);
+        return Ok(true);
+    }
+    if let Some(fault) = super::revisions::fault(element) {
+        if !hides {
+            return Err(fault.error());
+        }
+        hidden.hide(true);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn walk_inlines(
@@ -710,13 +830,26 @@ fn walk_inlines(
     hidden: &mut Hidden,
 ) -> Result<(), ConvertError> {
     let style = delta.resolve();
-    let hides = delta.hidden == Some(true);
-    for node in &elem.children {
+    let hides = !ctx.parse_ctx.hidden_requested() && delta.hidden == Some(true);
+    elem.validate_text_damage(ctx.parse_ctx)?;
+    for (at, node) in elem.children.iter().enumerate() {
+        if let Node::Elem(child) = node
+            && projected_selection(child, hides, hidden)?
+        {
+            continue;
+        }
+
         match node {
             Node::Text(t) if hides => hidden.hide(renders(t)),
             Node::Text(t) => {
                 let text = collapse_ws(&clean_text(t));
                 if !text.is_empty() {
+                    ctx.parse_ctx.charge(t.len() as u64)?;
+                    ctx.damage.report(
+                        ctx.parse_ctx,
+                        ctx.region.get(),
+                        elem.text_damage().iter().any(|(owner, _)| *owner == at),
+                    );
                     hidden.push(ctx, out, Inline::Text { text, style });
                 }
             }
@@ -725,9 +858,9 @@ fn walk_inlines(
             {
                 walk_text_elem(child, ctx, delta, out, boxes, hidden)?;
             }
-            Node::Elem(child) if child.is(ns::OFFICE, "annotation") => {
-                if !hides {
-                    ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+            Node::Elem(child) if super::comments::is_annotation(child) => {
+                if !hides && let Some(reference) = ctx.comment_reference(child)? {
+                    hidden.push(ctx, out, reference);
                 }
             }
             Node::Elem(child) if child.is(ns::DRAW, "frame") && hides => {
@@ -760,27 +893,13 @@ fn walk_text_elem(
     boxes: &mut Vec<Block>,
     hidden: &mut Hidden,
 ) -> Result<(), ConvertError> {
-    let hides = delta.hidden == Some(true);
+    let hides = !ctx.parse_ctx.hidden_requested() && delta.hidden == Some(true);
     match child.local.as_str() {
         "span" => {
-            let merged = child
-                .attr(ns::TEXT, "style-name")
-                .map(|name| ctx.styles.delta(ctx.parse_ctx, "text", name))
-                .transpose()?
-                .map_or(delta, |named| delta.merge(named));
+            let merged = element_delta(child, ctx.parse_ctx, ctx.styles, delta)?;
             walk_inlines(child, ctx, merged, out, boxes, hidden)?;
         }
-        "a" => {
-            let href = child.attr(ns::XLINK, "href").unwrap_or("");
-            let mut content = Vec::new();
-            walk_inlines(child, ctx, delta, &mut content, boxes, hidden)?;
-            match classify_href(href) {
-                Some(target) if !inlines_are_empty(&content) => {
-                    out.push(Inline::Link { content, target });
-                }
-                _ => out.append(&mut content),
-            }
-        }
+        "a" => walk_link(child, ctx, delta, out, boxes, hidden)?,
         "s" | "tab" | "line-break" | "bookmark" | "bookmark-start" if hides => hidden.hide(false),
         "s" => {
             let n = child.attr(ns::TEXT, "c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
@@ -795,11 +914,16 @@ fn walk_text_elem(
         }
         "note" if hides => hidden.hide(true),
         "note" => push_note(child, ctx, hidden, out)?,
-        "hidden-text" if child.attr(ns::TEXT, "is-hidden") == Some("true") => {
+        "hidden-text"
+            if !ctx.parse_ctx.hidden_requested()
+                && child.attr(ns::TEXT, "is-hidden") == Some("true") =>
+        {
             hidden.hide(holds_content(child));
         }
-        "tracked-changes" => report_deletions(child, ctx),
-        "soft-page-break" => {}
+        "change" | "change-start" if !hides && ctx.revision_omitted(child) => {
+            ctx.emit(DiagnosticCode::RevisionOmitted);
+        }
+        "tracked-changes" | "soft-page-break" => {}
         local
             if ctx.in_side_region()
                 && let Some(token) = side_token(local, child) =>
@@ -812,6 +936,32 @@ fn walk_text_elem(
             }
         }
         _ => walk_inlines(child, ctx, delta, out, boxes, hidden)?,
+    }
+    Ok(())
+}
+
+fn walk_link(
+    child: &Element,
+    ctx: &Ctx<'_, '_>,
+    delta: StyleDelta,
+    out: &mut Vec<Inline>,
+    boxes: &mut Vec<Block>,
+    hidden: &mut Hidden,
+) -> Result<(), ConvertError> {
+    let href = child.attr(ns::XLINK, "href").unwrap_or("");
+    let mut content = Vec::new();
+    walk_inlines(child, ctx, delta, &mut content, boxes, hidden)?;
+    match classify_href(href) {
+        Some(target) if !inlines_are_empty(&content) => {
+            ctx.damage.report(
+                ctx.parse_ctx,
+                ctx.region.get(),
+                crate::shared::xml::attribute_unresolved(child, ns::XLINK, "href")
+                    && crate::shared::uri::is_safe_link(href),
+            );
+            out.push(Inline::Link { content, target });
+        }
+        _ => out.append(&mut content),
     }
     Ok(())
 }
@@ -847,6 +997,10 @@ fn push_note(
     let id = note
         .attr(ns::TEXT, "id")
         .map_or_else(|| format!("odf:a:{idx}"), |id| format!("odf:n:{id}"));
+    if matches!(ctx.region.get(), Region::Header | Region::Footer | Region::Comment) {
+        out.push(Inline::NoteRef(id));
+        return Ok(());
+    }
     if !ctx.note_ids.borrow_mut().insert(id.clone()) {
         ctx.parse_ctx.emit(DiagnosticCode::DuplicateNote, Region::Note);
         out.push(Inline::NoteRef(id));
@@ -876,13 +1030,13 @@ pub(super) fn frame_content(
     frame: &Element,
     ctx: &Ctx<'_, '_>,
 ) -> Result<Option<FrameContent>, ConvertError> {
-    let alt = frame
-        .find(ns::SVG_COMPAT, "title")
-        .map(Element::text)
-        .or_else(|| frame.find(ns::SVG_COMPAT, "desc").map(Element::text))
-        .unwrap_or_default();
+    let label = frame.find(ns::SVG_COMPAT, "title").or_else(|| frame.find(ns::SVG_COMPAT, "desc"));
+    let alt = label.map(Element::text).unwrap_or_default();
     let alt = clean_text(alt.trim());
     let image = |alt, source| {
+        ctx.unresolved(
+            ctx.parse_ctx.image_alt_requested() && label.is_some_and(|label| label.unresolved_text),
+        );
         let origin = ctx.parse_ctx.image_origin(ctx.region.get());
         FrameContent::Inline(Inline::Image { origin, alt, source })
     };
@@ -895,9 +1049,10 @@ pub(super) fn frame_content(
         }
         if content.is(ns::DRAW, "object") {
             match read_object(ctx, content)? {
-                Object::Formula(MathTex { tex, glyphs }) => {
+                Object::Formula(MathTex { tex, glyphs, unresolved }) => {
                     ctx.emit_count(DiagnosticCode::UnmappedSymbol, glyphs);
                     if !tex.is_empty() {
+                        ctx.unresolved(unresolved);
                         return Ok(Some(FrameContent::Inline(Inline::Math(tex))));
                     }
                 }
@@ -906,6 +1061,9 @@ pub(super) fn frame_content(
             }
         } else if content.is(ns::DRAW, "image") {
             let source = load_image(ctx, content.attr(ns::XLINK, "href").unwrap_or(""))?;
+            ctx.unresolved(ctx.parse_ctx.image_links_requested()
+                && matches!(&source, ImageSource::External(url) if crate::shared::uri::is_safe_link(url))
+                && crate::shared::xml::attribute_unresolved(content, ns::XLINK, "href"));
             return Ok(Some(image(alt, source)));
         } else if content.ns.as_deref() == Some(ns::DRAW)
             && let Some(code) = media_loss(content)
@@ -942,8 +1100,7 @@ pub(super) fn read_object(ctx: &Ctx<'_, '_>, object: &Element) -> Result<Object,
     else {
         return Ok(unread);
     };
-    let Some(tree) = ctx.pkg.related_xml_part(&target.path, Role::Reported(ctx.region.get()))?
-    else {
+    let Some(tree) = ctx.pkg.related_xml_part(&target.path, Role::Probe)? else {
         return Ok(unread);
     };
     if let Some(math) = tree.first_descendant(ns::MATHML, "math") {
@@ -1020,17 +1177,27 @@ mod tests {
     #[test]
     fn paragraph_fields_are_sought_only_where_one_may_sit_and_each_look_is_charged() {
         let field = r#"<text:p><text:hidden-paragraph text:is-hidden="true"/></text:p>"#;
-        let xml = format!(
-            r#"<text:p xmlns:text="{}" xmlns:draw="{}"><text:span><text:a><text:s/></text:a></text:span><text:meta><text:s/></text:meta><text:meta-field><text:s/></text:meta-field><text:ruby><text:ruby-base><text:s/></text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:note><text:note-body>{field}</text:note-body></text:note><draw:frame><draw:text-box>{field}</draw:text-box></draw:frame></text:p>"#,
-            ns::TEXT,
-            ns::DRAW
-        );
-        let tree =
-            crate::package::xml::parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe)
-                .unwrap();
-        let paragraph = tree.find(ns::TEXT, "p").unwrap();
-        let parse_ctx = ParseCtx::default();
-        assert!(!hidden_by_fields(paragraph, &parse_ctx).unwrap());
-        assert_eq!(parse_ctx.fuel(), 13);
+        let hide = r#"<text:hidden-paragraph text:is-hidden="true"/>"#;
+        let show = r#"<text:hidden-paragraph text:is-hidden="false"/>"#;
+        for (prefix, hidden, looked) in [
+            (String::new(), false, 13),
+            (hide.to_string(), true, 14),
+            (show.to_string(), false, 14),
+            (format!("{hide}{show}"), false, 15),
+            (format!("{show}{hide}"), false, 15),
+        ] {
+            let xml = format!(
+                r#"<text:p xmlns:text="{}" xmlns:draw="{}">{prefix}<text:span><text:a><text:s/></text:a></text:span><text:meta><text:s/></text:meta><text:meta-field><text:s/></text:meta-field><text:ruby><text:ruby-base><text:s/></text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:note><text:note-body>{field}</text:note-body></text:note><draw:frame><draw:text-box>{field}</draw:text-box></draw:frame></text:p>"#,
+                ns::TEXT,
+                ns::DRAW
+            );
+            let tree =
+                crate::package::xml::parse_xml(&ParseCtx::default(), xml.as_bytes(), Role::Probe)
+                    .unwrap();
+            let paragraph = tree.find(ns::TEXT, "p").unwrap();
+            let parse_ctx = ParseCtx::default();
+            assert_eq!(hidden_by_fields(paragraph, &parse_ctx).unwrap(), hidden);
+            assert_eq!(parse_ctx.fuel(), looked);
+        }
     }
 }

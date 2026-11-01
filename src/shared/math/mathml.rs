@@ -12,6 +12,8 @@ pub(crate) struct MathTex {
     pub tex: String,
     /// The `mglyph` images it would show, which have no character.
     pub glyphs: u64,
+    /// Whether selected source text contains an unresolved XML reference.
+    pub unresolved: bool,
 }
 
 /// A `math` element as LaTeX source without delimiters, counting the image
@@ -19,7 +21,8 @@ pub(crate) struct MathTex {
 pub(crate) fn mathml_to_tex(math: &Element) -> MathTex {
     let mut glyphs = 0;
     let tex = sub_children(&mut glyphs, math);
-    MathTex { tex: tex.finish(), glyphs }
+    let (tex, unresolved) = tex.finish_with_damage();
+    MathTex { tex, glyphs, unresolved }
 }
 
 /// Whether a `math` element asks for display (block) layout.
@@ -71,33 +74,16 @@ fn sub_children(glyphs: &mut u64, elem: &Element) -> Tex {
 fn walk_elem(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     if matches!(e.local.as_str(), "mi" | "mn" | "mo" | "mtext" | "ms") {
         *glyphs = glyphs.saturating_add(glyphs_in(e));
+        tex.push_tex(&token(e));
+        return;
     }
     match e.local.as_str() {
         "semantics" => {
             if let Some(annotation) = tex_annotation(e) {
-                tex.push_str(&annotation);
+                tex.push_tex(&annotation);
             } else if let Some(first) = presentation(e) {
                 walk_elem(glyphs, first, tex);
             }
-        }
-        "mi" => identifier(e, tex),
-        "mn" => tex.push_math_text(&e.text()),
-        "mo" => operator(e, tex),
-        "mtext" => {
-            let text = e.text();
-            if !text.trim().is_empty() {
-                tex.push_text_mode(text.trim_matches(|c: char| c == '\n' || c == '\r'));
-            }
-        }
-        "ms" => {
-            let text = e.text();
-            let quoted = format!(
-                "{}{}{}",
-                e.attr_any("lquote").unwrap_or("\""),
-                text.trim_matches(|c: char| c == '\n' || c == '\r'),
-                e.attr_any("rquote").unwrap_or("\"")
-            );
-            tex.push_text_mode(&quoted);
         }
         "mspace" => space(e, tex),
         "mfrac" => fraction(glyphs, e, tex),
@@ -119,13 +105,48 @@ fn walk_elem(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
         "mmultiscripts" => multiscripts(glyphs, e, tex),
         "mfenced" => fenced(glyphs, e, tex),
         "mtable" => table(glyphs, e, tex),
-        "mphantom" => tex.push_command("\\phantom", &sub_children(&mut 0, e)),
+        "mphantom" => {
+            tex.push_command("\\phantom", &sub_children(&mut 0, e).without_unresolved());
+        }
         "menclose" => enclosure(glyphs, e, tex),
         "mglyph" => *glyphs = glyphs.saturating_add(1),
         "annotation" | "annotation-xml" | "maligngroup" | "malignmark" | "none" | "mprescripts" => {
         }
         _ => walk_children(glyphs, e, tex),
     }
+}
+
+fn token(e: &Element) -> Tex {
+    let mut tex = Tex::default();
+    match e.local.as_str() {
+        "mi" => identifier(e, &mut tex),
+        "mn" => tex.push_math_text(&e.text()),
+        "mo" => operator(e, &mut tex),
+        "mtext" => {
+            let text = e.text();
+            if !text.trim().is_empty() {
+                tex.push_text_mode(text.trim_matches(|c: char| c == '\n' || c == '\r'));
+            }
+        }
+        "ms" => {
+            let text = e.text();
+            let quoted = format!(
+                "{}{}{}",
+                e.attr_any("lquote").unwrap_or("\""),
+                text.trim_matches(|c: char| c == '\n' || c == '\r'),
+                e.attr_any("rquote").unwrap_or("\"")
+            );
+            tex.push_text_mode(&quoted);
+            tex.mark_unresolved(
+                ["lquote", "rquote"]
+                    .iter()
+                    .any(|name| crate::shared::xml::attribute_any_unresolved(e, name)),
+            );
+        }
+        _ => {}
+    }
+    tex.mark_unresolved(!tex.is_empty() && e.unresolved_text);
+    tex
 }
 
 fn space(e: &Element, tex: &mut Tex) {
@@ -160,22 +181,41 @@ fn fraction(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
 fn fenced(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     let open = e.attr_any("open").unwrap_or("(");
     let close = e.attr_any("close").unwrap_or(")");
-    let separators: Vec<char> =
-        e.attr_any("separators").unwrap_or(",").chars().filter(|c| !c.is_whitespace()).collect();
+    let separators: Vec<(char, bool)> =
+        attribute_chars(e, "separators", ",").filter(|(c, _)| !c.is_whitespace()).collect();
     tex.push_macro("\\left");
     tex.push_str(open.chars().next().map_or(".", delimiter));
     for (i, part) in e.child_elems().enumerate() {
         if i > 0 {
             // The last separator repeats for any further arguments.
             let sep = separators.get(i - 1).or(separators.last());
-            if let Some(sep) = sep {
+            if let Some((sep, damaged)) = sep {
                 tex.push_math_char(*sep);
+                tex.mark_unresolved(*damaged);
             }
         }
         tex.push_tex(&sub(glyphs, part));
     }
     tex.push_macro("\\right");
     tex.push_str(close.chars().next().map_or(".", delimiter));
+}
+
+fn attribute_chars<'a>(
+    e: &'a Element,
+    name: &str,
+    fallback: &'a str,
+) -> impl Iterator<Item = (char, bool)> + 'a {
+    let attr = e.attrs.iter().find(|attr| attr.local == name);
+    let text = attr.map_or(fallback, |attr| attr.value.as_str());
+    let mut damage = attr
+        .and_then(|attr| attr.value_damage.as_deref())
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .peekable();
+    text.char_indices().map(move |(offset, c)| {
+        while damage.next_if(|span| span.end <= offset).is_some() {}
+        (c, damage.peek().is_some_and(|span| span.start <= offset))
+    })
 }
 
 fn enclosure(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
@@ -192,7 +232,7 @@ fn enclosure(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     }
 }
 
-fn tex_annotation(semantics: &Element) -> Option<String> {
+fn tex_annotation(semantics: &Element) -> Option<Tex> {
     semantics
         .child_elems()
         .filter(|a| a.local == "annotation")
@@ -204,8 +244,17 @@ fn tex_annotation(semantics: &Element) -> Option<String> {
                 )
             })
         })
-        .map(|a| a.text().trim().to_string())
-        .filter(|t| !t.is_empty())
+        .and_then(|a| {
+            let text = a.text();
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let mut tex = Tex::default();
+            tex.push_str(text);
+            tex.mark_unresolved(a.unresolved_text);
+            Some(tex)
+        })
 }
 
 fn identifier(e: &Element, tex: &mut Tex) {

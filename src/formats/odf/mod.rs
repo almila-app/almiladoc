@@ -1,7 +1,9 @@
 //! OpenDocument Text (.odt), Spreadsheet (.ods), and Presentation (.odp).
 
 mod axes;
+mod comments;
 mod datastyle;
+mod revisions;
 mod sides;
 mod styles;
 mod table;
@@ -18,6 +20,7 @@ use crate::shared::assets::AssetSink;
 use crate::shared::sides::{PageSides, SideTimeline};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 use text::{Ctx, holds_content, parse_container};
 
 const STYLES_PART: &str = "styles.xml";
@@ -31,56 +34,84 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         return Err(ConvertError::Encrypted);
     }
 
-    let content_tree = pkg.required_xml_part("content.xml", Role::Content(Region::Body))?;
-    let body = content_tree
-        .find(ns::OFFICE, "document-content")
-        .and_then(|d| d.find(ns::OFFICE, "body"))
-        .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))?;
-
-    let (styles_tree, styles_unread) = if body.find(ns::OFFICE, "spreadsheet").is_some() {
+    let content_source =
+        pkg.required_xml_part("content.xml", Role::DeferredContent(Region::Body))?;
+    let raw_body = office_body(&content_source)?;
+    let (styles_source, styles_unread) = if raw_body.find(ns::OFFICE, "spreadsheet").is_some() {
         read_spreadsheet_styles(parse_ctx, &pkg)?
     } else {
-        (pkg.optional_xml_part(STYLES_PART, Role::Content(Region::Body))?, false)
+        (pkg.optional_xml_part(STYLES_PART, Role::DeferredContent(Region::Body))?, false)
     };
+    let styles_tree = styles_source.as_ref();
     let mut styles = styles::OdfStyles::default();
     if styles_unread {
         styles.mark_unread();
     }
-    for tree in styles_tree.iter().chain([&content_tree]) {
+    for tree in styles_tree.into_iter().chain([&content_source]) {
         styles.collect(tree);
     }
 
-    let assets = RefCell::new(AssetSink::new(parse_ctx));
-    let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets);
+    let styles = Rc::new(styles);
+    let mut views = revisions::StoryViews::with_styles(
+        parse_ctx,
+        styles_source.iter().chain(std::iter::once(&content_source)),
+        Rc::clone(&styles),
+    )?;
+    let body_view = views.selected(raw_body)?;
+    let body = body_view.as_ref().unwrap_or(raw_body);
 
-    let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
-        if parse_ctx.headers_footers_requested() {
-            sides::text_with_masters(text, &ctx)?
+    let assets = RefCell::new(AssetSink::new(parse_ctx));
+    let accepted =
+        revisions::accepted(parse_ctx, std::iter::once(&content_source).chain(styles_tree))?;
+    let comments = comments::Comments::new(
+        parse_ctx,
+        std::iter::once(&content_source).chain(styles_source.as_ref()),
+    )?;
+    let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets, accepted, comments, views);
+
+    let mut blocks = parse_body(body, &ctx, styles_tree)?;
+
+    comments::append(&ctx, &mut blocks)?;
+    let notes = ctx.notes.into_inner();
+    let assets = std::mem::take(&mut assets.borrow_mut().assets);
+    Ok(Document { blocks, notes, assets, ..Document::default() })
+}
+
+fn office_body(tree: &Element) -> Result<&Element, ConvertError> {
+    tree.find(ns::OFFICE, "document-content")
+        .and_then(|document| document.find(ns::OFFICE, "body"))
+        .ok_or_else(|| ConvertError::malformed_part("content.xml", "no office:body"))
+}
+
+fn parse_body(
+    body: &Element,
+    ctx: &Ctx<'_, '_>,
+    styles_tree: Option<&Element>,
+) -> Result<Vec<Block>, ConvertError> {
+    if let Some(text) = body.find(ns::OFFICE, "text") {
+        if ctx.parse_ctx.headers_footers_requested() {
+            sides::text_with_masters(text, ctx)
         } else {
-            for master in text_master_pages(parse_ctx, text, &styles)? {
-                report_running(master, parse_ctx);
+            for master in text_master_pages(ctx.parse_ctx, text, ctx.styles)? {
+                report_running(master, ctx.parse_ctx);
             }
-            parse_container(text, &ctx)?
+            parse_container(text, ctx)
         }
     } else if let Some(sheet) = body.find(ns::OFFICE, "spreadsheet") {
-        table::parse_spreadsheet(sheet, &ctx)?
+        table::parse_spreadsheet(sheet, ctx)
     } else if let Some(pres) = body.find(ns::OFFICE, "presentation") {
         let fill_images: HashMap<&str, &Element> = styles_tree
             .iter()
             .flat_map(|tree| tree.descendants(ns::DRAW, "fill-image"))
             .filter_map(|image| Some((image.attr(ns::DRAW, "name")?, image)))
             .collect();
-        parse_presentation(pres, &ctx, &fill_images)?
+        parse_presentation(pres, ctx, &fill_images)
     } else {
-        return Err(ConvertError::malformed_part(
+        Err(ConvertError::malformed_part(
             "content.xml",
             "no recognized office body (text, spreadsheet, or presentation)",
-        ));
-    };
-
-    let notes = ctx.notes.into_inner();
-    let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes, assets, ..Document::default() })
+        ))
+    }
 }
 
 /// A spreadsheet's styles part that does not read costs formatting alone, unless its entry
@@ -93,7 +124,9 @@ fn read_spreadsheet_styles(
     let lost = match pkg.part(STYLES_PART) {
         Ok(Some(bytes)) => match pkg.optional_xml_part(STYLES_PART, Role::Probe)? {
             Some(tree) => return Ok((Some(tree), false)),
-            None if styles::sets_hiding(parse_ctx, &bytes)? => Role::Content(Region::Body),
+            None if !parse_ctx.hidden_requested() && styles::sets_hiding(parse_ctx, &bytes)? => {
+                Role::Content(Region::Body)
+            }
             None => Role::Formatting,
         },
         Ok(None) => return Ok((None, false)),
@@ -200,8 +233,15 @@ fn parse_presentation(
     let mut art = HashMap::new();
     for (position, page) in pres.find_all(ns::DRAW, "page").enumerate() {
         let unit = ctx.parse_ctx.begin_unit(crate::model::UnitKind::Slide, position)?;
-        blocks.push(Block::UnitStart(unit.unit().model()));
         let props = page_properties(page, ctx);
+        ctx.damage.reset();
+        if !ctx.parse_ctx.hidden_requested()
+            && props.and_then(|props| props.attr(ns::PRESENTATION, "visibility")) == Some("hidden")
+        {
+            ctx.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+            continue;
+        }
+        blocks.push(Block::UnitStart(unit.unit().model()));
         if let Some(master) = styles.master_or_first(page.attr(ns::DRAW, "master-page-name")) {
             let (_, shown) =
                 masters.entry(master.attr(ns::STYLE, "name")).or_insert((master, Shown::default()));
@@ -418,8 +458,10 @@ fn walk_shape(child: &Element, ctx: &Ctx<'_, '_>, slide: &mut Slide) -> Result<(
         ctx.in_region(Region::Note, || walk_notes(child, ctx, notes, sides))?;
         return Ok(());
     }
-    if child.is(ns::OFFICE, "annotation") || child.is(OFFICEOOO, "annotation") {
-        ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+    if comments::is_annotation(child) {
+        if let Some(reference) = ctx.comment_reference(child)? {
+            slide.body.push(Block::Paragraph(vec![reference]));
+        }
         return Ok(());
     }
     if child.is(DR3D, "scene") {
@@ -738,8 +780,7 @@ mod tests {
     use DiagnosticCode::{
         BlockUnread, CommentOmitted, EmbeddedObject, FooterOmitted, FormControlUnread,
         GraphicUnread, HeaderOmitted, HiddenOmitted, ImageUnavailable, ImageUnplaced,
-        PartUnreadable, RevisionOmitted, StylePartUnreadable, TableSpanRepaired, TextBoxUnread,
-        UnmappedSymbol,
+        PartUnreadable, StylePartUnreadable, TableSpanRepaired, TextBoxUnread, UnmappedSymbol,
     };
 
     fn frame(content: &str) -> String {
@@ -1038,6 +1079,45 @@ mod tests {
     }
 
     #[test]
+    fn formula_entity_damage_follows_selected_mathml_in_inline_and_linked_objects() {
+        for (body, damaged) in [
+            ("<math:mi>&unknown;</math:mi>", true),
+            (
+                r#"<math:semantics><math:mi>&unknown;</math:mi><math:annotation encoding="tex">x</math:annotation></math:semantics>"#,
+                false,
+            ),
+            ("<math:mphantom><math:mi>&unknown;</math:mi></math:mphantom>", false),
+            ("<math:mi>x</math:mi><math:annotation>&unknown;</math:annotation>", false),
+        ] {
+            let formula = format!(
+                r#"<math:math xmlns:math="http://www.w3.org/1998/Math/MathML">{body}</math:math>"#
+            );
+            for linked in [false, true] {
+                let object = if linked {
+                    r#"<draw:object xlink:href="Object1"/>"#.to_string()
+                } else {
+                    format!("<draw:object>{formula}</draw:object>")
+                };
+                let parts = [("Object1/content.xml", formula.as_str())];
+                let odf =
+                    Odf { parts: &parts, ..text(&format!("<text:p>{}</text:p>", frame(&object))) };
+                let ctx = ParseCtx::default();
+                let doc = parse(&ctx, &odf.build()).unwrap();
+                assert_ne!(document_to_markdown(&doc), "");
+                let expected: Vec<Reported> = damaged
+                    .then_some((DiagnosticCode::UnresolvedEntity, Region::Body, None, 1))
+                    .into_iter()
+                    .collect();
+                assert_eq!(
+                    diagnostic_rows::<Reported>(&ctx.diagnostics()),
+                    expected,
+                    "{body} linked={linked}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[expect(clippy::too_many_lines, reason = "the table of formulas by where they render")]
     fn a_formula_reports_the_image_glyphs_it_drops_where_it_renders() {
         let math = |body: &str| {
@@ -1275,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn comments_and_deletions_are_omitted_and_counted() {
+    fn comments_are_counted_but_unreferenced_deletions_are_not() {
         let body = r#"<text:tracked-changes>
             <text:changed-region text:id="c1"><text:deletion><text:p>gone</text:p></text:deletion></text:changed-region>
             <text:changed-region text:id="c2"><text:insertion/></text:changed-region>
@@ -1284,10 +1364,7 @@ mod tests {
             <text:p>kept<text:tracked-changes><text:changed-region text:id="c4"><text:deletion><text:p>inline</text:p></text:deletion></text:changed-region></text:tracked-changes><office:annotation><text:p>remark</text:p></office:annotation><office:annotation-end/></text:p>"#;
         let (md, reported) = convert(&text(body));
         assert_eq!(md, "kept\n");
-        assert_eq!(
-            reported,
-            [(CommentOmitted, Region::Comment, None, 1), (RevisionOmitted, BODY, None, 3)]
-        );
+        assert_eq!(reported, [(CommentOmitted, Region::Comment, None, 1)]);
 
         let cell = "<office:annotation><text:p>note</text:p></office:annotation>";
         assert_eq!(
@@ -1315,6 +1392,202 @@ mod tests {
         <text:list-style style:name="Split"><text:list-level-style-number text:level="1" style:num-format="1" text:start-value="4"/><text:list-level-style-number text:level="2" style:num-format="1" text:start-value="3" text:display-levels="2"/><text:list-level-style-number text:level="3" style:num-format="1" text:start-value="6" text:display-levels="3"/></text:list-style>
         <text:outline-style style:name="Outline"><text:outline-level-style text:level="1" style:num-format="1"/></text:outline-style>
         </office:automatic-styles>"#;
+
+    #[test]
+    fn hidden_emit_restores_text_fields_sections_and_spreadsheet_axes() {
+        let source = Odf {
+            head: HIDING,
+            ..text(concat!(
+                "<text:section text:display=\"none\"><text:p>section</text:p></text:section>",
+                "<text:p text:style-name=\"Gone\">paragraph</text:p>",
+                "<text:p><text:hidden-paragraph text:is-hidden=\"true\"/>field</text:p>",
+                "<text:p><text:span text:style-name=\"Hide\">span</text:span>",
+                "<text:hidden-text text:is-hidden=\"true\">text</text:hidden-text></text:p>"
+            ))
+        };
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(document_to_markdown(&doc), "section\n\nparagraph\n\nfield\n\nspantext\n");
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), []);
+        let source = sheet(concat!(
+            "<table:table table:name=\"Secret\" table:display=\"false\">",
+            "<table:table-column table:visibility=\"collapse\"/>",
+            "<table:table-row table:visibility=\"collapse\"><table:table-cell><text:p>cell</text:p>",
+            "</table:table-cell></table:table-row></table:table>"
+        ));
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(document_to_markdown(&doc), "|  |\n| --- |\n| cell |\n");
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), []);
+    }
+
+    #[test]
+    fn hidden_slide_omission_keeps_ordinals_and_skips_its_side_payloads() {
+        let source = Odf {
+            head: concat!(
+                "<office:automatic-styles>",
+                "<style:style style:name=\"Hidden\" style:family=\"drawing-page\">",
+                "<style:drawing-page-properties presentation:visibility=\"hidden\"/>",
+                "</style:style></office:automatic-styles>"
+            ),
+            ..slides(concat!(
+                "<draw:page draw:style-name=\"Hidden\"><draw:rect><text:p><text:bookmark-start text:name=\"secret\"/>hidden</text:p></draw:rect>",
+                "<office:annotation><text:p>&bad;<draw:frame><draw:image xlink:href=\"missing.png\"/></draw:frame></text:p></office:annotation></draw:page>",
+                "<draw:page><draw:rect><text:p><text:a xlink:href=\"#secret\">jump</text:a></text:p></draw:rect></draw:page>"
+            ))
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(document_to_markdown(&doc), "jump\n");
+        assert_eq!(
+            doc.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::UnitStart(unit) => Some(unit.ordinal.get()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        assert_eq!(doc.notes.len(), 0);
+        assert_eq!(doc.assets.len(), 0);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(HiddenOmitted, BODY, Some(1), 1)]
+        );
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            "<a id=\"secret\"></a>hidden\n\n---\n\n[jump](#secret)\n"
+        );
+        assert_eq!(
+            doc.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::UnitStart(unit) => Some(unit.ordinal.get()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(CommentOmitted, Region::Comment, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn entity_damage_follows_selected_odf_text_revisions_and_link_targets() {
+        let source = Odf {
+            head: HIDING,
+            ..text(concat!(
+                "<text:tracked-changes><text:changed-region text:id=\"d\"><text:deletion><text:p>&old;</text:p></text:deletion></text:changed-region>",
+                "<text:changed-region text:id=\"i\"><text:insertion/></text:changed-region></text:tracked-changes>",
+                "<text:p><text:span text:style-name=\"Hide\">&hidden;</text:span>",
+                "<text:change-start text:change-id=\"i\"/>&new;<text:change-end text:change-id=\"i\"/>",
+                "<text:change text:change-id=\"d\"/></text:p>"
+            ))
+        };
+        for (revision, expected) in [
+            (crate::RevisionPolicy::Accept, "&amp;new;\n"),
+            (crate::RevisionPolicy::Reject, "&amp;old;\n"),
+        ] {
+            let ctx = ParseCtx::default().with_revisions(revision);
+            let doc = parse(&ctx, &source.build()).unwrap();
+            assert_eq!(document_to_markdown(&doc), expected);
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                [
+                    (DiagnosticCode::UnresolvedEntity, BODY, None, 1),
+                    (DiagnosticCode::RevisionOmitted, BODY, None, 1),
+                    (HiddenOmitted, BODY, None, 1)
+                ]
+            );
+        }
+        let source = text(
+            r#"<text:p><text:a xlink:href="https://www.example.org/&target;" office:name="&metadata;">www.example.org</text:a></text:p>"#,
+        );
+        let ctx = ParseCtx::default();
+        parse(&ctx, &source.build()).unwrap();
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::UnresolvedEntity, BODY, None, 1)]
+        );
+    }
+
+    #[test]
+    fn selected_cell_attributes_report_damage_without_reading_hidden_or_overridden_values() {
+        let source = sheet(concat!(
+            "<table:table><table:table-row>",
+            "<table:table-cell office:value-type=\"string\" office:string-value=\"&shown;\"/>",
+            "<table:table-cell office:value-type=\"string\" office:string-value=\"&unused;\"><text:p>cached</text:p></table:table-cell>",
+            "</table:table-row><table:table-row table:visibility=\"collapse\"><table:table-cell office:value-type=\"boolean\" office:boolean-value=\"&hidden;\"/>",
+            "</table:table-row></table:table>"
+        ));
+        let ctx = ParseCtx::default();
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(
+            document_to_markdown(&doc),
+            "|  |  |\n| --- | --- |\n| &amp;shown; | cached |\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [
+                (DiagnosticCode::UnresolvedEntity, BODY, Some(1), 1),
+                (HiddenOmitted, BODY, Some(1), 1)
+            ]
+        );
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [
+                (DiagnosticCode::CellValueUnreadable, BODY, Some(1), 1),
+                (DiagnosticCode::UnresolvedEntity, BODY, Some(1), 1)
+            ]
+        );
+        assert_eq!(doc.assets.len(), 0);
+    }
+
+    #[test]
+    fn overridden_cached_value_damage_does_not_reach_the_selected_cell_text() {
+        let source = sheet(concat!(
+            "<table:table><table:table-row><table:table-cell office:value-type=\"string\" office:string-value=\"&unused;\">",
+            "<text:p>cached</text:p></table:table-cell></table:table-row></table:table>"
+        ));
+        let ctx = ParseCtx::default();
+        let doc = parse(&ctx, &source.build()).unwrap();
+        assert_eq!(document_to_markdown(&doc), "|  |\n| --- |\n| cached |\n");
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), []);
+    }
+
+    #[test]
+    fn odf_image_entity_damage_follows_the_image_policy_and_selected_label() {
+        let cases = [
+            ("&label;", "https://www.example.org/ok", crate::ImagePolicy::Placeholder, true),
+            ("&label;", "https://www.example.org/ok", crate::ImagePolicy::AltText, true),
+            ("plain", "https://www.example.org/&target;", crate::ImagePolicy::Placeholder, true),
+            ("plain", "https://www.example.org/&target;", crate::ImagePolicy::AltText, false),
+            ("&label;", "https://www.example.org/&target;", crate::ImagePolicy::Omit, false),
+        ];
+        for (label, target, images, damaged) in cases {
+            let body = format!(
+                r#"<text:p><draw:frame><svg:title xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">{label}</svg:title><draw:image xlink:href="{target}"/></draw:frame></text:p>"#
+            );
+            let source = text(&body);
+            let ctx = ParseCtx::default().with_images(images);
+            parse(&ctx, &source.build()).unwrap();
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                if damaged {
+                    vec![(DiagnosticCode::UnresolvedEntity, BODY, None, 1)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
 
     fn hidden(count: u64) -> Vec<Reported> {
         vec![(HiddenOmitted, BODY, None, count)]
@@ -2512,6 +2785,65 @@ mod tests {
     fn a_formatting_change_is_neither_applied_nor_counted() {
         let body = r#"<text:tracked-changes><text:changed-region text:id="c1"><text:format-change><office:change-info/></text:format-change></text:changed-region></text:tracked-changes><text:p><text:change-start text:change-id="c1"/>kept<text:change-end text:change-id="c1"/></text:p>"#;
         assert_eq!(convert(&text(body)), ("kept\n".to_string(), vec![]));
+    }
+
+    fn revision_side(kind: &str, display: &str) -> String {
+        let definitions: String = (0..=6).map(|level| {
+            let content = if level == 6 { "old".to_string() } else {
+                let next = level + 1;
+                format!(r#"<text:change text:change-id="d{next}"/><text:change text:change-id="d{next}"/>"#)
+            };
+            format!(r#"<text:changed-region text:id="d{level}"><text:deletion><text:p>{content}</text:p></text:deletion></text:changed-region>"#)
+        }).collect();
+        format!(
+            r#"<style:{kind} {display}><text:tracked-changes>{definitions}</text:tracked-changes><text:p><text:change text:change-id="d0"/></text:p></style:{kind}>"#
+        )
+    }
+
+    #[test]
+    fn unselected_revision_side_stories_leave_the_selected_header_budget_available() {
+        let ignored = revision_side("header", "");
+        let disabled = revision_side("header", r#"style:display="false""#);
+        let shown_header = revision_side("header", "");
+        let shown_footer = revision_side("footer", "");
+        let cases = [
+            format!(
+                r#"<style:master-page style:name="Unused">{ignored}</style:master-page><style:master-page style:name="Used">{shown_header}</style:master-page>"#
+            ),
+            format!(
+                r#"<style:master-page style:name="Used">{disabled}{shown_footer}</style:master-page>"#
+            ),
+        ];
+        let head = r#"<office:automatic-styles><style:style style:name="Body" style:family="paragraph" style:master-page-name="Used"/></office:automatic-styles>"#;
+        let limits = Limits { max_xml_nodes: 128, ..Limits::default() };
+        for masters in cases {
+            let styles = format!("<office:master-styles>{masters}</office:master-styles>");
+            let source = Odf {
+                head,
+                styles: &styles,
+                ..text(r#"<text:p text:style-name="Body">body</text:p>"#)
+            };
+            for policy in [crate::HeaderFooterPolicy::Omit, crate::HeaderFooterPolicy::Emit] {
+                let ctx = ParseCtx::new(&limits)
+                    .with_revisions(crate::RevisionPolicy::Reject)
+                    .with_headers_footers(policy);
+                let doc = parse(&ctx, &source.build()).unwrap();
+                let restored = doc.blocks.iter().any(|block| match block {
+                    Block::HeaderFooter(side) => side.content.as_ref().is_some_and(|blocks| {
+                        blocks.iter().any(|block| block.plain_text() == "old".repeat(64))
+                    }),
+                    _ => false,
+                });
+                assert_eq!(restored, policy == crate::HeaderFooterPolicy::Emit);
+                assert_eq!(
+                    diagnostic_rows::<Reported>(&ctx.diagnostics())
+                        .iter()
+                        .filter(|(code, ..)| *code == PartUnreadable)
+                        .count(),
+                    0
+                );
+            }
+        }
     }
 
     #[test]

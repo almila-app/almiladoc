@@ -507,6 +507,7 @@ fn math_elem(local: &str) -> Element {
     Element {
         unresolved_text: false,
         text_damage: None,
+        selection: None,
         ns: Some(Rc::from(ns::M)),
         local: local.to_string(),
         attrs: Vec::new(),

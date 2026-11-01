@@ -21,6 +21,11 @@ pub(super) enum Fraction {
 }
 
 impl Tex {
+    pub(super) fn without_unresolved(mut self) -> Self {
+        self.unresolved = false;
+        self
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.out.is_empty()
     }

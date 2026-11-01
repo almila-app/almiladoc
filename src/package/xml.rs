@@ -78,6 +78,29 @@ impl Node {
 
 type TextDamage = Vec<(usize, Range<usize>)>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeferredFault {
+    Malformed(&'static str),
+    Refused { limit: Limit, max: u64 },
+}
+
+impl DeferredFault {
+    pub(crate) fn error(self) -> ConvertError {
+        match self {
+            Self::Malformed(reason) => ConvertError::malformed(reason),
+            Self::Refused { limit, max } => ConvertError::limit(limit, max),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentSelection {
+    Omitted,
+    Fault(DeferredFault),
+    Source(usize),
+    Hidden(u64),
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Element {
     /// Resolved namespace URI (interned); `None` for unqualified names.
@@ -88,6 +111,7 @@ pub(crate) struct Element {
     pub unresolved_text: bool,
     /// Ordered `children` indices and node-local UTF-8 byte ranges of unresolved references.
     pub text_damage: Option<Box<TextDamage>>,
+    pub selection: Option<Box<ContentSelection>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -851,6 +875,7 @@ fn start_to_element(
         children: Vec::new(),
         unresolved_text: false,
         text_damage: None,
+        selection: None,
     })
 }
 
@@ -1091,6 +1116,7 @@ mod tests {
                 .unwrap();
         for element in std::iter::once(&parsed.root).chain(parsed.root.descendant_elems()) {
             assert!(element.text_damage.is_none());
+            assert!(element.selection.is_none());
             for attribute in &element.attrs {
                 assert!(attribute.value_damage.is_none());
             }
@@ -1098,7 +1124,7 @@ mod tests {
         }
         assert_eq!(
             size_of::<Element>(),
-            size_of::<Option<Rc<str>>>() + 3 * size_of::<Vec<()>>() + 2 * size_of::<usize>(),
+            size_of::<Option<Rc<str>>>() + 3 * size_of::<Vec<()>>() + 3 * size_of::<usize>(),
         );
         assert_eq!(
             size_of::<Attr>(),
@@ -2058,6 +2084,7 @@ mod tests {
                     children,
                     unresolved_text: false,
                     text_damage: None,
+                    selection: None,
                 }
             }
         }
@@ -2258,6 +2285,7 @@ mod tests {
                     let expected = Element {
                         unresolved_text: false,
                         text_damage: None,
+                        selection: None,
                         ns: None,
                         local: "root".into(),
                         attrs: Vec::new(),

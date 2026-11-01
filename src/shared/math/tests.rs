@@ -79,6 +79,67 @@ fn mathml_prefers_a_tex_annotation_and_drops_the_rest() {
     assert_eq!(tex, "x = 1");
 }
 
+const MATHML_DAMAGE_CASES: &[(&str, &str, bool)] = &[
+    ("<mi>&unknown;</mi>", "\\&unknown;", true),
+    ("<mn>&unknown;</mn>", "\\&unknown;", true),
+    ("<mo>&unknown;</mo>", "\\&unknown;", true),
+    ("<mtext>&unknown;</mtext>", "\\text{\\&unknown;}", true),
+    ("<ms>&unknown;</ms>", "\\text{\"\\&unknown;\"}", true),
+    ("<mi>&amp;unknown;</mi>", "\\&unknown;", false),
+    ("<mi><![CDATA[&unknown;]]></mi>", "\\&unknown;", false),
+    ("&unknown;<mi>x</mi>", "x", false),
+    ("<mi>x</mi><annotation>&unknown;</annotation>", "x", false),
+    ("<semantics><mi>x</mi><mi>&unknown;</mi></semantics>", "x", false),
+    (
+        r#"<semantics><mi>&unknown;</mi><annotation encoding="tex">x</annotation></semantics>"#,
+        "x",
+        false,
+    ),
+    (
+        r#"<semantics><mi>x</mi><annotation encoding="tex">&unknown;</annotation></semantics>"#,
+        "&unknown;",
+        true,
+    ),
+    ("<mfrac><mi>x</mi><mi>y</mi><mi>&unknown;</mi></mfrac>", "\\frac{x}{y}", false),
+    ("<msup><mi>x</mi><mi>y</mi><mi>&unknown;</mi></msup>", "x^{y}", false),
+    ("<mphantom><mi>&unknown;</mi></mphantom>", "\\phantom{\\&unknown;}", false),
+    (
+        "<mfrac><mi>x</mi><msup><mi>y</mi><mi>&unknown;</mi></msup></mfrac>",
+        "\\frac{x}{y^{\\&unknown;}}",
+        true,
+    ),
+    (r#"<ms lquote="&unknown;" rquote="end">x</ms>"#, "\\text{\\&unknown;xend}", true),
+    (r#"<ms lquote="start" rquote="&unknown;">x</ms>"#, "\\text{startx\\&unknown;}", true),
+    (
+        r#"<mfenced open="(&unknown;" close=")&unknown;"><mi>x</mi></mfenced>"#,
+        "\\left(x\\right)",
+        false,
+    ),
+    (
+        r#"<mfenced open="&unknown;" close="&unknown;"><mi>x</mi></mfenced>"#,
+        "\\left.x\\right.",
+        false,
+    ),
+    (
+        r#"<mfenced separators=",&unknown;"><mi>x</mi><mi>y</mi></mfenced>"#,
+        "\\left(x,y\\right)",
+        false,
+    ),
+    (
+        r#"<mfenced separators=",&unknown;"><mi>x</mi><mi>y</mi><mi>z</mi></mfenced>"#,
+        "\\left(x,y\\&z\\right)",
+        true,
+    ),
+];
+
+#[test]
+fn mathml_damage_follows_only_the_text_its_selected_output_uses() {
+    for &(body, expected, damaged) in MATHML_DAMAGE_CASES {
+        let MathTex { tex, glyphs, unresolved } = convert(body);
+        assert_eq!((tex.as_str(), glyphs, unresolved), (expected, 0, damaged), "{body}");
+    }
+}
+
 #[test]
 fn mathml_presentation_tree_converts() {
     let tex = mathml(concat!(
@@ -194,7 +255,11 @@ const GLYPH_CASES: &[(&str, &str, &str, u64)] = &[
 #[test]
 fn mathml_counts_the_image_glyphs_it_drops_where_they_would_show() {
     for &(name, body, tex, glyphs) in GLYPH_CASES {
-        assert_eq!(convert(body), MathTex { tex: tex.to_string(), glyphs }, "{name}");
+        assert_eq!(
+            convert(body),
+            MathTex { tex: tex.to_string(), glyphs, unresolved: false },
+            "{name}"
+        );
     }
 }
 

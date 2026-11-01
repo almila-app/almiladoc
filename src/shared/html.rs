@@ -502,7 +502,7 @@ impl Builder<'_> {
     }
 
     fn push_math(&mut self, elem: &Element) {
-        let MathTex { tex, glyphs } = mathml_to_tex(elem);
+        let MathTex { tex, glyphs, .. } = mathml_to_tex(elem);
         self.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, Region::Body, glyphs);
         if tex.is_empty() {
             return;

@@ -13,9 +13,20 @@ impl DamageScope {
         }
     }
 
+    pub(crate) fn isolated<T>(&self, f: impl FnOnce() -> T) -> T {
+        let outer = self.0.replace(false);
+        let out = f();
+        self.0.set(outer);
+        out
+    }
+
     pub(crate) fn reset(&self) {
         self.0.set(false);
     }
+}
+
+pub(crate) fn attribute_any_unresolved(element: &Element, name: &str) -> bool {
+    element.attrs.iter().find(|attr| attr.local == name).is_some_and(|attr| attr.unresolved)
 }
 
 pub(crate) fn attribute_unresolved(element: &Element, namespace: &str, name: &str) -> bool {
