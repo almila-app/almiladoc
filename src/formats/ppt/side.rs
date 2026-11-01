@@ -1,6 +1,6 @@
 //! What a page shows of its headers, footers and comments: `HeadersFooters` containers, drawn
 //! date, slide-number, footer and header placeholders, which `HeaderFooterPolicy::Emit` writes,
-//! and the `Comment10` records of a `___PPT10` binary tag, which no output carries.
+//! and the `Comment10` records of a `___PPT10` binary tag.
 
 use super::records as rt;
 use super::scan;
@@ -229,6 +229,20 @@ impl PageFacts {
 /// Whether a `ProgBinaryTag` container body is a `___PPT10` tag whose blob holds a `Comment10`
 /// record, every record read charged as one unit of work. Any other tag is ignored.
 pub(super) fn tag_has_comment(parse_ctx: &ParseCtx<'_>, tag: &[u8]) -> Result<bool, ConvertError> {
+    let Some(blob) = comment_blob(parse_ctx, tag)? else { return Ok(false) };
+    for record in officeart::records(blob) {
+        parse_ctx.charge(1)?;
+        if record.rec_type == rt::COMMENT10 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(super) fn comment_blob<'a>(
+    parse_ctx: &ParseCtx<'_>,
+    tag: &'a [u8],
+) -> Result<Option<&'a [u8]>, ConvertError> {
     let records = scan(parse_ctx, tag)?;
     let named = records
         .iter()
@@ -236,15 +250,9 @@ pub(super) fn tag_has_comment(parse_ctx: &ParseCtx<'_>, tag: &[u8]) -> Result<bo
         .is_some_and(|name| utf16le_units(name.body).eq(COMMENT_TAG.encode_utf16()));
     let blob = records.iter().find(|r| r.rec_type == rt::BINARY_TAG_DATA_BLOB);
     let Some(blob) = blob.filter(|_| named) else {
-        return Ok(false);
+        return Ok(None);
     };
-    for record in officeart::records(blob.body) {
-        parse_ctx.charge(1)?;
-        if record.rec_type == rt::COMMENT10 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(Some(blob.body))
 }
 
 impl Settings {

@@ -10,6 +10,7 @@ pub(super) const NOTES_ATOM: u16 = 0x03F1;
 pub(super) const ENVIRONMENT: u16 = 0x03F2;
 pub(super) const SLIDE_PERSIST_ATOM: u16 = 0x03F3;
 pub(super) const MAIN_MASTER: u16 = 0x03F8;
+pub(super) const SLIDE_SHOW_INFO_ATOM: u16 = 0x03F9;
 pub(super) const EXTERNAL_OBJECT_LIST: u16 = 0x0409;
 pub(super) const DRAWING_GROUP: u16 = 0x040B;
 pub(super) const DRAWING: u16 = 0x040C;

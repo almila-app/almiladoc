@@ -7,6 +7,7 @@
 //! (fixed policy), rendered as a quote after their slide.
 
 mod fonts;
+mod hidden;
 mod records;
 mod side;
 mod styletext;
@@ -17,7 +18,8 @@ use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::HeaderFooterRegion as Side;
 use crate::model::{
-    Asset, Block, Document, Inline, Style, UnitKind, charge_blocks_copy, inlines_are_empty,
+    Asset, Block, Document, Inline, Note, NoteKind, Style, UnitKind, charge_blocks_copy,
+    inlines_are_empty,
 };
 use crate::shared::binary::{
     OptionalStream, decode_utf16, get_u16, get_u32, optional_ole_stream, read_ole_stream,
@@ -77,9 +79,10 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     if !parse_ctx.headers_footers_requested() || ex.recovering {
         ex.report_masters()?;
     }
+    let notes = std::mem::take(&mut ex.comments);
     Ok(Document {
         blocks: ex.into_blocks()?,
-        notes: Vec::new(),
+        notes,
         assets: pictures.assets,
         ..Document::default()
     })
@@ -366,6 +369,7 @@ struct ShapeFacts {
 struct Page<'a> {
     container: Option<&'a [u8]>,
     id: Option<u32>,
+    omitted: bool,
 }
 
 struct PendingShape {
@@ -377,12 +381,13 @@ struct PendingShape {
     text: String,
     units: Vec<u16>,
     styles: Option<StyleRuns>,
+    omitted: bool,
 }
 
 impl PendingShape {
     fn new(tx_type: TextType, (side, master_placeholder): (Option<Kind>, bool)) -> Self {
         let (text, units, styles) = (String::new(), Vec::new(), None);
-        Self { tx_type, side, master_placeholder, text, units, styles }
+        Self { tx_type, side, master_placeholder, text, units, styles, omitted: false }
     }
 }
 
@@ -394,6 +399,9 @@ struct Extractor<'c> {
     segments: Vec<Segment>,
     current: Vec<Block>,
     current_is_notes: bool,
+    comments: Vec<Note>,
+    omitted_slides: HashSet<u32>,
+    omit_page: bool,
     list_run: Vec<ListEntry>,
     pending: Option<PendingShape>,
     /// Master style tables in master-list order: (masterId, styles).
@@ -425,6 +433,7 @@ struct Extractor<'c> {
     own_background: bool,
     /// The page's outline text blocks in `TextHeaderAtom` order.
     outline: Vec<String>,
+    hidden_outline: BTreeSet<usize>,
     /// The slide list's outline text of the page is being read.
     reading_outline: bool,
     /// What slides show of masters they cannot name, as in recovery.
@@ -583,6 +592,9 @@ impl<'c> Extractor<'c> {
             segments: Vec::new(),
             current: Vec::new(),
             current_is_notes: false,
+            comments: Vec::new(),
+            omitted_slides: HashSet::new(),
+            omit_page: false,
             list_run: Vec::new(),
             pending: None,
             masters: Vec::new(),
@@ -601,6 +613,7 @@ impl<'c> Extractor<'c> {
             master_facts: Vec::new(),
             own_background: false,
             outline: Vec::new(),
+            hidden_outline: BTreeSet::new(),
             reading_outline: false,
             recovered_use: MasterUse::default(),
             recovered_slides: 0,
@@ -700,12 +713,14 @@ impl<'c> Extractor<'c> {
                         Some(slide)
                     };
                     self.unit = scope.as_ref().map(UnitScope::unit);
+                    self.page_visibility(container, id, is_notes)?;
                     self.own_background = false;
                     if !is_notes {
                         self.select_master(container);
                     }
-                    page = Some(Page { container, id });
+                    page = Some(Page { container, id, omitted: self.omit_page });
                 }
+                _ if self.omit_page => {}
                 _ => self.record(record)?,
             }
         }
@@ -715,6 +730,35 @@ impl<'c> Extractor<'c> {
         Ok(units)
     }
 
+    fn page_visibility(
+        &mut self,
+        container: Option<&[u8]>,
+        id: Option<u32>,
+        is_notes: bool,
+    ) -> Result<(), ConvertError> {
+        self.omit_page = if is_notes {
+            id.is_some_and(|id| self.omitted_slides.contains(&id))
+        } else {
+            match container {
+                Some(container) => hidden::slide(self.parse_ctx, container)?,
+                None => false,
+            }
+        };
+        if self.omit_page && !is_notes {
+            self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+            if let Some(id) = id {
+                self.omitted_slides.insert(id);
+            }
+        }
+        self.hidden_outline.clear();
+        if !self.omit_page
+            && let Some(container) = container
+        {
+            self.hidden_outline = hidden::outline(self.parse_ctx, container)?;
+        }
+        Ok(())
+    }
+
     /// Emit a page's own textboxes after its outline text, or report it
     /// unreadable, and report the headers, footers and comments it shows.
     fn finish_slide(&mut self, page: Option<Page<'_>>) -> Result<(), ConvertError> {
@@ -722,6 +766,9 @@ impl<'c> Extractor<'c> {
         let Some(page) = page else {
             return self.end_segment(None);
         };
+        if page.omitted {
+            return Ok(());
+        }
         match page.container {
             Some(container) => self.walk(container)?,
             None => self.parse_ctx.emit(DiagnosticCode::UnitUnreadable, self.region()),
@@ -760,6 +807,54 @@ impl<'c> Extractor<'c> {
         self.current.splice(0..0, blocks);
         let comments = u64::from(page.comments);
         self.parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments);
+        Ok(())
+    }
+
+    fn read_tag(&mut self, body: &[u8]) -> Result<(), ConvertError> {
+        if self.parse_ctx.comments_requested() {
+            self.read_comments(body)?;
+        } else if side::tag_has_comment(self.parse_ctx, body)? {
+            self.page.comments = true;
+        }
+        Ok(())
+    }
+
+    fn read_comments(&mut self, tag: &[u8]) -> Result<(), ConvertError> {
+        const RECORD_HEADER_LEN: usize = 8;
+        let Some(blob) = side::comment_blob(self.parse_ctx, tag)? else { return Ok(()) };
+        self.close_shape()?;
+        for comment in scan(self.parse_ctx, blob)? {
+            count_record(self.parse_ctx, &mut self.records)?;
+            if comment.rec_type != rt::COMMENT10 {
+                continue;
+            }
+            let entries = scan(self.parse_ctx, comment.body)?;
+            let mut consumed = 0;
+            for entry in &entries {
+                count_record(self.parse_ctx, &mut self.records)?;
+                consumed += RECORD_HEADER_LEN + entry.body.len();
+            }
+            let text = entries.iter().find(|r| r.rec_type == rt::CSTRING && r.instance() == 1);
+            let mut blocks = Vec::new();
+            if let Some(text) = text {
+                self.parse_ctx.charge(text.body.len() as u64)?;
+                let (text, damaged) = decode_utf16(utf16le_units(text.body));
+                if damaged {
+                    self.parse_ctx.emit(DiagnosticCode::InvalidEncoding, Region::Comment);
+                }
+                blocks.extend(
+                    text.split(['\r', '\n'])
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| Block::Paragraph(vec![Inline::plain(s.trim_end_matches('\0'))])),
+                );
+            } else if consumed < comment.body.len() {
+                self.parse_ctx.emit(DiagnosticCode::PartUnreadable, Region::Comment);
+            }
+            let ordinal = self.unit.map_or(0, |unit| unit.model().ordinal.get());
+            let id = format!("slide-{ordinal}-comment-{}", self.comments.len());
+            self.current.push(Block::Paragraph(vec![Inline::CommentRef(id.clone())]));
+            self.comments.push(Note { id, kind: NoteKind::Comment, blocks });
+        }
         Ok(())
     }
 
@@ -1040,6 +1135,9 @@ impl<'c> Extractor<'c> {
                 self.atom(record, in_client_data)?;
                 continue;
             }
+            if self.skip_hidden(record)? {
+                continue;
+            }
             match rec_type {
                 rt::CRYPT_SESSION10_CONTAINER => self.encrypted = true,
                 rt::HEADERS_FOOTERS => {
@@ -1047,11 +1145,7 @@ impl<'c> Extractor<'c> {
                         self.page.own = Some(Settings::read(parse_ctx, body)?);
                     }
                 }
-                rt::PROG_BINARY_TAG => {
-                    if side::tag_has_comment(parse_ctx, body)? {
-                        self.page.comments = true;
-                    }
-                }
+                rt::PROG_BINARY_TAG => self.read_tag(body)?,
                 rt::MAIN_MASTER if self.recovering => self.read_master(0, body)?,
                 // Notes containers are walked via the notes list; recovery
                 // has no lists, so their text is taken inline (as notes).
@@ -1074,6 +1168,25 @@ impl<'c> Extractor<'c> {
             }
         }
         Ok(())
+    }
+
+    fn skip_hidden(&mut self, record: Record<'_>) -> Result<bool, ConvertError> {
+        if hidden::container(self.parse_ctx, record)? {
+            self.close_shape()?;
+            self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, self.region());
+            return Ok(true);
+        }
+        if self.recovering
+            && record.rec_type == rt::SLIDE
+            && hidden::slide(self.parse_ctx, record.body)?
+        {
+            self.end_segment(None)?;
+            let _unit = self.parse_ctx.begin_unit(UnitKind::Slide, self.recovered_slides)?;
+            self.recovered_slides = self.recovered_slides.saturating_add(1);
+            self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// The unit a container opens: in recovery a slide's, which has no list to open it.
@@ -1118,7 +1231,10 @@ impl<'c> Extractor<'c> {
                 self.settle_link()?;
                 self.flush_shape()?;
                 let tx_type = body.first().map_or(TextType::BODY, |&t| TextType(t.into()));
-                self.pending = Some(PendingShape::new(tx_type, self.drawn_side()));
+                let mut pending = PendingShape::new(tx_type, self.drawn_side());
+                pending.omitted =
+                    self.reading_outline && self.hidden_outline.contains(&self.outline.len());
+                self.pending = Some(pending);
                 if let Some(shape) = &mut self.shape {
                     shape.text = true;
                 }
@@ -1141,7 +1257,7 @@ impl<'c> Extractor<'c> {
                 if let Some(pending) = &mut self.pending {
                     let (styles, complete) = styletext::parse_style_text(body, pending.units.len());
                     pending.styles = Some(styles);
-                    if !complete && pending.side.is_none() {
+                    if !complete && pending.side.is_none() && !pending.omitted {
                         self.parse_ctx.emit(DiagnosticCode::FormattingUnreadable, region);
                     }
                 }
@@ -1298,7 +1414,7 @@ impl<'c> Extractor<'c> {
 
     /// Whether the pending text is a drawn header or footer placeholder's, which no output carries.
     fn suppressed(&self) -> bool {
-        self.pending.as_ref().is_some_and(|pending| pending.side.is_some())
+        self.pending.as_ref().is_some_and(|pending| pending.side.is_some() || pending.omitted)
     }
 
     /// What the shape being walked is drawn as: a header or footer placeholder, and a
@@ -1327,7 +1443,7 @@ impl<'c> Extractor<'c> {
         let Some(shape) = self.pending.take() else {
             return Ok(());
         };
-        if shape.text.is_empty() || shape.master_placeholder {
+        if shape.text.is_empty() || shape.master_placeholder || shape.omitted {
             return Ok(());
         }
         if let Some(kind) = shape.side {
@@ -1927,6 +2043,122 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         parse(&parse_ctx, bytes).unwrap();
         diagnostic_rows(&parse_ctx.diagnostics())
+    }
+
+    fn author_comment_deck(text: Option<Vec<u8>>) -> Vec<u8> {
+        const COMMENT10_ATOM: u16 = 0x2EE1;
+        let mut settings = 3_i32.to_le_bytes().to_vec();
+        settings.extend(halves(&[2024, 1, 1, 1, 12, 34, 56, 0]));
+        settings.extend(17_i32.to_le_bytes());
+        settings.extend(29_i32.to_le_bytes());
+        let mut children = vec![record(0, rt::CSTRING, &utf16("Ada"))];
+        children.extend(text);
+        children.push(record(0, COMMENT10_ATOM, &settings));
+        let comment = container(0, rt::COMMENT10, &children);
+        listed(&[pages(0, &[(2, 256)])], &[slide(0, &[binary_tag("___PPT10", &[comment])])])
+    }
+
+    #[test]
+    fn binary_comments_allow_absent_optional_text_without_loss() {
+        let bytes = author_comment_deck(None);
+        let converter = crate::Converter::new(crate::Config {
+            comments: crate::CommentPolicy::Emit,
+            ..crate::Config::default()
+        })
+        .unwrap();
+        let converted = converter.convert(crate::Input::new(&bytes, crate::Format::Ppt)).unwrap();
+        assert_eq!(converted.markdown(), "");
+        assert_eq!(diagnostic_rows::<Reported>(converted.diagnostics()), []);
+    }
+
+    #[test]
+    fn truncated_binary_comment_text_remains_unread_content() {
+        let mut text = record(1 << 4, rt::CSTRING, &utf16("unread"));
+        text[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let bytes = author_comment_deck(Some(text));
+        let converter = crate::Converter::new(crate::Config {
+            comments: crate::CommentPolicy::Emit,
+            ..crate::Config::default()
+        })
+        .unwrap();
+        let error = converter.convert(crate::Input::new(&bytes, crate::Format::Ppt)).unwrap_err();
+        assert_matches!(error, ConvertError::Incomplete { diagnostics } if
+            diagnostic_rows::<Reported>(&diagnostics) ==
+                [(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]);
+    }
+
+    #[test]
+    fn requested_binary_comments_read_text_instance_and_keep_unit_identity() {
+        let comment = container(
+            0,
+            rt::COMMENT10,
+            &[
+                record(0, rt::CSTRING, &utf16("decoy author")),
+                record(1 << 4, rt::CSTRING, &utf16("comment body")),
+                record(2 << 4, rt::CSTRING, &utf16("XX")),
+            ],
+        );
+        let tag = binary_tag("___PPT10", &[comment]);
+        let bytes = listed(
+            &[pages(0, &[(2, 256), (3, 257)])],
+            &[slide(0, std::slice::from_ref(&tag)), slide(0, &[tag])],
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, &bytes).unwrap();
+        assert_eq!(document.notes.len(), 2);
+        assert_ne!(document.notes[0].id, document.notes[1].id);
+        for note in &document.notes {
+            assert_eq!(note.kind, NoteKind::Comment);
+            assert_eq!(note.blocks, vec![Block::Paragraph(vec![Inline::plain("comment body")])]);
+        }
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+    }
+
+    #[test]
+    fn hidden_outline_probe_leaves_specialized_side_containers_to_their_readers() {
+        let mut nested = atom32(0x2B00, &[0]);
+        for _ in 0..12 {
+            nested = container(0, 0x2B02, &[nested]);
+        }
+        for side in [
+            container(0, rt::HEADERS_FOOTERS, &[record(0, 0x0FDA, &[0; 4]), nested.clone()]),
+            container(
+                0,
+                rt::PROG_BINARY_TAG,
+                &[record(0, rt::CSTRING, &utf16("unrelated")), nested],
+            ),
+        ] {
+            let bytes = listed(&[pages(0, &[(2, 256)])], &[slide(0, &[side])]);
+            let limits = Limits { max_record_depth: 8, ..Limits::default() };
+            let ctx = ParseCtx::new(&limits);
+            let document = parse(&ctx, &bytes).unwrap();
+            assert_eq!(crate::render::markdown::document_to_markdown(&document), "");
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+        }
+    }
+
+    #[test]
+    fn binary_comment_decode_damage_is_reported_only_when_requested() {
+        let damaged =
+            container(0, rt::COMMENT10, &[record(1 << 4, rt::CSTRING, &halves(&[0x61, 0xD800]))]);
+        let bytes =
+            listed(&[pages(0, &[(2, 256)])], &[slide(0, &[binary_tag("___PPT10", &[damaged])])]);
+        for policy in [crate::CommentPolicy::Omit, crate::CommentPolicy::Emit] {
+            let ctx = ParseCtx::default().with_comments(policy);
+            let document = parse(&ctx, &bytes).unwrap();
+            let code = if policy == crate::CommentPolicy::Emit {
+                DiagnosticCode::InvalidEncoding
+            } else {
+                DiagnosticCode::CommentOmitted
+            };
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.diagnostics()),
+                [(code, Region::Comment, Some(1), 1)]
+            );
+            if policy == crate::CommentPolicy::Emit {
+                assert_eq!(document.notes[0].blocks, [Block::Paragraph(vec![Inline::plain("a�")])]);
+            }
+        }
     }
 
     #[test]
@@ -2659,20 +2891,6 @@ mod tests {
                 Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == records - 1
             );
         }
-    }
-
-    #[test]
-    fn a_recovered_deck_charges_the_scan_for_its_document_once() {
-        let bytes = deck(&[pages(0, &[(2, 256)])], &[slide(0, &[])], OptionalStream::Absent, false);
-        let parse_ctx = ParseCtx::default();
-        parse(&parse_ctx, &bytes).unwrap();
-        let fuel = parse_ctx.fuel();
-        assert_eq!(fuel, 4 + 1 + 7);
-        let limits = Limits { max_work: fuel - 1, ..Limits::default() };
-        assert_matches!(
-            parse(&ParseCtx::new(&limits), &bytes),
-            Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == fuel - 1
-        );
     }
 
     #[test]

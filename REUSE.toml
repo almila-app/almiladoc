@@ -87,6 +87,7 @@ path = [
     "src/formats/odf/datastyle.rs",
     "src/formats/odf/sides.rs",
     "src/formats/ppt/fonts.rs",
+    "src/formats/ppt/hidden.rs",
     "src/formats/ppt/records.rs",
     "src/formats/ppt/side.rs",
     "src/formats/ppt/tests/master_emit.rs",
