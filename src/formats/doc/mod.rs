@@ -596,16 +596,32 @@ mod tests {
         );
     }
 
-    type CommentReferenceCase<'a> = (&'a [u8], &'a [u8], Vec<Reported>);
+    type CommentReferenceCase<'a> = (&'a [u8], &'a [u8], crate::RevisionPolicy, Vec<Reported>);
 
     #[test]
     fn excluded_comment_references_do_not_parse_damaged_bodies_or_metadata() {
-        let cases: [CommentReferenceCase<'_>; 3] = [
-            (b"a\x05\r", HIDDEN, omitted(DiagnosticCode::HiddenOmitted, 1)),
-            (b"a\x05\r", DELETED, omitted(DiagnosticCode::RevisionOmitted, 1)),
-            (b"\x13 REF \x05 \x14a\x15\r", &[], vec![]),
+        let cases: [CommentReferenceCase<'_>; 4] = [
+            (
+                b"a\x05\r",
+                HIDDEN,
+                crate::RevisionPolicy::Accept,
+                omitted(DiagnosticCode::HiddenOmitted, 1),
+            ),
+            (
+                b"a\x05\r",
+                DELETED,
+                crate::RevisionPolicy::Accept,
+                omitted(DiagnosticCode::RevisionOmitted, 1),
+            ),
+            (
+                b"a\x05\r",
+                &[0x01, 0x08, 1],
+                crate::RevisionPolicy::Reject,
+                omitted(DiagnosticCode::RevisionOmitted, 1),
+            ),
+            (b"\x13 REF \x05 \x14a\x15\r", &[], crate::RevisionPolicy::Accept, vec![]),
         ];
-        for (body, properties, expected) in cases {
+        for (body, properties, revisions, expected) in cases {
             let at = u32::try_from(body.iter().position(|&c| c == 5).unwrap()).unwrap();
             let doc = comment_doc(body, &[b"\x05\x01\r"], &[at]).chpx_runs(&[
                 (at, &[]),
@@ -614,7 +630,7 @@ mod tests {
             ]);
             let bytes = threaded_comments(doc, &[(0, 0)]).fib(0x41A, u32::MAX).bytes();
             for comments in [crate::CommentPolicy::Emit, crate::CommentPolicy::Omit] {
-                let ctx = ParseCtx::default().with_comments(comments);
+                let ctx = ParseCtx::default().with_comments(comments).with_revisions(revisions);
                 let doc = parse(&ctx, &bytes).unwrap();
                 assert_eq!(markdown_of_document(&doc), "a\n");
                 assert_eq!(doc.notes, vec![]);
@@ -2087,6 +2103,32 @@ mod tests {
     fn converted(bytes: &[u8]) -> (String, Vec<Reported>) {
         let (doc, reported) = parsed_with(bytes);
         (crate::render::markdown::document_to_markdown(&doc), reported)
+    }
+
+    fn policy_converted(bytes: &[u8], revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_revisions(revisions);
+        let doc = parse(&ctx, bytes).unwrap();
+        (
+            crate::render::markdown::document_to_markdown(&doc),
+            diagnostic_rows(&ctx.into_diagnostics()),
+        )
+    }
+
+    #[test]
+    fn source_policies_retain_insertion_state_across_style_resets_and_piece_modifiers() {
+        let resetting = &[0x01, 0x08, 1, 0x33, 0x2A, 0];
+        let doc = runs_doc(&[("new", resetting), ("old\r", DELETED)]);
+        assert_eq!(
+            policy_converted(&doc.bytes(), crate::RevisionPolicy::Reject),
+            ("old\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
+        );
+        let doc = DocBuilder::new(b"")
+            .fib(0x4C, 6)
+            .pieces(&[(3, b"new", false, (0x42 << 1) | (1 << 8)), (6, b"ok\r", false, 0)]);
+        assert_eq!(
+            policy_converted(&doc.bytes(), crate::RevisionPolicy::Reject),
+            ("ok\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
+        );
     }
 
     #[test]

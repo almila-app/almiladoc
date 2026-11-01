@@ -60,6 +60,7 @@ pub(super) struct Chp {
     pub style: Style,
     pub hidden: bool,
     pub deleted: bool,
+    pub inserted: bool,
     pub fonts: Fonts,
     pub direct: Direct,
 }
@@ -67,7 +68,7 @@ pub(super) struct Chp {
 impl Chp {
     /// These properties with the ones a style reference or `sprmCPlain` leaves as `run` has them.
     fn keeping(self, run: Self) -> Self {
-        Self { deleted: run.deleted, direct: run.direct, ..self }
+        Self { deleted: run.deleted, inserted: run.inserted, direct: run.direct, ..self }
     }
 }
 
@@ -307,6 +308,7 @@ pub(super) fn direct_chp(
                 chp.style.position = vertical_position(operand).unwrap_or(chp.style.position);
             }
             SPRM_CF_RMARK_DEL => toggle(operand, base.deleted, &mut chp.deleted),
+            SPRM_CF_RMARK_INS => toggle(operand, base.inserted, &mut chp.inserted),
             SPRM_CF_VANISH => toggle(operand, base.hidden, &mut chp.hidden),
             SPRM_CF_BOLD => toggle(operand, base.style.bold, &mut chp.style.bold),
             SPRM_CF_ITALIC => toggle(operand, base.style.italic, &mut chp.style.italic),

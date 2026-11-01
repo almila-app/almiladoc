@@ -106,7 +106,7 @@ What a conversion cannot carry into its output is reported as `Diagnostics`: eac
 
 `Config::headers_footers` defaults to `HeaderFooterPolicy::Omit`; `Emit` preserves supported headers and footers as labelled blockquotes, fields a printed page updates as tokens and fixed or locked ones as their stored result. See [support](docs/support.md) for the readers.
 
-`Config::revisions` defaults to `RevisionPolicy::Accept`. In DOCX, `Reject` preserves deleted text, drops inserted text and joins paragraphs when the removed revision contains their paragraph mark. It selects stored text and structural boundaries; it does not reconstruct earlier formatting.
+`Config::revisions` defaults to `RevisionPolicy::Accept`. In DOCX, DOC, `Reject` preserves deleted text, drops inserted text and joins paragraphs when the removed revision contains their paragraph mark. It selects stored text and structural boundaries; it does not reconstruct earlier formatting.
 
 `Conversion::units()` returns typed source units and UTF-8 byte ranges into `markdown()`. Ranges contain unit content, excluding unit anchors, separators, boundary whitespace, the final newline and appended note definitions. Empty readable units keep zero-length ranges and original ordinals; omitted hidden sheets or slides and unreadable units have no range, bar a PPT slide whose slide-list text outlives its lost container. Slides with content are separated by one `---`; empty slides add no separator.
 

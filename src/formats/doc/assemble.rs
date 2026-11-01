@@ -108,8 +108,8 @@ enum Dropped {
 }
 
 impl Dropped {
-    fn of(chp: Chp) -> Option<Self> {
-        let revision = chp.deleted;
+    fn of(ctx: &ParseCtx<'_>, chp: Chp) -> Option<Self> {
+        let revision = if ctx.reject_revisions() { chp.inserted } else { chp.deleted };
         revision.then_some(Self::Revision).or_else(|| (chp.hidden).then_some(Self::Hidden))
     }
 }
@@ -128,12 +128,16 @@ impl DroppedRange {
         kind: Option<Dropped>,
         c: char,
         instruction: bool,
-    ) {
+    ) -> bool {
+        let report = ctx.reject_revisions()
+            && kind == Some(Dropped::Revision)
+            && !(self.kind == kind && self.renders);
         if is_mark(c) {
             self.close(ctx, region);
         } else {
             self.extend(ctx, region, kind, || renders(c) && !instruction);
         }
+        report
     }
 
     /// Extend the range by a character dropped as `kind`, closing it first
@@ -537,18 +541,23 @@ impl Assembler<'_, '_> {
                 parse_ctx.charge(1)?;
                 segment = self.segment(&s, Some(region))?;
             }
-            let drop = Dropped::of(segment.chp);
+            let drop = Dropped::of(self.parse_ctx, segment.chp);
             if self.reference(&s, drop, &mut dropped, &mut para, region)? {
                 continue;
             }
             let (c, mark) = (s.c, is_mark(s.c));
             let delimiter = matches!(c, '\u{13}' | '\u{14}' | '\u{15}');
-            dropped.observe(parse_ctx, region, drop, c, para.in_instruction());
+            let report_removed_mark =
+                dropped.observe(parse_ctx, region, drop, c, para.in_instruction());
             if drop.is_some() && !mark && !delimiter {
                 continue;
             }
             match c {
-                '\r' if drop.is_some() && self.joins_next(&cursor, &s)? => {}
+                '\r' if drop.is_some() && self.joins_next(&cursor, &s)? => {
+                    if report_removed_mark {
+                        parse_ctx.emit(DiagnosticCode::RevisionOmitted, region);
+                    }
+                }
                 '\r' | '\u{7}' | '\u{c}' | '\u{e}' => {
                     let pap = self.effective_pap(s.fc, s.piece)?;
                     let done = std::mem::replace(&mut para, ParaBuilder::new(parse_ctx, region));
@@ -931,7 +940,7 @@ impl Assembler<'_, '_> {
             match s.c {
                 '\u{13}' => depth += 1,
                 '\u{15}' => depth = depth.saturating_sub(1),
-                _ if depth > 0 || Dropped::of(segment.chp).is_some() => {}
+                _ if depth > 0 || Dropped::of(self.parse_ctx, segment.chp).is_some() => {}
                 c => {
                     let Some(shown) = shown_char(c) else {
                         continue;
