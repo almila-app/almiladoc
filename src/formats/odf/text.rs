@@ -93,6 +93,23 @@ impl<'a, 'b> Ctx<'a, 'b> {
         out
     }
 
+    /// Walk a header or footer in `region` with list and heading numbering of its own, and
+    /// what its tables hold apart from the body's.
+    pub(super) fn in_side<T>(&self, region: Region, f: impl FnOnce() -> T) -> T {
+        let lists = self.list_counters.take();
+        let ids = self.list_ids.take();
+        let headings = self.heading_counters.take();
+        let (out, _) = self.holding(|| self.in_region(region, f));
+        self.list_counters.replace(lists);
+        self.list_ids.replace(ids);
+        self.heading_counters.replace(headings);
+        out
+    }
+
+    fn in_side_region(&self) -> bool {
+        matches!(self.region.get(), Region::Header | Region::Footer)
+    }
+
     pub(super) fn dropped(&self) -> u64 {
         self.dropped.get()
     }
@@ -602,6 +619,11 @@ fn parse_inline_content(
     Ok(Some((out, boxes)))
 }
 
+/// Whether the body leaves a paragraph or heading out whole: hidden by its fields or its style.
+pub(super) fn block_hidden(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<bool, ConvertError> {
+    Ok(hidden_by_fields(elem, ctx.parse_ctx)? || paragraph_base(elem, ctx)?.hidden == Some(true))
+}
+
 /// Whether the `text:hidden-paragraph` fields of a paragraph hide it. ODF 1.3
 /// Part 3 7.7.11: one whose condition holds hides it unless another's fails;
 /// each condition is read from its cached `text:is-hidden` (19.821), never
@@ -778,9 +800,40 @@ fn walk_text_elem(
         }
         "tracked-changes" => report_deletions(child, ctx),
         "soft-page-break" => {}
+        local
+            if ctx.in_side_region()
+                && let Some(token) = side_token(local, child) =>
+        {
+            if hides {
+                hidden.hide(true);
+            } else {
+                hidden.push(ctx, out, Inline::Text { text: token.into(), style: delta.resolve() });
+                ctx.emit(DiagnosticCode::FieldToken);
+            }
+        }
         _ => walk_inlines(child, ctx, delta, out, boxes, hidden)?,
     }
     Ok(())
+}
+
+/// The token a header or footer writes for a field only a printed page resolves (ODF 1.3 Part 3,
+/// 7.3 and 7.5).
+/// A field whose `text:fixed` is true keeps the value it stores (19.809).
+fn side_token(local: &str, field: &Element) -> Option<&'static str> {
+    let fixed = field.attr(ns::TEXT, "fixed").map(super::styles::token);
+    if matches!(fixed, Some("true" | "1")) {
+        return None;
+    }
+    Some(match (local, field.attr(ns::TEXT, "display")) {
+        ("page-number", _) => "{page}",
+        ("page-count", _) => "{pages}",
+        ("date", _) => "{date}",
+        ("time", _) => "{time}",
+        ("sheet-name", _) => "{sheet}",
+        ("file-name", Some("full" | "path")) => "{path}",
+        ("file-name", _) => "{file}",
+        _ => return None,
+    })
 }
 
 fn push_note(
@@ -914,7 +967,7 @@ fn formula(math: &Element) -> Object {
 
 /// A picture's bytes into the asset store; `Unread` when the href names no
 /// part the package holds. Fatal errors propagate.
-fn load_image(ctx: &Ctx<'_, '_>, href: &str) -> Result<ImageSource, ConvertError> {
+pub(super) fn load_image(ctx: &Ctx<'_, '_>, href: &str) -> Result<ImageSource, ConvertError> {
     if href.is_empty() {
         return Ok(ImageSource::Unread);
     }

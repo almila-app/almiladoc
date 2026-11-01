@@ -36,6 +36,7 @@ mod pdf;
 mod raster;
 mod robustness;
 mod sheet_bounds;
+mod sides;
 mod snapshots;
 mod spreadsheets;
 mod style;

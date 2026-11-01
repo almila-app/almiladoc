@@ -8,7 +8,7 @@
 //! element), and an unreachable target is only noise in the output.
 
 use crate::ImagePolicy;
-use crate::model::{Block, Document, Inline, LinkTarget, Note, Unit};
+use crate::model::{Block, Inline, LinkTarget, Note, Unit};
 use crate::ocr::GapFills;
 use crate::render::markdown::escape::controls_to_spaces;
 use crate::render::markdown::image;
@@ -46,8 +46,17 @@ impl AnchorMap {
     }
 }
 
+/// Where anchors resolve: the body and its notes, or one side story, whose ids open with its own
+/// reserved prefix and whose headings, written as paragraphs, claim no slug.
+#[derive(Clone, Copy)]
+pub(crate) enum AnchorScope<'a> {
+    Body,
+    Side(&'a str),
+}
+
 pub(crate) fn resolve_anchors(
-    doc: &Document,
+    blocks: &[Block],
+    scope: AnchorScope<'_>,
     fills: &GapFills,
     notes: &[&Note],
     images: ImagePolicy,
@@ -59,11 +68,14 @@ pub(crate) fn resolve_anchors(
     // Anchor ids some link in the document targets, notes included.
     let mut linked: HashSet<&str> = HashSet::new();
     let mut linked_units = HashSet::new();
-    walk_all(doc, fills, notes, &mut |block| {
+    walk_all(blocks, fills, notes, &mut |block| {
         if let Some(content) = inlines(block) {
             for_each_link_target(content, &mut linked, &mut linked_units);
         }
     });
+    if let AnchorScope::Side(prefix) = scope {
+        return side_anchors(blocks, prefix, fills, &linked);
+    }
 
     // Pass 1: headings claim their GFM slugs in render order, binding any
     // heading-coincident anchor ids (the `anchor` field and anchor nodes
@@ -88,7 +100,7 @@ pub(crate) fn resolve_anchors(
             for_each_anchor(content, &mut bind);
         }
     };
-    walk_all(doc, fills, notes, &mut heading);
+    walk_all(blocks, fills, notes, &mut heading);
 
     // Pass 2: every remaining anchor a link targets gets a sanitized HTML id.
     let mut assign = |id: &str| {
@@ -99,14 +111,14 @@ pub(crate) fn resolve_anchors(
             resolved.insert(id.to_string(), Resolved { fragment: html, emit_html: true });
         }
     };
-    walk_all(doc, fills, notes, &mut |block| {
+    walk_all(blocks, fills, notes, &mut |block| {
         if let Some(content) = inlines(block) {
             for_each_anchor(content, &mut assign);
         }
     });
 
     let mut units = HashMap::new();
-    for block in &doc.blocks {
+    for block in blocks {
         if let Block::UnitStart(unit) = block
             && linked_units.contains(unit)
             && !units.contains_key(unit)
@@ -117,6 +129,34 @@ pub(crate) fn resolve_anchors(
         }
     }
     AnchorMap { resolved, units }
+}
+
+/// A side story's anchors: each a link targets, a heading's included, under `prefix`.
+fn side_anchors(
+    blocks: &[Block],
+    prefix: &str,
+    fills: &GapFills,
+    linked: &HashSet<&str>,
+) -> AnchorMap {
+    let mut ids = UniqueIds::default();
+    let mut resolved: HashMap<String, Resolved> = HashMap::new();
+    let mut assign = |id: &str| {
+        if linked.contains(id)
+            && !resolved.contains_key(id)
+            && let Some(html) = ids.claim(format!("{prefix}:{}", sanitize_id(id)))
+        {
+            resolved.insert(id.to_string(), Resolved { fragment: html, emit_html: true });
+        }
+    };
+    walk_all(blocks, fills, &[], &mut |block| {
+        if let Block::Heading { anchor: Some(id), .. } = block {
+            assign(id);
+        }
+        if let Some(content) = inlines(block) {
+            for_each_anchor(content, &mut assign);
+        }
+    });
+    AnchorMap { resolved, units: HashMap::new() }
 }
 
 #[derive(Default)]
@@ -184,12 +224,12 @@ fn inlines(block: &Block) -> Option<&[Inline]> {
 }
 
 fn walk_all<'a>(
-    doc: &'a Document,
+    blocks: &'a [Block],
     fills: &'a GapFills,
     notes: &[&'a Note],
     f: &mut impl FnMut(&'a Block),
 ) {
-    walk_blocks(&doc.blocks, fills, f);
+    walk_blocks(blocks, fills, f);
     for note in notes {
         walk_blocks(&note.blocks, fills, f);
     }
@@ -321,7 +361,7 @@ fn sanitize_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NoteKind;
+    use crate::model::{Document, NoteKind};
 
     #[test]
     fn slugs_keep_word_forming_characters_hyphenate_spaces_and_default_to_section() {
@@ -366,7 +406,8 @@ mod tests {
         };
         assert_eq!(
             resolve_anchors(
-                &doc,
+                &doc.blocks,
+                AnchorScope::Body,
                 &GapFills::default(),
                 &[],
                 ImagePolicy::Placeholder,
@@ -397,8 +438,14 @@ mod tests {
             ..Document::default()
         };
         let fills = GapFills::default();
-        let anchors =
-            resolve_anchors(&doc, &fills, &[&note], ImagePolicy::Placeholder, &HashMap::new());
+        let anchors = resolve_anchors(
+            &doc.blocks,
+            AnchorScope::Body,
+            &fills,
+            &[&note],
+            ImagePolicy::Placeholder,
+            &HashMap::new(),
+        );
         assert_eq!(anchors.fragment("in-note"), Some("note-title"));
         assert_eq!(anchors.html_id("body"), Some("body"));
         assert_eq!(anchors.html_id("target"), Some("target"));

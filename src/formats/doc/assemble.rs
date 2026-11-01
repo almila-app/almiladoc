@@ -3,6 +3,7 @@
 use super::fkp::{Run, Runs};
 use super::fonts::FontTable;
 use super::lists::{Counters, ListDef, Lists};
+use super::sides::{FieldLocks, Lock};
 use super::sprm::{
     self, Chp, PapDelta, SPRM_CF_DATA, SPRM_CF_OLE2, Tap, apply_pap_sprms, direct_chp, sets_flag,
 };
@@ -20,6 +21,7 @@ use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::fields::{
     FieldFrame, TargetSpans, field_result, hyperlink_target_spans, is_choice_form_field,
+    side_field_token,
 };
 use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
@@ -71,6 +73,8 @@ pub(super) struct Assembler<'c, 'w> {
     /// The Data stream, for `sprmCPicLocation` picture payloads.
     data: Vec<u8>,
     pub(super) assets: RefCell<AssetSink>,
+    /// The lock of each header-document field.
+    pub(super) field_locks: RefCell<FieldLocks<'w>>,
 }
 
 /// A paragraph's resolved properties: the style chain's contribution merged
@@ -168,6 +172,23 @@ fn is_mark(c: char) -> bool {
     matches!(c, '\r' | '\u{7}' | '\u{c}' | '\u{e}')
 }
 
+/// Choose the token a header or footer field writes once its instruction is whole; `lock`
+/// reads the lock of the field beginning at a CP, and only for a field that would write one.
+fn choose_token(
+    parse_ctx: &ParseCtx<'_>,
+    field: &mut OpenField,
+    lock: &mut impl FnMut(usize) -> Result<Lock, ConvertError>,
+) -> Result<(), ConvertError> {
+    parse_ctx.charge(field.frame.instr.len() as u64)?;
+    if side_field_token(&field.frame.instr, false).is_some() {
+        let found = lock(field.instr.start.saturating_sub(1))?;
+        field.frame.locked = found == Lock::Locked;
+        field.lock_unread = found == Lock::Unread;
+    }
+    field.frame.token = field.frame.side_token();
+    Ok(())
+}
+
 /// What a character that is no field delimiter adds to the text it stands in.
 fn shown_char(c: char) -> Option<char> {
     match c {
@@ -182,6 +203,8 @@ fn shown_char(c: char) -> Option<char> {
 /// text its result shows, as label or as the targets of links completed in it.
 struct OpenField {
     frame: FieldFrame,
+    /// Whether the field's lock, which keeps its result, does not read.
+    lock_unread: bool,
     instr: Range<usize>,
     result_damage: Pieces,
     target_damage: Pieces,
@@ -199,11 +222,14 @@ struct ParaBuilder<'c> {
     text_damage: Pieces,
     /// The pieces whose undecodable text `inlines` holds.
     damage: Pieces,
+    /// The region of the header or footer story the paragraph is in.
+    side: Option<Region>,
 }
 
 impl<'c> ParaBuilder<'c> {
-    fn new(parse_ctx: &'c ParseCtx<'c>) -> Self {
+    fn new(parse_ctx: &'c ParseCtx<'c>, region: Region) -> Self {
         Self {
+            side: matches!(region, Region::Header | Region::Footer).then_some(region),
             parse_ctx,
             inlines: Vec::new(),
             fields: Vec::new(),
@@ -223,6 +249,7 @@ impl<'c> ParaBuilder<'c> {
         let damage = std::mem::take(&mut self.text_damage);
         let style = self.style;
         match self.fields.last_mut() {
+            Some(f) if f.frame.token.is_some() => {}
             Some(f) if !f.frame.in_result => f.frame.instr.push_str(&text),
             Some(f) => {
                 f.frame.inlines.push(Inline::Text { text, style });
@@ -259,7 +286,7 @@ impl<'c> ParaBuilder<'c> {
     fn push_inline(&mut self, inline: Inline) -> Result<(), ConvertError> {
         self.flush_text()?;
         match self.fields.last_mut() {
-            Some(f) if !f.frame.in_result => {}
+            Some(f) if !f.frame.in_result || f.frame.token.is_some() => {}
             Some(f) => f.frame.inlines.push(inline),
             None => self.inlines.push(inline),
         }
@@ -274,6 +301,7 @@ impl<'c> ParaBuilder<'c> {
         self.flush_text()?;
         self.fields.push(OpenField {
             frame: FieldFrame::default(),
+            lock_unread: false,
             instr: instr..instr,
             result_damage: Pieces::new(),
             target_damage: Pieces::new(),
@@ -282,8 +310,13 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// End the innermost instruction at the separator at CP `cp`.
-    fn field_separate(&mut self, cp: usize) -> Result<(), ConvertError> {
+    /// End the innermost instruction at the separator at CP `cp`. In a header or footer, the
+    /// result of a field only a printed page resolves is read as an instruction is, and dropped.
+    fn field_separate(
+        &mut self,
+        cp: usize,
+        lock: &mut impl FnMut(usize) -> Result<Lock, ConvertError>,
+    ) -> Result<(), ConvertError> {
         self.flush_text()?;
         if let Some(f) = self.fields.last_mut()
             && !f.frame.in_result
@@ -291,6 +324,10 @@ impl<'c> ParaBuilder<'c> {
             f.frame.in_result = true;
             f.instr.end = cp;
             self.instructions -= 1;
+            if self.side.is_some() {
+                choose_token(self.parse_ctx, f, lock)?;
+                self.instructions += usize::from(f.frame.token.is_some());
+            }
         }
         Ok(())
     }
@@ -315,6 +352,7 @@ impl<'c> ParaBuilder<'c> {
         &mut self,
         cp: usize,
         targets: &mut impl FnMut(&OpenField) -> Result<Pieces, ConvertError>,
+        lock: &mut impl FnMut(usize) -> Result<Lock, ConvertError>,
     ) -> Result<(), ConvertError> {
         self.flush_text()?;
         let Some(mut field) = self.fields.pop() else {
@@ -323,6 +361,23 @@ impl<'c> ParaBuilder<'c> {
         if !field.frame.in_result {
             field.instr.end = cp;
             self.instructions -= 1;
+            if self.side.is_some() {
+                choose_token(self.parse_ctx, &mut field, lock)?;
+                self.instructions += usize::from(field.frame.token.is_some());
+            }
+        }
+        if let Some(token) = field.frame.token {
+            self.instructions -= 1;
+            if !self.in_instruction()
+                && let Some(region) = self.side
+            {
+                self.parse_ctx.emit(DiagnosticCode::FieldToken, region);
+                if field.lock_unread {
+                    self.parse_ctx.emit(DiagnosticCode::PartUnreadable, region);
+                }
+                self.push_inline(Inline::plain(token))?;
+            }
+            return Ok(());
         }
         let shown = !matches!(self.fields.last(), Some(f) if !f.frame.in_result);
         let own = if shown { targets(&field)? } else { Pieces::new() };
@@ -368,10 +423,11 @@ impl<'c> ParaBuilder<'c> {
         mut self,
         cp: usize,
         targets: &mut impl FnMut(&OpenField) -> Result<Pieces, ConvertError>,
+        lock: &mut impl FnMut(usize) -> Result<Lock, ConvertError>,
     ) -> Result<(Vec<Inline>, Pieces), ConvertError> {
         self.flush_text()?;
         while !self.fields.is_empty() {
-            self.field_end(cp, targets)?;
+            self.field_end(cp, targets, lock)?;
         }
         Ok((self.inlines, self.damage))
     }
@@ -409,11 +465,26 @@ impl<'c, 'w> Assembler<'c, 'w> {
             reported: RefCell::default(),
             data,
             assets: RefCell::new(AssetSink::new(parse_ctx)),
+            field_locks: RefCell::default(),
         }
     }
 }
 
 impl Assembler<'_, '_> {
+    /// The blocks of the header or footer text `range` of `story`, numbered by list counters of
+    /// their own.
+    pub(super) fn side_blocks(
+        &self,
+        story: &Range<usize>,
+        range: &Range<usize>,
+        region: Region,
+    ) -> Result<Option<Vec<Block>>, ConvertError> {
+        let body = self.counters.replace(Counters::default());
+        let blocks = self.build_blocks(story, range, region);
+        self.counters.replace(body);
+        blocks
+    }
+
     /// The blocks of the scalars of `range` in `story`, or `None` when it
     /// holds none.
     pub(super) fn build_blocks(
@@ -424,11 +495,12 @@ impl Assembler<'_, '_> {
     ) -> Result<Option<Vec<Block>>, ConvertError> {
         let parse_ctx = self.parse_ctx;
         let mut flow = Flow::default();
-        let mut para = ParaBuilder::new(parse_ctx);
+        let mut para = ParaBuilder::new(parse_ctx, region);
         let mut segment = Segment::default();
         let mut dropped = DroppedRange::default();
         let mut read = false;
         let mut targets = |field: &OpenField| self.target_damage(story, field);
+        let mut lock = |begin| self.field_lock(begin);
 
         self.text.preflight(parse_ctx, range)?;
         let mut cursor = self.text.cursor(parse_ctx, story, range)?;
@@ -465,9 +537,8 @@ impl Assembler<'_, '_> {
                 '\r' if drop.is_some() && self.joins_next(&cursor, &s)? => {}
                 '\r' | '\u{7}' | '\u{c}' | '\u{e}' => {
                     let pap = self.effective_pap(s.fc, s.piece)?;
-                    let (inlines, damage) =
-                        std::mem::replace(&mut para, ParaBuilder::new(parse_ctx))
-                            .finish(s.cp, &mut targets)?;
+                    let done = std::mem::replace(&mut para, ParaBuilder::new(parse_ctx, region));
+                    let (inlines, damage) = done.finish(s.cp, &mut targets, &mut lock)?;
                     self.report(damage.into_iter().map(Damaged::Piece), region);
                     self.end_paragraph(c, pap, inlines, &mut flow, region)?;
                 }
@@ -477,7 +548,7 @@ impl Assembler<'_, '_> {
             }
         }
         dropped.close(parse_ctx, region);
-        let (inlines, damage) = para.finish(range.end.min(story.end), &mut targets)?;
+        let (inlines, damage) = para.finish(range.end.min(story.end), &mut targets, &mut lock)?;
         self.report(damage.into_iter().map(Damaged::Piece), region);
         let blocks = flow.finish(parse_ctx, inlines)?;
         Ok(read.then_some(blocks))
@@ -526,12 +597,12 @@ impl Assembler<'_, '_> {
         match s.c {
             '\u{b}' => para.push_inline(Inline::LineBreak)?,
             '\u{13}' => para.field_begin(parse_ctx.limits().max_nesting_depth, s.cp + 1)?,
-            '\u{14}' => para.field_separate(s.cp)?,
+            '\u{14}' => para.field_separate(s.cp, &mut |begin| self.field_lock(begin))?,
             '\u{15}' => {
                 para.flush_text()?;
                 let choice = drop.is_none()
                     && para.fields.last().is_some_and(|f| is_choice_form_field(&f.frame.instr));
-                para.field_end(s.cp, targets)?;
+                para.field_end(s.cp, targets, &mut |begin| self.field_lock(begin))?;
                 if choice && !para.in_instruction() {
                     parse_ctx.emit(DiagnosticCode::FormControlUnread, region);
                 }
@@ -551,6 +622,30 @@ impl Assembler<'_, '_> {
             },
         }
         Ok(())
+    }
+
+    /// The lock of the header field that begins at `cp`, trusted where the text holds a field
+    /// end at the CP its table entry names.
+    fn field_lock(&self, cp: usize) -> Result<Lock, ConvertError> {
+        self.field_locks.borrow_mut().pair(self.parse_ctx)?;
+        let (headers, end, locked) = match &*self.field_locks.borrow() {
+            FieldLocks::Absent => return Ok(Lock::Unlocked),
+            FieldLocks::Unread | FieldLocks::Unpaired { .. } => return Ok(Lock::Unread),
+            FieldLocks::Read { headers, fields } => match fields.get(&cp) {
+                Some(&(end, locked)) => (headers.clone(), end, locked),
+                None => return Ok(Lock::Unread),
+            },
+        };
+        let mut cursor = self.text.cursor(self.parse_ctx, &headers, &(end..end + 1))?;
+        let ends = matches!(
+            cursor.next(self.parse_ctx)?,
+            Some(Event::Scalar(s)) if s.c == '\u{15}' && s.cp == end
+        );
+        Ok(match (ends, locked) {
+            (false, _) => Lock::Unread,
+            (true, true) => Lock::Locked,
+            (true, false) => Lock::Unlocked,
+        })
     }
 
     /// A floating shape reports where its anchor shows: a field instruction never renders.
@@ -1479,7 +1574,7 @@ mod tests {
             let table = clx(&[], ONE_PIECE);
             let runs = vec![run(0, 1, &chpx)];
             let text = assembler(&parse_ctx, view(b"\x01", &table, 1), runs, Vec::new());
-            let mut para = ParaBuilder::new(&parse_ctx);
+            let mut para = ParaBuilder::new(&parse_ctx, Region::Body);
             text.object_char(0, Region::Body, &mut para).unwrap();
             assert_eq!(para.inlines.len(), pushed, "{case}");
             drop(para);

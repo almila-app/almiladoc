@@ -6,15 +6,15 @@ use crate::ctx::ParseCtx;
 use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
 use crate::model::{
-    Asset, AssetId, Block, Cell, CellSlot, Document, Gap, GapId, ImageSource, Inline, ListItem,
-    OcrOrigin, Unit,
+    Asset, AssetId, Block, Cell, CellSlot, Document, Gap, GapId, HeaderFooter, ImageSource, Inline,
+    ListItem, OcrOrigin, Unit,
 };
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_SIGNATURE: &[u8] = b"\xff\xd8\xff";
 
-/// Leave a gap after each block of `document` that shows an embedded PNG or JPEG, numbered in
-/// document order within its image's unit, and count `image_not_ocred` for every other image;
+/// Leave a gap after each block of `document`, side stories included, that shows an embedded PNG
+/// or JPEG, numbered in document order within its image's unit, and count `image_not_ocred` for every other image;
 /// a note whose id an earlier note took never renders, so it gains none.
 pub(crate) fn leave_image_gaps(
     parse_ctx: &ParseCtx<'_>,
@@ -39,7 +39,8 @@ pub(crate) fn leave_image_gaps(
                     };
                     match block {
                         Block::Gap(gap) => number(gap, &mut next),
-                        Block::BlockQuote(inner) => {
+                        Block::BlockQuote(inner)
+                        | Block::HeaderFooter(HeaderFooter { content: Some(inner), .. }) => {
                             stack.push(Frame::Blocks(with_gaps(parse_ctx, inner, assets)?));
                         }
                         Block::List(list) => stack.push(Frame::Items(list.items.iter_mut())),
@@ -157,7 +158,10 @@ mod tests {
     use super::*;
     use crate::diagnostics::Region;
     use crate::limits::Limits;
-    use crate::model::{ImageOrigin, List, MarkerKind, Note, NoteKind, Table, UnitKind};
+    use crate::model::{
+        HeaderFooterRegion, HeaderFooterVariant, ImageOrigin, List, MarkerKind, Note, NoteKind,
+        Table, UnitKind,
+    };
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n...";
     const JPEG: &[u8] = b"\xff\xd8\xff\xdb";
@@ -269,6 +273,50 @@ mod tests {
         expected.notes[2].blocks.push(gap(1, two, 5));
         assert!(left(&mut document).is_empty());
         assert_eq!(document, expected);
+    }
+
+    #[test]
+    fn a_side_story_gains_gaps_in_body_order_and_counts_its_unread_images_in_its_region() {
+        let one = Some(slide(1));
+        let footer = |content| {
+            Block::HeaderFooter(HeaderFooter {
+                page_style: None,
+                region: HeaderFooterRegion::Footer,
+                variant: HeaderFooterVariant::Default,
+                content: Some(content),
+            })
+        };
+        let mut document = Document {
+            blocks: vec![
+                para(vec![image(0, Region::Body, one)]),
+                footer(vec![
+                    Block::BlockQuote(vec![para(vec![image(1, Region::Footer, one)])]),
+                    para(vec![image(2, Region::Footer, one)]),
+                ]),
+                para(vec![image(0, Region::Body, one)]),
+            ],
+            assets: assets(&[PNG, JPEG, b"GIF89a"]),
+            ..Document::default()
+        };
+        let diagnostics = left(&mut document);
+        assert_eq!(
+            document.blocks,
+            [
+                para(vec![image(0, Region::Body, one)]),
+                gap(0, one, 1),
+                footer(vec![
+                    Block::BlockQuote(vec![
+                        para(vec![image(1, Region::Footer, one)]),
+                        gap(1, one, 2),
+                    ]),
+                    para(vec![image(2, Region::Footer, one)]),
+                ]),
+                para(vec![image(0, Region::Body, one)]),
+                gap(0, one, 3),
+            ]
+        );
+        let rows: Vec<_> = diagnostics.iter().map(|d| (d.code, d.region, d.count)).collect();
+        assert_eq!(rows, [(DiagnosticCode::ImageNotOcred, Region::Footer, 1)]);
     }
 
     #[test]

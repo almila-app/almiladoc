@@ -10,6 +10,17 @@ pub(crate) struct FieldFrame {
     pub instr: String,
     pub in_result: bool,
     pub inlines: Vec<Inline>,
+    /// The token a header or footer writes in place of the result, which is not read.
+    pub token: Option<&'static str>,
+    /// Whether the field is locked, its result never updated.
+    pub locked: bool,
+}
+
+impl FieldFrame {
+    /// The token a header or footer writes for this field, judged on its instruction so far.
+    pub(crate) fn side_token(&self) -> Option<&'static str> {
+        side_field_token(&self.instr, self.locked)
+    }
 }
 
 /// Finish a field: wrap the result in a link when the instruction is a
@@ -21,6 +32,26 @@ pub(crate) fn field_result(instr: &str, content: Vec<Inline>) -> Vec<Inline> {
         }
         _ => content,
     }
+}
+
+/// The token a header or footer writes for a field only a printed page resolves: its page,
+/// page count, date, time and file name. A locked field keeps the result it stores.
+pub(crate) fn side_field_token(instr: &str, locked: bool) -> Option<&'static str> {
+    if locked {
+        return None;
+    }
+    let tokens = tokenize(instr);
+    let Some(Token::Word(keyword, _)) = tokens.first() else { return None };
+    let path = tokens.contains(&Token::Switch('p'));
+    Some(match keyword.to_ascii_uppercase().as_str() {
+        "PAGE" => "{page}",
+        "NUMPAGES" | "SECTIONPAGES" => "{pages}",
+        "DATE" => "{date}",
+        "TIME" => "{time}",
+        "FILENAME" if path => "{path}",
+        "FILENAME" => "{file}",
+        _ => return None,
+    })
 }
 
 /// Whether a field instruction is a check box or drop-down form field,
@@ -174,6 +205,28 @@ fn classify(url: String) -> LinkTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_page_field_s_first_keyword_names_its_side_token() {
+        for (instr, expected) in [
+            (" PAGE \\* MERGEFORMAT ", Some("{page}")),
+            ("page", Some("{page}")),
+            ("NUMPAGES", Some("{pages}")),
+            ("SectionPages", Some("{pages}")),
+            ("DATE \\@ \"d MMMM yyyy\"", Some("{date}")),
+            ("TIME", Some("{time}")),
+            ("FILENAME", Some("{file}")),
+            ("FILENAME \\p", Some("{path}")),
+            ("FILENAME \\P \\* Upper", Some("{path}")),
+            ("PAGEREF _Toc1", None),
+            ("SAVEDATE", None),
+            ("REF PAGE", None),
+            ("", None),
+        ] {
+            assert_eq!(side_field_token(instr, false), expected, "{instr:?}");
+            assert_eq!(side_field_token(instr, true), None, "{instr:?}");
+        }
+    }
 
     #[test]
     fn only_the_first_keyword_names_a_choice_form_field() {

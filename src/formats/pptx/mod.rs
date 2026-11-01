@@ -8,6 +8,7 @@ mod cascade;
 use crate::ctx::{AdmittedUnit, ImageLoss, ParseCtx};
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
+use crate::model::HeaderFooterRegion as Side;
 use crate::model::{
     Block, Cell, Document, GridBuilder, ImageSource, Inline, LinkTarget, Unit, UnitKind,
     inlines_are_empty, inlines_to_plain_text,
@@ -28,6 +29,7 @@ use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
 use crate::shared::math::{math_lines, omath_para_to_tex};
 use crate::shared::mc::{alternate_branch, holds_graphic};
 use crate::shared::numbering::{LevelCounters, every_deeper};
+use crate::shared::sides::{PageSides, SideTimeline};
 use crate::shared::text::clean_text;
 use crate::shared::typeface::run_inlines;
 use cascade::{Bullet, LevelStyle, Ph, Placeholder, TextProps, TitleClass};
@@ -62,6 +64,7 @@ struct LayoutInfo {
     placeholders: Vec<Placeholder>,
     master_path: Option<String>,
     backdrop: Backdrop,
+    part: TemplatePart,
 }
 
 struct MasterInfo {
@@ -71,6 +74,16 @@ struct MasterInfo {
     placeholders: Vec<Placeholder>,
     backdrop: Backdrop,
     theme: ThemeFills,
+    part: TemplatePart,
+    /// The theme's path, tree and relationships, which its picture fills resolve through.
+    theme_part: Option<(String, TemplatePart)>,
+}
+
+/// A layout's or master's tree and relationships, which its own shapes and background resolve
+/// through.
+struct TemplatePart {
+    tree: Option<Element>,
+    rels: Relationships,
 }
 
 /// What a slide, layout or master shows besides its placeholders.
@@ -135,6 +148,15 @@ impl ThemeFills {
         Self { fills: pictures("fillStyleLst"), backgrounds: pictures("bgFillStyleLst") }
     }
 
+    /// The blip of the picture fill `idx` names.
+    fn fill(theme: &Element, idx: u32) -> Option<&Element> {
+        let (list, first) =
+            if idx >= 1001 { ("bgFillStyleLst", 1001) } else { ("fillStyleLst", 1) };
+        let at = usize::try_from(idx.checked_sub(first)?).ok()?;
+        let fill = theme.first_descendant(ns::A, list)?.child_elems().nth(at)?;
+        fill.is(ns::A, "blipFill").then(|| fill.find(ns::A, "blip")).flatten()
+    }
+
     fn picture(&self, idx: u32) -> bool {
         let (list, first) = if idx >= 1001 { (&self.backgrounds, 1001) } else { (&self.fills, 1) };
         idx.checked_sub(first)
@@ -170,6 +192,9 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         all_rels.push(read_rels(&pkg, &rels_part_for(path), Role::Content(Region::Body))?);
     }
 
+    let emit = parse_ctx.headers_footers_requested();
+    let slide_sides = RefCell::new(PageSides::default());
+    let mut kept = (HashMap::new(), (SideTimeline::default(), SideTimeline::default()));
     for ((unit, slide_path), slide_rels) in slides.iter().zip(&all_rels) {
         let _unit = parse_ctx.enter_admitted(*unit);
         let tree = pkg.related_xml_part(slide_path, Role::Reported(Region::Body))?;
@@ -197,10 +222,13 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
             layout,
             master,
             slide_units: &slide_units,
+            sides: emit.then_some(&slide_sides),
         };
         blocks.push(Block::UnitStart(unit.model()));
-        parse_shapes(sp_tree, &ctx, &mut blocks)?;
-        blocks.extend(ctx.speaker_notes()?);
+        let layout = layout_path.as_deref().zip(layout);
+        let master = layout.and_then(|(_, l)| l.master_path.as_deref()).zip(master);
+        let state = emit.then_some((&mut kept.0, &mut kept.1));
+        write_slide(&ctx, (slide, sp_tree), (layout, master), state, &mut blocks)?;
     }
     if failed == slides.len() {
         return Err(ConvertError::malformed("no slide in the presentation could be read"));
@@ -277,7 +305,9 @@ impl Templates {
         let master = layout
             .and_then(|(_, l)| l.master_path.as_deref())
             .and_then(|mp| self.masters.get_key_value(mp));
-        report_repeated(parse_ctx, slide, layout, master, &mut self.repeated);
+        if !parse_ctx.headers_footers_requested() {
+            report_repeated(parse_ctx, slide, layout, master, &mut self.repeated);
+        }
         Ok((layout.map(|(_, l)| l), master.map(|(_, m)| m)))
     }
 }
@@ -330,7 +360,12 @@ fn load_layout(
     let backdrop = Backdrop::of(tree.as_ref().and_then(|t| t.find(ns::P, "sldLayout")));
     let rels = read_rels(pkg, &rels_part_for(layout_path), Role::Content(Region::Body))?;
     let master_path = rel_target_of_type(&rels, layout_path, MASTER_REL);
-    Ok(LayoutInfo { placeholders: placeholders(tree.as_ref()), master_path, backdrop })
+    Ok(LayoutInfo {
+        placeholders: placeholders(tree.as_ref()),
+        master_path,
+        backdrop,
+        part: TemplatePart { tree, rels },
+    })
 }
 
 fn placeholders(tree: Option<&Element>) -> Vec<Placeholder> {
@@ -346,9 +381,16 @@ fn load_master(
 ) -> Result<MasterInfo, ConvertError> {
     let tree = rooted_part(parse_ctx, pkg, master_path, Role::Content(Region::Body), "sldMaster")?;
     let rels = read_rels(pkg, &rels_part_for(master_path), Role::Probe)?;
-    let theme = match rel_target_of_type(&rels, master_path, THEME_REL) {
-        Some(theme_path) => pkg.related_xml_part(&theme_path, Role::Probe)?,
+    let theme_path = rel_target_of_type(&rels, master_path, THEME_REL);
+    let theme = match &theme_path {
+        Some(theme_path) => pkg.related_xml_part(theme_path, Role::Probe)?,
         None => None,
+    };
+    let theme_rels = match &theme_path {
+        Some(theme_path) if theme.is_some() && parse_ctx.headers_footers_requested() => {
+            Some(read_rels(pkg, &rels_part_for(theme_path), Role::Probe)?)
+        }
+        _ => None,
     };
     let styles = |name: &str| {
         let tx_styles = tree.as_ref().and_then(|t| t.first_descendant(ns::P, "txStyles"));
@@ -361,6 +403,10 @@ fn load_master(
         placeholders: placeholders(tree.as_ref()),
         backdrop: Backdrop::of(tree.as_ref().and_then(|t| t.find(ns::P, "sldMaster"))),
         theme: theme.as_ref().map(ThemeFills::read).unwrap_or_default(),
+        part: TemplatePart { tree, rels },
+        theme_part: theme_path
+            .zip(theme_rels)
+            .map(|(path, rels)| (path, TemplatePart { tree: theme, rels })),
     })
 }
 
@@ -413,18 +459,67 @@ fn report_repeated(
     }
 }
 
-/// Report a slide-number, date, footer or header placeholder, none of which
-/// is carried, when it shows text: `true` when `ph_type` names one.
-fn side_placeholder(parse_ctx: &ParseCtx<'_>, sp: &Element, ph_type: &str) -> bool {
-    let (code, region) = match ph_type {
-        kind if FOOTERS.contains(&kind) => (DiagnosticCode::FooterOmitted, Region::Footer),
-        "hdr" => (DiagnosticCode::HeaderOmitted, Region::Header),
-        _ => return false,
-    };
-    if sp.outermost(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
-        parse_ctx.emit(code, region);
+/// Write a slide: under `HeaderFooterPolicy::Emit` its header and footer, then its shapes and
+/// its notes page.
+fn write_slide(
+    ctx: &SlideCtx<'_, '_>,
+    (slide, sp_tree): (Option<&Element>, &Element),
+    templated: Templated<'_>,
+    kept: Option<Kept<'_>>,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConvertError> {
+    let mut kept = kept.zip(ctx.sides);
+    if let Some(((art, _), sides)) = kept.as_mut() {
+        decorate(ctx, slide, templated, art, &mut sides.borrow_mut())?;
     }
-    true
+    let mut body = Vec::new();
+    parse_shapes(sp_tree, ctx, &mut body)?;
+    let mut notes = None;
+    if let Some(((_, timelines), sides)) = kept {
+        sides.take().publish(ctx.parse_ctx, &mut timelines.0, blocks)?;
+        notes = Some(&mut timelines.1);
+    }
+    blocks.append(&mut body);
+    blocks.extend(ctx.speaker_notes(notes)?);
+    Ok(())
+}
+
+/// The side a slide-number, date, footer or header placeholder shows on.
+fn running_side(ph_type: &str) -> Option<Side> {
+    match ph_type {
+        kind if FOOTERS.contains(&kind) => Some(Side::Footer),
+        "hdr" => Some(Side::Header),
+        _ => None,
+    }
+}
+
+/// Read a header or footer placeholder into the page's sides, else report it when it shows text.
+fn side_placeholder(
+    sp: &Element,
+    ctx: &SlideCtx<'_, '_>,
+    ph: Ph<'_>,
+    side: Side,
+) -> Result<(), ConvertError> {
+    match ctx.sides {
+        Some(sides) => {
+            let side_ctx = SlideCtx { region: side.region(), sides: None, ..*ctx };
+            sides.borrow_mut().read(ctx.parse_ctx, side, || {
+                let mut blocks = Vec::new();
+                shape_content(sp, &side_ctx, Some(ph), &mut blocks);
+                Ok(blocks)
+            })?;
+        }
+        None => {
+            if sp.outermost(ns::A, "t").any(|t| !t.text().trim().is_empty()) {
+                let code = match side {
+                    Side::Header => DiagnosticCode::HeaderOmitted,
+                    Side::Footer => DiagnosticCode::FooterOmitted,
+                };
+                ctx.parse_ctx.emit(code, side.region());
+            }
+        }
+    }
+    Ok(())
 }
 
 struct SlideCtx<'a, 'b> {
@@ -439,6 +534,8 @@ struct SlideCtx<'a, 'b> {
     master: Option<&'b MasterInfo>,
     /// Slide part path -> the slide's unit, for internal slide-to-slide links.
     slide_units: &'b HashMap<&'b str, Unit>,
+    /// Where the page's header and footer placeholders go under `HeaderFooterPolicy::Emit`.
+    sides: Option<&'b RefCell<PageSides>>,
 }
 
 impl SlideCtx<'_, '_> {
@@ -492,7 +589,12 @@ impl SlideCtx<'_, '_> {
         (lvl, ppr.map_or(props, |ppr| props.merge(cascade::paragraph_props(ppr))))
     }
 
-    fn speaker_notes(&self) -> Result<Option<Block>, ConvertError> {
+    /// The slide's notes page as a quote, its header and footer first where `timeline` keeps
+    /// them.
+    fn speaker_notes(
+        &self,
+        timeline: Option<&mut SideTimeline>,
+    ) -> Result<Option<Block>, ConvertError> {
         if let Some(notes_path) = rel_target_of_type(self.rels, self.base_part, NOTES_REL)
             && let Some(tree) = rooted_part(
                 self.parse_ctx,
@@ -504,18 +606,25 @@ impl SlideCtx<'_, '_> {
         {
             let rels =
                 read_rels(self.pkg, &rels_part_for(&notes_path), Role::Content(Region::Note))?;
+            let sides = RefCell::new(PageSides::default());
             let notes_ctx = SlideCtx {
                 rels: &rels,
                 base_part: &notes_path,
                 region: Region::Note,
                 layout: None,
                 master: None,
+                sides: timeline.is_some().then_some(&sides),
                 ..*self
             };
-            let mut blocks = Vec::new();
+            let mut text = Vec::new();
             if let Some(sp_tree) = tree.first_descendant(ns::P, "spTree") {
-                parse_shapes(sp_tree, &notes_ctx, &mut blocks)?;
+                parse_shapes(sp_tree, &notes_ctx, &mut text)?;
             }
+            let mut blocks = Vec::new();
+            if let Some(timeline) = timeline {
+                sides.take().publish(self.parse_ctx, timeline, &mut blocks)?;
+            }
+            blocks.append(&mut text);
             return Ok((!blocks.is_empty()).then_some(Block::BlockQuote(blocks)));
         }
         Ok(None)
@@ -597,26 +706,185 @@ fn parse_shapes(
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConvertError> {
     for child in selected_children(ctx.parse_ctx, ctx.region, parent) {
-        if child.is(ns::P, "contentPart") || child.is(P14, "contentPart") {
-            ctx.emit(DiagnosticCode::GraphicUnread);
-            continue;
+        parse_shape_element(child, ctx, blocks)?;
+    }
+    Ok(())
+}
+
+fn parse_shape_element(
+    child: &Element,
+    ctx: &SlideCtx<'_, '_>,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConvertError> {
+    if child.is(ns::P, "contentPart") || child.is(P14, "contentPart") {
+        ctx.emit(DiagnosticCode::GraphicUnread);
+        return Ok(());
+    }
+    if child.ns.as_deref().is_none_or(|n| n != ns::P) {
+        return Ok(());
+    }
+    if hidden_shape(child) {
+        ctx.emit(DiagnosticCode::HiddenOmitted);
+        return Ok(());
+    }
+    match child.local.as_str() {
+        // Connector shapes carry the same `p:txBody` as plain shapes.
+        "sp" | "cxnSp" => parse_shape(child, ctx, blocks)?,
+        "grpSp" => parse_shapes(child, ctx, blocks)?,
+        "graphicFrame" => parse_graphic_frame(child, ctx, blocks)?,
+        "pic" => parse_picture(child, ctx, blocks)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Under `HeaderFooterPolicy::Emit`, the template content read so far and the slide and notes
+/// values in force.
+type Kept<'k> =
+    (&'k mut HashMap<(String, Piece), Decoration>, &'k mut (SideTimeline, SideTimeline));
+
+/// A slide's layout and master, each with its part path.
+type Templated<'t> = (Option<(&'t str, &'t LayoutInfo)>, Option<(&'t str, &'t MasterInfo)>);
+
+/// A layout's or master's own content read once: what it holds and what reading it reported.
+type Decoration = (Vec<Block>, crate::diagnostics::Diagnostics);
+
+/// What a slide shows of a template part: its own shapes, its picture background, or the theme
+/// fill a `p:bgRef` names.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Piece {
+    Shapes,
+    Background,
+    Theme(u32),
+}
+
+/// Under `HeaderFooterPolicy::Emit`, add the layout and master content a slide shows to its
+/// header: the picture background it takes from them, then the master's own shapes and the
+/// layout's, where each level shows the one above it. A slide's own picture background is
+/// unplaced; a theme's picture a `p:bgRef` names reads through the theme's relationships.
+fn decorate(
+    ctx: &SlideCtx<'_, '_>,
+    slide: Option<&Element>,
+    (layout, master): Templated<'_>,
+    art: &mut HashMap<(String, Piece), Decoration>,
+    sides: &mut PageSides,
+) -> Result<(), ConvertError> {
+    let parse_ctx = ctx.parse_ctx;
+    let own = Backdrop::of(slide);
+    let mut pieces: Vec<(&str, &TemplatePart, Piece)> = Vec::new();
+    let layout_background = layout.and_then(|(p, l)| Some((l.backdrop.background?, Some(p))));
+    let master_background = master.and_then(|(p, m)| Some((m.backdrop.background?, Some(p))));
+    match own.background.map(|b| (b, None)).or(layout_background).or(master_background) {
+        Some((Background::Picture, None)) => {
+            parse_ctx.image_loss(ImageLoss::Unplaced, Region::Body);
         }
-        if child.ns.as_deref().is_none_or(|n| n != ns::P) {
-            continue;
+        Some((Background::Picture, Some(part))) => {
+            if let Some((path, layout)) = layout.filter(|(path, _)| *path == part) {
+                pieces.push((path, &layout.part, Piece::Background));
+            } else if let Some((path, master)) = master.filter(|(path, _)| *path == part) {
+                pieces.push((path, &master.part, Piece::Background));
+            }
         }
-        if hidden_shape(child) {
-            ctx.emit(DiagnosticCode::HiddenOmitted);
-            continue;
+        Some((Background::Theme(idx), _)) => {
+            if let Some((_, master)) = master
+                && master.theme.picture(idx)
+                && let Some((path, theme)) = &master.theme_part
+            {
+                pieces.push((path.as_str(), theme, Piece::Theme(idx)));
+            }
         }
-        match child.local.as_str() {
-            // Connector shapes carry the same `p:txBody` as plain shapes.
-            "sp" | "cxnSp" => parse_shape(child, ctx, blocks),
-            "grpSp" => parse_shapes(child, ctx, blocks)?,
-            "graphicFrame" => parse_graphic_frame(child, ctx, blocks)?,
-            "pic" => parse_picture(child, ctx, blocks)?,
-            _ => {}
+        Some((Background::Fill, _)) | None => {}
+    }
+    let shows_layout = own.shows_master;
+    let shows_master = shows_layout && layout.is_some_and(|(_, l)| l.backdrop.shows_master);
+    if let Some((path, master)) = master.filter(|(_, m)| shows_master && m.backdrop.shapes) {
+        pieces.push((path, &master.part, Piece::Shapes));
+    }
+    if let Some((path, layout)) = layout.filter(|(_, l)| shows_layout && l.backdrop.shapes) {
+        pieces.push((path, &layout.part, Piece::Shapes));
+    }
+    for (path, part, piece) in pieces {
+        parse_ctx.charge(path.len() as u64)?;
+        let key = (path.to_owned(), piece);
+        if !art.contains_key(&key) {
+            let in_layout = layout.is_some_and(|(at, _)| at == path) && piece == Piece::Shapes;
+            let part_ctx = SlideCtx {
+                rels: &part.rels,
+                base_part: path,
+                region: Region::Header,
+                layout: layout.map(|(_, l)| l).filter(|_| in_layout),
+                master: master.map(|(_, m)| m),
+                sides: None,
+                ..*ctx
+            };
+            let read = parse_ctx.holding_reports(|| part_content(part, &part_ctx, piece))?;
+            art.insert(key.clone(), read);
+        }
+        let (blocks, held) = art.get(&key).ok_or(ConvertError::Internal)?;
+        sides.read(parse_ctx, Side::Header, || {
+            crate::model::charge_blocks_copy(blocks, |work| parse_ctx.charge(work))?;
+            parse_ctx.report_held(held)?;
+            Ok(blocks.clone())
+        })?;
+    }
+    Ok(())
+}
+
+/// A layout's or master's own shapes, those no placeholder holds, its picture background, or a
+/// theme's picture fill.
+fn part_content(
+    part: &TemplatePart,
+    ctx: &SlideCtx<'_, '_>,
+    piece: Piece,
+) -> Result<Vec<Block>, ConvertError> {
+    let root = part
+        .tree
+        .as_ref()
+        .and_then(|tree| tree.find(ns::P, "sldLayout").or_else(|| tree.find(ns::P, "sldMaster")));
+    let c_sld = root.and_then(|root| root.find(ns::P, "cSld"));
+    let mut blocks = Vec::new();
+    match piece {
+        Piece::Theme(idx) => {
+            let blip = part.tree.as_ref().and_then(|theme| ThemeFills::fill(theme, idx));
+            push_blip(&mut blocks, ctx, blip)?;
+        }
+        Piece::Background => {
+            let blip = c_sld
+                .and_then(|c| c.find(ns::P, "bg"))
+                .and_then(|bg| bg.find(ns::P, "bgPr"))
+                .and_then(|pr| pr.find(ns::A, "blipFill"))
+                .and_then(|fill| fill.find(ns::A, "blip"));
+            push_blip(&mut blocks, ctx, blip)?;
+        }
+        Piece::Shapes => {
+            let Some(tree) = c_sld.and_then(|c| c.find(ns::P, "spTree")) else {
+                return Ok(blocks);
+            };
+            for child in selected_children(ctx.parse_ctx, ctx.region, tree) {
+                if !matches!(child.local.as_str(), "nvGrpSpPr" | "grpSpPr" | "extLst")
+                    && child.first_descendant(ns::P, "ph").is_none()
+                {
+                    parse_shape_element(child, ctx, &mut blocks)?;
+                }
+            }
         }
     }
+    Ok(blocks)
+}
+
+/// The picture a `a:blip` shows, resolved through `ctx`'s part.
+fn push_blip(
+    blocks: &mut Vec<Block>,
+    ctx: &SlideCtx<'_, '_>,
+    blip: Option<&Element>,
+) -> Result<(), ConvertError> {
+    let rid = blip
+        .and_then(|b| b.attr_qualified(ns::R, "embed").or_else(|| b.attr_qualified(ns::R, "link")));
+    let source = match rid {
+        Some(rid) => rel_image_source(ctx.pkg, ctx.rels, ctx.base_part, ctx.assets, rid)?,
+        None => None,
+    };
+    push_image(blocks, ctx, String::new(), source.unwrap_or(ImageSource::Unread));
     Ok(())
 }
 
@@ -717,15 +985,33 @@ fn is_true(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true"))
 }
 
-fn parse_shape(sp: &Element, ctx: &SlideCtx<'_, '_>, blocks: &mut Vec<Block>) {
+fn parse_shape(
+    sp: &Element,
+    ctx: &SlideCtx<'_, '_>,
+    blocks: &mut Vec<Block>,
+) -> Result<(), ConvertError> {
     let ph = Ph::of(sp);
-    if let Some(ph) = ph
-        && (ctx.region == Region::Note && ph.kind == "sldImg"
-            || (ctx.region == Region::Note || ph.kind != "hdr")
-                && side_placeholder(ctx.parse_ctx, sp, ph.kind))
-    {
-        return;
+    if let Some(ph) = ph {
+        if ctx.region == Region::Note && ph.kind == "sldImg" {
+            return Ok(());
+        }
+        if let Some(side) = running_side(ph.kind)
+            && (ctx.region == Region::Note || ph.kind != "hdr")
+        {
+            return side_placeholder(sp, ctx, ph, side);
+        }
     }
+    shape_content(sp, ctx, ph, blocks);
+    Ok(())
+}
+
+/// A shape's text, title or body as its placeholder decides, and what it leaves unread.
+fn shape_content(
+    sp: &Element,
+    ctx: &SlideCtx<'_, '_>,
+    ph: Option<Ph<'_>>,
+    blocks: &mut Vec<Block>,
+) {
     if sp
         .outermost(ns::P, "sp")
         .any(|inner| !hidden_shape(inner) && !inner.text().trim().is_empty())
@@ -836,6 +1122,12 @@ fn parse_para_inlines(p: &Element, ctx: &SlideCtx<'_, '_>, props: TextProps) -> 
             continue;
         }
         match child.local.as_str() {
+            "fld" if let Some(token) = side_token(child, ctx.region) => {
+                let rpr = child.find(ns::A, "rPr");
+                let style = rpr.map_or(base, |rpr| cascade::rpr_delta(rpr).apply(base));
+                out.push(Inline::Text { text: token.into(), style });
+                ctx.emit(DiagnosticCode::FieldToken);
+            }
             "r" | "fld" => {
                 let rpr = child.find(ns::A, "rPr");
                 let style = rpr.map_or(base, |rpr| cascade::rpr_delta(rpr).apply(base));
@@ -871,6 +1163,19 @@ fn parse_para_inlines(p: &Element, ctx: &SlideCtx<'_, '_>, props: TextProps) -> 
         }
     }
     out
+}
+
+/// The token a header or footer writes for a slide number or date field (ECMA-376 Part 1,
+/// 21.1.2.2.4), whose cached text is not read.
+fn side_token(field: &Element, region: Region) -> Option<&'static str> {
+    if !matches!(region, Region::Header | Region::Footer) {
+        return None;
+    }
+    match field.attr(ns::A, "type")? {
+        "slidenum" => Some("{page}"),
+        kind if kind.starts_with("datetime") => Some("{date}"),
+        _ => None,
+    }
 }
 
 fn parse_graphic_frame(

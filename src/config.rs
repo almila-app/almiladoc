@@ -53,7 +53,7 @@ pub struct Config {
     pub images: ImagePolicy,
     /// Which images a parse leaves gaps after, for the caller's OCR.
     pub image_ocr: ImageOcr,
-    /// Whether supported print headers and footers appear.
+    /// Whether the page headers and footers a document declares appear.
     pub headers_footers: HeaderFooterPolicy,
 }
 
@@ -112,14 +112,14 @@ impl Default for Config {
     }
 }
 
-/// Whether supported print headers and footers appear in the output.
+/// Whether supported headers and footers appear in the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum HeaderFooterPolicy {
-    /// Count omitted source values without interpreting their print codes.
+    /// Count omitted source values without reading them.
     #[default]
     Omit,
-    /// Preserve their text and fixed dynamic-field tokens in labelled blockquotes.
+    /// Preserve their content, page-dependent fields as fixed tokens, in labelled blockquotes.
     Emit,
 }
 

@@ -82,6 +82,36 @@ impl Codepage {
     }
 }
 
+impl Codepage {
+    /// Decode `bytes`, with the span of each replacement character standing for bytes that did
+    /// not decode; a replacement character the bytes encode is text like any other.
+    pub(crate) fn decode_marked(self, bytes: &[u8]) -> (String, Vec<std::ops::Range<usize>>) {
+        let Table::Whatwg(encoding) = self.table else {
+            return (self.decode(bytes).0, Vec::new());
+        };
+        let mut decoder = encoding.new_decoder_without_bom_handling();
+        let capacity = decoder.max_utf8_buffer_length_without_replacement(bytes.len());
+        let mut text = String::with_capacity(capacity.unwrap_or(bytes.len()));
+        let mut invalid = Vec::new();
+        let mut rest = bytes;
+        loop {
+            let (result, read) =
+                decoder.decode_to_string_without_replacement(rest, &mut text, true);
+            rest = rest.get(read..).unwrap_or_default();
+            match result {
+                encoding_rs::DecoderResult::InputEmpty => break,
+                encoding_rs::DecoderResult::OutputFull => text.reserve(rest.len().max(1) * 3),
+                encoding_rs::DecoderResult::Malformed(..) => {
+                    let at = text.len();
+                    text.push(char::REPLACEMENT_CHARACTER);
+                    invalid.push(at..text.len());
+                }
+            }
+        }
+        (text, invalid)
+    }
+}
+
 /// What decoded text loses: bytes that did not decode, and non-ASCII bytes
 /// read in a guessed code page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -51,7 +51,7 @@ Public repository; per-file licensing is recorded in NOTICE and REUSE.toml.
 - bytes → `Format` (`Input::new`'s checked label, else `Input::auto`: a content sniff in
   `src/formats/detect.rs`, then its fallback, Python's path extension; CSV is never sniffed) →
   `formats::parse` → frontend → `model::Document` → `render::markdown`. A PDF page that needs OCR
-  is a `Block::Gap`; others map as usual, bar running heads and pictures (`image_omitted`).
+  is a `Block::Gap`; others map as usual, bar pictures (`image_omitted`) and Omit's running heads.
 - Frontends resolve tri-state `shared::delta::StyleDelta` into `Style`, numbering, list labels,
   relationships and fields. Note references and anchors stay ids; only the renderer decides syntax.
   Check new `Block` variants and containers in every renderer match, wildcards included. Images keep

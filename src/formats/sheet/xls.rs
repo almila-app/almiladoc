@@ -856,8 +856,7 @@ impl<'g, 'p> SheetReader<'g, 'p> {
             parse_ctx.grid_slots_left(),
             parse_ctx.limits().max_grid_slots,
         );
-        let print =
-            (globals.biff8 && parse_ctx.headers_footers_requested()).then(PrintRecords::default);
+        let print = parse_ctx.headers_footers_requested().then(PrintRecords::default);
         Self { print, parse_ctx, globals, out, pending: None, shape: None, text_of: None }
     }
 
@@ -1061,7 +1060,11 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         } else {
             Vec::new()
         };
-        print.read(self.parse_ctx, rec_type, &segments)
+        if self.globals.biff8 {
+            print.read(self.parse_ctx, rec_type, &segments)
+        } else {
+            print.read_bytes(self.parse_ctx, rec_type, &segments, self.globals.encoding)
+        }
     }
 
     fn omit_header_footer(&mut self, rec_type: u16, body: &[u8]) {
@@ -2166,8 +2169,8 @@ mod tests {
         );
         let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
         let book = biff5(Some(1252), &[], &[(b"S", rec(HEADER, &[1, b'H']))]);
-        assert_eq!(print_values(&parse(&ctx, &book).unwrap()), []);
-        assert_eq!(reported(ctx), [in_unit(DiagnosticCode::HeaderOmitted, 1, 1)]);
+        assert_eq!(print_values(&parse(&ctx, &book).unwrap()), [print_value(Header, Default, "H")]);
+        assert_eq!(reported(ctx), []);
     }
 
     #[test]
@@ -2978,6 +2981,56 @@ mod tests {
         assert_eq!(reported, [in_unit(DiagnosticCode::EncodingAssumed, 2, 1)]);
         let ascii = biff5(Some(1361), &[], &[(b"S", biff5_label(0, 0, 0, b"ok"))]);
         assert_eq!(converted(&ascii).1, []);
+    }
+
+    fn biff5_side(codepage: u16, segments: &[&[u8]]) -> (String, Vec<Reported>) {
+        let (first, rest) = segments.split_first().unwrap();
+        let continued: Vec<u8> = rest.iter().flat_map(|segment| rec(CONTINUE, segment)).collect();
+        let records = [rec(HEADER, first), continued, biff5_label(0, 0, 0, b"x")].concat();
+        let book = biff5(Some(codepage), &[], &[(b"S", records)]);
+        let ctx = ParseCtx::default().with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let doc = parse(&ctx, &book).unwrap();
+        (crate::render::markdown::document_to_markdown(&doc), reported(ctx))
+    }
+
+    #[test]
+    fn biff5_print_text_reads_in_its_code_page_its_damage_judged_after_its_codes_go() {
+        let label = "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n";
+        let table = "|  |\n| --- |\n| x |\n";
+        let header = |code| (code, Region::Header, Some(1), 1);
+        for (codepage, segments, shown, rows) in [
+            (
+                1251,
+                vec![&b"\x0a&L\xcb\xe5\xe2\xee&C&P"[..]],
+                "> \u{41b}\u{435}\u{432}\u{43e}\n>\n> {page}\n",
+                vec![header(DiagnosticCode::FieldToken)],
+            ),
+            (
+                1361,
+                vec![&b"\x0c&\"\xe9,Bold\"&LA"[..]],
+                "> A\n",
+                vec![header(DiagnosticCode::FormattingUnreadable)],
+            ),
+            (
+                1361,
+                vec![&b"\x03&L\xe9"[..]],
+                "> \u{e9}\n",
+                vec![header(DiagnosticCode::EncodingAssumed)],
+            ),
+            (932, vec![&b"\x04&L\x82"[..], &b"\xa0"[..]], "> \u{3042}\n", vec![]),
+            (
+                932,
+                vec![&b"\x04&L\x82&"[..]],
+                "> \u{fffd}\n",
+                vec![header(DiagnosticCode::InvalidEncoding)],
+            ),
+            (65001, vec![&b"\x05&L\xef\xbf\xbd"[..]], "> \u{fffd}\n", vec![]),
+        ] {
+            let expected = (format!("{label}{shown}\n{table}"), rows);
+            assert_eq!(biff5_side(codepage, &segments), expected, "{segments:?}");
+        }
+        let omitted = biff5(Some(1252), &[], &[(b"S", rec(HEADER, &[1, b'H']))]);
+        assert_eq!(converted(&omitted).1, [in_unit(DiagnosticCode::HeaderOmitted, 1, 1)]);
     }
 
     #[test]

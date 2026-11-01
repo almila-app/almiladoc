@@ -17,13 +17,13 @@ use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
 use crate::model::Node;
 use crate::model::{
-    Block, Cell, Document, Gap, Inline, LinkTarget, List, MarkerKind, Note, OcrOrigin, Table, Unit,
-    UnitKind, inlines_are_empty,
+    Block, Cell, Document, Gap, HeaderFooter, Inline, LinkTarget, List, MarkerKind, Note,
+    OcrOrigin, Table, Unit, UnitKind, inlines_are_empty,
 };
 use crate::ocr::{GapFills, GapState};
 use crate::shared::uri::is_safe_link;
 use crate::{ImagePolicy, UnitSpan};
-use anchors::{AnchorMap, resolve_anchors};
+use anchors::{AnchorMap, AnchorScope, resolve_anchors};
 use escape::{InlineContext, MathSite, backtick_fence, escape_marker_label, escape_math};
 use inline::render_inlines;
 use shape::Shapes;
@@ -48,6 +48,7 @@ pub(crate) struct Ctx<'d> {
     omitted_notes: HashSet<&'d str>,
     duplicate_notes: u64,
     side_index: StateCell<usize>,
+    in_side: bool,
 }
 
 impl<'d> Ctx<'d> {
@@ -71,7 +72,26 @@ impl<'d> Ctx<'d> {
         }
         ctx.nums = number_notes(&doc.blocks, &ctx.selected_notes, &ctx.omitted_notes, fills);
         let notes: Vec<&Note> = numbered_notes(&ctx).into_iter().map(|(note, _)| note).collect();
-        ctx.anchors = resolve_anchors(doc, fills, &notes, images, &ctx.nums);
+        ctx.anchors =
+            resolve_anchors(&doc.blocks, AnchorScope::Body, fills, &notes, images, &ctx.nums);
+        Ok(ctx)
+    }
+
+    /// The scope of one side story: its own anchors under `prefix`, and no notes, its owned
+    /// keys charged to `meter` before they are resolved.
+    fn side(
+        value: &HeaderFooter,
+        fills: &'d GapFills,
+        images: ImagePolicy,
+        (side_index, prefix): (usize, &str),
+        meter: &Meter<'_>,
+    ) -> Result<Self, ConvertError> {
+        value.charge_copy(|work| meter.charge(work))?;
+        let mut ctx = Self::empty(fills, images, side_index);
+        ctx.in_side = true;
+        let content = value.content.as_deref().unwrap_or_default();
+        ctx.anchors =
+            resolve_anchors(content, AnchorScope::Side(prefix), fills, &[], images, &ctx.nums);
         Ok(ctx)
     }
 
@@ -88,6 +108,7 @@ impl<'d> Ctx<'d> {
             omitted_notes: HashSet::new(),
             duplicate_notes: 0,
             side_index: StateCell::new(side_index),
+            in_side: false,
         }
     }
 
@@ -244,6 +265,7 @@ pub(crate) fn render_losses(
     let dangling = |found: &LossCounts| {
         found.links.saturating_add(if unread.notes { 0 } else { found.note_refs })
     };
+    let sides = side_losses(doc, &rc, unread, meter)?;
     let mut losses: Vec<RenderLoss> = [
         (DiagnosticCode::DuplicateNote, Region::Note, None, rc.duplicate_notes),
         (DiagnosticCode::DanglingReference, Region::Body, None, dangling(&body)),
@@ -252,6 +274,12 @@ pub(crate) fn render_losses(
         (DiagnosticCode::UnsafeLink, Region::Note, None, notes.unsafe_links),
     ]
     .into_iter()
+    .chain(sides.iter().flat_map(|&(region, unit, ref found)| {
+        [
+            (DiagnosticCode::DanglingReference, region, unit, dangling(found)),
+            (DiagnosticCode::UnsafeLink, region, unit, found.unsafe_links),
+        ]
+    }))
     .filter(|&(_, _, _, count)| count > 0)
     .collect();
     losses.extend(
@@ -262,9 +290,64 @@ pub(crate) fn render_losses(
         body.images
             .into_iter()
             .chain(notes.images)
+            .chain(sides.into_iter().flat_map(|(_, _, found)| found.images))
             .map(|((code, origin), count)| (code, origin.region, origin.unit, count)),
     );
     Ok(losses)
+}
+
+/// What each side story loses where it renders, in its own scope, with its region and unit.
+fn side_losses(
+    doc: &Document,
+    rc: &Ctx<'_>,
+    unread: Unread<'_>,
+    meter: &Meter<'_>,
+) -> Result<Vec<(Region, Option<Unit>, LossCounts)>, ConvertError> {
+    let mut sides = Vec::new();
+    for (value, unit) in side_stories(doc, rc) {
+        let side = Ctx::side(value, rc.fills, rc.images, (0, ""), meter)?;
+        let mut found = LossCounts::default();
+        let content = value.content.as_deref().unwrap_or_default();
+        visit_inlines(content, &side, &mut |inline, in_label| {
+            found.tally(inline, &side, unread, in_label);
+        });
+        sides.push((value.region.region(), unit, found));
+    }
+    Ok(sides)
+}
+
+/// Every side story with content that rendering `rc`'s document writes, with the unit whose
+/// body holds it: one a table cell holds writes nothing.
+fn side_stories<'d>(doc: &'d Document, rc: &Ctx<'d>) -> Vec<(&'d HeaderFooter, Option<Unit>)> {
+    let mut stories = Vec::new();
+    let mut unit = None;
+    let mut stack = Vec::new();
+    let notes = numbered_notes(rc).into_iter().flat_map(|(note, _)| &note.blocks);
+    for top in doc.blocks.iter().map(|block| (block, true)).chain(notes.map(|b| (b, false))) {
+        match top {
+            (Block::UnitStart(start), true) => unit = Some(*start),
+            (_, false) => unit = None,
+            _ => {}
+        }
+        stack.push(std::slice::from_ref(top.0));
+        while let Some(blocks) = stack.pop() {
+            for block in blocks {
+                if let Block::HeaderFooter(value @ HeaderFooter { content: Some(content), .. }) =
+                    block
+                {
+                    stories.push((value, unit));
+                    stack.push(content);
+                }
+                stack.extend(children(block, rc.fills).into_iter().filter_map(
+                    |child| match child {
+                        Node::Blocks(inner) => Some(inner),
+                        _ => None,
+                    },
+                ));
+            }
+        }
+    }
+    stories
 }
 
 #[derive(Debug, Clone, Default)]
@@ -585,6 +668,9 @@ fn write_block(
             }
             return table::write_table(unwrap(t, rc, sink.meter())?, rc, sink).map(|()| None);
         }
+        Block::Heading { anchor, content, .. } if rc.in_side => {
+            write_side_heading(anchor.as_deref(), content, rc, sink)?;
+        }
         Block::Heading { level, content, .. } => {
             let mut text = Text::new(sink.meter());
             render_inlines(content, InlineContext::Heading, rc, &mut text)?;
@@ -631,8 +717,25 @@ fn write_block(
     Ok(None)
 }
 
+/// Write a side story's heading as a paragraph, which claims no slug, its anchor before it.
+fn write_side_heading(
+    anchor: Option<&str>,
+    content: &[Inline],
+    rc: &Ctx<'_>,
+    sink: &mut Sink<'_>,
+) -> Result<(), ConvertError> {
+    let mut text = Text::new(sink.meter());
+    if let Some(id) = anchor.and_then(|id| rc.anchors.html_id(id)) {
+        text.push_str(&format!("<a id=\"{id}\"></a>"))?;
+    }
+    render_inlines(content, InlineContext::Block, rc, &mut text)?;
+    write_paragraph(&text.into_string(), sink)
+}
+
+/// Write a side story as a labelled quote whose anchor id prefixes every anchor its content
+/// resolves, so no id it writes meets the body's or another story's.
 fn write_header_footer(
-    value: &crate::model::HeaderFooter,
+    value: &HeaderFooter,
     rc: &Ctx<'_>,
     sink: &mut Sink<'_>,
 ) -> Result<(), ConvertError> {
@@ -643,11 +746,17 @@ fn write_header_footer(
     let variant = value.variant.name();
     let label = if region == "header" { "Header" } else { "Footer" };
     let inherited = if value.content.is_none() { ", uses default" } else { "" };
-    sink.write(&format!(
-        "<a id=\"almiladoc:{region}:{variant}:{number}\"></a>{label} ({variant}{inherited}):"
-    ))?;
+    let prefix = format!("almiladoc:{region}:{variant}:{number}");
+    sink.write(&format!("<a id=\"{prefix}\"></a>{label} ({variant}{inherited})"))?;
+    if let Some(name) = &value.page_style {
+        let mut text = Text::new(sink.meter());
+        escape_marker_label(name, InlineContext::Block, &mut text)?;
+        sink.write(" of page style ")?;
+        sink.write(text.as_str())?;
+    }
+    sink.write(":")?;
     if let Some(content) = &value.content {
-        let side = Ctx::empty(rc.fills, rc.images, number);
+        let side = Ctx::side(value, rc.fills, rc.images, (number, &prefix), sink.meter())?;
         sink.gap(2);
         write_blocks(content, &side, sink, None)?;
         rc.side_index.set(side.side_index.get());

@@ -17,7 +17,7 @@ const COLOR_BYTES: usize = 6;
 const THEME_ID_BYTES: usize = 2;
 pub(super) const MAX_BINARY_PRINT_UNITS: usize = 255;
 
-type Damage = (Range<usize>, DiagnosticCode);
+pub(super) type Damage = (Range<usize>, DiagnosticCode);
 type Field = (&'static str, Side, Variant, Option<&'static str>);
 
 const FIELDS: [Field; 6] = [
@@ -41,11 +41,13 @@ pub(super) struct PrintSettings {
     conflicts: [u64; 2],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum BinaryPrintText<'a> {
     Inherit,
     Unread,
     Utf16(Option<&'a [u8]>),
+    /// BIFF5/7 text decoded from its code page, with the spans its decoding damaged.
+    Decoded(String, Vec<Damage>),
 }
 
 #[derive(Default)]
@@ -219,6 +221,11 @@ fn binary_slot(
             let sections = sections(ctx, &text, &damage, |code| slot.report(code))?;
             slot.state.value.content = Some(paragraphs(sections));
         }
+        BinaryPrintText::Decoded(text, damage) => {
+            ctx.charge(text.len() as u64)?;
+            let sections = sections(ctx, &text, &damage, |code| slot.report(code))?;
+            slot.state.value.content = Some(paragraphs(sections));
+        }
     }
     Ok(slot)
 }
@@ -344,7 +351,7 @@ fn read_slot(
 fn inherit(side: Side, variant: Variant) -> PrintSlot {
     PrintSlot {
         state: HeaderFooterState {
-            value: HeaderFooter { region: side, variant, content: None },
+            value: HeaderFooter { page_style: None, region: side, variant, content: None },
             certainty: Certainty::Known,
         },
         reports: Vec::new(),
@@ -871,6 +878,7 @@ mod tests {
     #[test]
     fn print_state_comparison_prices_repeated_utf8_even_when_uncertain() {
         let value = HeaderFooter {
+            page_style: None,
             region: Side::Header,
             variant: Variant::Default,
             content: Some(paragraphs([String::new(), "é".repeat(64), String::new()])),

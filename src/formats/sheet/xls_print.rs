@@ -1,10 +1,12 @@
-use super::headers::{self, BinaryPrintText, PartialPrintSettings};
+use super::headers::{self, BinaryPrintText, Damage, PartialPrintSettings};
 use super::xls::{PrintString, SegReader, read_print_string};
 use crate::ctx::ParseCtx;
+use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
 use crate::shared::binary::get_u16;
+use crate::shared::codepage::Codepage;
 
 pub(super) const HEADER: u16 = 0x0014;
 pub(super) const FOOTER: u16 = 0x0015;
@@ -122,6 +124,44 @@ impl PrintRecords {
         Ok(())
     }
 
+    /// Read a BIFF5/7 `HEADER` or `FOOTER` record, through its `CONTINUE` segments: a one-byte
+    /// character count and that many bytes in the workbook's code page, with the span of each
+    /// character its decoding damaged.
+    pub(super) fn read_bytes(
+        &mut self,
+        ctx: &ParseCtx<'_>,
+        record: u16,
+        segments: &[&[u8]],
+        codepage: Codepage,
+    ) -> Result<(), ConvertError> {
+        if !self.eligible() {
+            self.skipped(record);
+            return Ok(());
+        }
+        let side = match record {
+            HEADER => Side::Header,
+            FOOTER => Side::Footer,
+            _ => return Ok(()),
+        };
+        ctx.charge(segments.len() as u64)?;
+        let mut bytes = segments.iter().flat_map(|segment| segment.iter().copied());
+        let text = match bytes.next() {
+            None => BinaryPrintText::Decoded(String::new(), Vec::new()),
+            Some(count) => {
+                let wanted: Vec<u8> = bytes.by_ref().take(usize::from(count)).collect();
+                ctx.charge(wanted.len() as u64)?;
+                if wanted.len() < usize::from(count) {
+                    BinaryPrintText::Unread
+                } else {
+                    let (text, invalid) = codepage.decode_marked(&wanted);
+                    let damage = damage_spans(&text, &invalid, codepage.assumed);
+                    BinaryPrintText::Decoded(text, damage)
+                }
+            }
+        };
+        self.settings.absorb(ctx, side, Variant::Default, text)
+    }
+
     fn variants(
         &mut self,
         ctx: &ParseCtx<'_>,
@@ -211,6 +251,22 @@ impl PrintRecords {
         }
         headers::publish(ctx, self.settings.finish(ctx)?, out)
     }
+}
+
+/// The spans of `text` its decoding damaged: those of bytes that did not decode, and, where the
+/// code page was assumed, each other non-ASCII character.
+fn damage_spans(text: &str, invalid: &[std::ops::Range<usize>], assumed: bool) -> Vec<Damage> {
+    let mut damage: Vec<Damage> =
+        invalid.iter().map(|span| (span.clone(), DiagnosticCode::InvalidEncoding)).collect();
+    if assumed {
+        damage.extend(text.char_indices().filter_map(|(at, c)| {
+            let span = at..at + c.len_utf8();
+            (!c.is_ascii() && !invalid.contains(&span))
+                .then_some((span, DiagnosticCode::EncodingAssumed))
+        }));
+        damage.sort_by_key(|(span, _)| span.start);
+    }
+    damage
 }
 
 fn counts(reader: &mut SegReader<'_>) -> Option<[u16; 4]> {

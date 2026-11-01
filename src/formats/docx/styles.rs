@@ -482,6 +482,11 @@ pub(super) fn on_off(parent: &Element, name: &str) -> Option<bool> {
     Some(!elem.attr(ns::W, "val").is_some_and(|value| turns_off(value.as_bytes())))
 }
 
+/// Whether the ST_OnOff attribute `name` of `elem` is on; an absent one is off.
+pub(super) fn on_off_attr(elem: &Element, name: &str) -> bool {
+    elem.attr(ns::W, name).is_some_and(|value| !turns_off(value.as_bytes()))
+}
+
 /// Whether an ST_OnOff value is one of the spellings of false.
 pub(super) fn turns_off(value: &[u8]) -> bool {
     matches!(value, b"0" | b"false" | b"off" | b"none")

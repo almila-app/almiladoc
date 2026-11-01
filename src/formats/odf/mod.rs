@@ -2,6 +2,7 @@
 
 mod axes;
 mod datastyle;
+mod sides;
 mod styles;
 mod table;
 mod text;
@@ -14,8 +15,9 @@ use crate::package::archive::{Role, report};
 use crate::package::xml::{Element, ns};
 use crate::package::{Package, PackageKind};
 use crate::shared::assets::AssetSink;
+use crate::shared::sides::{PageSides, SideTimeline};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use text::{Ctx, holds_content, parse_container};
 
 const STYLES_PART: &str = "styles.xml";
@@ -52,14 +54,23 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let ctx = Ctx::new(parse_ctx, &styles, &pkg, &assets);
 
     let blocks = if let Some(text) = body.find(ns::OFFICE, "text") {
-        for master in text_master_pages(parse_ctx, text, &styles)? {
-            report_running(master, parse_ctx);
+        if parse_ctx.headers_footers_requested() {
+            sides::text_with_masters(text, &ctx)?
+        } else {
+            for master in text_master_pages(parse_ctx, text, &styles)? {
+                report_running(master, parse_ctx);
+            }
+            parse_container(text, &ctx)?
         }
-        parse_container(text, &ctx)?
     } else if let Some(sheet) = body.find(ns::OFFICE, "spreadsheet") {
         table::parse_spreadsheet(sheet, &ctx)?
     } else if let Some(pres) = body.find(ns::OFFICE, "presentation") {
-        parse_presentation(pres, &ctx)?
+        let fill_images: HashMap<&str, &Element> = styles_tree
+            .iter()
+            .flat_map(|tree| tree.descendants(ns::DRAW, "fill-image"))
+            .filter_map(|image| Some((image.attr(ns::DRAW, "name")?, image)))
+            .collect();
+        parse_presentation(pres, &ctx, &fill_images)?
     } else {
         return Err(ConvertError::malformed_part(
             "content.xml",
@@ -159,21 +170,34 @@ fn report_running(master: &Element, parse_ctx: &ParseCtx<'_>) {
 }
 
 /// The running header or footer a presentation frame class stands for.
-fn running_frame(frame: &Element) -> Option<(DiagnosticCode, Region)> {
+fn running_frame(frame: &Element) -> Option<crate::model::HeaderFooterRegion> {
+    use crate::model::HeaderFooterRegion as Side;
     match frame.attr(ns::PRESENTATION, "class")? {
-        "header" => Some((DiagnosticCode::HeaderOmitted, Region::Header)),
-        "footer" | "page-number" | "date-time" => {
-            Some((DiagnosticCode::FooterOmitted, Region::Footer))
-        }
+        "header" => Some(Side::Header),
+        "footer" | "page-number" | "date-time" => Some(Side::Footer),
         _ => None,
     }
 }
 
-fn parse_presentation(pres: &Element, ctx: &Ctx<'_, '_>) -> Result<Vec<Block>, ConvertError> {
+fn emit_running(ctx: &Ctx<'_, '_>, side: crate::model::HeaderFooterRegion) {
+    let code = match side {
+        crate::model::HeaderFooterRegion::Header => DiagnosticCode::HeaderOmitted,
+        _ => DiagnosticCode::FooterOmitted,
+    };
+    ctx.parse_ctx.emit(code, side.region());
+}
+
+fn parse_presentation(
+    pres: &Element,
+    ctx: &Ctx<'_, '_>,
+    fill_images: &HashMap<&str, &Element>,
+) -> Result<Vec<Block>, ConvertError> {
     let styles = ctx.styles;
     let declared = declarations(pres);
     let mut blocks = Vec::new();
     let mut masters: BTreeMap<Option<&str>, (&Element, Shown)> = BTreeMap::new();
+    let (mut slide_sides, mut notes_sides) = (SideTimeline::default(), SideTimeline::default());
+    let mut art = HashMap::new();
     for (position, page) in pres.find_all(ns::DRAW, "page").enumerate() {
         let unit = ctx.parse_ctx.begin_unit(crate::model::UnitKind::Slide, position)?;
         blocks.push(Block::UnitStart(unit.unit().model()));
@@ -184,23 +208,120 @@ fn parse_presentation(pres: &Element, ctx: &Ctx<'_, '_>) -> Result<Vec<Block>, C
             shown.objects |= shows(props, "background-objects-visible");
             shown.background |= shows(props, "background-visible");
         }
-        report_declared(page, props, &declared, ctx);
-        let mut title = Vec::new();
-        let mut body = Vec::new();
+        let mut slide = Slide::new(ctx.parse_ctx.headers_footers_requested());
+        let master = styles.master_or_first(page.attr(ns::DRAW, "master-page-name"));
+        if let (Some(sides), Some(master)) = (slide.sides.as_mut(), master) {
+            let shown = Shown {
+                objects: shows(props, "background-objects-visible"),
+                background: shows(props, "background-visible"),
+            };
+            decorate(ctx, (master, shown), fill_images, &mut art, sides)?;
+        }
+        report_declared(page, props, &declared, ctx, slide.sides.as_mut())?;
+        walk_shapes(page, ctx, &mut slide)?;
+        if let Some(sides) = slide.sides {
+            sides.publish(ctx.parse_ctx, &mut slide_sides, &mut blocks)?;
+        }
+        blocks.append(&mut slide.title);
+        blocks.append(&mut slide.body);
         let mut notes = Vec::new();
-        walk_shapes(page, ctx, &mut title, &mut body, &mut notes)?;
-        blocks.append(&mut title);
-        blocks.append(&mut body);
+        if let Some(sides) = slide.notes_sides {
+            sides.publish(ctx.parse_ctx, &mut notes_sides, &mut notes)?;
+        }
+        notes.append(&mut slide.notes);
         if !notes.is_empty() {
             blocks.push(Block::BlockQuote(notes));
         }
     }
     for (master, shown) in masters.into_values() {
-        if decorates(master, shown, ctx) {
+        if !ctx.parse_ctx.headers_footers_requested() && decorates(master, shown, ctx) {
             ctx.parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header);
         }
     }
     Ok(blocks)
+}
+
+/// A master page's own content as a slide shows it: its bitmap background and its shapes that
+/// are no placeholder, read once for each way slides show it.
+type Decoration = (Vec<Block>, crate::diagnostics::Diagnostics);
+
+/// Under `HeaderFooterPolicy::Emit`, add to a slide's header the master page content it shows:
+/// the master's bitmap background where its page style shows the background, and its shapes
+/// that are no placeholder where it shows background objects.
+fn decorate(
+    ctx: &Ctx<'_, '_>,
+    (master, shown): (&Element, Shown),
+    fill_images: &HashMap<&str, &Element>,
+    art: &mut HashMap<(*const Element, bool, bool), Decoration>,
+    sides: &mut PageSides,
+) -> Result<(), ConvertError> {
+    let parse_ctx = ctx.parse_ctx;
+    let key = (std::ptr::from_ref(master), shown.objects, shown.background);
+    let (blocks, held) = match art.entry(key) {
+        std::collections::hash_map::Entry::Occupied(read) => read.into_mut(),
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(parse_ctx.holding_reports(|| {
+                ctx.in_side(Region::Header, || master_content(ctx, master, shown, fill_images))
+            })?)
+        }
+    };
+    sides.read(parse_ctx, crate::model::HeaderFooterRegion::Header, || {
+        crate::model::charge_blocks_copy(blocks, |work| parse_ctx.charge(work))?;
+        parse_ctx.report_held(held)?;
+        Ok(blocks.clone())
+    })
+}
+
+fn master_content(
+    ctx: &Ctx<'_, '_>,
+    master: &Element,
+    shown: Shown,
+    fill_images: &HashMap<&str, &Element>,
+) -> Result<Vec<Block>, ConvertError> {
+    let mut blocks = Vec::new();
+    let fill = page_properties(master, ctx)
+        .filter(|props| shown.background && props.attr(ns::DRAW, "fill") == Some("bitmap"));
+    if let Some(props) = fill {
+        let image = props.attr(ns::DRAW, "fill-image-name").and_then(|name| fill_images.get(name));
+        let href = image.and_then(|image| image.attr(ns::XLINK, "href")).unwrap_or_default();
+        let source = text::load_image(ctx, href)?;
+        let origin = ctx.parse_ctx.image_origin(Region::Header);
+        blocks.push(Block::Paragraph(vec![Inline::Image { origin, alt: String::new(), source }]));
+    }
+    if shown.objects {
+        let mut slide = Slide::new(false);
+        for shape in master.child_elems().filter(|shape| {
+            shape.ns.as_deref() == Some(ns::DRAW) && shape.attr(ns::PRESENTATION, "class").is_none()
+        }) {
+            walk_shape(shape, ctx, &mut slide)?;
+        }
+        blocks.append(&mut slide.title);
+        blocks.append(&mut slide.body);
+    }
+    Ok(blocks)
+}
+
+/// What a slide's shapes write: its title, body and notes, and under `HeaderFooterPolicy::Emit`
+/// the running header and footer of the slide and of its notes page.
+struct Slide {
+    title: Vec<Block>,
+    body: Vec<Block>,
+    notes: Vec<Block>,
+    sides: Option<PageSides>,
+    /// Set once the slide's notes page is walked.
+    notes_sides: Option<PageSides>,
+}
+
+impl Slide {
+    fn new(emit: bool) -> Self {
+        Self {
+            title: Vec::new(),
+            body: Vec::new(),
+            notes: Vec::new(),
+            sides: emit.then(PageSides::default),
+            notes_sides: None,
+        }
+    }
 }
 
 /// What some slide using a master page shows of it.
@@ -222,39 +343,48 @@ fn shows(props: Option<&Element>, attr: &str) -> bool {
 }
 
 /// The header, footer and date-time declarations that show anything, by
-/// kind and name.
-fn declarations(pres: &Element) -> HashSet<(&str, &str)> {
-    pres.child_elems()
-        .filter(|d| {
-            d.ns.as_deref() == Some(ns::PRESENTATION)
-                && matches!(d.local.as_str(), "header-decl" | "footer-decl" | "date-time-decl")
-                && (holds_content(d) || d.attr(ns::PRESENTATION, "source") == Some("current-date"))
-        })
-        .filter_map(|d| Some((d.local.as_str(), d.attr(ns::PRESENTATION, "name")?)))
-        .collect()
+/// kind and name; the first of a name wins.
+fn declarations(pres: &Element) -> HashMap<(&str, &str), &Element> {
+    let mut declared = HashMap::new();
+    for d in pres.child_elems().filter(|d| {
+        d.ns.as_deref() == Some(ns::PRESENTATION)
+            && matches!(d.local.as_str(), "header-decl" | "footer-decl" | "date-time-decl")
+            && (holds_content(d) || d.attr(ns::PRESENTATION, "source") == Some("current-date"))
+    }) {
+        if let Some(name) = d.attr(ns::PRESENTATION, "name") {
+            declared.entry((d.local.as_str(), name)).or_insert(d);
+        }
+    }
+    declared
 }
 
-/// Report the header, footer and date a slide shows from its presentation's
-/// declarations, unless its page style hides them.
+/// The header, footer and date a slide shows from its presentation's declarations, unless its
+/// page style hides them: written into `sides`, else reported.
 fn report_declared(
     page: &Element,
     props: Option<&Element>,
-    declared: &HashSet<(&str, &str)>,
+    declared: &HashMap<(&str, &str), &Element>,
     ctx: &Ctx<'_, '_>,
-) {
+    mut sides: Option<&mut PageSides>,
+) -> Result<(), ConvertError> {
+    use crate::model::HeaderFooterRegion as Side;
     use DiagnosticCode::{FooterOmitted, HeaderOmitted};
-    use Region::{Footer, Header};
     let kinds = [
-        ("use-header-name", "header-decl", "display-header", HeaderOmitted, Header),
-        ("use-footer-name", "footer-decl", "display-footer", FooterOmitted, Footer),
-        ("use-date-time-name", "date-time-decl", "display-date-time", FooterOmitted, Footer),
+        ("use-header-name", "header-decl", "display-header", HeaderOmitted, Side::Header),
+        ("use-footer-name", "footer-decl", "display-footer", FooterOmitted, Side::Footer),
+        ("use-date-time-name", "date-time-decl", "display-date-time", FooterOmitted, Side::Footer),
     ];
-    for (used, decl, display, code, region) in kinds {
+    for (used, kind, display, code, side) in kinds {
         let Some(name) = page.attr(ns::PRESENTATION, used) else { continue };
-        if shows(props, display) && declared.contains(&(decl, name)) {
-            ctx.parse_ctx.emit(code, region);
+        let Some(decl) = declared.get(&(kind, name)).filter(|_| shows(props, display)) else {
+            continue;
+        };
+        match sides.as_deref_mut() {
+            Some(sides) => sides::read_declaration(sides, decl, side, ctx)?,
+            None => ctx.parse_ctx.emit(code, side.region()),
         }
     }
+    Ok(())
 }
 
 /// Whether a master page shows anything of its own on the slides using it:
@@ -272,59 +402,65 @@ fn decorates(master: &Element, shown: Shown, ctx: &Ctx<'_, '_>) -> bool {
 }
 
 /// Walk a page's shapes in document order, recursing into `draw:g` groups.
-fn walk_shapes(
-    parent: &Element,
-    ctx: &Ctx<'_, '_>,
-    title: &mut Vec<Block>,
-    body: &mut Vec<Block>,
-    notes: &mut Vec<Block>,
-) -> Result<(), ConvertError> {
+fn walk_shapes(parent: &Element, ctx: &Ctx<'_, '_>, slide: &mut Slide) -> Result<(), ConvertError> {
     for child in parent.child_elems() {
-        if child.is(ns::PRESENTATION, "notes") {
-            ctx.in_region(Region::Note, || walk_notes(child, ctx, notes))?;
-            continue;
+        walk_shape(child, ctx, slide)?;
+    }
+    Ok(())
+}
+
+fn walk_shape(child: &Element, ctx: &Ctx<'_, '_>, slide: &mut Slide) -> Result<(), ConvertError> {
+    if child.is(ns::PRESENTATION, "notes") {
+        if slide.sides.is_some() {
+            slide.notes_sides.get_or_insert_default();
         }
-        if child.is(ns::OFFICE, "annotation") || child.is(OFFICEOOO, "annotation") {
-            ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
-            continue;
-        }
-        if child.is(DR3D, "scene") {
-            text::report_unplaced(child, ctx)?;
-            continue;
-        }
-        if child.ns.as_deref() != Some(ns::DRAW) {
-            continue;
-        }
-        match child.local.as_str() {
-            "frame" => {
-                if let Some((code, region)) = running_frame(child) {
-                    ctx.parse_ctx.emit(code, region);
-                    continue;
+        let (notes, sides) = (&mut slide.notes, slide.notes_sides.as_mut());
+        ctx.in_region(Region::Note, || walk_notes(child, ctx, notes, sides))?;
+        return Ok(());
+    }
+    if child.is(ns::OFFICE, "annotation") || child.is(OFFICEOOO, "annotation") {
+        ctx.parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
+        return Ok(());
+    }
+    if child.is(DR3D, "scene") {
+        text::report_unplaced(child, ctx)?;
+        return Ok(());
+    }
+    if child.ns.as_deref() != Some(ns::DRAW) {
+        return Ok(());
+    }
+    match child.local.as_str() {
+        "frame" => {
+            if let Some(side) = running_frame(child) {
+                match slide.sides.as_mut() {
+                    Some(sides) => sides::read_frame(sides, child, side, ctx)?,
+                    None => emit_running(ctx, side),
                 }
-                let inner = match text::frame_content(child, ctx)? {
-                    Some(text::FrameContent::Blocks(blocks)) => blocks,
-                    Some(text::FrameContent::Inline(Inline::Math(tex))) => vec![Block::Math(tex)],
-                    Some(text::FrameContent::Inline(graphic)) => {
-                        vec![Block::Paragraph(vec![graphic])]
-                    }
-                    None => Vec::new(),
-                };
-                if child.attr(ns::PRESENTATION, "class") == Some("title") {
-                    push_title_heading(inner, title, ctx);
-                } else {
-                    body.extend(inner);
-                }
+                return Ok(());
             }
-            "g" => walk_shapes(child, ctx, title, body, notes)?,
-            "a" => text::report_unplaced(child, ctx)?,
-            local if text::is_shape(local) => {
-                if child.child_elems().any(|c| c.is(ns::TEXT, "p") || c.is(ns::TEXT, "list")) {
-                    body.extend(parse_container(child, ctx)?);
+            let inner = match text::frame_content(child, ctx)? {
+                Some(text::FrameContent::Blocks(blocks)) => blocks,
+                Some(text::FrameContent::Inline(Inline::Math(tex))) => vec![Block::Math(tex)],
+                Some(text::FrameContent::Inline(graphic)) => {
+                    vec![Block::Paragraph(vec![graphic])]
                 }
+                None => Vec::new(),
+            };
+            if child.attr(ns::PRESENTATION, "class") == Some("title") {
+                push_title_heading(inner, &mut slide.title, ctx);
+            } else {
+                slide.body.extend(inner);
             }
-            "control" => ctx.emit(DiagnosticCode::FormControlUnread),
-            _ => {}
         }
+        "g" => walk_shapes(child, ctx, slide)?,
+        "a" => text::report_unplaced(child, ctx)?,
+        local if text::is_shape(local) => {
+            if child.child_elems().any(|c| c.is(ns::TEXT, "p") || c.is(ns::TEXT, "list")) {
+                slide.body.extend(parse_container(child, ctx)?);
+            }
+        }
+        "control" => ctx.emit(DiagnosticCode::FormControlUnread),
+        _ => {}
     }
     Ok(())
 }
@@ -335,14 +471,18 @@ fn walk_notes(
     page: &Element,
     ctx: &Ctx<'_, '_>,
     notes: &mut Vec<Block>,
+    mut sides: Option<&mut PageSides>,
 ) -> Result<(), ConvertError> {
     for shape in page.child_elems() {
         if shape.is(ns::DRAW, "g") {
-            walk_notes(shape, ctx, notes)?;
+            walk_notes(shape, ctx, notes, sides.as_deref_mut())?;
         } else if !shape.is(ns::DRAW, "frame") {
             text::report_unplaced(shape, ctx)?;
-        } else if let Some((code, region)) = running_frame(shape) {
-            ctx.parse_ctx.emit(code, region);
+        } else if let Some(side) = running_frame(shape) {
+            match sides.as_deref_mut() {
+                Some(sides) => sides::read_frame(sides, shape, side, ctx)?,
+                None => emit_running(ctx, side),
+            }
         } else if let Some(text_box) = shape.find(ns::DRAW, "text-box") {
             notes.extend(parse_container(text_box, ctx)?);
         } else {

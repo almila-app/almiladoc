@@ -469,7 +469,7 @@ fn binary_print_settings(
     ctx.charge(1)?;
     let flags = fields.u16().ok();
     let mut broken = flags.is_none();
-    let mut source = [BinaryPrintText::Unread; 6];
+    let mut source = [const { BinaryPrintText::Unread }; 6];
     for (index, value) in source.iter_mut().enumerate() {
         ctx.charge(1)?;
         let bytes = if broken { None } else { fields.nullable_wide_bytes().ok() };

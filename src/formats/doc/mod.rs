@@ -9,6 +9,7 @@ mod fkp;
 mod fonts;
 mod lists;
 mod pieces;
+mod sides;
 #[deny(
     clippy::indexing_slicing,
     reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
@@ -84,8 +85,8 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         shapes,
         data,
     );
-    let main = stories.main();
-    let blocks = assembler.build_blocks(&main, &main, Region::Body)?.unwrap_or_default();
+    let layout = sides::Layout { fib, table: &table, word_doc: &word_doc, stories: &stories };
+    let blocks = sides::body(parse_ctx, &layout, &assembler)?;
     let mut notes = Vec::new();
     for (range, story, id, kind) in note_ranges {
         if range.is_empty() || assembler.dropped_notes.borrow().contains(&id) {
@@ -175,6 +176,11 @@ impl Stories {
         self.text..self.text + self.ftn
     }
 
+    fn headers(&self) -> Range<usize> {
+        let start = self.text + self.ftn;
+        start..start + self.hdd
+    }
+
     fn endnotes(&self) -> Range<usize> {
         let start = self.text + self.ftn + self.hdd + self.atn;
         start..start + self.edn
@@ -193,6 +199,7 @@ impl Stories {
 }
 
 /// A PLC from the table stream: `n + 1` CPs, then `n` data elements.
+#[derive(Clone, Copy)]
 struct Plc<'t> {
     bytes: &'t [u8],
     n: usize,
@@ -245,10 +252,13 @@ impl<'a> Fib<'a> {
     const FC_PLCFFND_REF: usize = 0xAA;
     const FC_PLCFFND_TXT: usize = 0xB2;
     const FC_PLCFAND_REF: usize = 0xBA;
+    const FC_PLCF_SED: usize = 0xCA;
     const FC_PLCF_HDD: usize = 0xF2;
     const FC_PLCF_BTE_CHPX: usize = 0xFA;
     const FC_PLCF_BTE_PAPX: usize = 0x102;
     const FC_STTBF_FFN: usize = 0x112;
+    const FC_PLCF_FLD_HDR: usize = 0x122;
+    const FC_DOP: usize = 0x192;
     const FC_CLX: usize = 0x1A2;
     const LCB_CLX: usize = 0x1A6;
     const FC_PLC_SPA_MOM: usize = 0x1DA;
@@ -311,10 +321,8 @@ fn read_plc<'t>(
     Plc::new(bytes, data_size)
 }
 
-/// Count the header and footer stories and the comments, which this reader
-/// does not render, and the body text-box stories, which it never reads;
-/// a story whose table does not read counts once.
-fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
+/// Count each header and footer story the sections hold.
+fn report_side_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
     if let Some(hdd) = read_plc(fib, table, Fib::FC_PLCF_HDD, 0) {
         let sections = hdd.n.saturating_sub(1).saturating_sub(6) / 6;
         for story in (6..6 + sections * 6).filter(|&i| hdd.cp(i + 1) > hdd.cp(i)) {
@@ -325,6 +333,15 @@ fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], s
         }
     } else if stories.hdd > 0 {
         parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header);
+    }
+}
+
+/// Count the header and footer stories, which this reader renders only under
+/// `HeaderFooterPolicy::Emit`, the comments, which it does not render, and the body text-box
+/// stories, which it never reads; a story whose table does not read counts once.
+fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
+    if !parse_ctx.headers_footers_requested() {
+        report_side_stories(parse_ctx, fib, table, stories);
     }
     if let Some(comments) = read_plc(fib, table, Fib::FC_PLCFAND_REF, 30) {
         parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments.n as u64);
@@ -442,6 +459,14 @@ mod tests {
     use crate::shared::test_support::diagnostic_rows;
     use sprm::{PapDelta, apply_pap_sprms};
     use std::assert_matches;
+
+    use crate::HeaderFooterPolicy;
+    mod sides;
+
+    /// The Markdown `document` renders to.
+    fn markdown_of_document(document: &Document) -> String {
+        crate::render::markdown::document_to_markdown(document)
+    }
 
     #[test]
     fn repeated_huge_paragraph_properties_are_charged_on_each_replay() {

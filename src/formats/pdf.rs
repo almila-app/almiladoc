@@ -1,7 +1,8 @@
 //! PDF through unpdf, one page at a time, each page a unit. A page's verdict is ruled from the
 //! facts unpdf reports of it: one whose text does not stand for what it shows becomes a gap
-//! awaiting OCR, and every other page is mapped into the model without the running heads and
-//! folios that recur across its pages.
+//! awaiting OCR, and every other page is mapped into the model with the running heads and
+//! folios that recur across its pages left out, or, under `HeaderFooterPolicy::Emit`, written as
+//! its header and footer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
@@ -20,11 +21,13 @@ use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::inspect::PageVerdict;
 use crate::limits::Limit;
+use crate::model::HeaderFooterRegion as Side;
 use crate::model::{
     Block, Cell, Document, Gap, GapId, GapReason, GridBuilder, Inline, List, ListItem, MarkerKind,
     OcrOrigin, Style, UnitKind, VerticalPosition,
 };
 use crate::shared::fields::classify_rel_target;
+use crate::shared::sides::{PageSides, SideTimeline};
 
 /// The share of a page an image covers from which furniture or margin text over it is a scan's.
 const SCAN_COVERAGE: f32 = 0.9;
@@ -75,6 +78,7 @@ impl PageBox {
 pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, ConvertError> {
     let Extracted { pages, missing, parser } = extract(parse_ctx, bytes)?;
     let furniture = Furniture::of(&pages);
+    let mut sides = parse_ctx.headers_footers_requested().then(SideTimeline::default);
     let mut document = Document::default();
     let mut verdicts = Vec::with_capacity(pages.len());
     for (index, page) in pages.iter().enumerate() {
@@ -92,7 +96,7 @@ pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, Conve
             let figures = u64::from(read.page.image_op_count);
             parse_ctx.emit_count(DiagnosticCode::ImageOmitted, Region::Body, figures);
             garbled(parse_ctx, &read.page);
-            map_page(parse_ctx, read, &furniture, &mut document.blocks)?;
+            map_page(parse_ctx, read, &furniture, sides.as_mut(), &mut document.blocks)?;
         }
         verdicts.push(verdict);
     }
@@ -389,31 +393,44 @@ fn garbled(parse_ctx: &ParseCtx<'_>, page: &Page) {
     parse_ctx.emit_count(DiagnosticCode::GarbledFontEncoding, Region::Body, count);
 }
 
+/// Map a page's blocks, its running heads and folios left out where they lead or trail its
+/// text: reported, or under `HeaderFooterPolicy::Emit` written as the page's header and footer
+/// before its body.
 fn map_page(
     parse_ctx: &ParseCtx<'_>,
     read: &ReadPage,
     furniture: &Furniture,
+    timeline: Option<&mut SideTimeline>,
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConvertError> {
     let texts = &read.texts;
     let lead = texts.iter().take_while(|text| furniture.strips(text)).count();
     let trail = texts[lead..].iter().rev().take_while(|text| furniture.strips(text)).count();
-    let dropped: BTreeMap<usize, DiagnosticCode> = texts[..lead]
+    let dropped: BTreeMap<usize, Side> = texts[..lead]
         .iter()
-        .map(|text| (text.index, DiagnosticCode::HeaderOmitted))
-        .chain(
-            texts[texts.len() - trail..].iter().map(|t| (t.index, DiagnosticCode::FooterOmitted)),
-        )
+        .map(|text| (text.index, Side::Header))
+        .chain(texts[texts.len() - trail..].iter().map(|text| (text.index, Side::Footer)))
         .collect();
+    let mut sides = PageSides::default();
+    let mut body = Vec::new();
     for (index, element) in read.page.elements.iter().enumerate() {
-        match dropped.get(&index) {
-            Some(&code) if code == DiagnosticCode::HeaderOmitted => {
-                parse_ctx.emit(code, Region::Header);
+        match (dropped.get(&index), timeline.is_some()) {
+            (Some(&side), true) => sides.read(parse_ctx, side, || {
+                let mut out = Vec::new();
+                map_block(parse_ctx, element, &mut out)?;
+                Ok(out)
+            })?,
+            (Some(Side::Header), false) => {
+                parse_ctx.emit(DiagnosticCode::HeaderOmitted, Region::Header);
             }
-            Some(&code) => parse_ctx.emit(code, Region::Footer),
-            None => map_block(parse_ctx, element, blocks)?,
+            (Some(_), false) => parse_ctx.emit(DiagnosticCode::FooterOmitted, Region::Footer),
+            (None, _) => map_block(parse_ctx, element, &mut body)?,
         }
     }
+    if let Some(timeline) = timeline {
+        sides.publish(parse_ctx, timeline, blocks)?;
+    }
+    blocks.append(&mut body);
     Ok(())
 }
 
@@ -687,8 +704,81 @@ mod tests {
         let furniture = Furniture::of(&pages);
         let parse_ctx = ParseCtx::default();
         let mut blocks = Vec::new();
-        map_page(&parse_ctx, pages[at].as_ref().unwrap(), &furniture, &mut blocks).unwrap();
+        map_page(&parse_ctx, pages[at].as_ref().unwrap(), &furniture, None, &mut blocks).unwrap();
         (blocks, diagnostic_rows(&parse_ctx.into_diagnostics()))
+    }
+
+    #[test]
+    fn under_emit_a_page_writes_its_running_head_and_folio_as_painted_and_a_page_without_them_clears_them()
+     {
+        let pages = furnished();
+        let furniture = Furniture::of(&pages);
+        let limits = crate::limits::Limits::default();
+        let parse_ctx =
+            ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
+        let mut timeline = SideTimeline::default();
+        let mut blocks = Vec::new();
+        for (index, read) in pages.iter().enumerate() {
+            let _unit = parse_ctx.begin_unit(UnitKind::Page, index).unwrap();
+            map_page(
+                &parse_ctx,
+                read.as_ref().unwrap(),
+                &furniture,
+                Some(&mut timeline),
+                &mut blocks,
+            )
+            .unwrap();
+        }
+        let markdown = crate::render::markdown::document_to_markdown(&Document {
+            blocks,
+            ..Document::default()
+        });
+        let side = |n: u32, region: &str, label: &str, text: &str| {
+            let body = if text.is_empty() { String::new() } else { format!(">\n> {text}\n") };
+            format!("> <a id=\"almiladoc:{region}:default:{n}\"></a>{label} (default):\n{body}\n")
+        };
+        assert_eq!(
+            markdown,
+            [
+                side(1, "header", "Header", "**Journal**"),
+                side(2, "footer", "Footer", "**42**"),
+                "Body one\n\n".into(),
+                side(3, "footer", "Footer", "**43**"),
+                "Body two\n\n".into(),
+                side(4, "header", "Header", ""),
+                side(5, "footer", "Footer", ""),
+                side(6, "header", "Header", "**Journal**"),
+                side(7, "footer", "Footer", "**45**"),
+                "Body four\n".into(),
+            ]
+            .concat()
+        );
+        assert_eq!(
+            diagnostic_rows::<(DiagnosticCode, Region, u64)>(&parse_ctx.into_diagnostics()),
+            []
+        );
+    }
+
+    /// Four pages: a bold running head and folio about two bodies, a blank page, then both
+    /// again.
+    fn furnished() -> [Option<ReadPage>; 4] {
+        let styled = |head: &str, body: &str, folio: &str| {
+            let mut page = page(&[]);
+            let mut bold = Paragraph::new();
+            bold.add_run(TextRun::bold(head));
+            page.add_paragraph(bold);
+            page.add_paragraph(Paragraph::with_text(body));
+            let mut number = Paragraph::new();
+            number.add_run(TextRun::bold(folio));
+            page.add_paragraph(number);
+            Some(read_page(page))
+        };
+        [
+            styled("Journal", "Body one", "42"),
+            styled("Journal", "Body two", "43"),
+            Some(read_page(page(&[]))),
+            styled("Journal", "Body four", "45"),
+        ]
     }
 
     fn paragraphs(texts: &[&str]) -> Vec<Block> {
@@ -782,8 +872,14 @@ mod tests {
                 .collect();
             let furniture = Furniture::of(&pages);
             let mut blocks = Vec::new();
-            map_page(&ParseCtx::default(), pages[0].as_ref().unwrap(), &furniture, &mut blocks)
-                .unwrap();
+            map_page(
+                &ParseCtx::default(),
+                pages[0].as_ref().unwrap(),
+                &furniture,
+                None,
+                &mut blocks,
+            )
+            .unwrap();
             blocks.len()
         };
         assert_eq!(with(|| PdfBlock::Paragraph(Paragraph::heading("Chapter", 1))), 2);

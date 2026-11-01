@@ -39,12 +39,7 @@ pub(crate) fn write(
         meter.charge(metadata.text_work())?;
     }
     if config.headers_footers == HeaderFooterPolicy::Emit {
-        meter.charge(document.blocks.len() as u64)?;
-        for block in &document.blocks {
-            if let crate::model::Block::HeaderFooter(value) = block {
-                value.charge_copy(|work| meter.charge(work))?;
-            }
-        }
+        document.charge_side_copies(|work| meter.charge(work))?;
     }
     let document = &fills.spliced(document);
     let identity = EngineIdentity::of(config);
@@ -349,6 +344,7 @@ mod tests {
         use crate::model::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
         Document {
             blocks: vec![Block::HeaderFooter(HeaderFooter {
+                page_style: None,
                 region: HeaderFooterRegion::Footer,
                 variant: HeaderFooterVariant::Even,
                 content: Some(vec![paragraph("é")]),
@@ -365,6 +361,12 @@ mod tests {
             value["document"]["blocks"][0],
             serde_json::json!({"kind":"header_footer","value":{"region":"footer","variant":"even","content":[serde_json::to_value(paragraph("é")).unwrap()]}})
         );
+        let mut styled = print_side();
+        let Block::HeaderFooter(side) = &mut styled.blocks[0] else { panic!("{styled:?}") };
+        side.page_style = Some("Cover".into());
+        let value: serde_json::Value =
+            serde_json::from_str(&json(&styled, &Diagnostics::default()).unwrap()).unwrap();
+        assert_eq!(value["document"]["blocks"][0]["value"]["page_style"], "Cover");
         let mut source = awaiting_ocr();
         source.blocks.splice(0..0, print_side().blocks);
         let Block::Gap(gap) = &source.blocks[2] else { panic!("{source:?}") };
@@ -384,6 +386,59 @@ mod tests {
             Err(ConvertError::limit(Limit::Work, 9))
         );
         assert_eq!(meter.admitted(), 0);
+    }
+
+    fn nested_sides(outer: &str, inner: &str) -> Document {
+        use crate::model::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
+        let side = |name: &str, content| {
+            Block::HeaderFooter(HeaderFooter {
+                page_style: Some(name.into()),
+                region: HeaderFooterRegion::Header,
+                variant: HeaderFooterVariant::Default,
+                content: Some(content),
+            })
+        };
+        let inner = side(inner, vec![paragraph("i")]);
+        Document {
+            blocks: vec![Block::BlockQuote(vec![side(
+                outer,
+                vec![Block::BlockQuote(vec![inner])],
+            )])],
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn a_side_story_in_a_quote_and_one_it_nests_are_charged_before_any_byte_is_written() {
+        let emit = Config { headers_footers: HeaderFooterPolicy::Emit, ..Config::default() };
+        let long = "p".repeat(1000);
+        let token = crate::CancelToken::default();
+        token.cancel();
+        for (document, ledger, refused) in [
+            (
+                nested_sides(&long, "q"),
+                Ledger::new(500, None),
+                ConvertError::limit(Limit::Work, 500),
+            ),
+            (
+                nested_sides("q", &long),
+                Ledger::new(500, None),
+                ConvertError::limit(Limit::Work, 500),
+            ),
+            (nested_sides("q", "r"), Ledger::new(u64::MAX, Some(&token)), ConvertError::Cancelled),
+        ] {
+            let meter = Meter::new(&ledger, u64::MAX);
+            let written =
+                write(&emit, &document, &GapFills::of(&document), &Diagnostics::default(), &meter);
+            assert_eq!(written, Err(refused));
+            assert_eq!(meter.admitted(), 0);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&json(&nested_sides("o", "n"), &Diagnostics::default()).unwrap())
+                .unwrap();
+        let outer = &value["document"]["blocks"][0]["value"][0]["value"];
+        assert_eq!(outer["page_style"], "o");
+        assert_eq!(outer["content"][0]["value"][0]["value"]["page_style"], "n");
     }
 
     #[test]

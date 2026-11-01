@@ -4,7 +4,7 @@ use std::fmt;
 use std::slice;
 
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
-use crate::model::{Block, Cell, CellSlot, Document, Gap, GapId, ListItem};
+use crate::model::{Block, Cell, CellSlot, Document, Gap, GapId, HeaderFooter, ListItem};
 use crate::ocr::GapError;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -130,7 +130,10 @@ impl GapFills {
             *blocks = kept;
             for block in blocks {
                 match block {
-                    Block::BlockQuote(inner) => stack.push(inner),
+                    Block::BlockQuote(inner)
+                    | Block::HeaderFooter(HeaderFooter { content: Some(inner), .. }) => {
+                        stack.push(inner);
+                    }
                     Block::List(list) => stack.extend(list.items.iter_mut().map(|i| &mut i.blocks)),
                     Block::Table(table) => stack.extend(
                         table.grid.iter_mut().flatten().filter_map(|slot| match slot {
@@ -152,16 +155,13 @@ pub(crate) struct Located<'d> {
     depth: u64,
 }
 
-/// Every gap of `document` in document order, the body's before the notes'.
+/// Every gap of `document` in document order, the body's before the notes', a side story's in
+/// its own region.
 pub(crate) fn gaps(document: &Document) -> impl Iterator<Item = Located<'_>> {
     let body = std::iter::once((Region::Body, document.blocks.as_slice()));
     let notes = document.notes.iter().map(|note| (Region::Note, note.blocks.as_slice()));
-    body.chain(notes).flat_map(|(region, blocks)| {
-        Walk { stack: vec![(Frame::Blocks(blocks.iter()), 0)] }.map(move |(gap, depth)| Located {
-            gap,
-            region,
-            depth,
-        })
+    body.chain(notes).flat_map(|(region, blocks)| Walk {
+        stack: vec![(Frame::Blocks(blocks.iter()), 0, region)],
     })
 }
 
@@ -174,16 +174,16 @@ enum Frame<'d> {
 }
 
 struct Walk<'d> {
-    stack: Vec<(Frame<'d>, u64)>,
+    stack: Vec<(Frame<'d>, u64, Region)>,
 }
 
 impl<'d> Iterator for Walk<'d> {
-    type Item = (&'d Gap, u64);
+    type Item = Located<'d>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (frame, depth) = self.stack.last_mut()?;
-            let depth = *depth;
+            let (frame, depth, region) = self.stack.last_mut()?;
+            let (depth, mut region) = (*depth, *region);
             let entered = match frame {
                 Frame::Items(items) => items.next().map(|item| item.blocks.iter()),
                 Frame::Cells(cells) => cells.next().map(|cell| cell.blocks.iter()),
@@ -194,18 +194,26 @@ impl<'d> Iterator for Walk<'d> {
                     };
                     let inner = depth.saturating_add(1);
                     let frame = match block {
-                        Block::Gap(gap) => return Some((gap, depth)),
+                        Block::Gap(gap) => return Some(Located { gap, region, depth }),
                         Block::BlockQuote(blocks) => Frame::Blocks(blocks.iter()),
+                        Block::HeaderFooter(HeaderFooter {
+                            region: side,
+                            content: Some(blocks),
+                            ..
+                        }) => {
+                            region = side.region();
+                            Frame::Blocks(blocks.iter())
+                        }
                         Block::List(list) => Frame::Items(list.items.iter()),
                         Block::Table(table) => Frame::Cells(Box::new(table.origins())),
                         _ => continue,
                     };
-                    self.stack.push((frame, inner));
+                    self.stack.push((frame, inner, region));
                     continue;
                 }
             };
             match entered {
-                Some(blocks) => self.stack.push((Frame::Blocks(blocks), depth)),
+                Some(blocks) => self.stack.push((Frame::Blocks(blocks), depth, region)),
                 None => _ = self.stack.pop(),
             }
         }
@@ -218,7 +226,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Inline, List, MarkerKind, Note, NoteKind, OcrOrigin, Table, Unit, UnitKind,
+        HeaderFooterRegion, HeaderFooterVariant, Inline, List, MarkerKind, Note, NoteKind,
+        OcrOrigin, Table, Unit, UnitKind,
     };
 
     fn gap(page: u32) -> Block {
@@ -236,6 +245,15 @@ mod tests {
         Block::List(List { marker: MarkerKind::Bullet, start: 1, items })
     }
 
+    fn side(region: HeaderFooterRegion, content: Vec<Block>) -> Block {
+        Block::HeaderFooter(HeaderFooter {
+            page_style: None,
+            region,
+            variant: HeaderFooterVariant::Even,
+            content: Some(content),
+        })
+    }
+
     #[test]
     fn gaps_walk_every_container_in_order_the_body_before_the_notes() {
         let table =
@@ -246,7 +264,9 @@ mod tests {
                 gap(1),
                 Block::BlockQuote(vec![Block::Paragraph(vec![Inline::plain("x")]), gap(2)]),
                 list(vec![vec![gap(3)], vec![Block::Table(table)]]),
+                side(HeaderFooterRegion::Footer, vec![gap(8), Block::BlockQuote(vec![gap(9)])]),
                 gap(6),
+                side(HeaderFooterRegion::Header, vec![gap(10)]),
             ],
             notes: vec![Note { id: "n".into(), kind: NoteKind::Footnote, blocks: vec![gap(7)] }],
             assets: Vec::new(),
@@ -265,7 +285,10 @@ mod tests {
                 (3, body, 1),
                 (4, body, 2),
                 (5, body, 2),
+                (8, Region::Footer, 1),
+                (9, Region::Footer, 2),
                 (6, body, 0),
+                (10, Region::Header, 1),
                 (7, Region::Note, 0)
             ]
         );
@@ -283,6 +306,7 @@ mod tests {
                 Block::BlockQuote(vec![gap(2)]),
                 list(vec![vec![gap(3)]]),
                 table(vec![gap(4)]),
+                side(HeaderFooterRegion::Header, vec![gap(8), Block::BlockQuote(vec![gap(9)])]),
                 gap(5),
                 gap(6),
             ],
@@ -292,7 +316,7 @@ mod tests {
         let mut fills = GapFills::of(&document);
         assert!(matches!(fills.spliced(&document), Cow::Borrowed(_)));
         let mut diagnostics = Diagnostics::default();
-        for page in [1, 2, 3, 4, 7] {
+        for page in [1, 2, 3, 4, 7, 8, 9] {
             let id = GapId::new(
                 Some(Unit::new(UnitKind::Page, NonZeroU32::new(page).unwrap())),
                 NonZeroU32::MIN,
@@ -313,6 +337,10 @@ mod tests {
                 vec![Block::BlockQuote(filled("2"))],
                 vec![list(vec![filled("3")])],
                 vec![table(filled("4"))],
+                vec![side(
+                    HeaderFooterRegion::Header,
+                    [filled("8"), vec![Block::BlockQuote(filled("9"))]].concat(),
+                )],
                 vec![gap(5), gap(6)],
             ]
             .concat(),

@@ -1783,10 +1783,11 @@ fn note_references_on_one_line_render_in_linear_time() {
 }
 
 #[test]
-fn rich_side_content_has_an_empty_anchor_and_note_scope_and_bounded_nesting() {
+fn side_content_resolves_nothing_of_the_body_and_reports_what_it_loses() {
     use crate::model::{HeaderFooter, HeaderFooterRegion, HeaderFooterVariant};
     let plain = Inline::plain;
     let side = Block::HeaderFooter(HeaderFooter {
+        page_style: None,
         region: HeaderFooterRegion::Footer,
         variant: HeaderFooterVariant::First,
         content: Some(vec![Block::BlockQuote(vec![Block::Paragraph(vec![
@@ -1812,11 +1813,168 @@ fn rich_side_content_has_an_empty_anchor_and_note_scope_and_bounded_nesting() {
     let ledger = Ledger::new(u64::MAX, None);
     assert_eq!(
         super::render_losses(&source, READ, Placeholder, &Meter::new(&ledger, u64::MAX)).unwrap(),
-        [(DiagnosticCode::DanglingReference, Region::Body, None, 1)]
+        [
+            (DiagnosticCode::DanglingReference, Region::Body, None, 1),
+            (DiagnosticCode::DanglingReference, Region::Footer, None, 2),
+        ]
     );
     assert_eq!(check_nesting(&source, &GapFills::default(), 3), Ok(()));
     assert_eq!(
         check_nesting(&source, &GapFills::default(), 2),
         Err(ConvertError::limit(Limit::NestingDepth, 2))
     );
+}
+
+fn side_story(
+    region: crate::model::HeaderFooterRegion,
+    variant: crate::model::HeaderFooterVariant,
+    content: Vec<Block>,
+) -> Block {
+    Block::HeaderFooter(crate::model::HeaderFooter {
+        page_style: None,
+        region,
+        variant,
+        content: Some(content),
+    })
+}
+
+#[test]
+fn each_side_story_resolves_its_own_anchors_in_a_reserved_id_space() {
+    let source = isolated_sides();
+    assert_eq!(
+        document_to_markdown(&source),
+        concat!(
+            "# Body\n\n[up](#body) side\n\n",
+            "> <a id=\"almiladoc:header:default:1\"></a>Header (default):\n>\n",
+            "> <a id=\"almiladoc:header:default:1:x\"></a>one ",
+            "[here](#almiladoc:header:default:1:x) there\n\n",
+            "> <a id=\"almiladoc:footer:even:2\"></a>Footer (even):\n>\n",
+            "> <a id=\"almiladoc:footer:even:2:x\"></a>Body\n>\n",
+            "> [top](#almiladoc:footer:even:2:x) u ![Image](asset:0)\n\n",
+            "<a id=\"only-body\"></a>[first](#only-body)\n",
+        )
+    );
+    let ledger = Ledger::new(u64::MAX, None);
+    let mut losses =
+        super::render_losses(&source, READ, Placeholder, &Meter::new(&ledger, u64::MAX)).unwrap();
+    losses.sort();
+    assert_eq!(
+        losses,
+        [
+            (DiagnosticCode::ImagePlaceholder, Region::Footer, None, 1),
+            (DiagnosticCode::UnsafeLink, Region::Footer, None, 1),
+            (DiagnosticCode::DanglingReference, Region::Body, None, 1),
+            (DiagnosticCode::DanglingReference, Region::Header, None, 1),
+        ]
+    );
+}
+
+#[test]
+fn side_resolution_is_charged_to_the_render_meter_and_reports_in_the_unit_holding_it() {
+    use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
+    let story = |url: &str| {
+        side_story(
+            Side::Footer,
+            Variant::Default,
+            vec![Block::Paragraph(vec![
+                link(vec![Inline::plain("u")], external(url)),
+                Inline::Anchor("k".repeat(10_000)),
+            ])],
+        )
+    };
+    let source = Document {
+        blocks: vec![
+            Block::UnitStart(unit(UnitKind::Slide, 1)),
+            story("javascript:a"),
+            Block::UnitStart(unit(UnitKind::Slide, 2)),
+            story("javascript:b"),
+        ],
+        ..Document::default()
+    };
+    let unlimited = Ledger::new(u64::MAX, None);
+    let losses =
+        super::render_losses(&source, READ, Placeholder, &Meter::new(&unlimited, u64::MAX));
+    assert_eq!(
+        losses.unwrap(),
+        [
+            (DiagnosticCode::UnsafeLink, Region::Footer, Some(unit(UnitKind::Slide, 1)), 1),
+            (DiagnosticCode::UnsafeLink, Region::Footer, Some(unit(UnitKind::Slide, 2)), 1),
+        ]
+    );
+    let small = Ledger::new(5_000, None);
+    let refused = Err(ConvertError::limit(Limit::Work, 5_000));
+    let meter = Meter::new(&small, u64::MAX);
+    assert_eq!(super::render_losses(&source, READ, Placeholder, &meter).map(|_| ()), refused);
+    let small = Ledger::new(5_000, None);
+    let meter = Meter::new(&small, u64::MAX);
+    let rendered = render(&source, &GapFills::default(), &meter, Placeholder);
+    assert_eq!(rendered.map(|_| ()), refused);
+    let token = crate::CancelToken::default();
+    token.cancel();
+    let cancelled = Ledger::new(u64::MAX, Some(&token));
+    let meter = Meter::new(&cancelled, u64::MAX);
+    assert_eq!(
+        super::render_losses(&source, READ, Placeholder, &meter).map(|_| ()),
+        Err(ConvertError::Cancelled)
+    );
+}
+
+#[test]
+fn a_page_style_names_its_side_in_escaped_text() {
+    use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
+    let mut story = side_story(Side::Header, Variant::First, vec![text("x")]);
+    let Block::HeaderFooter(value) = &mut story else { panic!("{story:?}") };
+    value.page_style = Some("*a*<b>\n[c]".into());
+    value.content = None;
+    assert_eq!(
+        doc(vec![story]),
+        "> <a id=\"almiladoc:header:first:1\"></a>Header (first, uses default) of page style \\*a\\*\\<b> \\[c]:\n"
+    );
+}
+
+/// A body and two side stories that share anchor ids and link across one another.
+fn isolated_sides() -> Document {
+    use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
+    let plain = Inline::plain;
+    let to =
+        |label: &str, id: &str| link(vec![Inline::plain(label)], LinkTarget::anchor(id.into()));
+    let side_image = Inline::Image {
+        origin: ImageOrigin::new(Region::Footer, None),
+        alt: String::new(),
+        source: ImageSource::Asset(AssetId(0)),
+    };
+    Document {
+        blocks: vec![
+            anchored(1, "x", vec![plain("Body")]),
+            Block::Paragraph(vec![to("up", "x"), plain(" "), to("side", "only-side")]),
+            side_story(
+                Side::Header,
+                Variant::Default,
+                vec![Block::Paragraph(vec![
+                    Inline::Anchor("x".into()),
+                    plain("one "),
+                    to("here", "x"),
+                    plain(" "),
+                    to("there", "only-body"),
+                    Inline::Anchor("only-side".into()),
+                ])],
+            ),
+            side_story(
+                Side::Footer,
+                Variant::Even,
+                vec![
+                    anchored(2, "x", vec![plain("Body")]),
+                    Block::Paragraph(vec![
+                        to("top", "x"),
+                        plain(" "),
+                        link(vec![plain("u")], external("javascript:alert(1)")),
+                        plain(" "),
+                        side_image,
+                    ]),
+                ],
+            ),
+            Block::Paragraph(vec![Inline::Anchor("only-body".into()), to("first", "only-body")]),
+        ],
+        ..Document::default()
+    }
 }

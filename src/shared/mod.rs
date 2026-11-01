@@ -37,6 +37,7 @@ pub(crate) mod ocr_table;
     reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
 )]
 pub(crate) mod officeart;
+pub(crate) mod sides;
 pub(crate) mod symbol;
 pub(crate) mod tag_scan;
 #[cfg(test)]

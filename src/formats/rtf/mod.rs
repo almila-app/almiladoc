@@ -1,9 +1,11 @@
 //! RTF frontend: a position-explicit lexer feeding a state machine in one
 //! pass, with the font/style/list tables parsed into typed definitions as
 //! their groups close. Numbering comes from the list tables - never guessed
-//! from label text. Page headers/footers are excluded (fixed policy).
+//! from label text. Page headers and footers are skipped where they stand and read where a
+//! section shows them (`sides`).
 
 mod lexer;
+mod sides;
 mod table;
 mod tables;
 
@@ -15,14 +17,19 @@ use crate::model::{
     Block, Document, ImageSource, Inline, LinkTarget, Note, NoteKind, Style, VerticalPosition,
     inlines_are_empty,
 };
+use crate::model::{HeaderFooterRegion as Side, HeaderFooterVariant as Variant};
 use crate::package::xml::{Element, Node, ns};
+use crate::shared::assets::AssetSink;
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
 use crate::shared::codepage::{self, Codepage, TextLoss};
 use crate::shared::delta::rebase_emphasis;
-use crate::shared::fields::{field_result, hyperlink_target_spans, is_choice_form_field};
+use crate::shared::fields::{
+    field_result, hyperlink_target_spans, is_choice_form_field, side_field_token,
+};
 use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
 use crate::shared::math::{DROPPED, GUESSED, math_lines, omath_para_to_tex};
 use crate::shared::numbering::{LevelCounters, composite_label, every_deeper};
+use crate::shared::sides::{SideStory, SideTimeline};
 use crate::shared::symbol::{self, Decoded, Glyph};
 use crate::shared::text::clean_text;
 use lexer::{Lexer, Token, hex_digit};
@@ -80,6 +87,8 @@ struct CharState {
     hidden: bool,
     capture: Capture,
     in_note: bool,
+    /// Inside a header or footer story read under `HeaderFooterPolicy::Emit`.
+    side: Option<Side>,
 }
 
 impl CharState {
@@ -113,6 +122,7 @@ impl Default for CharState {
             hidden: false,
             capture: Capture::None,
             in_note: false,
+            side: None,
         }
     }
 }
@@ -120,6 +130,10 @@ impl Default for CharState {
 struct FieldFrame {
     depth: usize,
     instr: String,
+    /// The token a header or footer writes in place of the result, which is not read.
+    token: Option<&'static str>,
+    /// Whether `\fldlock` locks the field, its result never updated.
+    locked: bool,
     /// What each damaged character of the instruction lost.
     losses: Vec<InstrLoss>,
     start: usize,
@@ -568,8 +582,8 @@ impl Destinations {
     }
 }
 
-/// Destinations whose content is excluded: headers/footers by fixed policy,
-/// metadata and binary destinations because they carry no document text.
+/// Destinations whose content the body never shows: headers and footers, read apart where a
+/// section shows them, and metadata and binary destinations, which carry no document text.
 #[rustfmt::skip]
 const SUPPRESSED_DESTINATIONS: &[&str] = &[
     "fonttbl", "colortbl", "stylesheet", "info", "object", "header", "footer", "headerl", "headerr",
@@ -623,7 +637,9 @@ struct Parser<'a> {
     counters: Counters,
     table: TableState<'a>,
     dest: Destinations,
-    assets: crate::shared::assets::AssetSink,
+    assets: AssetSink,
+    /// Under `HeaderFooterPolicy::Emit`, the headers and footers each section shows.
+    sides: Option<sides::Sections>,
 }
 
 impl<'a> Parser<'a> {
@@ -653,7 +669,8 @@ impl<'a> Parser<'a> {
             counters: Counters::default(),
             table: TableState::new(parse_ctx),
             dest: Destinations::default(),
-            assets: crate::shared::assets::AssetSink::new(parse_ctx),
+            assets: AssetSink::new(parse_ctx),
+            sides: parse_ctx.headers_footers_requested().then(sides::Sections::new),
         }
     }
 
@@ -716,6 +733,9 @@ impl<'a> Parser<'a> {
             None => self.parse_ctx.emit(DiagnosticCode::UnmatchedClose, Region::Body),
         }
         let depth = self.stack.len();
+        if let Some(sections) = &mut self.sides {
+            sections.close(depth, self.lexer.pos().saturating_sub(1));
+        }
         self.close_fields(depth);
         self.dest.close_notes(depth, &mut self.inlines);
         self.dest.close_bookmark(self.state.capture == Capture::Bookmark, &mut self.inlines);
@@ -756,7 +776,11 @@ impl<'a> Parser<'a> {
     }
 
     fn region(&self) -> Region {
-        if self.state.in_note { Region::Note } else { Region::Body }
+        match self.state.side {
+            Some(side) => side.region(),
+            None if self.state.in_note => Region::Note,
+            None => Region::Body,
+        }
     }
 
     /// Report `loss` in text that reaches the output in `region`.
@@ -921,6 +945,13 @@ impl<'a> Parser<'a> {
             let start = frame.start.min(self.inlines.len());
             let content = self.inlines.split_off(start);
             let region = self.region();
+            if let Some(token) = frame.token {
+                if self.renders() {
+                    self.inlines.push(Inline::plain(token));
+                    self.parse_ctx.emit(DiagnosticCode::FieldToken, region);
+                }
+                continue;
+            }
             if is_choice_form_field(&frame.instr) {
                 if frame.opened_hidden {
                     self.drop_hidden();
@@ -959,7 +990,8 @@ impl<'a> Parser<'a> {
     /// Dispatch a control word to its subsystem handler; unhandled words
     /// that name a suppressed destination silence their group.
     fn control_word(&mut self, word: &str, param: Option<i32>) -> Result<(), ConvertError> {
-        let handled = self.codepage_control(word, param)
+        let handled = self.side_control(word, param)?
+            || self.codepage_control(word, param)
             || self.picture_property_control(word)
             || self.math_control(word, param)
             || self.character_control(word, param)
@@ -977,6 +1009,41 @@ impl<'a> Parser<'a> {
         self.state.suppress = true;
         self.state.capture = Capture::None;
         Ok(())
+    }
+
+    /// Under `HeaderFooterPolicy::Emit`, skip a header or footer group whose holder shows, to
+    /// read where a section shows it, and follow the settings that choose its pages.
+    fn side_control(&mut self, word: &str, param: Option<i32>) -> Result<bool, ConvertError> {
+        let in_body = self.renders() && self.state.side.is_none() && !self.state.omit;
+        let Some(sections) = &mut self.sides else { return Ok(false) };
+        let on = param != Some(0);
+        match word {
+            "facingp" | "titlepg" | "sectd" if !in_body => return Ok(false),
+            "facingp" => sections.facing = on,
+            "titlepg" => sections.current.title_page = on,
+            "sectd" => sections.current.title_page = false,
+            _ => {
+                let Some((side, pages)) = sides::destination(word) else { return Ok(false) };
+                let holder_shows = self.stack.last().is_some_and(|holder| {
+                    !holder.suppress
+                        && !holder.omit
+                        && !holder.deleted
+                        && !holder.hidden
+                        && holder.capture == Capture::None
+                        && holder.side.is_none()
+                });
+                if !holder_shows || sections.open.is_some() {
+                    return Ok(false);
+                }
+                self.flush_pending();
+                let state = self.state;
+                let sections = self.sides.as_mut().ok_or(ConvertError::Internal)?;
+                sections.open = Some((side, pages, self.stack.len(), self.lexer.pos(), state));
+                (self.state.suppress, self.state.omit) = (true, true);
+                self.state.capture = Capture::None;
+            }
+        }
+        Ok(true)
     }
 
     /// The document's code page: its first `\ansicpg`, else the last of
@@ -1101,6 +1168,9 @@ impl<'a> Parser<'a> {
             "ldblquote" => self.push_generated('\u{201c}'),
             "rdblquote" => self.push_generated('\u{201d}'),
             "bullet" => self.push_generated('\u{2022}'),
+            "chpgn" | "chdate" | "chtime" | "chdpl" | "chdpa" if self.state.side.is_some() => {
+                self.page_token(word);
+            }
             "chpgn" | "chdate" | "chtime" | "chdpl" | "chdpa" => {
                 if self.renders() {
                     self.parse_ctx.emit(DiagnosticCode::FieldValueUnread, self.region());
@@ -1133,6 +1203,13 @@ impl<'a> Parser<'a> {
             self.inlines.push(Inline::LineBreak);
         } else if !self.state.suppress {
             self.end_paragraph()?;
+            if section && !self.state.deleted && self.state.side.is_none() && self.sides.is_some() {
+                self.flush_runs();
+                let begin = self.blocks.len();
+                if let Some(sections) = &mut self.sides {
+                    sections.break_at(begin);
+                }
+            }
         }
         Ok(())
     }
@@ -1252,11 +1329,43 @@ impl<'a> Parser<'a> {
         self.dest.fields.push(FieldFrame {
             depth: self.stack.len(),
             instr: String::new(),
+            token: None,
+            locked: false,
             losses: Vec::new(),
             start: self.inlines.len(),
             opened_hidden: self.state.hidden,
         });
         Ok(())
+    }
+
+    /// A field's result, which a header or footer does not read where the field's token stands
+    /// in for it.
+    fn field_result(&mut self) -> Result<(), ConvertError> {
+        self.flush_pending();
+        self.state.capture = Capture::None;
+        let token = self.dest.fields.last().filter(|_| self.state.side.is_some());
+        if let Some(token) = token.and_then(|frame| side_field_token(&frame.instr, frame.locked)) {
+            self.parse_ctx.charge(self.dest.fields.last().map_or(0, |f| f.instr.len()) as u64)?;
+            (self.state.suppress, self.state.omit) = (true, true);
+            if let Some(frame) = self.dest.fields.last_mut() {
+                frame.token = Some(token);
+            }
+        }
+        Ok(())
+    }
+
+    /// The token a header or footer writes for a page number, date or time control word.
+    fn page_token(&mut self, word: &str) {
+        self.flush_pending();
+        if self.renders() {
+            let token = match word {
+                "chpgn" => "{page}",
+                "chtime" => "{time}",
+                _ => "{date}",
+            };
+            self.inlines.push(Inline::Text { text: token.into(), style: self.state.style });
+            self.parse_ctx.emit(DiagnosticCode::FieldToken, self.region());
+        }
     }
 
     fn object_control(&mut self, word: &str) -> Result<bool, ConvertError> {
@@ -1269,9 +1378,12 @@ impl<'a> Parser<'a> {
                 }
                 self.state.suppress = true;
             }
-            "fldrslt" => {
-                self.flush_pending();
-                self.state.capture = Capture::None;
+            "fldrslt" => self.field_result()?,
+            "fldlock" => {
+                let depth = self.stack.len();
+                if let Some(frame) = self.dest.fields.last_mut().filter(|f| f.depth == depth) {
+                    frame.locked = true;
+                }
             }
             "footnote" => {
                 self.flush_pending();
@@ -1788,6 +1900,20 @@ impl<'a> Parser<'a> {
     }
 
     fn finish(mut self) -> Result<Document, ConvertError> {
+        let mut blocks = self.finish_blocks()?;
+        if let Some(sections) = self.sides.take() {
+            blocks = self.with_sides(sections, blocks)?;
+        }
+        Ok(Document {
+            blocks,
+            notes: self.dest.notes,
+            assets: self.assets.assets,
+            ..Document::default()
+        })
+    }
+
+    /// Close what is still open and take the blocks read.
+    fn finish_blocks(&mut self) -> Result<Vec<Block>, ConvertError> {
         for depth in (1..=self.table.depth()).rev() {
             if self.table.has_partial_row(depth) {
                 self.end_row(depth)?;
@@ -1796,12 +1922,99 @@ impl<'a> Parser<'a> {
         self.table.collapse_nested()?;
         self.flush_top_table()?;
         self.flush_runs();
-        Ok(Document {
-            blocks: self.blocks,
-            notes: self.dest.notes,
-            assets: self.assets.assets,
-            ..Document::default()
-        })
+        Ok(std::mem::take(&mut self.blocks))
+    }
+
+    /// `blocks` with each section's headers and footers before its first block where they
+    /// change, each group read once where a section first shows it.
+    fn with_sides(
+        &mut self,
+        mut sections: sides::Sections,
+        blocks: Vec<Block>,
+    ) -> Result<Vec<Block>, ConvertError> {
+        let parse_ctx = self.parse_ctx;
+        let current = sections.current.clone();
+        sections.done.push(current);
+        parse_ctx.charge(sections.done.len() as u64)?;
+        let mut read: HashMap<(usize, Side, Variant), SideStory> = HashMap::new();
+        let mut timeline = SideTimeline::default();
+        let mut out = Vec::new();
+        let mut rest = blocks.into_iter();
+        let mut at = 0;
+        for section in &sections.done {
+            out.extend(rest.by_ref().take(section.begin.saturating_sub(at)));
+            at = at.max(section.begin);
+            for side in [Side::Header, Side::Footer] {
+                for variant in [Variant::Default, Variant::First, Variant::Even] {
+                    let known;
+                    let story = match section.shown(side, variant, sections.facing) {
+                        None => {
+                            known = SideStory::known(side, variant, None);
+                            &known
+                        }
+                        Some(None) => {
+                            known = SideStory::known(side, variant, Some(Vec::new()));
+                            &known
+                        }
+                        Some(Some(index)) => {
+                            let key = (index, side, variant);
+                            self.read_once(&mut read, &sections.definitions, key)?;
+                            read.get(&key).ok_or(ConvertError::Internal)?
+                        }
+                    };
+                    timeline.publish(parse_ctx, story, &mut out)?;
+                }
+            }
+        }
+        out.extend(rest);
+        Ok(out)
+    }
+
+    /// Read the story of the definition `key` names as its side and variant, once.
+    fn read_once(
+        &mut self,
+        read: &mut HashMap<(usize, Side, Variant), SideStory>,
+        definitions: &[sides::Definition],
+        key: (usize, Side, Variant),
+    ) -> Result<(), ConvertError> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = read.entry(key) {
+            let (index, side, variant) = key;
+            let definition = *definitions.get(index).ok_or(ConvertError::Internal)?;
+            let parse_ctx = self.parse_ctx;
+            slot.insert(SideStory::read(parse_ctx, side, variant, || {
+                self.read_story(definition, side).map(Some)
+            })?);
+        }
+        Ok(())
+    }
+
+    /// One header or footer group's blocks, read by a parser of its own over its bytes, from
+    /// the state it opened in, with this document's tables, code page and assets.
+    fn read_story(
+        &mut self,
+        definition: sides::Definition,
+        side: Side,
+    ) -> Result<Vec<Block>, ConvertError> {
+        let bytes = self.bytes.get(definition.bytes()).unwrap_or_default();
+        let mut story = Parser::new(self.parse_ctx, bytes);
+        story.sides = None;
+        story.prelude = std::mem::take(&mut self.prelude);
+        story.assets = std::mem::replace(&mut self.assets, AssetSink::new(self.parse_ctx));
+        story.decoder.default_encoding = self.decoder.default_encoding;
+        (story.codepage_declared, story.assumed_reported) = (true, self.assumed_reported);
+        (story.deff, story.last_symbol) = (self.deff, self.last_symbol);
+        story.state = CharState {
+            side: Some(side),
+            suppress: false,
+            omit: false,
+            capture: Capture::None,
+            in_note: false,
+            ..definition.state
+        };
+        let read = story.run().and_then(|()| story.finish_blocks());
+        self.prelude = std::mem::take(&mut story.prelude);
+        self.assets = std::mem::replace(&mut story.assets, AssetSink::new(self.parse_ctx));
+        read
     }
 }
 

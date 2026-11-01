@@ -1,14 +1,16 @@
-//! What a page shows of its headers, footers and comments, none of which is written:
-//! `HeadersFooters` containers, drawn date, slide-number, footer and header placeholders, and
-//! the `Comment10` records of a `___PPT10` binary tag.
+//! What a page shows of its headers, footers and comments: `HeadersFooters` containers, drawn
+//! date, slide-number, footer and header placeholders, which `HeaderFooterPolicy::Emit` writes,
+//! and the `Comment10` records of a `___PPT10` binary tag, which no output carries.
 
 use super::records as rt;
 use super::scan;
 use crate::ctx::ParseCtx;
-use crate::diagnostics::{DiagnosticCode, Region};
+use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
+use crate::model::{Block, HeaderFooterRegion as Side, Inline};
 use crate::shared::binary::{get_u16, utf16le_units};
 use crate::shared::officeart;
+use crate::shared::sides::PageSides;
 
 const COMMENT_TAG: &str = "___PPT10";
 const TAG_NAME_INSTANCE: u16 = 0;
@@ -43,6 +45,11 @@ pub(super) enum Kind {
 }
 
 impl Kind {
+    /// The side the kind shows on.
+    pub(super) fn side(self) -> Side {
+        if self == Self::Header { Side::Header } else { Side::Footer }
+    }
+
     /// The kind a `PlaceholderAtom` body names, if it is one of the four.
     pub(super) fn placed(placeholder: &[u8]) -> Option<Self> {
         match *placeholder.get(PLACEMENT_AT)? {
@@ -64,7 +71,16 @@ pub(super) struct Shown {
     header: bool,
 }
 
-impl Shown {
+/// What a `HeadersFooters` container shows, and the strings it shows: the user date, unless
+/// today's date shows, the header and the footer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Settings {
+    shown: Shown,
+    today: bool,
+    strings: [Option<Vec<u16>>; 3],
+}
+
+impl Settings {
     /// Read a `HeadersFooters` container body, each record charged as one unit of work. The date
     /// shows when `fHasDate` is set and either `fHasTodayDate` is, or `fHasUserDate` is and the
     /// user date has text; a footer or header shows when its flag is set and its string has text.
@@ -76,22 +92,33 @@ impl Shown {
             .and_then(|atom| get_u16(atom.body, FLAGS_AT))
             .unwrap_or(0);
         let flag = |bit: u16| flags & bit != 0;
-        let text = |instance: u16| {
-            records.iter().any(|r| {
-                r.rec_type == rt::CSTRING
-                    && r.instance() == instance
-                    && has_text(utf16le_units(r.body))
-            })
+        let string = |instance: u16| {
+            records
+                .iter()
+                .find(|r| {
+                    r.rec_type == rt::CSTRING
+                        && r.instance() == instance
+                        && has_text(utf16le_units(r.body))
+                })
+                .map(|r| utf16le_units(r.body).collect::<Vec<u16>>())
         };
+        let today = flag(HAS_TODAY_DATE);
+        let strings = [USER_DATE_INSTANCE, HEADER_INSTANCE, FOOTER_INSTANCE].map(string);
+        let [user_date, header, footer] = strings.each_ref().map(Option::is_some);
         Ok(Self {
-            date: flag(HAS_DATE)
-                && (flag(HAS_TODAY_DATE) || flag(HAS_USER_DATE) && text(USER_DATE_INSTANCE)),
-            slide_number: flag(HAS_SLIDE_NUMBER),
-            footer: flag(HAS_FOOTER) && text(FOOTER_INSTANCE),
-            header: flag(HAS_HEADER) && text(HEADER_INSTANCE),
+            shown: Shown {
+                date: flag(HAS_DATE) && (today || flag(HAS_USER_DATE) && user_date),
+                slide_number: flag(HAS_SLIDE_NUMBER),
+                footer: flag(HAS_FOOTER) && footer,
+                header: flag(HAS_HEADER) && header,
+            },
+            today,
+            strings,
         })
     }
+}
 
+impl Shown {
     fn mark(&mut self, kind: Kind) {
         match kind {
             Kind::Date => self.date = true,
@@ -103,35 +130,81 @@ impl Shown {
 }
 
 /// The deck's default for each kind of page, which a page's own container replaces.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Defaults {
-    pub(super) slides: Shown,
-    pub(super) notes: Shown,
+    pub(super) slides: Settings,
+    pub(super) notes: Settings,
 }
 
-/// What one page shows that no output carries, collected while it is read and reported when it
-/// ends.
+/// What one page shows of its headers, footers and comments, collected while it is read.
 #[derive(Debug, Default)]
 pub(super) struct PageFacts {
     /// The page's own `HeadersFooters` container, over the deck's default.
-    pub(super) own: Option<Shown>,
+    pub(super) own: Option<Settings>,
     drawn: Shown,
+    /// Under `HeaderFooterPolicy::Emit`, the blocks each drawn kind's first shape shows, with
+    /// what reading them reported.
+    drawn_blocks: Vec<(Kind, Vec<Block>, Diagnostics)>,
     pub(super) comments: bool,
 }
 
 impl PageFacts {
     /// Note a placeholder shape of `kind` drawn on the page, when its `text` is more than the
-    /// field mark.
-    pub(super) fn draw(&mut self, kind: Kind, text: &str) {
+    /// field mark; `blocks` is what it shows where headers and footers are written.
+    pub(super) fn draw(
+        &mut self,
+        kind: Kind,
+        text: &str,
+        blocks: Option<(Vec<Block>, Diagnostics)>,
+    ) {
         if text.chars().any(|c| c != FIELD_MARK && is_text(c)) {
             self.drawn.mark(kind);
+            if let Some((blocks, held)) = blocks
+                && !self.drawn_blocks.iter().any(|(drawn, ..)| *drawn == kind)
+            {
+                self.drawn_blocks.push((kind, blocks, held));
+            }
         }
+    }
+
+    /// The header and footer the page shows: each footer kind, in date, footer and slide-number
+    /// order, from its settings, else as drawn; its header on a notes page or where one is drawn.
+    pub(super) fn sides(
+        &mut self,
+        parse_ctx: &ParseCtx<'_>,
+        default: &Settings,
+        notes: bool,
+    ) -> Result<PageSides, ConvertError> {
+        let settings = self.own.clone().unwrap_or_else(|| default.clone());
+        let mut sides = PageSides::default();
+        for kind in [Kind::Date, Kind::Footer, Kind::SlideNumber, Kind::Header] {
+            let side = kind.side();
+            let set = match kind {
+                Kind::Date => settings.shown.date,
+                Kind::Footer => settings.shown.footer,
+                Kind::SlideNumber => settings.shown.slide_number,
+                Kind::Header => notes && settings.shown.header,
+            };
+            let drawn = self.drawn_blocks.iter().position(|(drawn, ..)| *drawn == kind);
+            sides.read(parse_ctx, side, || match (set, drawn) {
+                (true, _) => {
+                    Ok(vec![Block::Paragraph(vec![settings.text(parse_ctx, kind, side)?])])
+                }
+                (false, Some(at)) => {
+                    let (_, blocks, held) = self.drawn_blocks.swap_remove(at);
+                    parse_ctx.report_held(&held)?;
+                    Ok(blocks)
+                }
+                (false, None) => Ok(Vec::new()),
+            })?;
+        }
+        Ok(sides)
     }
 
     /// Report each footer kind the page shows once, its header once on a notes page or when one
     /// is drawn, and its comments once. A slide's `fHasHeader` is ignored.
-    pub(super) fn report(self, parse_ctx: &ParseCtx<'_>, default: Shown, notes: bool) {
-        let shown = self.own.unwrap_or(default);
+    pub(super) fn report(self, parse_ctx: &ParseCtx<'_>, default: &Settings, notes: bool) {
+        let shown = self.own.map_or(default.shown, |own| own.shown);
         let drawn = self.drawn;
         let footers = [
             shown.date || drawn.date,
@@ -173,6 +246,57 @@ pub(super) fn tag_has_comment(parse_ctx: &ParseCtx<'_>, tag: &[u8]) -> Result<bo
     }
     Ok(false)
 }
+
+impl Settings {
+    /// The text a shown kind writes: a token for a slide number or today's date, else its string,
+    /// reporting a code unit that does not decode.
+    fn text(
+        &self,
+        parse_ctx: &ParseCtx<'_>,
+        kind: Kind,
+        side: Side,
+    ) -> Result<Inline, ConvertError> {
+        let index = match kind {
+            Kind::SlideNumber => return Ok(token(parse_ctx, "{page}", side)),
+            Kind::Date if self.today => return Ok(token(parse_ctx, "{date}", side)),
+            Kind::Date => 0,
+            Kind::Header => 1,
+            Kind::Footer => 2,
+        };
+        let units = self.strings.get(index).cloned().flatten().unwrap_or_default();
+        parse_ctx.charge(units.len() as u64)?;
+        let mut invalid = 0u64;
+        let text: String = char::decode_utf16(units)
+            .map(|c| {
+                c.unwrap_or_else(|_| {
+                    invalid = invalid.saturating_add(1);
+                    char::REPLACEMENT_CHARACTER
+                })
+            })
+            .filter(|&c| c != '\0')
+            .collect();
+        if invalid > 0 {
+            parse_ctx.emit(DiagnosticCode::InvalidEncoding, side.region());
+        }
+        Ok(Inline::plain(text.trim()))
+    }
+}
+
+fn token(parse_ctx: &ParseCtx<'_>, token: &str, side: Side) -> Inline {
+    parse_ctx.emit(DiagnosticCode::FieldToken, side.region());
+    Inline::plain(token)
+}
+
+/// The token a drawn placeholder's field mark stands for.
+pub(super) fn field_token(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Date => Some("{date}"),
+        Kind::SlideNumber => Some("{page}"),
+        Kind::Footer | Kind::Header => None,
+    }
+}
+
+pub(super) const FIELD: char = FIELD_MARK;
 
 fn is_text(c: char) -> bool {
     c != '\0' && !c.is_whitespace()

@@ -207,6 +207,7 @@ mod tests {
 
     fn side(content: Option<Vec<Block>>) -> Block {
         Block::HeaderFooter(HeaderFooter {
+            page_style: None,
             region: HeaderFooterRegion::Header,
             variant: HeaderFooterVariant::Default,
             content,

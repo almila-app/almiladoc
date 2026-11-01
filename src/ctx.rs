@@ -276,6 +276,31 @@ impl<'a> ParseCtx<'a> {
         self.diagnostics.set(diagnostics);
     }
 
+    /// Run `read` with its reports held back, returning them beside what it read.
+    pub(crate) fn holding_reports<T>(
+        &self,
+        read: impl FnOnce() -> Result<T, ConvertError>,
+    ) -> Result<(T, Diagnostics), ConvertError> {
+        let outer = self.diagnostics.take();
+        let read = read();
+        let held = self.diagnostics.replace(outer);
+        read.map(|value| (value, held))
+    }
+
+    /// Report again, in the current unit, every loss `held` holds.
+    pub(crate) fn report_held(&self, held: &Diagnostics) -> Result<(), ConvertError> {
+        for diagnostic in held.iter() {
+            self.charge(1)?;
+            self.emit_count(diagnostic.code, diagnostic.region, diagnostic.count);
+        }
+        Ok(())
+    }
+
+    /// The unit reports go to.
+    pub(crate) fn current_unit(&self) -> Option<Unit> {
+        self.unit.get()
+    }
+
     /// Admit the unit at 0-based `position` in its document's list (a slide,
     /// sheet or spine item) and report in it until the scope drops, refusing
     /// a unit numbered past [`Limits::max_pages`].

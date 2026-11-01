@@ -11,11 +11,14 @@ mod records;
 mod side;
 mod styletext;
 
-use crate::ctx::{AdmittedUnit, ParseCtx, UnitScope};
+use crate::ctx::{AdmittedUnit, ImageLoss, ParseCtx, UnitScope};
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
-use crate::model::{Asset, Block, Document, Inline, Style, UnitKind, inlines_are_empty};
+use crate::model::HeaderFooterRegion as Side;
+use crate::model::{
+    Asset, Block, Document, Inline, Style, UnitKind, charge_blocks_copy, inlines_are_empty,
+};
 use crate::shared::binary::{
     OptionalStream, decode_utf16, get_u16, get_u32, optional_ole_stream, read_ole_stream,
     utf16le_units,
@@ -24,10 +27,11 @@ use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::link_label::{label_is_absolute_url, label_shows_target};
 use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
 use crate::shared::officeart::{self, Record, record_at};
+use crate::shared::sides::{PageSides, SideTimeline};
 use crate::shared::typeface::{Route, Slot, Slots, run_inlines};
 use fonts::FontCollection;
 use records as rt;
-use side::{Defaults, Kind, PageFacts, Shown};
+use side::{Defaults, Kind, PageFacts, Settings};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use styletext::{MasterLevel, StyleCursor, StyleRuns, TextType};
@@ -70,7 +74,9 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     }
     let pictures = collect_pictures(parse_ctx, &mut ole)?;
     ex.report_pictures(&pictures);
-    ex.report_masters()?;
+    if !parse_ctx.headers_footers_requested() || ex.recovering {
+        ex.report_masters()?;
+    }
     Ok(Document {
         blocks: ex.into_blocks()?,
         notes: Vec::new(),
@@ -181,6 +187,8 @@ const FSP_BACKGROUND: u32 = 0x0400;
 struct MasterFacts {
     /// A shape other than the patriarch, the background and placeholders.
     objects: bool,
+    /// Under `HeaderFooterPolicy::Emit`, what the extractor reads of those shapes once.
+    content: Option<MasterContent>,
     /// A background filled with a picture or texture.
     picture_background: bool,
     shown: MasterUse,
@@ -309,6 +317,14 @@ impl MasterShape {
     }
 }
 
+/// A master's objects as the extractor reads them: their blocks, what reading them reported,
+/// and how many pictures they place, which no output carries.
+struct MasterContent {
+    blocks: Vec<Block>,
+    held: crate::diagnostics::Diagnostics,
+    pictures: u64,
+}
+
 fn master_shape(parse_ctx: &ParseCtx<'_>, container: &[u8]) -> Result<MasterShape, ConvertError> {
     let mut shape = MasterShape::default();
     for record in scan(parse_ctx, container)? {
@@ -341,6 +357,8 @@ struct ShapeFacts {
     outline: Option<usize>,
     /// Drawn as a header or footer placeholder.
     side: Option<Kind>,
+    /// A placeholder of any kind.
+    placeholder: bool,
 }
 
 /// A listed slide or notes page: its container when the persist reference
@@ -354,14 +372,17 @@ struct PendingShape {
     tx_type: TextType,
     /// Drawn as a header or footer placeholder.
     side: Option<Kind>,
+    /// A placeholder a master draws, which its slides do not show.
+    master_placeholder: bool,
     text: String,
     units: Vec<u16>,
     styles: Option<StyleRuns>,
 }
 
 impl PendingShape {
-    fn new(tx_type: TextType, side: Option<Kind>) -> Self {
-        Self { tx_type, side, text: String::new(), units: Vec::new(), styles: None }
+    fn new(tx_type: TextType, (side, master_placeholder): (Option<Kind>, bool)) -> Self {
+        let (text, units, styles) = (String::new(), Vec::new(), None);
+        Self { tx_type, side, master_placeholder, text, units, styles }
     }
 }
 
@@ -412,8 +433,15 @@ struct Extractor<'c> {
     fonts: FontCollection,
     /// What the document shows on a slide or notes page that has no container of its own.
     defaults: Defaults,
-    /// What the page being walked shows and no output carries.
+    /// What the page being walked shows of its headers, footers and comments.
     page: PageFacts,
+    /// The slide headers and footers in force, under `HeaderFooterPolicy::Emit`.
+    slide_sides: SideTimeline,
+    /// The master the slide being walked names, and what of it the slide shows.
+    slide_master: Option<(Option<u32>, MasterUse)>,
+    /// While a master's drawing is walked under `HeaderFooterPolicy::Emit`, the pictures its
+    /// objects place.
+    master: Option<u64>,
 }
 
 /// The persist-resolved layout of the presentation: slide/notes lists from
@@ -579,11 +607,20 @@ impl<'c> Extractor<'c> {
             fonts: FontCollection::default(),
             defaults: Defaults::default(),
             page: PageFacts::default(),
+            slide_sides: SideTimeline::default(),
+            slide_master: None,
+            master: None,
         }
     }
 
     fn region(&self) -> Region {
-        if self.current_is_notes { Region::Note } else { Region::Body }
+        if self.master.is_some() {
+            Region::Header
+        } else if self.current_is_notes {
+            Region::Note
+        } else {
+            Region::Body
+        }
     }
 
     /// Walk slides in presentation order: the UserEditAtom chain yields the
@@ -599,9 +636,14 @@ impl<'c> Extractor<'c> {
         for &(id, _, master) in &masters {
             self.read_master(id, master)?;
         }
-        let main = masters.into_iter().filter(|&(_, rec_type, _)| rec_type == rt::MAIN_MASTER);
+        let main = masters.iter().filter(|&&(_, rec_type, _)| rec_type == rt::MAIN_MASTER);
         let parse_ctx = self.parse_ctx;
-        self.masters = main.map(|(id, _, m)| (id, master_styles(parse_ctx, m))).collect();
+        self.masters = main.map(|&(id, _, m)| (id, master_styles(parse_ctx, m))).collect();
+        if parse_ctx.headers_footers_requested() {
+            for &(id, _, master) in &masters {
+                self.walk_master(id, master)?;
+            }
+        }
         let units =
             self.walk_slide_list(layout.slide_list, &layout.persist, data, false, &HashMap::new())?;
         if let Some(notes_list) = layout.notes_list {
@@ -686,7 +728,7 @@ impl<'c> Extractor<'c> {
         }
         self.close_shape()?;
         if page.container.is_some() {
-            self.settle_page();
+            self.settle_page()?;
         }
         if !self.current_is_notes
             && (page.container.is_some() || !self.current.is_empty())
@@ -697,11 +739,28 @@ impl<'c> Extractor<'c> {
         self.end_segment(page.id)
     }
 
-    /// Report the page just read, which must still be inside its unit's scope.
-    fn settle_page(&mut self) {
+    /// Write or report the headers and footers of the page just read, and report its comments;
+    /// the page must still be inside its unit's scope.
+    fn settle_page(&mut self) -> Result<(), ConvertError> {
         let notes = self.current_is_notes;
-        let default = if notes { self.defaults.notes } else { self.defaults.slides };
-        std::mem::take(&mut self.page).report(self.parse_ctx, default, notes);
+        let default = if notes { &self.defaults.notes } else { &self.defaults.slides };
+        let mut page = std::mem::take(&mut self.page);
+        if !self.parse_ctx.headers_footers_requested() {
+            page.report(self.parse_ctx, default, notes);
+            return Ok(());
+        }
+        let mut sides = page.sides(self.parse_ctx, default, notes)?;
+        if !notes {
+            self.master_header(&mut sides)?;
+        }
+        let mut blocks = Vec::new();
+        let mut notes_timeline = SideTimeline::default();
+        let timeline = if notes { &mut notes_timeline } else { &mut self.slide_sides };
+        sides.publish(self.parse_ctx, timeline, &mut blocks)?;
+        self.current.splice(0..0, blocks);
+        let comments = u64::from(page.comments);
+        self.parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, comments);
+        Ok(())
     }
 
     /// Read the `DocumentContainer`'s font collection, external objects, picture store and the
@@ -713,10 +772,10 @@ impl<'c> Extractor<'c> {
             match rec_type {
                 rt::HEADERS_FOOTERS => match record.instance() {
                     rt::SLIDE_HEADERS_FOOTERS_INSTANCE => {
-                        self.defaults.slides = Shown::read(parse_ctx, body)?;
+                        self.defaults.slides = Settings::read(parse_ctx, body)?;
                     }
                     rt::NOTES_HEADERS_FOOTERS_INSTANCE => {
-                        self.defaults.notes = Shown::read(parse_ctx, body)?;
+                        self.defaults.notes = Settings::read(parse_ctx, body)?;
                     }
                     _ => {}
                 },
@@ -805,6 +864,39 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
+    /// Read what a master's objects show, in the header region, its placeholders left out and its
+    /// text styled by its own levels, else its main master's.
+    fn walk_master(&mut self, id: u32, master: &[u8]) -> Result<(), ConvertError> {
+        let parse_ctx = self.parse_ctx;
+        let Some(index) = self.master_facts.iter().position(|&(master, _)| master == id) else {
+            return Ok(());
+        };
+        let main =
+            self.master_facts.get(index).and_then(|(_, facts)| facts.follows).map(|(main, _)| main);
+        let mut styled = [id].into_iter().chain(main);
+        self.active_master = styled
+            .find_map(|id| self.masters.iter().position(|&(master, _)| master == id))
+            .unwrap_or(0);
+        let saved = (std::mem::take(&mut self.current), std::mem::take(&mut self.list_run));
+        self.master = Some(0);
+        let walked = parse_ctx.holding_reports(|| {
+            for Record { rec_type, body, .. } in scan(parse_ctx, master)? {
+                if rec_type == rt::DRAWING {
+                    self.walk(body)?;
+                }
+            }
+            self.close_shape()?;
+            Ok(std::mem::take(&mut self.current))
+        });
+        let pictures = self.master.take().unwrap_or(0);
+        (self.current, self.list_run) = saved;
+        let (blocks, held) = walked?;
+        if let Some((_, facts)) = self.master_facts.get_mut(index) {
+            facts.content = Some(MasterContent { blocks, held, pictures });
+        }
+        Ok(())
+    }
+
     /// The facts of the master `id`, else of the first main master.
     fn master_facts_mut(&mut self, id: Option<u32>) -> Option<&mut MasterFacts> {
         let fallback = self.masters.first().map(|&(id, _)| id);
@@ -859,10 +951,10 @@ impl<'c> Extractor<'c> {
                 || offset.is_some_and(|offset| pictures.undecodable.contains(&offset))
             {
                 if unavailable.insert((unit, region, offset)) {
-                    self.parse_ctx.image_loss(crate::ctx::ImageLoss::Unavailable, region);
+                    self.parse_ctx.image_loss(ImageLoss::Unavailable, region);
                 }
             } else {
-                self.parse_ctx.image_loss(crate::ctx::ImageLoss::Unplaced, region);
+                self.parse_ctx.image_loss(ImageLoss::Unplaced, region);
             }
         }
     }
@@ -870,7 +962,7 @@ impl<'c> Extractor<'c> {
     fn close_shape(&mut self) -> Result<(), ConvertError> {
         self.settle_link()?;
         self.finish_shape()?;
-        self.flush_shape();
+        self.flush_shape()?;
         flush_list(&mut self.current, &mut self.list_run);
         Ok(())
     }
@@ -924,13 +1016,15 @@ impl<'c> Extractor<'c> {
             let Some(record) = record_at(buf, *pos) else {
                 match stack.pop() {
                     Some((.., rt::NOTES, _)) => {
+                        self.close_shape()?;
+                        self.settle_page()?;
                         self.end_segment(None)?;
-                        self.settle_page();
                         self.current_is_notes = false;
                     }
                     Some((.., Some(_))) => {
+                        self.close_shape()?;
+                        self.settle_page()?;
                         self.end_segment(None)?;
-                        self.settle_page();
                         self.unit = None;
                     }
                     _ => {}
@@ -950,7 +1044,7 @@ impl<'c> Extractor<'c> {
                 rt::CRYPT_SESSION10_CONTAINER => self.encrypted = true,
                 rt::HEADERS_FOOTERS => {
                     if record.instance() == rt::PAGE_HEADERS_FOOTERS_INSTANCE {
-                        self.page.own = Some(Shown::read(parse_ctx, body)?);
+                        self.page.own = Some(Settings::read(parse_ctx, body)?);
                     }
                 }
                 rt::PROG_BINARY_TAG => {
@@ -1022,7 +1116,7 @@ impl<'c> Extractor<'c> {
         match rec_type {
             rt::TEXT_HEADER_ATOM => {
                 self.settle_link()?;
-                self.flush_shape();
+                self.flush_shape()?;
                 let tx_type = body.first().map_or(TextType::BODY, |&t| TextType(t.into()));
                 self.pending = Some(PendingShape::new(tx_type, self.drawn_side()));
                 if let Some(shape) = &mut self.shape {
@@ -1059,6 +1153,9 @@ impl<'c> Extractor<'c> {
                     self.recovered_use = self.recovered_use.or(shown);
                 } else if let Some(master) = self.master_facts_mut(get_u32(body, 12)) {
                     master.shown = master.shown.or(shown);
+                    if !self.current_is_notes {
+                        self.slide_master = Some((get_u32(body, 12), shown));
+                    }
                 }
             }
             _ => self.shape_atom(record, in_client_data)?,
@@ -1075,7 +1172,9 @@ impl<'c> Extractor<'c> {
                 }
             }
             rt::PLACEHOLDER_ATOM => {
-                self.shape.iter_mut().for_each(|shape| shape.side = Kind::placed(body));
+                if let Some(shape) = &mut self.shape {
+                    (shape.side, shape.placeholder) = (Kind::placed(body), true);
+                }
             }
             officeart::FSP => {
                 self.settle_link()?;
@@ -1171,6 +1270,12 @@ impl<'c> Extractor<'c> {
         let Some(shape) = self.shape.take() else {
             return Ok(());
         };
+        if let Some(pictures) = &mut self.master {
+            let placed = shape.pib.is_some_and(|pib| pib != 0 && !shape.preview)
+                || shape.fill.picture().is_some() && !shape.background;
+            *pictures += u64::from(placed && !shape.placeholder);
+            return Ok(());
+        }
         let region = self.region();
         if let Some(pib) = shape.pib.filter(|&pib| pib != 0 && !shape.preview) {
             self.placed.insert((self.unit, region, pib));
@@ -1196,8 +1301,12 @@ impl<'c> Extractor<'c> {
         self.pending.as_ref().is_some_and(|pending| pending.side.is_some())
     }
 
-    fn drawn_side(&self) -> Option<Kind> {
-        self.shape.as_ref().and_then(|shape| shape.side)
+    /// What the shape being walked is drawn as: a header or footer placeholder, and a
+    /// placeholder on the master being walked.
+    fn drawn_side(&self) -> (Option<Kind>, bool) {
+        let shape = self.shape.as_ref();
+        let placeholder = self.master.is_some() && shape.is_some_and(|shape| shape.placeholder);
+        (shape.and_then(|shape| shape.side), placeholder)
     }
 
     fn push_text(&mut self, text: &str) {
@@ -1214,16 +1323,21 @@ impl<'c> Extractor<'c> {
 
     /// Emit the pending shape: paragraphs split on CR, styled by the
     /// character runs, listed by paragraph depth/bullet with master defaults.
-    fn flush_shape(&mut self) {
+    fn flush_shape(&mut self) -> Result<(), ConvertError> {
         let Some(shape) = self.pending.take() else {
-            return;
+            return Ok(());
         };
-        if shape.text.is_empty() {
-            return;
+        if shape.text.is_empty() || shape.master_placeholder {
+            return Ok(());
         }
         if let Some(kind) = shape.side {
-            self.page.draw(kind, &shape.text);
-            return;
+            let blocks = if self.parse_ctx.headers_footers_requested() {
+                Some(self.parse_ctx.holding_reports(|| Ok(self.side_blocks(&shape, kind)))?)
+            } else {
+                None
+            };
+            self.page.draw(kind, &shape.text, blocks);
+            return Ok(());
         }
         self.shape_counter += 1;
         let shape_id = self.shape_counter;
@@ -1265,6 +1379,85 @@ impl<'c> Extractor<'c> {
                 self.current.push(Block::Paragraph(inlines));
             }
         }
+        Ok(())
+    }
+
+    /// A drawn placeholder's paragraphs, its field mark the token of the field it shows.
+    fn side_blocks(&self, shape: &PendingShape, kind: Kind) -> Vec<Block> {
+        let unstyled = StyleRuns::default();
+        let styles = shape.styles.as_ref().unwrap_or(&unstyled);
+        let region = kind.side().region();
+        let mut blocks = Vec::new();
+        for (mut inlines, ..) in self.paragraphs(&shape.text, styles, &[]) {
+            for inline in &mut inlines {
+                if let Inline::Text { text, .. } = inline
+                    && text.contains(side::FIELD)
+                {
+                    let token = side::field_token(kind).unwrap_or_default();
+                    let marks = text.matches(side::FIELD).count() as u64;
+                    if !token.is_empty() {
+                        self.parse_ctx.emit_count(DiagnosticCode::FieldToken, region, marks);
+                    }
+                    *text = text.replace(side::FIELD, token);
+                }
+            }
+            if !inlines_are_empty(&inlines) {
+                blocks.push(Block::Paragraph(inlines));
+            }
+        }
+        blocks
+    }
+
+    /// The master content the slide just walked shows, as its header: the text of the master's
+    /// objects, and through a title master the objects of its main master it shows; their
+    /// pictures and a picture background are unplaced, as every picture here is.
+    fn master_header(&mut self, sides: &mut PageSides) -> Result<(), ConvertError> {
+        let Some((id, shown)) = self.slide_master.take() else { return Ok(()) };
+        let own_background = self.own_background;
+        let at = |id: u32| self.master_facts.iter().position(|&(master, _)| master == id);
+        let fallback = self.masters.first().map(|&(id, _)| id);
+        let Some(index) = id.and_then(at).or_else(|| fallback.and_then(at)) else {
+            return Ok(());
+        };
+        let Some((_, master)) = self.master_facts.get(index) else { return Ok(()) };
+        let follows = master.follows;
+        let own_shown = MasterUse {
+            background: shown.background && !follows.is_some_and(|(_, own)| own.background),
+            ..shown
+        };
+        let mut chain = vec![(Some(index), own_shown)];
+        if let Some((main, own)) = follows {
+            let through = MasterUse {
+                objects: shown.objects && own.objects,
+                background: shown.background && own.background,
+            };
+            chain.push((at(main), through));
+        }
+        let parse_ctx = self.parse_ctx;
+        for (index, used) in chain {
+            self.parse_ctx.charge(1)?;
+            let Some((_, facts)) = index.and_then(|index| self.master_facts.get(index)) else {
+                continue;
+            };
+            sides.read(parse_ctx, Side::Header, || {
+                let mut blocks = Vec::new();
+                if let Some(content) =
+                    facts.content.as_ref().filter(|_| used.objects && facts.objects)
+                {
+                    charge_blocks_copy(&content.blocks, |work| parse_ctx.charge(work))?;
+                    parse_ctx.report_held(&content.held)?;
+                    blocks.clone_from(&content.blocks);
+                    for _ in 0..content.pictures {
+                        parse_ctx.image_loss(ImageLoss::Unplaced, Region::Header);
+                    }
+                }
+                if used.background && facts.picture_background && !own_background {
+                    parse_ctx.image_loss(ImageLoss::Unplaced, Region::Header);
+                }
+                Ok(blocks)
+            })?;
+        }
+        Ok(())
     }
 
     /// The CR-ended paragraphs of `source` as `(inlines, depth, own bullet)`.
@@ -1274,7 +1467,18 @@ impl<'c> Extractor<'c> {
         styles: &StyleRuns,
         levels: &[MasterLevel],
     ) -> Vec<(Vec<Inline>, u16, Option<bool>)> {
-        let (parse_ctx, region, fonts) = (self.parse_ctx, self.region(), &self.fonts);
+        self.paragraphs_in(source, styles, levels, self.region())
+    }
+
+    /// [`Self::paragraphs`], reporting what does not map in `region`.
+    fn paragraphs_in(
+        &self,
+        source: &str,
+        styles: &StyleRuns,
+        levels: &[MasterLevel],
+        region: Region,
+    ) -> Vec<(Vec<Inline>, u16, Option<bool>)> {
+        let (parse_ctx, fonts) = (self.parse_ctx, &self.fonts);
         let close_run =
             |text: &mut String, (style, route): (Style, Route), inlines: &mut Vec<_>| {
                 if text.is_empty() {
@@ -1341,7 +1545,15 @@ mod tests {
     use std::io::Write;
     use std::num::NonZero;
 
+    use crate::HeaderFooterPolicy;
+    mod master_emit;
+
+    /// The Markdown `document` renders to.
+    fn markdown_of_document(document: &Document) -> String {
+        crate::render::markdown::document_to_markdown(document)
+    }
     mod page_side;
+    mod page_side_emit;
     mod page_side_reads;
 
     fn deflated_metafile_picture(inflated: usize) -> Vec<u8> {
@@ -1625,6 +1837,19 @@ mod tests {
         record(0x6E00, 0xF01E, if decodes { &[0; 21] } else { &[0; 4] })
     }
 
+    /// A one-slide deck whose slide shows `flags` of its title master `title`, which follows
+    /// the main master `main`.
+    fn titled(flags: u32, main: Vec<u8>, title: Vec<u8>) -> Vec<u8> {
+        let doc = [pages(0, &[(2, 256)]), pages(1, &[(3, 1), (4, 2)])];
+        listed(&doc, &[slide_on(2, flags, &[]), main, title])
+    }
+
+    /// A one-slide deck whose slide shows `flags` of a main master of `shapes` and `fill`.
+    fn mastered(shapes: &[Vec<u8>], fill: u32, flags: u32) -> Vec<u8> {
+        let doc = [pages(0, &[(2, 256)]), pages(1, &[(3, 1)])];
+        listed(&doc, &[slide(flags, &[]), master(shapes, fill)])
+    }
+
     fn master(shapes: &[Vec<u8>], fill: u32) -> Vec<u8> {
         title_master(0, 0, shapes, &[(0x0180, fill), (0x4186, 1)])
     }
@@ -1723,10 +1948,6 @@ mod tests {
         };
         let fill_shape = |props: &[(u16, u32)]| drawing(&[shape(0x0A00, props, &[])]);
         let picture_fill = [(0x0180, 3), (0x4186, 1)];
-        let titled = |flags: u32, main: Vec<u8>, title: Vec<u8>| {
-            let doc = [one_slide(), pages(1, &[(3, 1), (4, 2)])];
-            listed(&doc, &[slide_on(2, flags, &[]), main, title])
-        };
         let styled = |style: &[u8]| {
             let content = [text(&[0x61, 0x62, 0x0D]), record(0, 0x0FA1, style)].concat();
             on_slide(&[content])
@@ -1734,10 +1955,6 @@ mod tests {
         let noted = |notes_list: Vec<u8>, owner: u32| {
             let objects = [slide(0, &[]), slide(0, &[]), notes(owner, &[unpaired()])];
             listed(&[two_slides.clone(), notes_list], &objects)
-        };
-        let mastered = |shapes: &[Vec<u8>], fill: u32, flags: u32| {
-            let doc = [one_slide(), pages(1, &[(3, 1)])];
-            listed(&doc, &[slide(flags, &[]), master(shapes, fill)])
         };
         let objects = |list: &[Vec<u8>], shapes: &[Vec<u8>]| {
             let doc = [one_slide(), container(0, 0x0409, list), bstore(&[0])];

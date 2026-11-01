@@ -548,6 +548,7 @@ mod tests {
         ];
         containers.extend([None, Some(vec![]), Some(vec![text("a"), text("b")])].map(|content| {
             Block::HeaderFooter(crate::model::HeaderFooter {
+                page_style: None,
                 region: crate::model::HeaderFooterRegion::Header,
                 variant: crate::model::HeaderFooterVariant::Default,
                 content,

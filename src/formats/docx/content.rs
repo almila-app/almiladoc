@@ -1,7 +1,9 @@
 //! Block and inline walking for WordprocessingML parts.
 
 use super::numbering::{Counters, Numbering};
-use super::styles::{FontRoute, RunFonts, Styles, Toggles, on_off, outline, rpr_delta, val};
+use super::styles::{
+    FontRoute, RunFonts, Styles, Toggles, on_off, on_off_attr, outline, rpr_delta, val,
+};
 use crate::ctx::{ImageLoss, ParseCtx};
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -17,7 +19,7 @@ use crate::shared::assets::{AssetSink, rel_image_source, retain_ole_payload};
 use crate::shared::blockstyle::{BlockStyle, Outline, StyledRun};
 use crate::shared::delta::rebase_emphasis;
 use crate::shared::drawingml::{self, GraphicPart};
-use crate::shared::fields::{FieldFrame, classify_rel_target, field_result};
+use crate::shared::fields::{FieldFrame, classify_rel_target, field_result, side_field_token};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
@@ -124,11 +126,26 @@ pub(super) struct Moves {
 /// What this reader shows and reads of a branch: everything.
 const READ_ALL: mc::Shown = (|_| true, |_| true);
 
-impl Ctx<'_, '_> {
+impl<'b> Ctx<'_, 'b> {
     /// The same document-wide dependencies scoped to another package part
     /// (notes parts): only the relationships, base path and region change.
     pub(super) fn for_part(&self, rels: Relationships, base_part: String, region: Region) -> Self {
         Self { rels, base_part, region, moves: RefCell::default(), ..*self }
+    }
+
+    /// A header or footer part's scope: its own numbering counters and references, so nothing
+    /// it holds numbers, reads or counts body content.
+    pub(super) fn for_side(
+        &self,
+        (rels, base_part, region): (Relationships, String, Region),
+        counters: &'b RefCell<Counters>,
+        references: &'b References,
+    ) -> Self {
+        Self { rels, base_part, region, counters, references, moves: RefCell::default(), ..*self }
+    }
+
+    fn in_side(&self) -> bool {
+        matches!(self.region, Region::Header | Region::Footer)
     }
 
     pub(super) fn settle_moves(&self) -> Result<(), ConvertError> {
@@ -500,9 +517,25 @@ pub(super) fn parse_blocks(
 ) -> Result<Vec<Block>, ConvertError> {
     let mut blocks: Vec<Block> = Vec::new();
     let mut runs = Runs::default();
-    collect_blocks(parent, ctx, &mut blocks, &mut runs)?;
+    collect_blocks(parent, ctx, &mut blocks, &mut runs, None)?;
     runs.release(ctx, &mut blocks)?;
     Ok(blocks)
+}
+
+/// For each section a paragraph mark ends, where the next one starts among the body's blocks
+/// and the properties of the one it ends; a mark a revision deletes ends none.
+pub(super) type SectionBreaks<'e> = Vec<(usize, &'e Element)>;
+
+pub(super) fn parse_body<'e>(
+    body: &'e Element,
+    ctx: &Ctx<'_, '_>,
+) -> Result<(Vec<Block>, SectionBreaks<'e>), ConvertError> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut runs = Runs::default();
+    let mut breaks = Vec::new();
+    collect_blocks(body, ctx, &mut blocks, &mut runs, Some(&mut breaks))?;
+    runs.release(ctx, &mut blocks)?;
+    Ok((blocks, breaks))
 }
 
 fn collect_blocks<'e>(
@@ -510,11 +543,12 @@ fn collect_blocks<'e>(
     ctx: &Ctx<'_, '_>,
     blocks: &mut Vec<Block>,
     runs: &mut Runs<'e>,
+    mut breaks: Option<&mut SectionBreaks<'e>>,
 ) -> Result<(), ConvertError> {
     for child in parent.child_elems() {
         if child.is(ns::MC, "AlternateContent") {
             if let Some(branch) = ctx.alternate_branch(child, None, false, BranchHolder::Text)? {
-                collect_blocks(branch, ctx, blocks, runs)?;
+                collect_blocks(branch, ctx, blocks, runs, breaks.as_deref_mut())?;
             }
             continue;
         }
@@ -539,6 +573,9 @@ fn collect_blocks<'e>(
                     Mark::Dropped(pending) => runs.joining = Some((pending, pieces)),
                     Mark::Kept(kind) => emit_paragraph(kind, pieces, blocks, runs),
                 }
+                if let Some(breaks) = breaks.as_deref_mut() {
+                    note_section_break(child, ctx, blocks, runs, breaks)?;
+                }
             }
             "tbl" => {
                 runs.release(ctx, blocks)?;
@@ -546,10 +583,12 @@ fn collect_blocks<'e>(
             }
             "sdt" => {
                 if let Some(content) = child.find(ns::W, "sdtContent") {
-                    collect_blocks(content, ctx, blocks, runs)?;
+                    collect_blocks(content, ctx, blocks, runs, breaks.as_deref_mut())?;
                 }
             }
-            "customXml" | "ins" | "moveTo" => collect_blocks(child, ctx, blocks, runs)?,
+            "customXml" | "ins" | "moveTo" => {
+                collect_blocks(child, ctx, blocks, runs, breaks.as_deref_mut())?;
+            }
             "altChunk" => ctx.emit(DiagnosticCode::ImportedPartUnread),
             "del" | "moveFrom" => {
                 let mut walker = InlineWalker::outside_paragraphs(ctx)?;
@@ -565,9 +604,29 @@ fn collect_blocks<'e>(
     Ok(())
 }
 
+/// Record where the next section starts when `paragraph`'s mark ends one that accepting
+/// revisions keeps.
+fn note_section_break<'e>(
+    paragraph: &'e Element,
+    ctx: &Ctx<'_, '_>,
+    blocks: &mut Vec<Block>,
+    runs: &mut Runs<'e>,
+    breaks: &mut SectionBreaks<'e>,
+) -> Result<(), ConvertError> {
+    let ppr = paragraph.find(ns::W, "pPr");
+    if let Some(section) = ppr.and_then(|pr| pr.find(ns::W, "sectPr"))
+        && !mark_removed(ppr.and_then(|pr| pr.find(ns::W, "rPr")))
+    {
+        runs.release(ctx, blocks)?;
+        breaks.push((blocks.len(), section));
+    }
+    Ok(())
+}
+
 /// Whether a paragraph's mark drops once revisions are accepted and hidden text omitted:
 /// a deleted, moved-out, hidden or specially hidden mark, which joins its paragraph to the
-/// next. A mark carrying its section's properties is a section break, which never joins.
+/// next. A mark carrying its section's properties is a section break, which hiding never joins;
+/// accepting its deletion removes the break with it.
 fn mark_drops(
     ppr: Option<&Element>,
     ctx: &Ctx<'_, '_>,
@@ -575,17 +634,21 @@ fn mark_drops(
     hides: bool,
 ) -> Result<bool, ConvertError> {
     let rpr = ppr.and_then(|pr| pr.find(ns::W, "rPr"));
+    if mark_removed(rpr) {
+        return Ok(true);
+    }
     if ppr.and_then(|pr| pr.find(ns::W, "sectPr")).is_some() {
         return Ok(false);
     }
-    if rpr.is_some_and(|rpr| {
-        rpr.find(ns::W, "del").is_some()
-            || rpr.find(ns::W, "moveFrom").is_some()
-            || on_off(rpr, "specVanish") == Some(true)
-    }) {
+    if rpr.is_some_and(|rpr| on_off(rpr, "specVanish") == Some(true)) {
         return Ok(true);
     }
     hidden_beside_runs(ctx, rpr, base, hides)
+}
+
+/// Whether accepting revisions removes a paragraph mark: deleted or moved out.
+fn mark_removed(rpr: Option<&Element>) -> bool {
+    rpr.is_some_and(|rpr| rpr.find(ns::W, "del").is_some() || rpr.find(ns::W, "moveFrom").is_some())
 }
 
 /// Whether a mark, a math run or a run in a declined choice is hidden: a character style that
@@ -853,6 +916,9 @@ struct InlineWalker<'a, 'b, 'e> {
     enclosing: u64,
     /// Whether an enclosing walker discards this one's output (a field's instruction).
     discarded: bool,
+    /// Whether this output stands in a side field's result its token replaces, where nothing,
+    /// a text box or chart included, is read.
+    tokenized: bool,
     revision: Option<Dropped>,
     /// The kind of the dropped range still open in the paragraph, which holds rendered content;
     /// an inner walker takes it and hands it back.
@@ -872,6 +938,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             fields: Vec::new(),
             enclosing: 0,
             discarded: false,
+            tokenized: false,
             revision: None,
             range: None,
             dropped: false,
@@ -902,6 +969,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(Self {
             enclosing: self.deeper()?,
             discarded: !self.shown(),
+            tokenized: self.replaced(),
             revision: self.revision.clone(),
             range: self.range.take(),
             ..Self::new(self.ctx, self.base, self.hides, self.fonts)
@@ -938,6 +1006,35 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     /// an enclosing walker.
     fn shown(&self) -> bool {
         !self.discarded && self.fields.iter().all(|f| f.in_result)
+    }
+
+    /// A simple field: its result, read and placed, or the token that stands in for it.
+    fn walk_simple_field(&mut self, field: &Element) -> Result<(), ConvertError> {
+        let instr = field.attr(ns::W, "instr").unwrap_or("");
+        let token = self.side_token(instr, on_off_attr(field, "fldLock"))?;
+        let mut inner = self.inner()?;
+        if token.is_some() {
+            (inner.discarded, inner.tokenized) = (true, true);
+        }
+        inner.walk(field)?;
+        let (content, attachments, _) = self.rejoin(inner);
+        self.place_field(instr, token, content);
+        self.place_blocks(attachments);
+        Ok(())
+    }
+
+    /// Whether what is walked now lies in a side field's result its token replaces.
+    fn replaced(&self) -> bool {
+        self.tokenized || self.fields.iter().any(|f| f.token.is_some())
+    }
+
+    /// The token a header or footer writes in place of the field `instr` names.
+    fn side_token(&self, instr: &str, locked: bool) -> Result<Option<&'static str>, ConvertError> {
+        if !self.ctx.in_side() {
+            return Ok(None);
+        }
+        self.ctx.parse_ctx.charge(instr.len() as u64)?;
+        Ok(side_field_token(instr, locked))
     }
 
     /// Reports `count` symbol-font codes no table maps, where their text would have shown.
@@ -1035,14 +1132,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             match child.local.as_str() {
                 "r" => self.walk_run(child)?,
                 "hyperlink" => self.walk_hyperlink(child, dropping.is_some())?,
-                "fldSimple" => {
-                    let instr = child.attr(ns::W, "instr").unwrap_or("");
-                    let mut inner = self.inner()?;
-                    inner.walk(child)?;
-                    let (content, attachments, _) = self.rejoin(inner);
-                    self.place_all(field_result(instr, content));
-                    self.place_blocks(attachments);
-                }
+                "fldSimple" => self.walk_simple_field(child)?,
                 "bookmarkStart" => {
                     if let Some(name) = child.attr(ns::W, "name")
                         && name != "_GoBack"
@@ -1103,6 +1193,9 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     /// equation's end runs on past it unless the equation renders something. Math with no run
     /// drops whole where the paragraph hides it or a revision drops it.
     fn walk_math(&mut self, math: &Element, display: bool) -> Result<(), ConvertError> {
+        if self.replaced() {
+            return Ok(());
+        }
         let mut runs = MathRuns::default();
         self.walk_math_runs(math, display, &mut runs)?;
         let dropping = if runs.any {
@@ -1381,7 +1474,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                     _ => false,
                 }
             };
-            if content && (shown || blocks) {
+            if content && (shown || (blocks && !self.replaced())) {
                 self.drop_content(kind);
             }
         }
@@ -1458,6 +1551,10 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 "sym" => self.push_sym(child, style),
                 "ruby" => self.report_ruby(child)?,
                 "contentPart" => self.report_shown(DiagnosticCode::GraphicUnread),
+                "pgNum" if self.ctx.in_side() => {
+                    self.push(Inline::Text { text: "{page}".into(), style });
+                    self.report_shown(DiagnosticCode::FieldToken);
+                }
                 "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
                 | "yearLong" => self.report_shown(DiagnosticCode::FieldValueUnread),
                 // Markdown has no pages or columns, but every w:br still
@@ -1496,24 +1593,46 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         match delimiter.attr(ns::W, "fldCharType") {
             Some("begin") => {
                 self.deeper()?;
-                self.fields.push(FieldFrame::default());
+                let locked = on_off_attr(delimiter, "fldLock");
+                self.fields.push(FieldFrame { locked, ..FieldFrame::default() });
                 return Ok(delimiter.find(ns::W, "ffData").is_some_and(|data| {
                     data.find(ns::W, "checkBox").is_some() || data.find(ns::W, "ddList").is_some()
                 }));
             }
             Some("separate") => {
+                let token = match self.fields.last() {
+                    Some(f) if !f.in_result => self.side_token(&f.instr, f.locked)?,
+                    _ => None,
+                };
                 if let Some(f) = self.fields.last_mut() {
-                    f.in_result = true;
+                    f.in_result = token.is_none();
+                    f.token = token;
                 }
             }
             Some("end") => {
-                if let Some(FieldFrame { instr, inlines, .. }) = self.fields.pop() {
-                    self.place_all(field_result(&instr, inlines));
+                if let Some(FieldFrame { instr, inlines, token, locked, .. }) = self.fields.pop() {
+                    let token = match token {
+                        Some(token) => Some(token),
+                        None if inlines.is_empty() => self.side_token(&instr, locked)?,
+                        None => None,
+                    };
+                    self.place_field(&instr, token, inlines);
                 }
             }
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Place a field's result, or the token that stands in for it.
+    fn place_field(&mut self, instr: &str, token: Option<&'static str>, result: Vec<Inline>) {
+        match token {
+            Some(token) => {
+                self.place(Inline::plain(token));
+                self.report_shown(DiagnosticCode::FieldToken);
+            }
+            None => self.place_all(field_result(instr, result)),
+        }
     }
 
     fn instr_text(&mut self, instr: &Element) {
@@ -1525,6 +1644,9 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     /// Inside a field's instruction only text boxes, charts and diagrams are read or
     /// reported, since nothing else there reaches the output.
     fn walk_drawing(&mut self, elem: &Element) -> Result<(), ConvertError> {
+        if self.replaced() {
+            return Ok(());
+        }
         let mut contents = Contents::default();
         contents.collect(elem, self.ctx, self.branch_holder(), None)?;
         let Contents { boxes, graphics, shapes, shape_text } = contents;

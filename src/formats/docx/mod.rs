@@ -2,6 +2,7 @@
 
 mod content;
 mod numbering;
+mod sides;
 mod styles;
 
 use crate::ctx::ParseCtx;
@@ -47,8 +48,12 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         .find(ns::W, "document")
         .and_then(|d| d.find(ns::W, "body"))
         .ok_or_else(|| ConvertError::malformed_part(&main_part, "no document body"))?;
-    report_side_parts(parse_ctx, body, &doc_rels, &main_part);
+    let emit_sides = parse_ctx.headers_footers_requested();
+    if !emit_sides {
+        report_side_parts(parse_ctx, body, &doc_rels, &main_part);
+    }
 
+    let side_scopes = sides::SideScopes::new();
     let counters = RefCell::new(Counters::default());
     let assets = RefCell::new(AssetSink::new(parse_ctx));
     let references = References::default();
@@ -70,8 +75,15 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         references: &references,
         moves: RefCell::default(),
     };
-    let blocks = content::parse_blocks(body, &ctx)?;
-    ctx.settle_moves()?;
+    let blocks = if emit_sides {
+        let (blocks, breaks) = content::parse_body(body, &ctx)?;
+        ctx.settle_moves()?;
+        sides::interleave(&ctx, &side_scopes, body, blocks, &breaks)?
+    } else {
+        let blocks = content::parse_blocks(body, &ctx)?;
+        ctx.settle_moves()?;
+        blocks
+    };
 
     let notes = parse_notes(&ctx, footnotes_part, endnotes_part)?;
     parse_ctx.emit_count(DiagnosticCode::CommentOmitted, Region::Comment, references.comments());
@@ -142,8 +154,8 @@ fn parse_notes(
     Ok(notes)
 }
 
-/// Headers and footers the sections name, each part once (by its id where
-/// its relationship is unknown): none is read.
+/// Under `HeaderFooterPolicy::Omit`, the headers and footers the sections name, each part once
+/// (by its id where its relationship is unknown): none is read.
 fn report_side_parts(parse_ctx: &ParseCtx<'_>, body: &Element, rels: &Relationships, base: &str) {
     for (reference, code, region) in [
         ("headerReference", DiagnosticCode::HeaderOmitted, Region::Header),
@@ -4022,13 +4034,22 @@ mod tests {
                 "one\n\ntwo\n",
             ),
             (
-                "a section's last paragraph",
+                "a section's deleted last mark",
                 format!(
                     "{}{}",
                     p(
                         &format!("<w:pPr><w:rPr>{deleted_mark}</w:rPr><w:sectPr/></w:pPr>"),
-                        &shown("one")
+                        &shown("one ")
                     ),
+                    p("", &shown("two"))
+                ),
+                "one two\n",
+            ),
+            (
+                "a section's hidden last mark",
+                format!(
+                    "{}{}",
+                    p("<w:pPr><w:rPr><w:vanish/></w:rPr><w:sectPr/></w:pPr>", &shown("one")),
                     p("", &shown("two"))
                 ),
                 "one\n\ntwo\n",

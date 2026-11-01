@@ -168,7 +168,7 @@ class ImagePolicy:
 
 @final
 class HeaderFooterPolicy:
-    """Whether supported print headers and footers appear in the output."""
+    """Whether supported headers and footers appear in the output."""
 
     OMIT: ClassVar[HeaderFooterPolicy]
     EMIT: ClassVar[HeaderFooterPolicy]
@@ -308,7 +308,7 @@ class Config:
 
     @property
     def headers_footers(self) -> HeaderFooterPolicy:
-        """Whether supported print headers and footers appear."""
+        """Whether the page headers and footers a document declares appear."""
 
 @final
 class CancelToken:

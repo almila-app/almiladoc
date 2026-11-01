@@ -1,4 +1,6 @@
-use super::{Block, Document, ImageSource, Inline, LinkTarget, Node, children};
+use super::{
+    Block, CellSlot, Document, ImageSource, Inline, LinkTarget, Node, Region, Unit, children,
+};
 use std::collections::HashMap;
 
 /// A header or footer change with content isolated from body anchors and notes.
@@ -12,6 +14,9 @@ pub struct HeaderFooter {
     pub variant: HeaderFooterVariant,
     /// `None` uses the default variant; an empty block list clears the content.
     pub content: Option<Vec<Block>>,
+    /// The named page style whose pages show this value, where values are kept per page style.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub page_style: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +75,14 @@ impl HeaderFooterRegion {
             Self::Footer => "footer",
         }
     }
+
+    /// The diagnostic region content on this side reports in.
+    pub(crate) fn region(self) -> Region {
+        match self {
+            Self::Header => Region::Header,
+            Self::Footer => Region::Footer,
+        }
+    }
 }
 
 impl HeaderFooterVariant {
@@ -87,40 +100,51 @@ impl HeaderFooter {
         &self,
         mut charge: impl FnMut(u64) -> Result<(), E>,
     ) -> Result<(), E> {
-        let mut pending = Vec::new();
         charge(1)?;
-        if let Some(content) = &self.content {
-            pending.push(Node::Blocks(content));
+        if let Some(name) = &self.page_style {
+            charge(text_work(name))?;
         }
-        while let Some(node) = pending.pop() {
-            match node {
-                Node::Blocks(blocks) => {
-                    charge((blocks.len() as u64).saturating_mul(2))?;
-                    for block in blocks {
-                        charge_block_fields(block, &mut charge)?;
-                        pending.extend(children(block, &|_| None));
-                    }
+        match &self.content {
+            Some(content) => charge_blocks_copy(content, charge),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Charge a copy of `blocks`: each container and every owned string they hold.
+pub(crate) fn charge_blocks_copy<E>(
+    blocks: &[Block],
+    mut charge: impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut pending = vec![Node::Blocks(blocks)];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Blocks(blocks) => {
+                charge((blocks.len() as u64).saturating_mul(2))?;
+                for block in blocks {
+                    charge_block_fields(block, &mut charge)?;
+                    pending.extend(children(block, &|_| None));
                 }
-                Node::Inlines(inlines) => {
-                    charge((inlines.len() as u64).saturating_mul(2))?;
-                    pending.extend(inlines.iter().map(Node::Inline));
+            }
+            Node::Inlines(inlines) => {
+                charge((inlines.len() as u64).saturating_mul(2))?;
+                pending.extend(inlines.iter().map(Node::Inline));
+            }
+            Node::Inline(inline) => {
+                charge_inline_fields(inline, &mut charge)?;
+                if let Inline::Link { content, .. } = inline {
+                    pending.push(Node::Inlines(content));
                 }
-                Node::Inline(inline) => {
-                    charge_inline_fields(inline, &mut charge)?;
-                    if let Inline::Link { content, .. } = inline {
-                        pending.push(Node::Inlines(content));
-                    }
-                }
-                Node::Cells(mut cells) => {
-                    if let Some(cell) = cells.next() {
-                        pending.push(Node::Cells(cells));
-                        pending.push(Node::Blocks(&cell.blocks));
-                    }
+            }
+            Node::Cells(mut cells) => {
+                if let Some(cell) = cells.next() {
+                    pending.push(Node::Cells(cells));
+                    pending.push(Node::Blocks(&cell.blocks));
                 }
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 fn text_work(value: &str) -> u64 {
@@ -156,6 +180,9 @@ fn charge_block_fields<E>(
             }
         }
         Block::Gap(gap) => charge(gap.reasons.len() as u64)?,
+        Block::HeaderFooter(HeaderFooter { page_style: Some(name), .. }) => {
+            charge(text_work(name))?;
+        }
         Block::Paragraph(_)
         | Block::Heading { anchor: None, .. }
         | Block::BlockQuote(_)
@@ -193,30 +220,141 @@ fn charge_inline_fields<E>(
     Ok(())
 }
 
+impl HeaderFooter {
+    /// Place every image the content shows in `unit`, charging each container walked.
+    pub(crate) fn place_images<E>(
+        &mut self,
+        unit: Option<Unit>,
+        mut charge: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut pending: Vec<Place<'_>> =
+            self.content.as_deref_mut().map(Place::Blocks).into_iter().collect();
+        while let Some(place) = pending.pop() {
+            match place {
+                Place::Blocks(blocks) => {
+                    charge(blocks.len() as u64)?;
+                    for block in blocks {
+                        match block {
+                            Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } => {
+                                pending.push(Place::Inlines(inlines));
+                            }
+                            Block::List(list) => pending.extend(
+                                list.items.iter_mut().map(|item| Place::Blocks(&mut item.blocks)),
+                            ),
+                            Block::Table(table) => pending.extend(origins(&mut table.grid)),
+                            Block::BlockQuote(inner)
+                            | Block::HeaderFooter(Self { content: Some(inner), .. }) => {
+                                pending.push(Place::Blocks(inner));
+                            }
+                            Block::HeaderFooter(_)
+                            | Block::CodeBlock { .. }
+                            | Block::Rule
+                            | Block::Math(_)
+                            | Block::Gap(_)
+                            | Block::UnitStart(_) => {}
+                        }
+                    }
+                }
+                Place::Inlines(inlines) => {
+                    charge(inlines.len() as u64)?;
+                    for inline in inlines {
+                        match inline {
+                            Inline::Image { origin, .. } => origin.unit = unit,
+                            Inline::Link { content, .. } => pending.push(Place::Inlines(content)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What [`HeaderFooter::place_images`] has yet to walk.
+enum Place<'d> {
+    Blocks(&'d mut [Block]),
+    Inlines(&'d mut [Inline]),
+}
+
+/// The blocks of each origin cell of `grid`, to walk.
+fn origins(grid: &mut [Vec<CellSlot>]) -> impl Iterator<Item = Place<'_>> {
+    grid.iter_mut().flatten().filter_map(|slot| match slot {
+        CellSlot::Origin(cell) => Some(Place::Blocks(&mut cell.blocks)),
+        CellSlot::Covered { .. } => None,
+    })
+}
+
 impl Document {
+    /// Charge a copy of every side story the document holds, wherever it stands, each with what
+    /// it nests.
+    #[cfg_attr(
+        not(feature = "serde"),
+        expect(dead_code, reason = "only the JSON copies a whole document")
+    )]
+    pub(crate) fn charge_side_copies<E>(
+        &self,
+        mut charge: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut pending: Vec<Node<'_>> = vec![Node::Blocks(&self.blocks)];
+        pending.extend(self.notes.iter().map(|note| Node::Blocks(&note.blocks)));
+        while let Some(node) = pending.pop() {
+            match node {
+                Node::Blocks(blocks) => {
+                    charge(blocks.len() as u64)?;
+                    for block in blocks {
+                        match block {
+                            Block::HeaderFooter(value) => value.charge_copy(&mut charge)?,
+                            _ => pending.extend(children(block, &|_| None)),
+                        }
+                    }
+                }
+                Node::Cells(mut cells) => {
+                    if let Some(cell) = cells.next() {
+                        pending.push(Node::Cells(cells));
+                        pending.push(Node::Blocks(&cell.blocks));
+                    }
+                }
+                Node::Inlines(_) | Node::Inline(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn push_header_footer<E>(
         &mut self,
         state: HeaderFooterState,
         previous: &mut HashMap<(HeaderFooterRegion, HeaderFooterVariant), HeaderFooterState>,
-        mut charge: impl FnMut(u64) -> Result<(), E>,
+        charge: impl FnMut(u64) -> Result<(), E>,
     ) -> Result<bool, E> {
-        let key = (state.value.region, state.value.variant);
-        let unchanged = if let Some(old) = previous.get(&key) {
-            state.same_content(old, &mut charge)?
-        } else {
-            state.value.charge_copy(&mut charge)?;
-            state.certainty == HeaderFooterCertainty::Known
-                && (state.value.content.is_none()
-                    || (state.value.variant == HeaderFooterVariant::Default
-                        && state.value.content.as_ref().is_some_and(Vec::is_empty)))
-        };
-        if !unchanged {
-            state.value.charge_copy(charge)?;
-            previous.insert(key, state.clone());
-            self.blocks.push(Block::HeaderFooter(state.value));
-        }
-        Ok(!unchanged)
+        push_header_footer(&mut self.blocks, state, previous, charge)
     }
+}
+
+/// Push `state` onto `blocks` unless it repeats the value in force for its region and variant,
+/// or, first of its key, changes nothing a page shows; whether it was pushed.
+pub(crate) fn push_header_footer<E>(
+    blocks: &mut Vec<Block>,
+    state: HeaderFooterState,
+    previous: &mut HashMap<(HeaderFooterRegion, HeaderFooterVariant), HeaderFooterState>,
+    mut charge: impl FnMut(u64) -> Result<(), E>,
+) -> Result<bool, E> {
+    let key = (state.value.region, state.value.variant);
+    let unchanged = if let Some(old) = previous.get(&key) {
+        state.same_content(old, &mut charge)?
+    } else {
+        state.value.charge_copy(&mut charge)?;
+        state.certainty == HeaderFooterCertainty::Known
+            && (state.value.content.is_none()
+                || (state.value.variant == HeaderFooterVariant::Default
+                    && state.value.content.as_ref().is_some_and(Vec::is_empty)))
+    };
+    if !unchanged {
+        state.value.charge_copy(charge)?;
+        previous.insert(key, state.clone());
+        blocks.push(Block::HeaderFooter(state.value));
+    }
+    Ok(!unchanged)
 }
 
 #[cfg(test)]
@@ -228,6 +366,7 @@ mod tests {
 
     fn linked_side(target: LinkTarget) -> HeaderFooter {
         HeaderFooter {
+            page_style: None,
             region: HeaderFooterRegion::Header,
             variant: HeaderFooterVariant::Default,
             content: Some(vec![Block::BlockQuote(vec![Block::Paragraph(vec![Inline::Link {

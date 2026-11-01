@@ -31,7 +31,7 @@ impl OnLoss {
     }
 }
 
-/// Whether supported print headers and footers appear in the output.
+/// Whether supported headers and footers appear in the output.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct HeaderFooterPolicy(almiladoc::HeaderFooterPolicy);
@@ -270,7 +270,7 @@ impl Config {
         ImageOcr(self.0.image_ocr)
     }
 
-    /// Whether supported print headers and footers appear.
+    /// Whether the page headers and footers a document declares appear.
     #[getter]
     fn headers_footers(&self) -> HeaderFooterPolicy {
         HeaderFooterPolicy(self.0.headers_footers)

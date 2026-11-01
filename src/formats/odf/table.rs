@@ -20,6 +20,7 @@ use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
 use crate::formats::odf::axes::{Axes, Step, Visibility, declared_end, repeats, row_steps};
 use crate::formats::odf::datastyle::{FormatCost, Shown};
+use crate::formats::odf::sides::MasterSides;
 use crate::formats::odf::styles::named;
 use crate::formats::odf::text::{Ctx, holds_content, parse_children, report_unplaced};
 use crate::formats::sheet::format_float;
@@ -844,6 +845,7 @@ pub(super) fn parse_spreadsheet(
         .collect::<Result<Vec<(&Element, bool)>, ConvertError>>()?;
     let multi_sheet = tables.iter().filter(|(_, shown)| *shown).count() > 1;
     let mut blocks = Vec::new();
+    let mut sides = ctx.parse_ctx.headers_footers_requested().then(|| MasterSides::new(ctx));
     for (position, (table, shown)) in tables.into_iter().enumerate() {
         let unit = ctx.parse_ctx.begin_unit(crate::model::UnitKind::Sheet, position)?;
         if !shown {
@@ -855,17 +857,22 @@ pub(super) fn parse_spreadsheet(
             .map(|style| ctx.styles.style_master_page(ctx.parse_ctx, "table", style))
             .transpose()?
             .flatten();
-        if let Some(master) = ctx.styles.master_or_first(named) {
+        let master = ctx.styles.master_or_first(named);
+        if let Some(master) = master.filter(|_| sides.is_none()) {
             super::report_running(master, ctx.parse_ctx);
         }
         let name = table.attr(ns::TABLE, "name").unwrap_or("");
         let content = build_table(table, ctx, Visibility::Applied)?;
         blocks.push(Block::UnitStart(unit.unit().model()));
-        if content.is_empty() {
+        let start = blocks.len();
+        if let (Some(sides), Some(master)) = (sides.as_mut(), master) {
+            sides.publish_run(master, &mut blocks)?;
+        }
+        if content.is_empty() && blocks.len() == start {
             continue;
         }
         if multi_sheet {
-            blocks.push(Block::heading(2, vec![Inline::plain(name)]));
+            blocks.insert(start, Block::heading(2, vec![Inline::plain(name)]));
         }
         blocks.extend(content);
     }
