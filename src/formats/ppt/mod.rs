@@ -739,10 +739,11 @@ impl<'c> Extractor<'c> {
         self.omit_page = if is_notes {
             id.is_some_and(|id| self.omitted_slides.contains(&id))
         } else {
-            match container {
-                Some(container) => hidden::slide(self.parse_ctx, container)?,
-                None => false,
-            }
+            !self.parse_ctx.hidden_requested()
+                && match container {
+                    Some(container) => hidden::slide(self.parse_ctx, container)?,
+                    None => false,
+                }
         };
         if self.omit_page && !is_notes {
             self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
@@ -752,6 +753,7 @@ impl<'c> Extractor<'c> {
         }
         self.hidden_outline.clear();
         if !self.omit_page
+            && !self.parse_ctx.hidden_requested()
             && let Some(container) = container
         {
             self.hidden_outline = hidden::outline(self.parse_ctx, container)?;
@@ -1171,13 +1173,14 @@ impl<'c> Extractor<'c> {
     }
 
     fn skip_hidden(&mut self, record: Record<'_>) -> Result<bool, ConvertError> {
-        if hidden::container(self.parse_ctx, record)? {
+        if !self.parse_ctx.hidden_requested() && hidden::container(self.parse_ctx, record)? {
             self.close_shape()?;
             self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, self.region());
             return Ok(true);
         }
         if self.recovering
             && record.rec_type == rt::SLIDE
+            && !self.parse_ctx.hidden_requested()
             && hidden::slide(self.parse_ctx, record.body)?
         {
             self.end_segment(None)?;
@@ -1652,7 +1655,7 @@ mod tests {
     use crate::limits::Limits;
     use crate::model::UnitKind::{self, Slide};
     use crate::shared::officeart::record;
-    use crate::shared::test_support::diagnostic_rows;
+    use crate::shared::test_support::{diagnostic_rows, unit_ordinals};
     use page_side::{
         FOOTER, FOOTER_TEXT, HEADER, SLIDE_NUMBER, TODAY, USER_DATE, binary_tag, by_default,
         comment, drawn, flagged, footer_of, headers_footers, on_notes, on_slide, recovered, tagged,
@@ -2114,6 +2117,69 @@ mod tests {
         assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
     }
 
+    fn hidden_slide_with(content: &[Vec<u8>]) -> Vec<u8> {
+        let mut flags = [0; 16];
+        flags[10] = 4;
+        slide(0, &[&[record(0, 0x03F9, &flags)][..], content].concat())
+    }
+
+    #[test]
+    fn hidden_slides_drop_their_outline_notes_and_comments_with_original_ordinals() {
+        let list = container(
+            0,
+            0x0FF0,
+            &[page_atom(2, 256), typed(4, "secret outline"), page_atom(3, 257)],
+        );
+        let bytes = listed(
+            &[list, pages(2, &[(4, 0), (5, 0)])],
+            &[
+                hidden_slide_with(&[binary_tag("___PPT10", &[comment()])]),
+                slide(0, &[label("shown")]),
+                notes(256, &[label("secret note")]),
+                notes(257, &[label("shown note")]),
+            ],
+        );
+        let omit = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&omit, &bytes).unwrap();
+        assert_eq!(unit_ordinals(&document), [2]);
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&document),
+            "shown\n\n> shown note\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&omit.diagnostics()),
+            [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+        );
+        let emit = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let document = parse(&emit, &bytes).unwrap();
+        assert_eq!(unit_ordinals(&document), [1, 2]);
+        assert!(
+            crate::render::markdown::document_to_markdown(&document).contains("secret outline")
+        );
+    }
+
+    #[test]
+    fn hidden_shapes_drop_text_and_outline_references_unless_requested() {
+        let hidden = text_shape(0x0A00, &[(0x03BF, 0x0002_0002)], &[], &[typed(4, "hidden text")]);
+        let referenced = shape(0x0A00, &[(0x03BF, 0x0002_0002)], &[atom32(0x0F9E, &[0])]);
+        let list = container(0, 0x0FF0, &[page_atom(2, 256), typed(4, "hidden outline")]);
+        let bytes = listed(&[list], &[slide(0, &[drawing(&[hidden, referenced])])]);
+        let omit = ParseCtx::default();
+        let document = parse(&omit, &bytes).unwrap();
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "");
+        assert_eq!(
+            diagnostic_rows::<Reported>(&omit.diagnostics()),
+            [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 2)]
+        );
+        let emit = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let document = parse(&emit, &bytes).unwrap();
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&document),
+            "hidden outline\n\nhidden text\n"
+        );
+        assert_eq!(diagnostic_rows::<Reported>(&emit.diagnostics()), []);
+    }
+
     #[test]
     fn hidden_outline_probe_leaves_specialized_side_containers_to_their_readers() {
         let mut nested = atom32(0x2B00, &[0]);
@@ -2134,6 +2200,31 @@ mod tests {
             let document = parse(&ctx, &bytes).unwrap();
             assert_eq!(crate::render::markdown::document_to_markdown(&document), "");
             assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+        }
+    }
+
+    #[test]
+    fn hidden_groups_suppress_descendants_and_leave_clear_flags_visible() {
+        let content = text_shape(0x0A00, &[], &[], &[typed(4, "inside")]);
+        for (flags, hidden) in [(0x0002_0002, true), (0x0002_0000, false), (0x0000_0002, false)] {
+            let parent = shape(1, &[(0x03BF, flags)], &[]);
+            let group = container(0, 0xF003, &[parent, content.clone()]);
+            let bytes = listed(&[pages(0, &[(2, 256)])], &[slide(0, &[drawing(&[group])])]);
+            let omit = ParseCtx::default();
+            let document = parse(&omit, &bytes).unwrap();
+            assert_eq!(
+                crate::render::markdown::document_to_markdown(&document),
+                if hidden { "" } else { "inside\n" }
+            );
+            let expected = if hidden {
+                vec![(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+            } else {
+                vec![]
+            };
+            assert_eq!(diagnostic_rows::<Reported>(&omit.diagnostics()), expected);
+            let emit = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+            let document = parse(&emit, &bytes).unwrap();
+            assert_eq!(crate::render::markdown::document_to_markdown(&document), "inside\n");
         }
     }
 
@@ -2889,6 +2980,23 @@ mod tests {
             assert_matches!(
                 read(&mut Extractor::new(&parse_ctx), data),
                 Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == records - 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_recovered_deck_charges_its_document_scan_and_visibility_probe() {
+        let bytes = deck(&[pages(0, &[(2, 256)])], &[slide(0, &[])], OptionalStream::Absent, false);
+        for (policy, expected) in [(crate::HiddenPolicy::Omit, 13), (crate::HiddenPolicy::Emit, 12)]
+        {
+            let parse_ctx = ParseCtx::default().with_hidden(policy);
+            parse(&parse_ctx, &bytes).unwrap();
+            let fuel = parse_ctx.fuel();
+            assert_eq!(fuel, expected);
+            let limits = Limits { max_work: fuel - 1, ..Limits::default() };
+            assert_matches!(
+                parse(&ParseCtx::new(&limits).with_hidden(policy), &bytes),
+                Err(ConvertError::ResourceLimit { limit: Limit::Work, max }) if max == fuel - 1
             );
         }
     }
