@@ -83,6 +83,7 @@ path = [
     "src/formats/doc/tests/sides.rs",
     "src/formats/docx/sides.rs",
     "src/formats/docx/comments.rs",
+    "src/formats/pptx/comments.rs",
     "src/formats/odf/datastyle.rs",
     "src/formats/odf/sides.rs",
     "src/formats/ppt/fonts.rs",

@@ -4,6 +4,7 @@
 //! policy), rendered as a quote after each slide's content.
 
 mod cascade;
+mod comments;
 
 use crate::ctx::{AdmittedUnit, ImageLoss, ParseCtx};
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -26,7 +27,7 @@ use crate::shared::fields::classify_rel_target;
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
-use crate::shared::math::{math_lines, omath_para_to_tex};
+use crate::shared::math::{math_lines, omath_para_with_damage};
 use crate::shared::mc::{alternate_branch, holds_graphic};
 use crate::shared::numbering::{LevelCounters, every_deeper};
 use crate::shared::sides::{PageSides, SideTimeline};
@@ -170,10 +171,7 @@ impl ThemeFills {
 pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, ConvertError> {
     let pkg = open_ooxml(parse_ctx, bytes)?;
 
-    let pres_part = read_main_part(parse_ctx, &pkg, &[MAIN_PART])?
-        .ok_or_else(|| ConvertError::missing_part(MAIN_PART))?;
-    let pres = pkg.required_xml_part(&pres_part, Role::Content(Region::Body))?;
-    let pres_rels = read_rels(&pkg, &rels_part_for(&pres_part), Role::Content(Region::Body))?;
+    let (pres_part, pres, pres_rels) = read_presentation(parse_ctx, &pkg)?;
 
     let default_text =
         cascade::parse_level_styles(pres.first_descendant(ns::P, "defaultTextStyle"));
@@ -186,19 +184,17 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let mut failed = 0usize;
     let slide_units: HashMap<&str, Unit> =
         slides.iter().map(|(unit, path)| (path.as_str(), unit.model())).collect();
-    let mut all_rels: Vec<Relationships> = Vec::with_capacity(slides.len());
-    for (unit, path) in &slides {
-        let _unit = parse_ctx.enter_admitted(*unit);
-        all_rels.push(read_rels(&pkg, &rels_part_for(path), Role::Content(Region::Body))?);
-    }
+    let mut notes = Vec::new();
 
     let emit = parse_ctx.headers_footers_requested();
     let slide_sides = RefCell::new(PageSides::default());
     let mut kept = (HashMap::new(), (SideTimeline::default(), SideTimeline::default()));
-    for ((unit, slide_path), slide_rels) in slides.iter().zip(&all_rels) {
+    for (unit, slide_path) in &slides {
         let _unit = parse_ctx.enter_admitted(*unit);
-        let tree = pkg.related_xml_part(slide_path, Role::Reported(Region::Body))?;
+        let SlideTree::Visible(tree) = read_slide(parse_ctx, &pkg, slide_path)? else { continue };
         let slide = tree.as_ref().and_then(|t| t.find(ns::P, "sld"));
+        let slide_rels =
+            read_rels(&pkg, &rels_part_for(slide_path), Role::DeferredContent(Region::Body))?;
         let c_sld = slide.and_then(|s| s.find(ns::P, "cSld"));
         let Some(sp_tree) = c_sld.and_then(|c| c.find(ns::P, "spTree")) else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
@@ -206,15 +202,16 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
             continue;
         };
 
-        let layout_path = rel_target_of_type(slide_rels, slide_path, LAYOUT_REL);
+        let layout_path = rel_target_of_type(&slide_rels, slide_path, LAYOUT_REL);
         let (layout, master) =
             templates.of_slide(parse_ctx, &pkg, slide, layout_path.as_deref())?;
-        report_comments_and_controls(parse_ctx, slide_rels, c_sld);
+        report_comments_and_controls(parse_ctx, &slide_rels, c_sld);
 
+        let damage = crate::shared::xml::DamageScope::default();
         let ctx = SlideCtx {
             parse_ctx,
             pkg: &pkg,
-            rels: slide_rels,
+            rels: &slide_rels,
             base_part: slide_path,
             region: Region::Body,
             assets: &assets,
@@ -223,19 +220,54 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
             master,
             slide_units: &slide_units,
             sides: emit.then_some(&slide_sides),
+            damage: Some(&damage),
         };
         blocks.push(Block::UnitStart(unit.model()));
         let layout = layout_path.as_deref().zip(layout);
         let master = layout.and_then(|(_, l)| l.master_path.as_deref()).zip(master);
         let state = emit.then_some((&mut kept.0, &mut kept.1));
         write_slide(&ctx, (slide, sp_tree), (layout, master), state, &mut blocks)?;
+        comments::read(&ctx, unit.model(), &mut blocks, &mut notes)?;
     }
     if failed == slides.len() {
         return Err(ConvertError::malformed("no slide in the presentation could be read"));
     }
 
     let assets = std::mem::take(&mut assets.borrow_mut().assets);
-    Ok(Document { blocks, notes: Vec::new(), assets, ..Document::default() })
+    Ok(Document { blocks, notes, assets, ..Document::default() })
+}
+
+fn read_presentation(
+    parse_ctx: &ParseCtx<'_>,
+    pkg: &Package<'_>,
+) -> Result<(String, Element, Relationships), ConvertError> {
+    let pres_part = read_main_part(parse_ctx, pkg, &[MAIN_PART])?
+        .ok_or_else(|| ConvertError::missing_part(MAIN_PART))?;
+    let pres = pkg.required_xml_part(&pres_part, Role::DeferredContent(Region::Body))?;
+    let pres_rels =
+        read_rels(pkg, &rels_part_for(&pres_part), Role::DeferredContent(Region::Body))?;
+
+    Ok((pres_part, pres, pres_rels))
+}
+
+enum SlideTree {
+    Omitted,
+    Visible(Option<Element>),
+}
+
+fn read_slide(
+    parse_ctx: &ParseCtx<'_>,
+    pkg: &Package<'_>,
+    part: &str,
+) -> Result<SlideTree, ConvertError> {
+    let (tree, held) = parse_ctx.holding_reports(|| pkg.related_xml_part(part, Role::Probe))?;
+    let slide = tree.as_ref().and_then(|t| t.find(ns::P, "sld"));
+    if slide.is_some_and(|s| matches!(s.attr(ns::P, "show"), Some("0" | "false"))) {
+        parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
+        return Ok(SlideTree::Omitted);
+    }
+    parse_ctx.report_held(&held)?;
+    Ok(SlideTree::Visible(tree))
 }
 
 fn listed_slides(
@@ -317,7 +349,9 @@ fn report_comments_and_controls(
     slide_rels: &Relationships,
     c_sld: Option<&Element>,
 ) {
-    if slide_rels.iter().any(|(_, r)| COMMENT_RELS.contains(&r.rel_type.as_str())) {
+    if !parse_ctx.comments_requested()
+        && slide_rels.iter().any(|(_, r)| COMMENT_RELS.contains(&r.rel_type.as_str()))
+    {
         parse_ctx.emit(DiagnosticCode::CommentOmitted, Region::Comment);
     }
     if let Some(controls) = c_sld.and_then(|c| c.find(ns::P, "controls")) {
@@ -356,9 +390,10 @@ fn load_layout(
     pkg: &Package<'_>,
     layout_path: &str,
 ) -> Result<LayoutInfo, ConvertError> {
-    let tree = rooted_part(parse_ctx, pkg, layout_path, Role::Content(Region::Body), "sldLayout")?;
+    let tree =
+        rooted_part(parse_ctx, pkg, layout_path, Role::DeferredContent(Region::Body), "sldLayout")?;
     let backdrop = Backdrop::of(tree.as_ref().and_then(|t| t.find(ns::P, "sldLayout")));
-    let rels = read_rels(pkg, &rels_part_for(layout_path), Role::Content(Region::Body))?;
+    let rels = read_rels(pkg, &rels_part_for(layout_path), Role::DeferredContent(Region::Body))?;
     let master_path = rel_target_of_type(&rels, layout_path, MASTER_REL);
     Ok(LayoutInfo {
         placeholders: placeholders(tree.as_ref()),
@@ -379,7 +414,8 @@ fn load_master(
     pkg: &Package<'_>,
     master_path: &str,
 ) -> Result<MasterInfo, ConvertError> {
-    let tree = rooted_part(parse_ctx, pkg, master_path, Role::Content(Region::Body), "sldMaster")?;
+    let tree =
+        rooted_part(parse_ctx, pkg, master_path, Role::DeferredContent(Region::Body), "sldMaster")?;
     let rels = read_rels(pkg, &rels_part_for(master_path), Role::Probe)?;
     let theme_path = rel_target_of_type(&rels, master_path, THEME_REL);
     let theme = match &theme_path {
@@ -536,6 +572,7 @@ struct SlideCtx<'a, 'b> {
     slide_units: &'b HashMap<&'b str, Unit>,
     /// Where the page's header and footer placeholders go under `HeaderFooterPolicy::Emit`.
     sides: Option<&'b RefCell<PageSides>>,
+    damage: Option<&'b crate::shared::xml::DamageScope>,
 }
 
 impl SlideCtx<'_, '_> {
@@ -548,7 +585,18 @@ impl SlideCtx<'_, '_> {
         {
             return LinkTarget::Unit(*unit);
         }
-        classify_rel_target(rel.mode == TargetMode::External, &rel.target)
+        let target = classify_rel_target(rel.mode == TargetMode::External, &rel.target);
+        if let Some(damage) = self.damage {
+            damage.report(
+                self.parse_ctx,
+                self.region,
+                rel.unresolved_target
+                    && matches!(&target,
+                    LinkTarget::External(url) | LinkTarget::Relative(url)
+                    if crate::shared::uri::is_safe_link(url)),
+            );
+        }
+        target
     }
 
     /// Fold the cascade for a paragraph, outermost first.
@@ -600,14 +648,19 @@ impl SlideCtx<'_, '_> {
                 self.parse_ctx,
                 self.pkg,
                 &notes_path,
-                Role::Content(Region::Note),
+                Role::DeferredContent(Region::Note),
                 "notes",
             )?
         {
-            let rels =
-                read_rels(self.pkg, &rels_part_for(&notes_path), Role::Content(Region::Note))?;
+            let rels = read_rels(
+                self.pkg,
+                &rels_part_for(&notes_path),
+                Role::DeferredContent(Region::Note),
+            )?;
             let sides = RefCell::new(PageSides::default());
+            let damage = crate::shared::xml::DamageScope::default();
             let notes_ctx = SlideCtx {
+                damage: Some(&damage),
                 rels: &rels,
                 base_part: &notes_path,
                 region: Region::Note,
@@ -653,9 +706,12 @@ impl SlideCtx<'_, '_> {
 /// Whether a slide shows `elem`: its slide-number, date and footer
 /// placeholders it does not.
 fn renders(elem: &Element) -> bool {
-    !hidden_shape(elem)
-        && (!(elem.is(ns::P, "sp") || elem.is(ns::P, "cxnSp"))
-            || !Ph::of(elem).is_some_and(|ph| FOOTERS.contains(&ph.kind)))
+    !hidden_shape(elem) && renders_hidden(elem)
+}
+
+fn renders_hidden(elem: &Element) -> bool {
+    !(elem.is(ns::P, "sp") || elem.is(ns::P, "cxnSp"))
+        || !Ph::of(elem).is_some_and(|ph| FOOTERS.contains(&ph.kind))
 }
 
 /// Whether this reader reads `elem` where a slide shows it: never VML.
@@ -675,8 +731,8 @@ fn selected_children<'e>(
     open.reverse();
     while let Some(elem) = open.pop() {
         if elem.is(ns::MC, "AlternateContent") {
-            let branch =
-                alternate_branch(parse_ctx, region, elem, None, SUPPORTED_NS, (renders, reads));
+            let shown = (renders as fn(&Element) -> bool, reads as fn(&Element) -> bool);
+            let branch = alternate_branch(parse_ctx, region, elem, None, SUPPORTED_NS, shown);
             if let Some(branch) = branch {
                 let at = open.len();
                 open.extend(branch.child_elems());
@@ -795,12 +851,11 @@ fn decorate(
         }
         Some((Background::Fill, _)) | None => {}
     }
-    let shows_layout = own.shows_master;
-    let shows_master = shows_layout && layout.is_some_and(|(_, l)| l.backdrop.shows_master);
+    let shows_master = own.shows_master && layout.is_some_and(|(_, l)| l.backdrop.shows_master);
     if let Some((path, master)) = master.filter(|(_, m)| shows_master && m.backdrop.shapes) {
         pieces.push((path, &master.part, Piece::Shapes));
     }
-    if let Some((path, layout)) = layout.filter(|(_, l)| shows_layout && l.backdrop.shapes) {
+    if let Some((path, layout)) = layout.filter(|(_, l)| own.shows_master && l.backdrop.shapes) {
         pieces.push((path, &layout.part, Piece::Shapes));
     }
     for (path, part, piece) in pieces {
@@ -808,7 +863,9 @@ fn decorate(
         let key = (path.to_owned(), piece);
         if !art.contains_key(&key) {
             let in_layout = layout.is_some_and(|(at, _)| at == path) && piece == Piece::Shapes;
+            let damage = crate::shared::xml::DamageScope::default();
             let part_ctx = SlideCtx {
+                damage: Some(&damage),
                 rels: &part.rels,
                 base_part: path,
                 region: Region::Header,
@@ -907,7 +964,7 @@ fn parse_picture(
         ctx.emit(DiagnosticCode::GraphicUnread);
     }
     let source = blip_source(pic, ctx)?;
-    push_image(blocks, ctx, description(pic), source);
+    push_image(blocks, ctx, description(pic, ctx), source);
     Ok(())
 }
 
@@ -916,14 +973,30 @@ fn blip_source(pic: &Element, ctx: &SlideCtx<'_, '_>) -> Result<ImageSource, Con
     let rid = pic
         .first_descendant(ns::A, "blip")
         .and_then(|b| b.attr_qualified(ns::R, "embed").or_else(|| b.attr_qualified(ns::R, "link")));
-    Ok(match rid {
+    let source = match rid {
         Some(rid) => rel_image_source(ctx.pkg, ctx.rels, ctx.base_part, ctx.assets, rid)?,
         None => None,
     }
-    .unwrap_or(ImageSource::Unread))
+    .unwrap_or(ImageSource::Unread);
+    if let Some(damage) = ctx.damage {
+        damage.report(ctx.parse_ctx, ctx.region, ctx.parse_ctx.image_links_requested()
+            && matches!(&source, ImageSource::External(url) if crate::shared::uri::is_safe_link(url))
+            && rid.and_then(|id| ctx.rels.get(id)).is_some_and(|rel| rel.unresolved_target));
+    }
+    Ok(source)
 }
 
-fn description(elem: &Element) -> String {
+fn description(elem: &Element, ctx: &SlideCtx<'_, '_>) -> String {
+    if let Some(damage) = ctx.damage {
+        damage.report(
+            ctx.parse_ctx,
+            ctx.region,
+            ctx.parse_ctx.image_alt_requested()
+                && elem
+                    .first_descendant(ns::P, "cNvPr")
+                    .is_some_and(|p| crate::shared::xml::attribute_unresolved(p, ns::P, "descr")),
+        );
+    }
     elem.first_descendant(ns::P, "cNvPr")
         .and_then(|p| p.attr(ns::P, "descr"))
         .map(clean_text)
@@ -951,7 +1024,10 @@ fn embedded_object(
         ctx.assets,
         ole.attr_qualified(ns::R, "id"),
     )?;
-    let descr = frame.find(ns::P, "nvGraphicFramePr").map(description).unwrap_or_default();
+    let descr = frame
+        .find(ns::P, "nvGraphicFramePr")
+        .map(|properties| description(properties, ctx))
+        .unwrap_or_default();
     let pic =
         selected_children(ctx.parse_ctx, ctx.region, ole).into_iter().find(|c| c.is(ns::P, "pic"));
     match pic {
@@ -1014,7 +1090,7 @@ fn shape_content(
 ) {
     if sp
         .outermost(ns::P, "sp")
-        .any(|inner| !hidden_shape(inner) && !inner.text().trim().is_empty())
+        .any(|inner| (!hidden_shape(inner)) && !inner.text().trim().is_empty())
     {
         ctx.emit(DiagnosticCode::GraphicUnread);
     }
@@ -1109,13 +1185,7 @@ fn parse_para_inlines(p: &Element, ctx: &SlideCtx<'_, '_>, props: TextProps) -> 
     let mut out: Vec<Inline> = Vec::new();
     for child in p.child_elems() {
         if child.is(ns::A14, "m") {
-            let para = child.find(ns::M, "oMathPara").unwrap_or(child);
-            for (i, tex) in omath_para_to_tex(para).into_iter().enumerate() {
-                if i > 0 {
-                    out.push(Inline::LineBreak);
-                }
-                out.push(Inline::Math(tex));
-            }
+            out.extend(parse_math_inlines(child, ctx));
             continue;
         }
         if child.ns.as_deref().is_none_or(|n| n != ns::A) {
@@ -1133,11 +1203,19 @@ fn parse_para_inlines(p: &Element, ctx: &SlideCtx<'_, '_>, props: TextProps) -> 
                 let style = rpr.map_or(base, |rpr| cascade::rpr_delta(rpr).apply(base));
                 let faces =
                     rpr.map_or(props.faces, |rpr| props.faces.merge(cascade::rpr_faces(rpr)));
-                let text = child.find(ns::A, "t").map(Element::text).unwrap_or_default();
+                let text_element = child.find(ns::A, "t");
+                let text = text_element.map(Element::text).unwrap_or_default();
                 let (content, unmapped) = run_inlines(&text, faces.route(), style);
                 ctx.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, ctx.region, unmapped);
                 if content.is_empty() {
                     continue;
+                }
+                if let Some(damage) = ctx.damage {
+                    damage.report(
+                        ctx.parse_ctx,
+                        ctx.region,
+                        text_element.is_some_and(|text| text.unresolved_text),
+                    );
                 }
                 let click = rpr.and_then(|r| r.find(ns::A, "hlinkClick"));
                 let rid =
@@ -1161,6 +1239,22 @@ fn parse_para_inlines(p: &Element, ctx: &SlideCtx<'_, '_>, props: TextProps) -> 
             "br" => out.push(Inline::LineBreak),
             _ => {}
         }
+    }
+    out
+}
+
+fn parse_math_inlines(child: &Element, ctx: &SlideCtx<'_, '_>) -> Vec<Inline> {
+    let mut out = Vec::new();
+    let para = child.find(ns::M, "oMathPara").unwrap_or(child);
+    let (lines, damaged) = omath_para_with_damage(para);
+    if let Some(damage) = ctx.damage {
+        damage.report(ctx.parse_ctx, ctx.region, damaged);
+    }
+    for (i, tex) in lines.into_iter().enumerate() {
+        if i > 0 {
+            out.push(Inline::LineBreak);
+        }
+        out.push(Inline::Math(tex));
     }
     out
 }
@@ -1467,6 +1561,275 @@ mod tests {
         format!(
             "<p:{root} {NS} {attrs}><p:cSld>{bg}<p:spTree>{tree}</p:spTree></p:cSld></p:{root}>"
         )
+    }
+
+    #[test]
+    fn requested_legacy_and_modern_comments_keep_their_bodies_and_replies() {
+        let modern = "http://schemas.microsoft.com/office/powerpoint/2018/8/main";
+        let legacy = format!(
+            r#"<p:cmLst {NS}><p:cm authorId="1" idx="4"><p:text>legacy body</p:text></p:cm></p:cmLst>"#
+        );
+        let threaded = format!(
+            r#"<m:cmLst xmlns:m="{modern}" {NS}><m:cm id="root"><m:replyLst><m:reply id="reply"><m:txBody><a:p><a:r><a:t>reply body</a:t></a:r></a:p></m:txBody></m:reply></m:replyLst><m:txBody><a:p><a:r><a:rPr b="1"/><a:t>modern body</a:t></a:r></a:p></m:txBody></m:cm></m:cmLst>"#
+        );
+        let parts = one(
+            "",
+            &[
+                ("c1", "comments", "../comments/legacy.xml"),
+                ("c2", COMMENT_RELS[1], "../comments/modern.xml"),
+            ],
+            &[("ppt/comments/legacy.xml", legacy), ("ppt/comments/modern.xml", threaded)],
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes.len(), 2);
+        assert_eq!(document.notes[0].kind, crate::model::NoteKind::Comment);
+        assert_eq!(
+            document.notes[0].blocks,
+            vec![Block::Paragraph(vec![Inline::plain("legacy body")])]
+        );
+        assert_matches!(&document.notes[1].blocks[..], [Block::Paragraph(_), Block::BlockQuote(reply)] if reply == &vec![Block::Paragraph(vec![Inline::plain("reply body")])]);
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+        assert_matches!(&document.blocks[1], Block::Paragraph(refs) if refs.len() == 2 && refs.iter().all(|i| matches!(i, Inline::CommentRef(_))));
+    }
+
+    #[test]
+    fn duplicate_comment_bodies_and_unrendered_metadata_report_no_damage() {
+        let modern = "http://schemas.microsoft.com/office/powerpoint/2018/8/main";
+        let comments = format!(
+            r#"<m:cmLst xmlns:m="{modern}" {NS}><m:cm id="same" created="&unresolved;"><m:txBody><a:p><a:r><a:t>first</a:t></a:r></a:p></m:txBody></m:cm><m:cm id="same"><m:txBody><a:p><a:r><a:t>&unresolved;</a:t></a:r></a:p></m:txBody></m:cm></m:cmLst>"#
+        );
+        let parts = one(
+            "",
+            &[("c", COMMENT_RELS[1], "../comments/thread.xml")],
+            &[("ppt/comments/thread.xml", comments)],
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes.len(), 1);
+        assert_eq!(document.notes[0].blocks, [Block::Paragraph(vec![Inline::plain("first")])]);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [(DiagnosticCode::DuplicateNote, Region::Comment, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn hidden_slides_skip_their_relationships_and_keep_original_units() {
+        let hidden = part("sld", r#"show="false""#, &shape("", &text("&unresolved;")), "");
+        let shown = part("sld", "", &shape("", &text("shown")), "");
+        let parts =
+            deck(&[hidden, shown], &[("ppt/slides/_rels/slide1.xml.rels", UNPARSEABLE.into())]);
+        let ctx = ParseCtx::default();
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(unit_ordinals(&document), [2]);
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "shown\n");
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn hidden_shape_entity_damage_follows_the_selected_view() {
+        let hidden = format!(
+            "<p:sp><p:nvSpPr><p:cNvPr hidden=\"true\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>{}</p:sp>",
+            text("&unknown;")
+        );
+        let parts =
+            deck(&[part("sld", "", &format!("{}{hidden}", shape("", &text("shown"))), "")], &[]);
+        let ctx = ParseCtx::default();
+        parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn selected_presentation_values_own_entity_damage_in_each_story() {
+        let slides =
+            std::array::from_fn::<_, 2, _>(|_| part("sld", "", &shape("", &text("&unknown;")), ""));
+        let parts = deck(&slides, &[]);
+        let ctx = ParseCtx::default();
+        parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [
+                (DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1),
+                (DiagnosticCode::UnresolvedEntity, Region::Body, Some(2), 1),
+            ]
+        );
+        let parts = notes(&shape("", &text("&unknown;")));
+        let ctx = ParseCtx::default();
+        parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [(DiagnosticCode::UnresolvedEntity, Region::Note, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn presentation_image_damage_follows_the_selected_alt_and_external_link() {
+        let pic = |alt: &str| picture("", "image").replace("name=\"pic\"", alt);
+        let rels = |target: &str| {
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}" TargetMode="External"/></Relationships>"#
+            )
+        };
+        for (alt, target, images, damaged) in [
+            (
+                r#"descr="&unknown;""#,
+                "https://example.org/image.png",
+                crate::ImagePolicy::Omit,
+                false,
+            ),
+            (
+                r#"descr="&unknown;""#,
+                "https://example.org/image.png",
+                crate::ImagePolicy::Placeholder,
+                true,
+            ),
+            (
+                r#"name="&unknown;""#,
+                "https://example.org/image.png",
+                crate::ImagePolicy::Placeholder,
+                false,
+            ),
+            (
+                r#"descr="safe""#,
+                "https://example.org/&unknown;.png",
+                crate::ImagePolicy::Omit,
+                false,
+            ),
+            (
+                r#"descr="safe""#,
+                "https://example.org/&unknown;.png",
+                crate::ImagePolicy::Placeholder,
+                true,
+            ),
+        ] {
+            let parts = deck(
+                &[part("sld", "", &pic(alt), "")],
+                &[("ppt/slides/_rels/slide1.xml.rels", rels(target))],
+            );
+            let ctx = ParseCtx::default().with_images(images);
+            parse(&ctx, &zip_package(&parts)).unwrap();
+            let expected: Vec<Reported> = if damaged {
+                vec![(DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1)]
+            } else {
+                vec![]
+            };
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), expected);
+        }
+    }
+
+    #[test]
+    fn undisplayed_presentation_metadata_is_quiet_and_link_targets_remain_reported() {
+        let linked = r#"<p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="link"/></a:rPr><a:t>label</a:t></a:r></a:p></p:txBody>"#;
+        for (body, expected) in [
+            (shape("", &text("safe")), vec![]),
+            (shape("", linked), vec![(DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1)]),
+        ] {
+            let mut parts = deck(&[part("sld", r#"show="&unknown;""#, &body, "")], &[
+                ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.org/&unknown;" TargetMode="External"/></Relationships>"#.into()),
+            ]);
+            let (_, presentation) =
+                parts.iter_mut().find(|(name, _)| name == "ppt/presentation.xml").unwrap();
+            *presentation =
+                presentation.replace("<p:sldIdLst>", r#"<p:extLst name="&unknown;"/><p:sldIdLst>"#);
+            let ctx = ParseCtx::default();
+            parse(&ctx, &zip_package(&parts)).unwrap();
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), expected);
+        }
+    }
+
+    #[test]
+    fn presentation_anchor_relationship_ids_do_not_report_entity_damage() {
+        let linked = r#"<p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="link"/></a:rPr><a:t>label</a:t></a:r></a:p></p:txBody>"#;
+        let rels = r##"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="#&unknown;" TargetMode="External"/></Relationships>"##;
+        let parts = deck(
+            &[part("sld", "", &shape("", linked), "")],
+            &[("ppt/slides/_rels/slide1.xml.rels", rels.into())],
+        );
+        let ctx = ParseCtx::default();
+        parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+    }
+
+    #[test]
+    fn legacy_replies_follow_both_parent_identifiers() {
+        let threading = "http://schemas.microsoft.com/office/powerpoint/2012/main";
+        let comments = format!(
+            r#"<p:cmLst {NS} xmlns:t="{threading}"><p:cm authorId="9" idx="4"><p:text>decoy</p:text></p:cm><p:cm authorId="2" idx="4"><p:text>parent</p:text></p:cm><p:cm authorId="3" idx="8"><p:text>reply</p:text><p:extLst><p:ext><t:threadingInfo><t:parentCm authorId="2" idx="4"/></t:threadingInfo></p:ext></p:extLst></p:cm></p:cmLst>"#
+        );
+        let parts = one(
+            "",
+            &[("c", "comments", "../comments/legacy.xml")],
+            &[("ppt/comments/legacy.xml", comments)],
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes.len(), 2);
+        assert_eq!(
+            document.notes[1].blocks,
+            [
+                Block::Paragraph(vec![Inline::plain("parent")]),
+                Block::BlockQuote(vec![Block::Paragraph(vec![Inline::plain("reply")])])
+            ]
+        );
+    }
+
+    #[test]
+    fn omitted_comments_do_not_read_side_parts_and_requested_damage_is_in_comment_region() {
+        let parts = one(
+            "",
+            &[("c", "comments", "../comments/legacy.xml")],
+            &[("ppt/comments/legacy.xml", UNPARSEABLE.into())],
+        );
+        let omit = ParseCtx::default();
+        let document = parse(&omit, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes, []);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&omit.diagnostics()),
+            [(DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1)]
+        );
+        let emit = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&emit, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes, []);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&emit.diagnostics()),
+            [(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]
+        );
+    }
+
+    #[test]
+    fn comment_reuse_keeps_slide_ids_and_reports_links_in_each_comment_region() {
+        let modern = "http://schemas.microsoft.com/office/powerpoint/2018/8/main";
+        let comment = format!(
+            r#"<m:cmLst xmlns:m="{modern}" {NS}><m:cm id="same"><m:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="missing"/></a:rPr><a:t>label</a:t></a:r></a:p></m:txBody></m:cm></m:cmLst>"#
+        );
+        let slide = part("sld", "", "", "");
+        let rels = relationships(&[("c", COMMENT_RELS[1], "../comments/shared.xml")]);
+        let parts = deck(
+            &[slide.clone(), slide],
+            &[
+                ("ppt/slides/_rels/slide1.xml.rels", rels.clone()),
+                ("ppt/slides/_rels/slide2.xml.rels", rels),
+                ("ppt/comments/shared.xml", comment),
+            ],
+        );
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(document.notes.len(), 2);
+        assert_ne!(document.notes[0].id, document.notes[1].id);
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [
+                (DiagnosticCode::LinkTargetUnread, Region::Comment, Some(1), 1),
+                (DiagnosticCode::LinkTargetUnread, Region::Comment, Some(2), 1),
+            ]
+        );
     }
 
     #[test]
