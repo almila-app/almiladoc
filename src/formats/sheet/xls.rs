@@ -78,7 +78,14 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let mut records = RecordCount::new(parse_ctx);
     let globals = read_globals(&data, &mut records)?;
 
-    let shown = globals.sheets.iter().filter(|s| matches!(s, Listed::Shown(_))).count();
+    let shown = globals
+        .sheets
+        .iter()
+        .filter(|s| {
+            matches!(s, Listed::Shown(_))
+                || (parse_ctx.hidden_requested() && matches!(s, Listed::Hidden(Some(_))))
+        })
+        .count();
     let mut doc = Document::default();
     let mut failed = 0usize;
     let mut previous = HashMap::new();
@@ -119,11 +126,12 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
 fn selected_sheet<'a>(ctx: &ParseCtx<'_>, listed: &'a Listed) -> Option<&'a BoundSheet> {
     match listed {
         Listed::Shown(sheet) => Some(sheet),
-        Listed::Hidden => {
+        Listed::Hidden(Some(sheet)) if ctx.hidden_requested() => Some(sheet),
+        Listed::Hidden(_) if !ctx.hidden_requested() => {
             ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             None
         }
-        Listed::Unreadable => {
+        Listed::Hidden(_) | Listed::Unreadable => {
             ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
             None
         }
@@ -541,7 +549,7 @@ fn workbook_codepage(cp: u16) -> Codepage {
 /// A sheet the workbook's directory lists, in source order.
 enum Listed {
     Shown(BoundSheet),
-    Hidden,
+    Hidden(Option<BoundSheet>),
     /// A record too short for its offset, state or name, or whose name does
     /// not read.
     Unreadable,
@@ -722,11 +730,11 @@ fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<Listed> {
         let (name, name_loss) =
             globals.read_string(&mut SegReader::new(&segs), LengthPrefix::U8)?;
         let sheet = BoundSheet { name: clean_text(&name), name_loss, offset };
-        Some(if hidden { Listed::Hidden } else { Listed::Shown(sheet) })
+        Some(if hidden { Listed::Hidden(Some(sheet)) } else { Listed::Shown(sheet) })
     };
     Some(read().unwrap_or_else(|| {
         if body.get(4).is_some_and(|state| state & 3 != 0) {
-            Listed::Hidden
+            Listed::Hidden(None)
         } else {
             Listed::Unreadable
         }
@@ -1113,7 +1121,7 @@ impl<'g, 'p> SheetReader<'g, 'p> {
     fn object(&mut self, body: &[u8]) -> Result<(), ConvertError> {
         self.text_of = None;
         let shape = self.shape.take();
-        let hidden = shape.as_ref().is_some_and(|s| s.hidden);
+        let hidden = shape.as_ref().is_some_and(|s| s.hidden) && !self.parse_ctx.hidden_requested();
         let anchor = shape.map(|s| s.anchor).filter(|at| at.col < BIFF8_COLS);
         let parse_ctx = self.parse_ctx;
         match (obj_kind(body), anchor) {
@@ -3025,6 +3033,22 @@ mod tests {
     }
 
     #[test]
+    fn omitted_comments_follow_column_visibility_and_hidden_policy() {
+        for hidden in [crate::HiddenPolicy::Omit, crate::HiddenPolicy::Emit] {
+            let records = [rec(NOTE, &le16(&[0, 1, 0, 7])), hidden_cols(1, 1)].concat();
+            let ctx = ParseCtx::default().with_hidden(hidden);
+            let doc = parse(&ctx, &one_sheet(records).build()).unwrap();
+            assert_eq!(doc.notes, []);
+            let expected = if hidden == crate::HiddenPolicy::Omit {
+                vec![in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]
+            } else {
+                vec![(DiagnosticCode::CommentOmitted, Region::Comment, Some(1), 1)]
+            };
+            assert_eq!(reported(ctx), expected);
+        }
+    }
+
+    #[test]
     fn omitted_comments_keep_unplaceable_note_declarations() {
         for body in [vec![], le16(&[0, 256, 0, 7])] {
             let ctx = ParseCtx::default();
@@ -3107,6 +3131,61 @@ mod tests {
             parse(&ctx, &bytes).unwrap();
             assert_eq!(reported(ctx), [in_unit(DiagnosticCode::CommentOmitted, 1, 1)]);
         }
+    }
+
+    #[test]
+    fn hidden_emit_restores_biff_sheets_and_axes() {
+        let records = [
+            label(0, 0, 0, "shown"),
+            label(0, 1, 0, "column"),
+            label(1, 0, 0, "row"),
+            hidden_cols(1, 1),
+            hidden_row(1),
+        ]
+        .concat();
+        for state in [0, 1, 2] {
+            let wb =
+                Wb { xfs: vec![0], sheets: vec![("S", state, records.clone())], ..Wb::default() };
+            let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+            let doc = parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(texts(first_table(&doc)), [vec!["shown", "column"], vec!["row", ""]]);
+            assert_eq!(reported(ctx), []);
+        }
+    }
+
+    #[test]
+    fn hidden_emit_restores_biff_controls_and_reports_selected_drawing_losses() {
+        let records = [
+            msodrawing(0, 0, true),
+            obj(0x0B, 1),
+            client_textbox(),
+            txo("caption"),
+            msodrawing(0, 1, true),
+            obj(0x08, 0),
+            msodrawing(0, 2, true),
+            obj(0x05, 0),
+            msodrawing(0, 3, true),
+            obj(0x06, 0),
+            client_textbox(),
+            txo("shape text"),
+            msodrawing(0, 4, true),
+            obj(0x06, 0),
+            client_textbox(),
+            txo(""),
+        ]
+        .concat();
+        let wb = one_sheet(records);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 4)]);
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), [vec!["[x] caption"]]);
+        assert_eq!(
+            reported(ctx),
+            [
+                in_unit(DiagnosticCode::ImageUnplaced, 1, 1),
+                in_unit(DiagnosticCode::GraphicUnread, 1, 2)
+            ]
+        );
     }
 
     fn diagnose(wb: &Wb) -> Vec<Reported> {

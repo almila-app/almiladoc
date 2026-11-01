@@ -2548,6 +2548,60 @@ mod tests {
     }
 
     #[test]
+    fn binary_comment_damage_follows_anchor_visibility_and_truncation_reports() {
+        let rels = format!(
+            r#"<Relationships xmlns="{PKG_RELS}"><Relationship Id="comment" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments.bin"/></Relationships>"#
+        );
+        let mut damaged = comment_part("x");
+        let text = [
+            rec(637, &[vec![1], wunits(&[0xD800]), 0u32.to_le_bytes().to_vec()].concat()),
+            rec(636, &[]),
+            rec(634, &[]),
+            rec(629, &[]),
+        ]
+        .concat();
+        let tail = [
+            rec(637, &[vec![1], wstr("x"), 0u32.to_le_bytes().to_vec()].concat()),
+            rec(636, &[]),
+            rec(634, &[]),
+            rec(629, &[]),
+        ]
+        .concat();
+        damaged.truncate(damaged.len() - tail.len());
+        damaged.extend(text);
+        let wb = Wb {
+            extra: vec![
+                ("xl/worksheets/_rels/sheet1.bin.rels", rels.clone().into_bytes()),
+                ("xl/comments.bin", damaged),
+            ],
+            ..one_sheet(row_hdr(1, true))
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes, []);
+        assert_eq!(reported(ctx), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+        let ctx = ParseCtx::default()
+            .with_comments(crate::CommentPolicy::Emit)
+            .with_hidden(crate::HiddenPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes[0].blocks[0].plain_text(), "\u{FFFD}");
+        assert_eq!(reported(ctx), [(DiagnosticCode::InvalidEncoding, Region::Comment, Some(1), 1)]);
+        let mut truncated = comment_part("cut");
+        truncated.pop();
+        let wb = Wb {
+            extra: vec![
+                ("xl/worksheets/_rels/sheet1.bin.rels", rels.into_bytes()),
+                ("xl/comments.bin", truncated),
+            ],
+            ..one_sheet(Vec::new())
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes, []);
+        assert_eq!(reported(ctx), [(DiagnosticCode::PartUnreadable, Region::Comment, Some(1), 1)]);
+    }
+
+    #[test]
     fn binary_comment_record_and_work_limits_remain_fatal() {
         let bytes = comment_part("bounded");
         let limits = crate::Limits { max_records: 2, ..crate::Limits::default() };
@@ -2566,6 +2620,26 @@ mod tests {
             read_comments(&ParseCtx::default(), &cut),
             Err(ConvertError::Malformed { reason: "incomplete comments", .. })
         );
+    }
+
+    #[test]
+    fn hidden_emit_restores_binary_sheets_and_axes() {
+        let body = [
+            col_info(1, 1, true),
+            row_hdr(0, false),
+            text_cell(0, "shown"),
+            text_cell(1, "column"),
+            row_hdr(1, true),
+            text_cell(0, "row"),
+        ]
+        .concat();
+        for state in [0, 1, 2] {
+            let wb = Wb { sheets: vec![("S", state, body.clone())], ..Wb::default() };
+            let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+            let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(texts(first_table(&doc)), [vec!["shown", "column"], vec!["row", ""]]);
+            assert_eq!(reported(ctx), []);
+        }
     }
 
     #[test]

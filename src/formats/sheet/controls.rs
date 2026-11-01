@@ -93,9 +93,10 @@ fn vml_checkboxes(
         if !checkbox && !OTHER_CONTROLS.contains(&kind) {
             continue;
         }
-        if shape
-            .attr_unqualified("style")
-            .is_some_and(|s| s.replace(' ', "").contains("visibility:hidden"))
+        if !parse_ctx.hidden_requested()
+            && shape
+                .attr_unqualified("style")
+                .is_some_and(|s| s.replace(' ', "").contains("visibility:hidden"))
         {
             parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             continue;

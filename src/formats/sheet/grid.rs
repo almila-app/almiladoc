@@ -188,8 +188,16 @@ impl SheetContent {
     ) -> Result<BTreeSet<String>, ConvertError> {
         ctx.charge(self.hidden_rows.len() as u64 + self.hidden_cols.len() as u64)?;
         let hidden = Hidden {
-            rows: HiddenRuns::of(self.hidden_rows.clone()),
-            cols: HiddenRuns::of(self.hidden_cols.clone()),
+            rows: HiddenRuns::of(if ctx.hidden_requested() {
+                Vec::new()
+            } else {
+                self.hidden_rows.clone()
+            }),
+            cols: HiddenRuns::of(if ctx.hidden_requested() {
+                Vec::new()
+            } else {
+                self.hidden_cols.clone()
+            }),
         };
         let mut selected = BTreeSet::new();
         for (id, at) in anchors {
@@ -652,7 +660,7 @@ pub(super) fn build_table_with_notes(
     for (&(code, region), &count) in &sheet.reports {
         parse_ctx.emit_count(code, region, count);
     }
-    let hidden = Hidden::of(&mut sheet);
+    let hidden = Hidden::of(parse_ctx, &mut sheet);
     let mut cells = cell_contents(&mut sheet);
     let moved = move_hidden_origins(&mut sheet.merges, &hidden, &mut cells);
     append_comments(parse_ctx, &mut sheet, &hidden, &mut cells, notes)?;
@@ -685,7 +693,11 @@ struct Hidden {
 }
 
 impl Hidden {
-    fn of(sheet: &mut SheetContent) -> Self {
+    fn of(ctx: &ParseCtx<'_>, sheet: &mut SheetContent) -> Self {
+        if ctx.hidden_requested() {
+            sheet.hidden_rows.clear();
+            sheet.hidden_cols.clear();
+        }
         Self {
             rows: HiddenRuns::of(std::mem::take(&mut sheet.hidden_rows)),
             cols: HiddenRuns::of(std::mem::take(&mut sheet.hidden_cols)),

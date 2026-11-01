@@ -113,7 +113,7 @@ pub(super) fn list_sheets<'r, T>(
     let mut sheets = Vec::new();
     for (position, (hidden, rid, sheet)) in listed.into_iter().enumerate() {
         let scope = parse_ctx.begin_unit(UnitKind::Sheet, position)?;
-        if hidden {
+        if hidden && !parse_ctx.hidden_requested() {
             parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             continue;
         }
@@ -217,7 +217,7 @@ fn read_sheet_parts(
         return Ok(());
     };
     let mut losses = Vec::new();
-    drawing_losses(parse_ctx, drawing, Branch::Other, false, &mut losses)?;
+    drawing_losses(parse_ctx, drawing, Branch::Other, parse_ctx.hidden_requested(), &mut losses)?;
     for code in losses {
         parse_ctx.emit(code, Region::Body);
     }
@@ -933,6 +933,84 @@ mod tests {
                 (DiagnosticCode::DanglingReference, Region::Comment, Some(1), 2),
                 (DiagnosticCode::DuplicateNote, Region::Comment, Some(1), 1)
             ]
+        );
+    }
+
+    #[test]
+    fn hidden_emit_restores_sheets_axes_and_comment_damage_only_where_selected() {
+        let comments = format!(
+            r#"<comments xmlns="{SML}"><commentList><comment ref="B1"><text><t>hidden &unknown;</t></text></comment></commentList></comments>"#
+        );
+        let rels = format!(
+            r#"<Relationship Id="comments" Type="{COMMENTS_REL}" Target="../comments.xml"/>"#
+        );
+        let body = r#"<cols><col min="2" max="2" hidden="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c></row><row r="2" hidden="1"><c r="A2"><v>3</v></c></row></sheetData>"#;
+        for state in ["", "hidden", "veryHidden"] {
+            let wb = Wb {
+                sheets: vec![("S", state, body)],
+                sheet_rels: Some(&rels),
+                extra: vec![("xl/comments.xml", &comments)],
+                ..Wb::default()
+            };
+            let ctx = ParseCtx::default()
+                .with_comments(crate::CommentPolicy::Emit)
+                .with_hidden(crate::HiddenPolicy::Emit);
+            let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(texts(first_table(&doc)), [vec!["1", "2"], vec!["3", ""]], "{state}");
+            assert_eq!(doc.notes.len(), 1, "{state}");
+            assert_eq!(
+                reported(ctx),
+                [(DiagnosticCode::UnresolvedEntity, Region::Comment, Some(1), 1)],
+                "{state}"
+            );
+        }
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/comments.xml", &comments)],
+            ..one_sheet(body)
+        };
+        let ctx = ParseCtx::default().with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes, []);
+        assert_eq!(reported(ctx), [in_unit(DiagnosticCode::HiddenOmitted, 1, 2)]);
+    }
+
+    #[test]
+    fn hidden_thread_bodies_and_depth_are_not_selected_after_placeholder_remapping() {
+        let comments = format!(
+            r#"<comments xmlns="{SML}"><authors><author>tc=root</author></authors><commentList><comment ref="B1" authorId="0"><text><t>compatibility</t></text></comment></commentList></comments>"#
+        );
+        let mut entries = String::from(
+            r#"<threadedComment id="root" ref="A1" personId="person"><text>hidden &unknown;</text></threadedComment>"#,
+        );
+        for index in 0..9 {
+            let parent =
+                if index == 0 { "root".to_string() } else { format!("reply{}", index - 1) };
+            entries.push_str(&format!(r#"<threadedComment id="reply{index}" parentId="{parent}" ref="A1" personId="person"><text>reply &unknown;</text></threadedComment>"#));
+        }
+        let threaded = format!(
+            r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">{entries}</ThreadedComments>"#
+        );
+        let rels = format!(
+            r#"<Relationship Id="legacy" Type="{COMMENTS_REL}" Target="../comments.xml"/><Relationship Id="threaded" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threaded.xml"/>"#
+        );
+        let body = r#"<cols><col min="2" max="2" hidden="1"/></cols><sheetData/>"#;
+        let wb = Wb {
+            sheet_rels: Some(&rels),
+            extra: vec![("xl/comments.xml", &comments), ("xl/threaded.xml", &threaded)],
+            ..one_sheet(body)
+        };
+        let limits = crate::Limits { max_nesting_depth: 6, ..crate::Limits::default() };
+        let ctx = ParseCtx::new(&limits).with_comments(crate::CommentPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(doc.notes, []);
+        assert_eq!(reported(ctx), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+        let ctx = ParseCtx::new(&limits)
+            .with_comments(crate::CommentPolicy::Emit)
+            .with_hidden(crate::HiddenPolicy::Emit);
+        assert_matches!(
+            super::super::parse(&ctx, &wb.build()),
+            Err(ConvertError::ResourceLimit { limit: Limit::NestingDepth, max: 6 })
         );
     }
 
@@ -1937,6 +2015,36 @@ mod tests {
     }
 
     #[test]
+    fn hidden_emit_selects_unsupported_drawing_content_at_each_group_level() {
+        let text = "<xdr:txBody><a:p><a:r><a:t>shape &unknown;</a:t></a:r></a:p></xdr:txBody>";
+        let leaf = sp(" hidden=\"1\"", text);
+        let inner = format!(
+            r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr>{leaf}</xdr:grpSp>"#
+        );
+        for shape in [
+            &leaf,
+            &inner,
+            &format!(
+                r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr>{inner}</xdr:grpSp>"#
+            ),
+        ] {
+            let drawing = drawing(shape);
+            let rels = format!(
+                r#"<Relationship Id="drawing" Type="{DRAWING_REL}" Target="../drawing.xml"/>"#
+            );
+            let wb = drawing_wb(
+                &rels,
+                r#"<drawing r:id="drawing"/>"#,
+                vec![("xl/drawing.xml", &drawing)],
+            );
+            assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 1)]);
+            let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+            super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(reported(ctx), [in_unit(DiagnosticCode::GraphicUnread, 1, 1)]);
+        }
+    }
+
+    #[test]
     fn a_hidden_drawing_group_charges_its_content_walk() {
         let content = drawing(&format!(
             r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr>{}</xdr:grpSp>"#,
@@ -1952,6 +2060,44 @@ mod tests {
             drawing_losses(&ctx, root, Branch::Other, false, &mut Vec::new()),
             Err(ConvertError::ResourceLimit { limit: Limit::Work, max: 1 })
         );
+    }
+
+    #[test]
+    fn empty_hidden_shapes_and_compatibility_controls_have_no_drawing_loss() {
+        let empty = sp(" hidden=\"1\"", "<xdr:spPr/>");
+        let nested = format!(
+            r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr><xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr hidden="1"/></xdr:nvGrpSpPr>{empty}</xdr:grpSp></xdr:grpSp>"#
+        );
+        let compat = CONTROL.replace(r#"name="c""#, r#"name="c" hidden="1""#);
+        let choice = format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="a14">{compat}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#
+        );
+        let drawing = drawing(&format!("{empty}{nested}{choice}"));
+        let rels =
+            format!(r#"<Relationship Id="drawing" Type="{DRAWING_REL}" Target="../drawing.xml"/>"#);
+        let wb =
+            drawing_wb(&rels, r#"<drawing r:id="drawing"/>"#, vec![("xl/drawing.xml", &drawing)]);
+        for policy in [crate::HiddenPolicy::Omit, crate::HiddenPolicy::Emit] {
+            let ctx = ParseCtx::default().with_hidden(policy);
+            super::super::parse(&ctx, &wb.build()).unwrap();
+            assert_eq!(reported(ctx), []);
+        }
+    }
+
+    #[test]
+    fn hidden_emit_restores_supported_vml_controls_and_reports_other_controls() {
+        let vml = format!(
+            r#"<xml xmlns:v="{}" xmlns:x="{}"><v:shape style="visibility:hidden"><v:textbox>caption</v:textbox><x:ClientData ObjectType="Checkbox"><x:Anchor>0,0,0,0,1,0,1,0</x:Anchor><x:Checked>1</x:Checked></x:ClientData></v:shape><v:shape style="visibility:hidden"><x:ClientData ObjectType="Button"/></v:shape></xml>"#,
+            ns::VML,
+            ns::X_VML
+        );
+        let rels = r#"<Relationship Id="vml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawing.vml"/>"#;
+        let wb = drawing_wb(rels, "<sheetData/>", vec![("xl/drawing.vml", &vml)]);
+        assert_eq!(diagnose(&wb), [in_unit(DiagnosticCode::HiddenOmitted, 1, 2)]);
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let doc = super::super::parse(&ctx, &wb.build()).unwrap();
+        assert_eq!(texts(first_table(&doc)), [vec!["[x] caption"]]);
+        assert_eq!(reported(ctx), [in_unit(DiagnosticCode::FormControlUnread, 1, 1)]);
     }
 
     #[test]
