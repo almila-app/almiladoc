@@ -173,13 +173,19 @@ impl<'b> Ctx<'_, 'b> {
         matches!(self.region, Region::Header | Region::Footer)
     }
 
-    fn drops_revision(element: &Element) -> bool {
-        let names = ["del", "moveFrom"];
+    fn drops_revision(&self, element: &Element) -> bool {
+        let names =
+            if self.parse_ctx.reject_revisions() { ["ins", "moveTo"] } else { ["del", "moveFrom"] };
         element.ns.as_deref() == Some(ns::W) && names.contains(&element.local.as_str())
     }
 
-    fn removes_property(properties: Option<&Element>, deleted: &str) -> bool {
-        let name = deleted;
+    fn removes_property(
+        &self,
+        properties: Option<&Element>,
+        deleted: &str,
+        inserted: &str,
+    ) -> bool {
+        let name = if self.parse_ctx.reject_revisions() { inserted } else { deleted };
         properties.is_some_and(|properties| properties.find(ns::W, name).is_some())
     }
 
@@ -200,7 +206,11 @@ impl<'b> Ctx<'_, 'b> {
     fn move_range(&self, marker: &Element, renders: bool) -> Result<(), ConvertError> {
         let mut moves = self.moves.borrow_mut();
         let id = marker.attr(ns::W, "id").unwrap_or_default();
-        let (start, end) = ("moveFromRangeStart", "moveFromRangeEnd");
+        let (start, end) = if self.parse_ctx.reject_revisions() {
+            ("moveToRangeStart", "moveToRangeEnd")
+        } else {
+            ("moveFromRangeStart", "moveFromRangeEnd")
+        };
         match marker.local.as_str() {
             local if local == start => {
                 if let Some(name) = marker.attr(ns::W, "name") {
@@ -377,8 +387,8 @@ fn without_hidden_text(
     elem: &Element,
     hides: bool,
 ) -> Result<Element, ConvertError> {
-    let copied = copy_with(ctx.parse_ctx, elem, |child| {
-        if Ctx::drops_revision(child) {
+    let mut copied = copy_with(ctx.parse_ctx, elem, |child| {
+        if ctx.drops_revision(child) {
             return Ok(None);
         }
         if (child.is(ns::W, "r") || child.is(ns::M, "r"))
@@ -394,6 +404,10 @@ fn without_hidden_text(
         };
         without_hidden_text(ctx, child, hides).map(Some)
     })?;
+    if ctx.parse_ctx.reject_revisions() && elem.is(ns::W, "delText") {
+        copied.local.clear();
+        copied.local.push('t');
+    }
     Ok(copied)
 }
 
@@ -625,7 +639,7 @@ fn collect_blocks<'e>(
                     collect_blocks(content, ctx, blocks, runs, breaks.as_deref_mut())?;
                 }
             }
-            "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
+            "ins" | "del" | "moveFrom" | "moveTo" if ctx.drops_revision(child) => {
                 let mut walker = InlineWalker::outside_paragraphs(ctx)?;
                 walker.in_revision(child, |w| w.walk(child))?;
                 walker.close_range();
@@ -654,7 +668,7 @@ fn note_section_break<'e>(
 ) -> Result<(), ConvertError> {
     let ppr = paragraph.find(ns::W, "pPr");
     if let Some(section) = ppr.and_then(|pr| pr.find(ns::W, "sectPr"))
-        && !mark_removed(ppr.and_then(|pr| pr.find(ns::W, "rPr")))
+        && !mark_removed(ppr.and_then(|pr| pr.find(ns::W, "rPr")), ctx)
     {
         runs.release(ctx, blocks)?;
         breaks.push((blocks.len(), section));
@@ -673,7 +687,7 @@ fn mark_drops(
     hides: bool,
 ) -> Result<bool, ConvertError> {
     let rpr = ppr.and_then(|pr| pr.find(ns::W, "rPr"));
-    if mark_removed(rpr) {
+    if mark_removed(rpr, ctx) {
         return Ok(true);
     }
     if ppr.and_then(|pr| pr.find(ns::W, "sectPr")).is_some() {
@@ -686,8 +700,8 @@ fn mark_drops(
 }
 
 /// Whether accepting revisions removes a paragraph mark: deleted or moved out.
-fn mark_removed(rpr: Option<&Element>) -> bool {
-    rpr.is_some_and(|rpr| rpr.child_elems().any(Ctx::drops_revision))
+fn mark_removed(rpr: Option<&Element>, ctx: &Ctx<'_, '_>) -> bool {
+    rpr.is_some_and(|rpr| rpr.child_elems().any(|revision| ctx.drops_revision(revision)))
 }
 
 /// Whether a mark, a math run or a run in a declined choice is hidden: a character style that
@@ -1186,7 +1200,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         self.walk(content)?;
                     }
                 }
-                "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
+                "ins" | "del" | "moveFrom" | "moveTo" if self.ctx.drops_revision(child) => {
                     self.in_revision(child, |w| w.walk(child))?;
                 }
                 "smartTag" | "ins" | "del" | "moveFrom" | "bdo" | "dir" | "moveTo"
@@ -1253,7 +1267,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             return Ok(());
         }
         let filtered;
-        let shown_math = if runs.hidden || runs.alternate {
+        let shown_math = if runs.hidden || runs.alternate || self.ctx.parse_ctx.reject_revisions() {
             filtered = self.without_hidden_runs(math)?;
             &filtered
         } else {
@@ -1330,7 +1344,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 self.walk_math_runs(child, display, runs)?;
             } else {
                 match child.local.as_str() {
-                    "ins" | "del" | "moveFrom" | "moveTo" if Ctx::drops_revision(child) => {
+                    "ins" | "del" | "moveFrom" | "moveTo" if self.ctx.drops_revision(child) => {
                         self.in_revision(child, |w| w.walk_math_runs(child, display, runs))?;
                     }
                     "moveFromRangeStart" | "moveFromRangeEnd" | "moveToRangeStart"
@@ -1354,7 +1368,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 if let Some(branch) = self.ctx.math_branch(child, self.hides)? {
                     self.report_declined(branch)?;
                 }
-            } else if !Ctx::drops_revision(child) {
+            } else if !self.ctx.drops_revision(child) {
                 self.report_declined(child)?;
             }
         }
@@ -1377,12 +1391,12 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     /// The equation as it renders: without its hidden runs, and alternate content replaced by
     /// its selected branch.
     fn without_hidden_runs(&self, elem: &Element) -> Result<Element, ConvertError> {
-        let copied = copy_with(self.ctx.parse_ctx, elem, |child| {
+        let mut copied = copy_with(self.ctx.parse_ctx, elem, |child| {
             if child.is(ns::MC, "AlternateContent") {
                 let branch = omitted_branch(child);
                 return branch.map(|branch| self.without_hidden_runs(branch)).transpose();
             }
-            if Ctx::drops_revision(child) {
+            if self.ctx.drops_revision(child) {
                 return Ok(None);
             }
             let rpr = child.find(ns::W, "rPr");
@@ -1391,6 +1405,17 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             }
             self.without_hidden_runs(child).map(Some)
         })?;
+        if self.ctx.parse_ctx.reject_revisions() && elem.ns.as_deref() == Some(ns::W) {
+            let name = match elem.local.as_str() {
+                "del" => Some("ins"),
+                "moveFrom" => Some("moveTo"),
+                _ => None,
+            };
+            if let Some(name) = name {
+                copied.local.clear();
+                copied.local.push_str(name);
+            }
+        }
         Ok(copied)
     }
 
@@ -1611,7 +1636,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 continue;
             }
             match child.local.as_str() {
-                "t" => {
+                "t" | "delText" if child.local == "t" || self.ctx.parse_ctx.reject_revisions() => {
                     self.push_run_text(child, style, fonts.route());
                 }
                 "tab" | "ptab" => self.push(Inline::Text { text: " ".into(), style: Style::PLAIN }),
@@ -1644,7 +1669,9 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                         self.ctx.emit(DiagnosticCode::FormControlUnread);
                     }
                 }
-                "instrText" => {
+                "instrText" | "delInstrText"
+                    if child.local == "instrText" || self.ctx.parse_ctx.reject_revisions() =>
+                {
                     self.instr_text(child)?;
                 }
                 _ => {}
@@ -2390,7 +2417,7 @@ fn collect_rows<'e>(
             if child.first_descendant(ns::W, "tr").is_some() {
                 ctx.emit(DiagnosticCode::BlockUnread);
             }
-        } else if Ctx::removes_property(child.find(ns::W, "trPr"), "del") {
+        } else if ctx.removes_property(child.find(ns::W, "trPr"), "del", "ins") {
             deleted.push((rows.len(), child));
         } else {
             rows.push(child);
@@ -2440,7 +2467,11 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx<'_, '_>, row: &mut RowIn
             local
                 if is_move_marker(child)
                     || (local == "tc"
-                        && Ctx::removes_property(child.find(ns::W, "tcPr"), "cellDel")) =>
+                        && ctx.removes_property(
+                            child.find(ns::W, "tcPr"),
+                            "cellDel",
+                            "cellIns",
+                        )) =>
             {
                 let folded = row.cells.last().map_or(0, |last| last.merged.len());
                 row.deleted.push(((row.cells.len(), folded), child));

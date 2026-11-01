@@ -57,6 +57,8 @@ pub struct Config {
     pub headers_footers: HeaderFooterPolicy,
     /// Whether supported source comments appear as isolated footnotes.
     pub comments: CommentPolicy,
+    /// Which tracked text revision view appears.
+    pub revisions: RevisionPolicy,
 }
 
 impl Config {
@@ -111,6 +113,7 @@ impl Default for Config {
             image_ocr: ImageOcr::None,
             headers_footers: HeaderFooterPolicy::Omit,
             comments: CommentPolicy::Omit,
+            revisions: RevisionPolicy::Accept,
         }
     }
 }
@@ -135,6 +138,17 @@ pub enum CommentPolicy {
     Omit,
     /// Preserve comments as GFM footnotes, with replies inside their parent.
     Emit,
+}
+
+/// Which tracked text revision view appears in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum RevisionPolicy {
+    /// Keep inserted text and remove deleted text.
+    #[default]
+    Accept,
+    /// Keep deleted text and remove inserted text.
+    Reject,
 }
 
 /// How an image appears without fetching or interpreting its content.

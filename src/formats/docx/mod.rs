@@ -347,6 +347,25 @@ mod tests {
     use std::assert_matches;
     use std::fmt::Debug;
 
+    fn policy_converted(body: &str, revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_revisions(revisions);
+        let document = parse(&ctx, &zip_package(&[("word/document.xml", document(body))])).unwrap();
+        (document_to_markdown(&document), diagnostic_rows(&ctx.into_diagnostics()))
+    }
+
+    #[test]
+    fn source_policy_reject_restores_deleted_text_math_and_paragraph_marks() {
+        for (body, expected, count) in [
+            (format!("<w:p>{}<w:ins>{}</w:ins></w:p>", deleted("old"), shown("new")), "old\n", 1),
+            (format!("{}{}", p("<w:pPr><w:rPr><w:ins/></w:rPr></w:pPr>", &shown("one")), p("", &shown("two"))), "onetwo\n", 0),
+            (format!("{}{}", p("<w:pPr><w:rPr><w:del/></w:rPr></w:pPr>", &shown("one")), p("", &shown("two"))), "one\n\ntwo\n", 0),
+            ("<w:p><m:oMath><w:del><m:r><m:t>old</m:t></m:r></w:del><w:ins><m:r><m:t>new</m:t></m:r></w:ins></m:oMath></w:p>".into(), "$old$\n", 1),
+        ] {
+            let reported = if count == 0 { vec![] } else { vec![(DiagnosticCode::RevisionOmitted, Region::Body, count)] };
+            assert_eq!(policy_converted(&body, crate::RevisionPolicy::Reject), (expected.into(), reported), "{body}");
+        }
+    }
+
     #[test]
     fn comments_emit_in_a_reserved_footnote_space() {
         let body = run(r#"<w:t>Body</w:t><w:commentReference w:id="7"/>"#);
@@ -2039,6 +2058,71 @@ mod tests {
         }
     }
 
+    fn revision_cell(mark: &str, text: &str) -> String {
+        format!("<w:tc><w:tcPr>{mark}</w:tcPr>{}</w:tc>", p("", &shown(text)))
+    }
+
+    fn check_revision_table(
+        body: &str,
+        (rows, cols): (usize, usize),
+        accepted: [&str; 2],
+        rejected: [&str; 2],
+    ) {
+        for (policy, expected) in
+            [(crate::RevisionPolicy::Accept, accepted), (crate::RevisionPolicy::Reject, rejected)]
+        {
+            let ctx = ParseCtx::default().with_revisions(policy);
+            let doc = parse(&ctx, &zip_package(&[("word/document.xml", document(body))])).unwrap();
+            let [Block::Table(table)] = doc.blocks.as_slice() else { panic!() };
+            assert_eq!((table.grid.len(), table.grid.first().map_or(0, Vec::len)), (rows, cols));
+            let text: Vec<_> = table
+                .origins()
+                .map(|cell| match cell.blocks.as_slice() {
+                    [Block::Paragraph(inlines)] => inlines_to_plain_text(inlines),
+                    _ => panic!(),
+                })
+                .collect();
+            assert_eq!(text, expected);
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                [(DiagnosticCode::RevisionOmitted, Region::Body, 1)]
+            );
+        }
+    }
+
+    #[test]
+    fn reject_selects_inserted_and_deleted_table_rows() {
+        let row = |mark: &str, text: &str| {
+            format!("<w:tr><w:trPr>{mark}</w:trPr>{}</w:tr>", revision_cell("", text))
+        };
+        check_revision_table(
+            &table(&format!(
+                "{}{}{}",
+                row("", "keep-row"),
+                row("<w:ins/>", "insert-row"),
+                row("<w:del/>", "delete-row")
+            )),
+            (2, 1),
+            ["keep-row", "insert-row"],
+            ["keep-row", "delete-row"],
+        );
+    }
+
+    #[test]
+    fn reject_selects_inserted_and_deleted_table_cells() {
+        check_revision_table(
+            &table(&format!(
+                "<w:tr>{}{}{}</w:tr>",
+                revision_cell("", "keep-cell"),
+                revision_cell("<w:cellIns/>", "insert-cell"),
+                revision_cell("<w:cellDel/>", "delete-cell")
+            )),
+            (1, 2),
+            ["keep-cell", "insert-cell"],
+            ["keep-cell", "delete-cell"],
+        );
+    }
+
     #[test]
     fn picture_entity_damage_follows_only_its_displayed_alt_and_link() {
         let cases = [
@@ -2100,6 +2184,33 @@ mod tests {
                     vec![]
                 }
             );
+        }
+    }
+
+    #[test]
+    fn xml_entity_damage_follows_the_selected_revision_text() {
+        let body =
+            document(&p("", &format!("{}<w:ins>{}</w:ins>", deleted("&old;"), shown("new"))));
+        let bytes = zip_package(&[("word/document.xml", body)]);
+        for (policy, expected, losses) in [
+            (
+                crate::RevisionPolicy::Accept,
+                "new\n",
+                vec![(DiagnosticCode::RevisionOmitted, Region::Body, 1)],
+            ),
+            (
+                crate::RevisionPolicy::Reject,
+                "&amp;old;\n",
+                vec![
+                    (DiagnosticCode::UnresolvedEntity, Region::Body, 1),
+                    (DiagnosticCode::RevisionOmitted, Region::Body, 1),
+                ],
+            ),
+        ] {
+            let ctx = ParseCtx::default().with_revisions(policy);
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(document_to_markdown(&doc), expected);
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), losses);
         }
     }
 

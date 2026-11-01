@@ -40,6 +40,7 @@ __all__ = [
     "OnLoss",
     "Parsed",
     "ResourceLimitError",
+    "RevisionPolicy",
     "UnsupportedError",
     "sniff",
 ]
@@ -176,6 +177,14 @@ class CommentPolicy:
     def __repr__(self) -> str: ...
 
 @final
+class RevisionPolicy:
+    """Which tracked text revision view appears in the output."""
+
+    ACCEPT: ClassVar[RevisionPolicy]
+    REJECT: ClassVar[RevisionPolicy]
+    def __repr__(self) -> str: ...
+
+@final
 class HeaderFooterPolicy:
     """Whether supported headers and footers appear in the output."""
 
@@ -286,7 +295,8 @@ class Config:
     than one), what a loss does, how images appear and which leave gaps for
     OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
     1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
-    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`.
+    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT` and
+    `RevisionPolicy.ACCEPT`.
     A thread count out of range raises `ConfigError`."""
 
     def __new__(
@@ -299,6 +309,7 @@ class Config:
         image_ocr: ImageOcr | None = None,
         headers_footers: HeaderFooterPolicy | None = None,
         comments: CommentPolicy | None = None,
+        revisions: RevisionPolicy | None = None,
     ) -> Config: ...
     @property
     def limits(self) -> Limits:
@@ -316,6 +327,10 @@ class Config:
     def image_ocr(self) -> ImageOcr:
         """Which images a parse leaves a gap after for OCR."""
 
+    @property
+    def revisions(self) -> RevisionPolicy:
+        """Which tracked text revision view appears."""
+        ...
     @property
     def comments(self) -> CommentPolicy:
         """Whether supported source comments appear as isolated footnotes."""

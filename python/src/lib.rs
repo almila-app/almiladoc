@@ -15,6 +15,7 @@ mod _almiladoc {
     #[pymodule_export]
     use crate::config::{
         CommentPolicy, Config, HeaderFooterPolicy, ImageOcr, ImagePolicy, Limits, OnLoss,
+        RevisionPolicy,
     };
     #[pymodule_export]
     use crate::converter::{

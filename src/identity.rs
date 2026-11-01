@@ -32,8 +32,16 @@ impl EngineIdentity {
 }
 
 fn fingerprinted(config: &Config) -> String {
-    let Config { limits: _, threads: _, on_loss, images, image_ocr, headers_footers, comments } =
-        config;
+    let Config {
+        limits: _,
+        threads: _,
+        on_loss,
+        images,
+        image_ocr,
+        headers_footers,
+        comments,
+        revisions,
+    } = config;
     let mut fields = format!(
         "on_loss={};images={};image_ocr={};",
         on_loss.as_str(),
@@ -45,6 +53,9 @@ fn fingerprinted(config: &Config) -> String {
     }
     if *comments == crate::CommentPolicy::Emit {
         fields.push_str("comments=emit;");
+    }
+    if *revisions == crate::RevisionPolicy::Reject {
+        fields.push_str("revisions=reject;");
     }
     fields
 }
@@ -59,11 +70,12 @@ mod tests {
         let config = Config {
             headers_footers: crate::HeaderFooterPolicy::Emit,
             comments: crate::CommentPolicy::Emit,
+            revisions: crate::RevisionPolicy::Reject,
             ..Config::default()
         };
         assert_eq!(
             fingerprinted(&config),
-            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;"
+            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;revisions=reject;"
         );
     }
 

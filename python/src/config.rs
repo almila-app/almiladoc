@@ -71,6 +71,26 @@ impl CommentPolicy {
     }
 }
 
+/// Which tracked text revision view appears in the output.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct RevisionPolicy(almiladoc::RevisionPolicy);
+
+#[pymethods]
+impl RevisionPolicy {
+    #[classattr]
+    const ACCEPT: Self = Self(almiladoc::RevisionPolicy::Accept);
+    #[classattr]
+    const REJECT: Self = Self(almiladoc::RevisionPolicy::Reject);
+    fn __repr__(&self) -> &'static str {
+        match self.0 {
+            almiladoc::RevisionPolicy::Accept => "RevisionPolicy.ACCEPT",
+            almiladoc::RevisionPolicy::Reject => "RevisionPolicy.REJECT",
+            _ => "RevisionPolicy.<unknown>",
+        }
+    }
+}
+
 /// How images appear in Markdown without fetching their content.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
@@ -221,7 +241,8 @@ impl Hash for Limits {
 /// than one), what a loss does, how images appear and which leave gaps for
 /// OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
 /// 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
-/// `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`.
+/// `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT` and
+/// `RevisionPolicy.ACCEPT`.
 /// A thread count out of range raises `ConfigError`.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq)]
@@ -234,7 +255,7 @@ impl Config {
         clippy::too_many_arguments,
         reason = "Python keywords mirror the core configuration fields"
     )]
-    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, headers_footers = None, comments = None))]
+    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, headers_footers = None, comments = None, revisions = None))]
     fn new(
         py: Python<'_>,
         limits: Option<&Bound<'_, Limits>>,
@@ -244,6 +265,7 @@ impl Config {
         image_ocr: Option<&Bound<'_, ImageOcr>>,
         headers_footers: Option<&Bound<'_, HeaderFooterPolicy>>,
         comments: Option<&Bound<'_, CommentPolicy>>,
+        revisions: Option<&Bound<'_, RevisionPolicy>>,
     ) -> PyResult<Self> {
         let mut config = almiladoc::Config::default();
         if let Some(limits) = limits {
@@ -258,6 +280,9 @@ impl Config {
         }
         if let Some(image_ocr) = image_ocr {
             config.image_ocr = image_ocr.get().0;
+        }
+        if let Some(policy) = revisions {
+            config.revisions = policy.get().0;
         }
         if let Some(policy) = comments {
             config.comments = policy.get().0;
@@ -311,9 +336,15 @@ impl Config {
         CommentPolicy(self.0.comments)
     }
 
+    /// Which tracked text revision view appears.
+    #[getter]
+    fn revisions(&self) -> RevisionPolicy {
+        RevisionPolicy(self.0.revisions)
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, headers_footers={}, comments={})",
+            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, headers_footers={}, comments={}, revisions={})",
             self.limits().__repr__(),
             self.0.threads,
             self.on_loss().__repr__(),
@@ -321,6 +352,7 @@ impl Config {
             self.image_ocr().__repr__(),
             self.headers_footers().__repr__(),
             self.comments().__repr__(),
+            self.revisions().__repr__()
         )
     }
 }
@@ -334,5 +366,6 @@ impl Hash for Config {
         self.0.image_ocr.hash(state);
         self.0.headers_footers.hash(state);
         self.0.comments.hash(state);
+        self.0.revisions.hash(state);
     }
 }

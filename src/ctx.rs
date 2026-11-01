@@ -9,6 +9,7 @@ use std::num::NonZeroU32;
 
 use crate::config::{
     CommentPolicy, ConfigError, HeaderFooterPolicy, ImageOcr, ImagePolicy, PageSelection,
+    RevisionPolicy,
 };
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
@@ -24,6 +25,7 @@ pub(crate) struct ParseCtx<'a> {
     image_ocr: ImageOcr,
     headers_footers: HeaderFooterPolicy,
     comments: CommentPolicy,
+    revisions: RevisionPolicy,
     ocr_pages: PageSelection,
     ledger: Ledger<'a>,
     diagnostics: Cell<Diagnostics>,
@@ -87,6 +89,7 @@ impl<'a> ParseCtx<'a> {
             image_ocr: ImageOcr::None,
             headers_footers: HeaderFooterPolicy::Omit,
             comments: CommentPolicy::Omit,
+            revisions: RevisionPolicy::Accept,
             ocr_pages: PageSelection::None,
             ledger: Ledger::new(limits.max_work, None),
             diagnostics: Cell::default(),
@@ -134,6 +137,14 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn comments_requested(&self) -> bool {
         self.comments == CommentPolicy::Emit
+    }
+
+    pub(crate) fn with_revisions(self, revisions: RevisionPolicy) -> Self {
+        Self { revisions, ..self }
+    }
+
+    pub(crate) fn reject_revisions(&self) -> bool {
+        self.revisions == RevisionPolicy::Reject
     }
 
     pub(crate) fn image_ocr(&self) -> ImageOcr {

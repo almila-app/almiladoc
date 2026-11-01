@@ -919,6 +919,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(len({omitted, emitted}), 2)
         self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
 
+    def test_revision_policy_is_frozen_and_fingerprinted(self):
+        base = almiladoc.Config()
+        selected = almiladoc.Config(revisions=almiladoc.RevisionPolicy.REJECT)
+        self.assertEqual(base.revisions, almiladoc.RevisionPolicy.ACCEPT)
+        self.assertEqual(almiladoc.Config(revisions=None), base)
+        self.assertEqual(repr(selected.revisions), "RevisionPolicy.REJECT")
+        self.assertEqual(len({base, selected}), 2)
+        self.assertEqual(len({almiladoc.Converter(c).identity for c in (base, selected)}), 2)
+
     def test_defaults_are_almiladocs(self):
         limits = almiladoc.Limits()
         self.assertEqual(limits.max_input_bytes, 256 << 20)
@@ -936,7 +945,7 @@ class ConfigTest(unittest.TestCase):
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
             r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT, "
-            r"comments=CommentPolicy\.OMIT\)$",
+            r"comments=CommentPolicy\.OMIT, revisions=RevisionPolicy\.ACCEPT\)$",
         )
 
     def test_limits_and_config_are_frozen_keyword_only_values(self):

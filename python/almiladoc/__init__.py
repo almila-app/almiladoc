@@ -42,6 +42,7 @@ from almiladoc._almiladoc import (
     OnLoss,
     Parsed,
     ResourceLimitError,
+    RevisionPolicy,
     UnsupportedError,
     sniff,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "OnLoss",
     "Parsed",
     "ResourceLimitError",
+    "RevisionPolicy",
     "UnsupportedError",
     "sniff",
 ]
