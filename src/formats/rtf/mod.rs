@@ -795,7 +795,7 @@ impl<'a> Parser<'a> {
     }
 
     fn hides(&self) -> bool {
-        self.state.hidden
+        self.state.hidden && !self.parse_ctx.hidden_requested()
     }
 
     /// Whether body text in the current state reaches the output.
@@ -1054,6 +1054,7 @@ impl<'a> Parser<'a> {
     fn side_control(&mut self, word: &str, param: Option<i32>) -> Result<bool, ConvertError> {
         let in_body = self.renders() && self.state.side.is_none() && !self.state.omit;
         let reject = self.parse_ctx.reject_revisions();
+        let emit_hidden = self.parse_ctx.hidden_requested();
         let Some(sections) = &mut self.sides else { return Ok(false) };
         let on = param != Some(0);
         match word {
@@ -1067,7 +1068,7 @@ impl<'a> Parser<'a> {
                     !holder.suppress
                         && !holder.omit
                         && !if reject { holder.inserted } else { holder.deleted }
-                        && !holder.hidden
+                        && (!holder.hidden || emit_hidden)
                         && holder.capture == Capture::None
                         && holder.side.is_none()
                 });
@@ -2088,8 +2089,12 @@ mod tests {
     use super::*;
     use crate::shared::test_support::diagnostic_rows;
 
-    fn policy_converted(source: &str, revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
-        let ctx = ParseCtx::default().with_revisions(revisions);
+    fn policy_converted(
+        source: &str,
+        hidden: crate::HiddenPolicy,
+        revisions: crate::RevisionPolicy,
+    ) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_hidden(hidden).with_revisions(revisions);
         let doc = parse(&ctx, source.as_bytes()).unwrap();
         (
             crate::render::markdown::document_to_markdown(&doc),
@@ -2111,8 +2116,23 @@ mod tests {
                 vec![(DiagnosticCode::RevisionOmitted, Region::Body, count)]
             };
             assert_eq!(
-                policy_converted(source, crate::RevisionPolicy::Reject),
+                policy_converted(source, crate::HiddenPolicy::Omit, crate::RevisionPolicy::Reject),
                 (expected.into(), diagnostics),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_emit_restores_text_paragraph_marks_and_nested_notes() {
+        for (source, expected) in [
+            (r"{\rtf1 a{\v b}c}", "abc\n"),
+            (r"{\rtf1 a{\v\par}b\par}", "a\n\nb\n"),
+            (r"{\rtf1 a{\v{\footnote hidden}}b}", "a[^1]b\n\n[^1]: hidden\n"),
+        ] {
+            assert_eq!(
+                policy_converted(source, crate::HiddenPolicy::Emit, crate::RevisionPolicy::Accept),
+                (expected.into(), vec![]),
                 "{source}"
             );
         }
