@@ -54,7 +54,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let mut converted = 0usize;
     for (admitted, chapter_path) in &spine_paths {
         let unit = parse_ctx.enter_admitted(*admitted);
-        let tree = pkg.related_xml_part(chapter_path, Role::Reported(Region::Body))?;
+        let tree = pkg.related_xml_part(chapter_path, Role::Probe)?;
         let Some((tree, body)) = tree.as_ref().and_then(|tree| Some((tree, chapter_body(tree)?)))
         else {
             parse_ctx.emit(DiagnosticCode::UnitUnreadable, Region::Body);
@@ -347,10 +347,16 @@ fn read_sheet(
             return Ok(Sheet { text: None, lost: None });
         }
         Err(e) if e.is_fatal() => return Err(e),
+        Err(_) if parse_ctx.hidden_requested() => {
+            report(parse_ctx, Role::Formatting.unreadable());
+            return Ok(Sheet { text: None, lost: None });
+        }
         Err(_) => return Ok(Sheet { text: None, lost: Some(id) }),
     };
     let (text, _, undecoded) = encoding_rs::UTF_8.decode(&bytes);
-    let lost = undecoded && Stylesheet::damage_may_hide(parse_ctx, &text)?;
+    let lost = undecoded
+        && !parse_ctx.hidden_requested()
+        && Stylesheet::damage_may_hide(parse_ctx, &text)?;
     if undecoded && !lost {
         parse_ctx.emit(DiagnosticCode::InvalidStyleEncoding, Region::Container);
     }
@@ -459,6 +465,187 @@ mod tests {
         let diagnostics =
             crate::converter::diagnostics_of(parse_ctx, &doc, crate::ImagePolicy::Placeholder);
         diagnostic_rows(&diagnostics.unwrap())
+    }
+
+    #[test]
+    fn hidden_chapter_entities_report_only_in_the_selected_view() {
+        let content = chapter("", r#"<p style="display:none">&unknown;</p>"#);
+        let bytes = book(&["ch.xhtml"], &[("ch.xhtml", &content)]);
+        for (policy, expected) in [
+            (
+                crate::HiddenPolicy::Omit,
+                vec![(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)],
+            ),
+            (
+                crate::HiddenPolicy::Emit,
+                vec![(DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1)],
+            ),
+        ] {
+            let ctx = ParseCtx::default().with_hidden(policy);
+            parse(&ctx, &bytes).unwrap();
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), expected);
+        }
+        let converted = crate::Converter::new(crate::Config::default())
+            .unwrap()
+            .convert(crate::Input::new(&bytes, crate::Format::Epub))
+            .unwrap();
+        assert_eq!(converted.markdown(), "text\n");
+    }
+
+    #[test]
+    fn chapter_damage_is_selected_per_source_node_and_shared_by_sub_builders() {
+        let hidden = chapter(
+            "<title>&unknown;</title>",
+            r#"<p title="&unknown;" class="&unknown;" style="color:&unknown;">plain<span style="display:none">&unknown;</span>&amp;unknown;</p>"#,
+        );
+        let visible = chapter(
+            "",
+            "<blockquote><ul><li><p>&unknown;</p></li></ul></blockquote><pre>&other;</pre>",
+        );
+        let bytes = book(
+            &["hidden.xhtml", "visible.xhtml"],
+            &[("hidden.xhtml", &hidden), ("visible.xhtml", &visible)],
+        );
+        let ctx = ParseCtx::default();
+        let doc = parse(&ctx, &bytes).unwrap();
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&doc),
+            "text\n\nplain&amp;unknown;\n\ntext\n\n> - &amp;unknown;\n\n```\n&other;\n```\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.diagnostics()),
+            [
+                (DiagnosticCode::UnresolvedEntity, Region::Body, Some(2), 1),
+                (DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn chapter_attributes_report_only_retained_destinations_and_image_labels() {
+        use crate::ImagePolicy::{AltText, Omit, Placeholder};
+        let cases = [
+            (r#"<a href="https://example.org/&unknown;">target</a>"#, Placeholder, true),
+            (r#"<a href="javascript:&unknown;">target</a>"#, Placeholder, false),
+            (r##"<a href="#&unknown;">target</a>"##, Placeholder, false),
+            (
+                r#"<p title="&unknown;" id="&unknown;" style="display:&unknown;">shown</p>"#,
+                Placeholder,
+                false,
+            ),
+            (r#"<img src="https://example.org/&unknown;" alt="picture"/>"#, Placeholder, true),
+            (r#"<image href="https://example.org/&unknown;" alt="picture"/>"#, Placeholder, true),
+            (r#"<img src="https://example.org/&unknown;" alt="picture"/>"#, AltText, false),
+            (r#"<img src="https://example.org/&unknown;" alt="picture"/>"#, Omit, false),
+            (
+                r#"<img src="https://example.org/p.png" href="&unknown;" alt="picture"/>"#,
+                Placeholder,
+                false,
+            ),
+            (r#"<img src="https://example.org/p.png" alt="&unknown;"/>"#, Placeholder, true),
+            (r#"<img src="https://example.org/p.png" alt="&unknown;"/>"#, AltText, true),
+            (r#"<img src="https://example.org/p.png" alt="&unknown;"/>"#, Omit, false),
+            (r#"<img src="https://example.org/p.png" alt="&amp;unknown;"/>"#, Placeholder, false),
+            (r#"<img src="javascript:&unknown;" alt="picture"/>"#, Placeholder, false),
+        ];
+        for (body, images, damaged) in cases {
+            let chapter = chapter("", body);
+            let bytes = book(&["ch.xhtml"], &[("ch.xhtml", &chapter)]);
+            let ctx = ParseCtx::default().with_images(images);
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(doc.blocks.len(), 3, "{body}");
+            let expected: Vec<Reported> = damaged
+                .then_some((DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1))
+                .into_iter()
+                .collect();
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.diagnostics()),
+                expected,
+                "{body} {images:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chapter_text_damage_reports_from_each_selected_container() {
+        for body in [
+            "<p>&unknown;</p>",
+            "<h2>&unknown;</h2>",
+            "<pre>&unknown;</pre>",
+            "<ul><li><p>&unknown;</p></li></ul>",
+            "<blockquote><blockquote><p>&unknown;</p></blockquote></blockquote>",
+            "<table><tr><td><p>&unknown;</p></td></tr></table>",
+        ] {
+            let chapter = chapter("", body);
+            let bytes = book(&["ch.xhtml"], &[("ch.xhtml", &chapter)]);
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert!(
+                doc.blocks.iter().any(|block| block.plain_text().contains("&unknown;")),
+                "{body}"
+            );
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.diagnostics()),
+                [(DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1)],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn chapter_math_damage_follows_the_selected_mathml_branch_and_hidden_policy() {
+        let cases = [
+            ("<mi>&unknown;</mi>", true),
+            (
+                r#"<semantics><mi>&unknown;</mi><annotation encoding="application/x-tex">x</annotation></semantics>"#,
+                false,
+            ),
+            (
+                r#"<semantics><mi>x</mi><annotation encoding="application/x-tex">&unknown;</annotation></semantics>"#,
+                true,
+            ),
+            ("<mi>x</mi><annotation>&unknown;</annotation>", false),
+            ("<mphantom><mi>&unknown;</mi></mphantom>", false),
+        ];
+        for (math, damaged) in cases {
+            for hidden in [crate::HiddenPolicy::Omit, crate::HiddenPolicy::Emit] {
+                let chapter =
+                    chapter("", &format!(r#"<p style="display:none"><math>{math}</math></p>"#));
+                let bytes = book(&["ch.xhtml"], &[("ch.xhtml", &chapter)]);
+                let ctx = ParseCtx::default().with_hidden(hidden);
+                parse(&ctx, &bytes).unwrap();
+                let expected: Vec<Reported> = if hidden == crate::HiddenPolicy::Omit {
+                    vec![(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+                } else {
+                    damaged
+                        .then_some((DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1))
+                        .into_iter()
+                        .collect()
+                };
+                assert_eq!(
+                    diagnostic_rows::<Reported>(&ctx.diagnostics()),
+                    expected,
+                    "{math} {hidden:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_emit_makes_stylesheet_hiding_damage_a_formatting_loss() {
+        let content =
+            chapter(r#"<link rel="stylesheet" href="style.css"/>"#, r#"<p class="h">hidden</p>"#);
+        let bytes = book(
+            &["ch.xhtml"],
+            &[("ch.xhtml", &content), ("style.css", b".h { disp\xffay: none }")],
+        );
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let document = parse(&ctx, &bytes).unwrap();
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "text\n\nhidden\n");
+        assert_eq!(
+            diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::InvalidStyleEncoding, Region::Container, None, 1)]
+        );
     }
 
     #[test]

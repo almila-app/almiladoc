@@ -57,7 +57,6 @@ table lands on its own, before the first wave whose files it shares.
 | Wave | Items | Placement |
 |---|---|---|
 | W7 | unpdf-clip (on the unpdf release that fixes hidden raster gaps) | |
-| W8 | side-policies | |
 
 Prove the native PDF API and its real-consumer integration together before publication; the first
 release is next.
@@ -75,18 +74,6 @@ release is next.
   `THIRD-PARTY-LICENSES`, ADR 0001 decision 6, ADR 0002.
 - **Credit:** none.
 - **Depends on:** that unpdf release. **Size:** about 40 lines. **Tier:** T2.
-
-### W8
-
-#### side-policies: finish source content policies
-- **Goal:** let the caller preserve supported side content and choose the tracked text view.
-- **Scope:** add comments as GFM footnotes in a reserved label space, replies inside their parent,
-  text revision Reject and hidden-structure output policies. Reject retains deleted text, drops
-  inserted text and rejoins paragraphs whose mark a revision removes. Omit counts existing
-  references without reading side parts. Side anchors and references stay isolated from body
-  resolution.
-- **Order:** comments join asset first-reference ordering after headers and footers.
-- **Size:** separate the comment, revision and hidden policies and each source frontend. **Tier:** T3.
 
 ## External tracks
 

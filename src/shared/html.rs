@@ -20,6 +20,7 @@ use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::header::resolve_header_rows;
 use crate::shared::math::{MathTex, mathml_is_display, mathml_to_tex};
 use crate::shared::text::{clean_text, collapse_ws};
+use crate::shared::xml::{DamageScope, attribute_any_unresolved};
 use std::collections::HashMap;
 
 /// Frontend hooks: how hrefs, image sources, and anchor ids resolve in the
@@ -39,19 +40,27 @@ pub(crate) fn to_blocks(
     css: &Stylesheet,
     ctx: &dyn HtmlCtx,
 ) -> Result<Vec<Block>, ConvertError> {
-    walk_blocks(parse_ctx, css, ctx, body, StyleDelta::default(), true)
+    walk_blocks(parse_ctx, css, ctx, &DamageScope::default(), body, StyleDelta::default(), true)
 }
 
 fn walk_blocks(
     parse_ctx: &ParseCtx<'_>,
     css: &Stylesheet,
     ctx: &dyn HtmlCtx,
+    damage: &DamageScope,
     elem: &Element,
     delta: StyleDelta,
     start_boundary: bool,
 ) -> Result<Vec<Block>, ConvertError> {
-    let mut builder =
-        Builder { blocks: Vec::new(), inlines: Vec::new(), css, ctx, parse_ctx, start_boundary };
+    let mut builder = Builder {
+        blocks: Vec::new(),
+        inlines: Vec::new(),
+        css,
+        ctx,
+        parse_ctx,
+        damage,
+        start_boundary,
+    };
     builder.walk_children(elem, delta)?;
     Ok(builder.finish())
 }
@@ -280,6 +289,7 @@ struct Builder<'e> {
     css: &'e Stylesheet,
     ctx: &'e dyn HtmlCtx,
     parse_ctx: &'e ParseCtx<'e>,
+    damage: &'e DamageScope,
     /// Whether text appended while `inlines` is empty sits at a whitespace
     /// boundary (block start: leading whitespace collapses away; inline
     /// sub-builders inherit the surrounding run's state instead).
@@ -353,7 +363,7 @@ impl Builder<'_> {
         delta: StyleDelta,
         start_boundary: bool,
     ) -> Result<Vec<Block>, ConvertError> {
-        walk_blocks(self.parse_ctx, self.css, self.ctx, elem, delta, start_boundary)
+        walk_blocks(self.parse_ctx, self.css, self.ctx, self.damage, elem, delta, start_boundary)
     }
 
     /// Element-level props: matching stylesheet rules and the inline `style`
@@ -373,7 +383,7 @@ impl Builder<'_> {
     }
 
     fn hides(&self, elem: &Element) -> Result<bool, ConvertError> {
-        Ok(self.element_props(elem)?.hidden == Some(true))
+        Ok(!self.parse_ctx.hidden_requested() && self.element_props(elem)?.hidden == Some(true))
     }
 
     fn push_anchor(&mut self, elem: &Element) {
@@ -384,16 +394,22 @@ impl Builder<'_> {
     }
 
     fn walk_children(&mut self, elem: &Element, delta: StyleDelta) -> Result<(), ConvertError> {
-        for node in &elem.children {
+        elem.validate_text_damage(self.parse_ctx)?;
+        let mut damage = elem.text_damage().iter().peekable();
+        for (at, node) in elem.children.iter().enumerate() {
             match node {
-                Node::Text(t) => self.push_text(t, delta),
+                Node::Text(t) => {
+                    let damaged = damage.peek().is_some_and(|(child, _)| *child == at);
+                    self.push_text(t, delta, damaged);
+                    while damage.next_if(|(child, _)| *child == at).is_some() {}
+                }
                 Node::Elem(e) => self.walk_elem(e, delta)?,
             }
         }
         Ok(())
     }
 
-    fn push_text(&mut self, text: &str, delta: StyleDelta) {
+    fn push_text(&mut self, text: &str, delta: StyleDelta, damaged: bool) {
         let mut text = collapse_ws(&clean_text(text));
         // Collapse across node boundaries: leading whitespace vanishes at a
         // block start and after already-emitted whitespace, no matter how
@@ -404,12 +420,13 @@ impl Builder<'_> {
         if text.is_empty() {
             return;
         }
+        self.damage.report(self.parse_ctx, Region::Body, damaged);
         self.inlines.push(Inline::Text { text, style: delta.resolve() });
     }
 
     fn walk_elem(&mut self, elem: &Element, delta: StyleDelta) -> Result<(), ConvertError> {
         let props = self.element_props(elem)?;
-        if props.hidden == Some(true) {
+        if props.hidden == Some(true) && !self.parse_ctx.hidden_requested() {
             if holds_content(elem) {
                 self.parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
             }
@@ -442,6 +459,7 @@ impl Builder<'_> {
                 self.flush_paragraph();
                 let text = elem.text();
                 if !text.trim().is_empty() {
+                    self.damage.report(self.parse_ctx, Region::Body, elem.unresolved_text);
                     self.blocks.push(Block::CodeBlock { lang: None, text });
                 }
             }
@@ -502,11 +520,12 @@ impl Builder<'_> {
     }
 
     fn push_math(&mut self, elem: &Element) {
-        let MathTex { tex, glyphs, .. } = mathml_to_tex(elem);
+        let MathTex { tex, glyphs, unresolved } = mathml_to_tex(elem);
         self.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, Region::Body, glyphs);
         if tex.is_empty() {
             return;
         }
+        self.damage.report(self.parse_ctx, Region::Body, unresolved);
         if mathml_is_display(elem) {
             self.flush_paragraph();
             self.blocks.push(Block::Math(tex));
@@ -519,16 +538,7 @@ impl Builder<'_> {
         self.push_anchor(elem);
         match elem.local.as_str() {
             "br" => self.inlines.push(Inline::LineBreak),
-            "img" | "image" => {
-                let alt = clean_text(elem.attr_any("alt").unwrap_or(""));
-                let src = elem.attr_any("src").or_else(|| elem.attr_any("href")).unwrap_or("");
-                let source = self.ctx.image_source(src)?;
-                self.inlines.push(Inline::Image {
-                    origin: self.parse_ctx.image_origin(Region::Body),
-                    alt,
-                    source,
-                });
-            }
+            "img" | "image" => self.push_image(elem)?,
             "a" => {
                 let target = elem.attr_any("href").and_then(|href| self.ctx.link_target(href));
                 let content = self.inline_children_at(
@@ -539,7 +549,16 @@ impl Builder<'_> {
                 // An empty label still keeps a resolved target: the renderer
                 // shows the URL as the link text.
                 match target {
-                    Some(target) => self.inlines.push(Inline::Link { content, target }),
+                    Some(target) => {
+                        self.damage.report(
+                            self.parse_ctx,
+                            Region::Body,
+                            attribute_any_unresolved(elem, "href")
+                                && matches!(&target, LinkTarget::External(url) | LinkTarget::Relative(url)
+                                    if crate::shared::uri::is_safe_link(url)),
+                        );
+                        self.inlines.push(Inline::Link { content, target });
+                    }
                     None => self.inlines.extend(content),
                 }
             }
@@ -553,6 +572,27 @@ impl Builder<'_> {
             }
             _ => self.walk_children(elem, delta)?,
         }
+        Ok(())
+    }
+
+    fn push_image(&mut self, elem: &Element) -> Result<(), ConvertError> {
+        let alt = clean_text(elem.attr_any("alt").unwrap_or(""));
+        let attr = if elem.attr_any("src").is_some() { "src" } else { "href" };
+        let source = self.ctx.image_source(elem.attr_any(attr).unwrap_or(""))?;
+        let target_damage = self.parse_ctx.image_links_requested()
+            && matches!(&source, ImageSource::External(url) if crate::shared::uri::is_safe_link(url))
+            && attribute_any_unresolved(elem, attr);
+        self.damage.report(
+            self.parse_ctx,
+            Region::Body,
+            target_damage
+                || (self.parse_ctx.image_alt_requested() && attribute_any_unresolved(elem, "alt")),
+        );
+        self.inlines.push(Inline::Image {
+            origin: self.parse_ctx.image_origin(Region::Body),
+            alt,
+            source,
+        });
         Ok(())
     }
 
@@ -918,6 +958,24 @@ mod tests {
 
     fn blocks(html: &str) -> Vec<Block> {
         blocks_with_css(html, "")
+    }
+
+    #[test]
+    fn hidden_emit_keeps_css_hidden_content_and_reports_unsupported_children() {
+        let html = r#"<body><p class="h">hidden</p><ul><li>item</li><div class="h">unread</div></ul><script>never</script></body>"#;
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let blocks = convert(html, ".h { display: none }", &ctx).unwrap();
+        assert_eq!(
+            crate::render::markdown::document_to_markdown(&crate::model::Document {
+                blocks,
+                ..crate::model::Document::default()
+            }),
+            "hidden\n\n- item\n"
+        );
+        assert_eq!(
+            diagnostic_rows::<(DiagnosticCode, Region, u64)>(&ctx.into_diagnostics()),
+            [(DiagnosticCode::BlockUnread, Region::Body, 1)]
+        );
     }
 
     #[test]

@@ -1,7 +1,10 @@
 //! The converters the fuzz targets run, the packages around one fuzzed part, and the determinism
 //! check the part-injection targets run.
 
-use almiladoc::{Config, Conversion, ConvertError, Converter, Format, Input};
+use almiladoc::{
+    CommentPolicy, Config, Conversion, ConvertError, Converter, Format, HeaderFooterPolicy,
+    HiddenPolicy, Input, RevisionPolicy,
+};
 use std::io::{Cursor, Write};
 use zip::result::ZipResult;
 use zip::write::SimpleFileOptions;
@@ -19,8 +22,7 @@ pub const MAX_GRID_SLOTS: u64 = 500_000;
 /// sanitizers; below it the bound still catches painting that is charged too little.
 pub const MAX_PAINTING_WORK: u64 = 1 << 20;
 
-/// The converter every target that does not paint runs: the default configuration with
-/// [`MAX_GRID_SLOTS`].
+/// A converter with default content policies and [`MAX_GRID_SLOTS`].
 ///
 /// # Panics
 ///
@@ -51,7 +53,32 @@ fn config() -> Config {
 /// Converts `data` as `format`; a conversion may fail with a typed error but never panic, hang or
 /// exhaust memory.
 pub fn convert(data: &[u8], format: Format) {
-    let _: Result<Conversion, ConvertError> = converter().convert(Input::new(data, format));
+    let _: Result<Conversion, ConvertError> =
+        policy_converter(data).convert(Input::new(data, format));
+}
+
+fn policy_config(data: &[u8]) -> Config {
+    let bits = data.iter().copied().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    let mut config = config();
+    if bits & 1 != 0 {
+        config.comments = CommentPolicy::Emit;
+    }
+    if bits & 2 != 0 {
+        config.hidden = HiddenPolicy::Emit;
+    }
+    if bits & 4 != 0 {
+        config.revisions = RevisionPolicy::Reject;
+    }
+    if bits & 8 != 0 {
+        config.headers_footers = HeaderFooterPolicy::Emit;
+    }
+    config
+}
+
+fn policy_converter(data: &[u8]) -> Converter {
+    Converter::new(policy_config(data)).expect("the fuzz configuration is valid")
 }
 
 macro_rules! content_types {
@@ -244,7 +271,7 @@ impl Template {
     }
 
     /// Converts the package around `fuzzed` twice with one converter, and parses and serialises
-    /// it to JSON twice.
+    /// it to JSON twice, under deterministic source-content policies selected by its bytes.
     ///
     /// # Panics
     ///
@@ -254,7 +281,7 @@ impl Template {
         let Ok(package) = self.package(fuzzed) else {
             return;
         };
-        let converter = converter();
+        let converter = policy_converter(fuzzed);
         let input = Input::new(&package, self.format);
         let convert = || converter.convert(input.clone());
         assert_eq!(convert(), convert());
@@ -269,6 +296,43 @@ mod tests {
     use almiladoc::{DiagnosticCode, Limit};
     use std::fs;
     use std::path::Path;
+
+    fn policy_profile(config: &Config) -> (bool, bool, bool, bool) {
+        (
+            config.comments == CommentPolicy::Emit,
+            config.hidden == HiddenPolicy::Emit,
+            config.revisions == RevisionPolicy::Reject,
+            config.headers_footers == HeaderFooterPolicy::Emit,
+        )
+    }
+
+    #[test]
+    fn policy_profiles_keep_saved_inputs_stable_across_toolchain_versions() {
+        for (bytes, profile) in [
+            (b"".as_slice(), (true, false, true, false)),
+            (b"a".as_slice(), (false, false, true, true)),
+            (b"hello".as_slice(), (true, true, false, true)),
+        ] {
+            assert_eq!(policy_profile(&policy_config(bytes)), profile);
+        }
+    }
+
+    #[test]
+    fn equal_length_payloads_cover_every_policy_combination_even_when_cfb_aligned() {
+        for size in [7, 512] {
+            let profiles: std::collections::BTreeSet<_> = (0..=u8::MAX)
+                .map(|value| {
+                    let mut bytes = vec![0; size];
+                    bytes[size - 1] = value;
+                    let selected = policy_config(&bytes);
+                    assert_eq!(selected, policy_config(&bytes));
+                    assert_eq!(selected.limits.max_grid_slots, MAX_GRID_SLOTS);
+                    policy_profile(&selected)
+                })
+                .collect();
+            assert_eq!(profiles.len(), 16, "{size}-byte payloads");
+        }
+    }
 
     fn seeds(template: &Template) -> Vec<(String, Vec<u8>)> {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds").join(template.name);

@@ -25,9 +25,13 @@ and format-code parsers rather than dying at the container gate. `xlsx` takes
 a whole workbook, and its seeds cover all three containers because the
 frontend picks the reader from the bytes.
 
-Every target but `pdf_raster` converts through `converter()` in `src/lib.rs`, which the whole-input
-targets reach as `convert(data, format)`: the default configuration with `max_grid_slots` lowered,
-so a grid at its limit stays inside libFuzzer's slow-unit bound.
+The shared configuration lowers `max_grid_slots`, so a grid at its limit stays inside
+libFuzzer's slow-unit bound. Whole-input `convert(data, format)` and part-injection `check` select
+comments, hidden content, text revisions and headers/footers from a stable FNV-1a hash of the
+original fuzz bytes, without stripping or changing them. Saved inputs keep the same policy profile
+across toolchain upgrades. This reaches all 16 policy combinations,
+including aligned CFB inputs whose length cannot vary freely. Seed contract tests use the default
+policies explicitly. Dedicated rendering and painting targets keep their own configuration.
 
 `pdf_raster` parses a PDF with every page a gap through `painting_converter()`, which lowers
 `max_work` too, paints every page at up to 50 dpi within 1 Mpx twice, and fails on any difference.
