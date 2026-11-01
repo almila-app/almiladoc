@@ -262,7 +262,9 @@ fn read_slide(
 ) -> Result<SlideTree, ConvertError> {
     let (tree, held) = parse_ctx.holding_reports(|| pkg.related_xml_part(part, Role::Probe))?;
     let slide = tree.as_ref().and_then(|t| t.find(ns::P, "sld"));
-    if slide.is_some_and(|s| matches!(s.attr(ns::P, "show"), Some("0" | "false"))) {
+    if !parse_ctx.hidden_requested()
+        && slide.is_some_and(|s| matches!(s.attr(ns::P, "show"), Some("0" | "false")))
+    {
         parse_ctx.emit(DiagnosticCode::HiddenOmitted, Region::Body);
         return Ok(SlideTree::Omitted);
     }
@@ -714,6 +716,10 @@ fn renders_hidden(elem: &Element) -> bool {
         || !Ph::of(elem).is_some_and(|ph| FOOTERS.contains(&ph.kind))
 }
 
+fn reads_hidden(elem: &Element) -> bool {
+    elem.ns.as_deref() != Some(ns::VML) && renders_hidden(elem)
+}
+
 /// Whether this reader reads `elem` where a slide shows it: never VML.
 fn reads(elem: &Element) -> bool {
     elem.ns.as_deref() != Some(ns::VML) && renders(elem)
@@ -731,7 +737,11 @@ fn selected_children<'e>(
     open.reverse();
     while let Some(elem) = open.pop() {
         if elem.is(ns::MC, "AlternateContent") {
-            let shown = (renders as fn(&Element) -> bool, reads as fn(&Element) -> bool);
+            let shown = if parse_ctx.hidden_requested() {
+                (renders_hidden as fn(&Element) -> bool, reads_hidden as fn(&Element) -> bool)
+            } else {
+                (renders as fn(&Element) -> bool, reads as fn(&Element) -> bool)
+            };
             let branch = alternate_branch(parse_ctx, region, elem, None, SUPPORTED_NS, shown);
             if let Some(branch) = branch {
                 let at = open.len();
@@ -779,7 +789,7 @@ fn parse_shape_element(
     if child.ns.as_deref().is_none_or(|n| n != ns::P) {
         return Ok(());
     }
-    if hidden_shape(child) {
+    if hidden_shape(child) && !ctx.parse_ctx.hidden_requested() {
         ctx.emit(DiagnosticCode::HiddenOmitted);
         return Ok(());
     }
@@ -1088,10 +1098,10 @@ fn shape_content(
     ph: Option<Ph<'_>>,
     blocks: &mut Vec<Block>,
 ) {
-    if sp
-        .outermost(ns::P, "sp")
-        .any(|inner| (!hidden_shape(inner)) && !inner.text().trim().is_empty())
-    {
+    if sp.outermost(ns::P, "sp").any(|inner| {
+        (ctx.parse_ctx.hidden_requested() || !hidden_shape(inner))
+            && !inner.text().trim().is_empty()
+    }) {
         ctx.emit(DiagnosticCode::GraphicUnread);
     }
     if sp.find(ns::P, "spPr").is_some_and(|pr| pr.find(ns::A, "blipFill").is_some()) {
@@ -1638,12 +1648,20 @@ mod tests {
         );
         let parts =
             deck(&[part("sld", "", &format!("{}{hidden}", shape("", &text("shown"))), "")], &[]);
-        let ctx = ParseCtx::default();
-        parse(&ctx, &zip_package(&parts)).unwrap();
-        assert_eq!(
-            diagnostic_rows::<Reported>(&ctx.diagnostics()),
-            [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
-        );
+        for (policy, expected) in [
+            (
+                crate::HiddenPolicy::Omit,
+                vec![(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)],
+            ),
+            (
+                crate::HiddenPolicy::Emit,
+                vec![(DiagnosticCode::UnresolvedEntity, Region::Body, Some(1), 1)],
+            ),
+        ] {
+            let ctx = ParseCtx::default().with_hidden(policy);
+            parse(&ctx, &zip_package(&parts)).unwrap();
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), expected);
+        }
     }
 
     #[test]
@@ -1758,6 +1776,23 @@ mod tests {
     }
 
     #[test]
+    fn hidden_policy_emits_hidden_slides_shapes_and_nested_groups() {
+        let inner = shape("", &text("inside"));
+        let group = format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden="true"/></p:nvGrpSpPr>{inner}</p:grpSp>"#
+        );
+        let hidden = part("sld", r#"show="0""#, &group, "");
+        let parts = deck(&[hidden], &[]);
+        let omitted = parse(&ParseCtx::default(), &zip_package(&parts)).unwrap();
+        assert_eq!(omitted.blocks, []);
+        let ctx = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+        let document = parse(&ctx, &zip_package(&parts)).unwrap();
+        assert_eq!(unit_ordinals(&document), [1]);
+        assert_eq!(crate::render::markdown::document_to_markdown(&document), "inside\n");
+        assert_eq!(diagnostic_rows::<Reported>(&ctx.diagnostics()), []);
+    }
+
+    #[test]
     fn legacy_replies_follow_both_parent_identifiers() {
         let threading = "http://schemas.microsoft.com/office/powerpoint/2012/main";
         let comments = format!(
@@ -1830,6 +1865,37 @@ mod tests {
                 (DiagnosticCode::LinkTargetUnread, Region::Comment, Some(2), 1),
             ]
         );
+    }
+
+    #[test]
+    fn hidden_shapes_emit_at_each_group_level_when_requested() {
+        let hidden_shape =
+            shape("", &text("inside")).replace("<p:nvSpPr>", r#"<p:nvSpPr><p:cNvPr hidden="1"/>"#);
+        let nested = format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr hidden="true"/></p:nvGrpSpPr><p:grpSp>{hidden_shape}</p:grpSp></p:grpSp>"#
+        );
+        for tree in [hidden_shape, nested] {
+            let parts = one(&tree, &[], &[]);
+            let omit = ParseCtx::default();
+            assert_eq!(
+                crate::render::markdown::document_to_markdown(
+                    &parse(&omit, &zip_package(&parts)).unwrap()
+                ),
+                ""
+            );
+            assert_eq!(
+                diagnostic_rows::<Reported>(&omit.diagnostics()),
+                [(DiagnosticCode::HiddenOmitted, Region::Body, Some(1), 1)]
+            );
+            let emit = ParseCtx::default().with_hidden(crate::HiddenPolicy::Emit);
+            assert_eq!(
+                crate::render::markdown::document_to_markdown(
+                    &parse(&emit, &zip_package(&parts)).unwrap()
+                ),
+                "inside\n"
+            );
+            assert_eq!(diagnostic_rows::<Reported>(&emit.diagnostics()), []);
+        }
     }
 
     #[test]
