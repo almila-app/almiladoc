@@ -82,15 +82,17 @@ pub(crate) fn map_ordered<T: Sync, R: Send>(
 }
 
 #[cfg(feature = "ocr-http")]
-pub(crate) use network::{fan_out, wait};
+pub(crate) use network::{Spawn, fan_out, on_a_thread, wait, watched};
 
 /// What a network engine's requests run on: scoped threads of their own, and waits a cancel
 /// ends.
 #[cfg(feature = "ocr-http")]
 mod network {
+    use std::io;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Mutex, PoisonError};
-    use std::thread;
+    use std::thread::{self, Scope};
     use std::time::{Duration, Instant};
 
     use crate::ledger::CancelToken;
@@ -111,6 +113,52 @@ mod network {
             }
             thread::sleep(left.min(CANCEL_POLL));
         }
+    }
+
+    /// Starts a watcher on a thread of `scope`, failing when none starts.
+    pub(crate) type Spawn = for<'scope, 'env> fn(
+        &'scope Scope<'scope, 'env>,
+        Box<dyn FnOnce() + Send + 'scope>,
+    ) -> io::Result<()>;
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the watcher of a network engine's requests runs on a scoped thread of its own"
+    )]
+    pub(crate) fn on_a_thread<'scope>(
+        scope: &'scope Scope<'scope, '_>,
+        watch: Box<dyn FnOnce() + Send + 'scope>,
+    ) -> io::Result<()> {
+        thread::Builder::new().spawn_scoped(scope, watch).map(drop)
+    }
+
+    /// `work` on the calling thread while a watcher `spawn` starts calls `stop` once `cancel` is
+    /// cancelled, ending as soon as `work` does; `None` without a watcher.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the watcher of a network engine's requests runs on a scoped thread of its own"
+    )]
+    pub(crate) fn watched<R>(
+        spawn: Spawn,
+        cancel: &CancelToken,
+        stop: impl FnOnce() + Send,
+        work: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let (done, finished) = mpsc::channel::<()>();
+        thread::scope(|scope| {
+            let watch = move || {
+                while finished.recv_timeout(CANCEL_POLL) == Err(RecvTimeoutError::Timeout) {
+                    if cancel.is_cancelled() {
+                        stop();
+                        return;
+                    }
+                }
+            };
+            spawn(scope, Box::new(watch)).ok()?;
+            let result = work();
+            drop(done);
+            Some(result)
+        })
     }
 
     /// `work` of each of `items` on the calling thread and up to `workers - 1` scoped ones the OS
@@ -197,6 +245,43 @@ mod network {
             });
             assert_eq!(taken[0], Some(0));
             assert_eq!(taken[3..], [None; 9]);
+        }
+
+        #[test]
+        fn a_watcher_stops_once_its_token_is_cancelled_and_ends_with_its_work() {
+            let (cancel, stopped) = (CancelToken::new(), AtomicBool::new(false));
+            let runs = 20;
+            let start = Instant::now();
+            for _ in 0..runs {
+                let ran =
+                    watched(on_a_thread, &cancel, || stopped.store(true, Ordering::SeqCst), || 7);
+                assert_eq!((ran, stopped.load(Ordering::SeqCst)), (Some(7), false));
+            }
+            assert!(start.elapsed() < CANCEL_POLL * runs, "{:?}", start.elapsed());
+            let patience = Duration::from_secs(1);
+            let ended = watched(
+                on_a_thread,
+                &cancel,
+                || stopped.store(true, Ordering::SeqCst),
+                || {
+                    cancel.cancel();
+                    let start = Instant::now();
+                    while !stopped.load(Ordering::SeqCst) && start.elapsed() < patience {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    start.elapsed()
+                },
+            );
+            let ended = ended.unwrap();
+            assert!(stopped.load(Ordering::SeqCst) && ended < patience, "{ended:?}");
+        }
+
+        #[test]
+        fn work_never_runs_without_a_watcher() {
+            let (cancel, ran) = (CancelToken::new(), AtomicBool::new(false));
+            let no_thread: Spawn = |_, _| Err(io::ErrorKind::WouldBlock.into());
+            let refused = watched(no_thread, &cancel, || (), || ran.store(true, Ordering::SeqCst));
+            assert_eq!((refused, ran.load(Ordering::SeqCst)), (None, false));
         }
 
         #[test]

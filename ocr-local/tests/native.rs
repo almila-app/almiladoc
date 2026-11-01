@@ -10,7 +10,7 @@ mod test_logging;
 
 use almiladoc::{
     CancelToken, Converter, Format, GapFill, ImageOcr, ImagePolicy, Input, OcrEngine, OcrFailure,
-    OcrOutcome, OnLoss, RasterSpec,
+    OcrFailureKind, OcrOutcome, OnLoss, RasterSpec,
 };
 use almiladoc_ocr_local::{
     Config, Error, FileRole, FileSpec, Limits, LocalOcr, ModelFiles, Runtime,
@@ -155,7 +155,7 @@ fn check_vocabulary_mismatch(
         LocalOcr::new(runtime, &models, config, raster).expect("native mismatch setup failed");
     let result = incompatible.recognize(&[request], &CancelToken::new());
     assert!(
-        result == vec![OcrOutcome::Unattempted(OcrFailure::default())],
+        result == vec![OcrOutcome::Unattempted(OcrFailure::new(OcrFailureKind::Unreachable, None))],
         "incompatible vocabulary was not refused"
     );
 }

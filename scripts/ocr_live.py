@@ -30,14 +30,16 @@ FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/pdf/handmade-fiv
 
 
 def settle(
-    parsed: almiladoc.Parsed, request: almiladoc.OcrRequest, outcome: str | almiladoc.OcrFailure
+    parsed: almiladoc.Parsed, request: almiladoc.OcrRequest, result: almiladoc.OcrResult
 ) -> str:
-    if isinstance(outcome, almiladoc.OcrFailure):
-        if outcome.attempted:
+    if (failure := result.failure) is not None:
+        if failure.attempted:
             parsed.fail_gap(request.gap)
-        return f"{'failed' if outcome.attempted else 'unattempted'}, status {outcome.status}"
+        return f"{'failed' if failure.attempted else 'unattempted'}, status {failure.status}"
+    outcome = result.text or ""
+    fill = parsed.fill_gap_tables if result.tables else parsed.fill_gap
     try:
-        parsed.fill_gap(request.gap, outcome)
+        fill(request.gap, outcome)
     except almiladoc.GapRefused as refused:
         parsed.fail_gap(request.gap)
         return f"refused, past {refused.limit}"
@@ -218,12 +220,12 @@ def recognize_corpus(args: argparse.Namespace) -> list[str]:
         outcomes = engine.recognize([request])
         if len(outcomes) != 1:
             return ["error"]
-        outcome = outcomes[0]
-        if isinstance(outcome, almiladoc.OcrFailure):
-            status = "none" if outcome.status is None else str(outcome.status)
-            statuses.append(f"{'failed' if outcome.attempted else 'unattempted'}-{status}")
+        result = outcomes[0]
+        if (failure := result.failure) is not None:
+            status = "none" if failure.status is None else str(failure.status)
+            statuses.append(f"{'failed' if failure.attempted else 'unattempted'}-{status}")
             break
-        statuses.append(judge(outcome, text, headings))
+        statuses.append(judge(result.text or "", text, headings))
     return statuses
 
 

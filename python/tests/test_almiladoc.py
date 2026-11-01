@@ -3,6 +3,7 @@
 import array
 import ast
 import contextlib
+import datetime
 import http.server
 import io
 import json
@@ -171,9 +172,10 @@ class Vision(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.seen.append((self.path, self.headers["Authorization"], body))
-        status, headers, content = self.server.answer
-        reply = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
-        payload = json.dumps(reply).encode() if status == 200 else b""
+        status, headers, content, reply = self.server.answer
+        if reply is None and status == 200:
+            reply = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        payload = b"" if reply is None else json.dumps(reply).encode()
         self.send_response(status)
         for header in headers:
             self.send_header(*header)
@@ -187,9 +189,9 @@ class Vision(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def vision_server(status=200, headers=(), content="A dot"):
+def vision_server(status=200, headers=(), content="A dot", reply=None):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Vision)
-    server.answer, server.seen = (status, headers, content), []
+    server.answer, server.seen = (status, headers, content, reply), []
     server.base_url = f"http://127.0.0.1:{server.server_port}/v1"
     serving = threading.Thread(target=server.serve_forever)
     serving.start()
@@ -1314,30 +1316,136 @@ class OcrHttpTest(unittest.TestCase):
         requests = pickle.loads(sent)
         with vision_server() as server:
             engine = almiladoc.OcrHttp(server.base_url, "vision", concurrency=2)
-            texts = engine.recognize(requests * 3)
+            results = engine.recognize(requests * 3)
             converted = converter_.convert(data, ocr=engine)
-        self.assertEqual(texts, ["A dot"] * 3)
+        self.assertEqual([result.text for result in results], ["A dot"] * 3)
+        self.assertEqual(
+            (results[0].tables, results[0].failure, results[0].attempts),
+            (False, None, [almiladoc.OcrAttempt(None, 200)]),
+        )
+        self.assertEqual(pickle.loads(pickle.dumps(results)), results)
         self.assertEqual(len(server.seen), 4)
-        child.fill_gap(requests[0].gap, texts[0])
+        child.fill_gap(requests[0].gap, results[0].text)
         self.assertEqual(child.render().markdown, converted.markdown)
         with vision_server(status=400) as server:
             engine = almiladoc.OcrHttp(server.base_url, "vision")
             (rejected,) = engine.recognize(requests)
-        self.assertEqual(rejected, almiladoc.OcrFailure(status=400))
+        failure = almiladoc.OcrFailure(kind="rejected", attempted=False, status=400)
         self.assertEqual(
-            (rejected.attempted, rejected.status, repr(rejected)),
-            (True, 400, "OcrFailure(attempted=True, status=400)"),
+            rejected,
+            almiladoc.OcrResult(failure=failure, attempts=[almiladoc.OcrAttempt(status=400)]),
+        )
+        self.assertEqual(
+            (rejected.text, rejected.failure.kind, rejected.failure.attempted, repr(failure)),
+            (
+                None,
+                "rejected",
+                False,
+                "OcrFailure(kind='rejected', attempted=False, status=400, retry_after=None)",
+            ),
         )
         self.assertEqual(pickle.loads(pickle.dumps(rejected)), rejected)
+        unreachable = almiladoc.OcrFailure(kind="unreachable", attempted=False)
         self.assertEqual(
-            engine.recognize(requests * 2), [almiladoc.OcrFailure(attempted=False)] * 2
+            [result.failure for result in engine.recognize(requests * 2)], [unreachable] * 2
         )
-        self.assertEqual(hash(almiladoc.OcrFailure()), hash(almiladoc.OcrFailure(attempted=True)))
+        self.assertEqual(
+            hash(almiladoc.OcrFailure(kind="busy")),
+            hash(almiladoc.OcrFailure(kind="busy", attempted=True)),
+        )
         (request,) = requests
         for image, media_type in [(request.image, "image/jpeg"), (b"GIF89a", "image/png")]:
             forged = almiladoc.OcrRequest(request.gap, image, media_type, 64)
             with self.assertRaises(ValueError):
                 engine.recognize([forged])
+
+    def test_a_result_reports_usage_tier_and_each_attempt_and_pickles(self):
+        converter_, data = self.rich()
+        requests = converter_.parse(data).ocr_requests()
+        reply = {
+            "model": "vision-2",
+            "service_tier": "flex",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 4},
+            },
+            "choices": [{"message": {"content": "| a |\n|---|"}, "finish_reason": "length"}],
+        }
+        with vision_server(reply=reply) as server:
+            engine = almiladoc.OcrHttp(
+                server.base_url,
+                "vision",
+                layout="developer_then_image",
+                token_limit_field="max_completion_tokens",
+                temperature=None,
+                image_detail="high",
+                answer_model="vision-2",
+                service_tiers=["default", "flex"],
+                tier_fallback=([], "Flex is"),
+                preserve_table_spans=True,
+            )
+            (result,) = engine.recognize(requests)
+        body = server.seen[0][2]
+        self.assertEqual(
+            (body["max_completion_tokens"], "temperature" in body, body["service_tier"]),
+            (8192, False, "default"),
+        )
+        self.assertEqual([message["role"] for message in body["messages"]], ["developer", "user"])
+        self.assertEqual(body["messages"][1]["content"][0]["image_url"]["detail"], "high")
+        self.assertEqual(
+            result,
+            almiladoc.OcrResult(
+                failure=almiladoc.OcrFailure(kind="unfinished", status=200),
+                usage=almiladoc.TokenUsage(6, 4, 7),
+                realized_tier=1,
+                attempts=[almiladoc.OcrAttempt(0, 200)],
+            ),
+        )
+        usage = result.usage
+        self.assertEqual((usage.input_uncached, usage.input_cached, usage.output), (6, 4, 7))
+        self.assertEqual(
+            repr(result),
+            "OcrResult(failure=OcrFailure(kind='unfinished', attempted=True, status=200, "
+            "retry_after=None), usage=TokenUsage(input_uncached=6, input_cached=4, output=7), "
+            "realized_tier=1, attempts=[OcrAttempt(tier=0, status=200)])",
+        )
+        for value in [result, usage, result.attempts[0], result.failure]:
+            self.assertEqual(pickle.loads(pickle.dumps(value)), value)
+        filled = almiladoc.OcrResult(text="| a |", tables=True)
+        self.assertEqual((filled.text, filled.tables, filled.failure), ("| a |", True, None))
+        self.assertEqual(
+            repr(filled),
+            "OcrResult(text=<5 bytes>, tables=True, usage=None, realized_tier=None, attempts=[])",
+        )
+        for arguments in [{}, {"text": "a", "failure": result.failure}]:
+            with self.assertRaises(ValueError):
+                almiladoc.OcrResult(**arguments)
+        with self.assertRaises(ValueError):
+            almiladoc.OcrFailure(kind="other")
+
+    def test_retry_after_is_reported_as_seconds_or_an_aware_date(self):
+        converter_, data = self.rich()
+        requests = converter_.parse(data).ocr_requests()
+        utc = datetime.UTC
+        latest = datetime.datetime(9999, 12, 31, 23, 59, 59, tzinfo=utc)
+        for header, after in [
+            ("120", 120),
+            ("Sun, 01 Nov 2026 10:08:00 GMT", datetime.datetime(2026, 11, 1, 10, 8, tzinfo=utc)),
+            ("Fri, 31 Dec 9999 23:59:60 GMT", latest),
+        ]:
+            with vision_server(status=429, headers=[("Retry-After", header)]) as server:
+                engine = almiladoc.OcrHttp(server.base_url, "vision", retries=0)
+                (result,) = engine.recognize(requests)
+            failure = result.failure
+            self.assertEqual(
+                (failure.kind, failure.status, failure.retry_after), ("busy", 429, after)
+            )
+            self.assertEqual(pickle.loads(pickle.dumps(result)), result)
+            self.assertIn(f"retry_after={after!r}", repr(result))
+        for wrong in [datetime.datetime(2026, 11, 1), True]:
+            with self.assertRaises(TypeError):
+                almiladoc.OcrFailure(kind="busy", retry_after=wrong)
 
     def test_a_refused_field_raises_config_error_naming_it(self):
         for field, given in [
@@ -1356,6 +1464,12 @@ class OcrHttpTest(unittest.TestCase):
             ("extra_body", {"extra_body": {"seed": float("nan")}}),
             ("max_tokens", {"max_tokens": 0}),
             ("temperature", {"temperature": 2.5}),
+            ("layout", {"layout": "image_first"}),
+            ("token_limit_field", {"token_limit_field": "tokens"}),
+            ("image_detail", {"image_detail": "medium"}),
+            ("answer_model", {"answer_model": ""}),
+            ("service_tiers", {"service_tiers": ["flex tier"]}),
+            ("tier_fallback", {"service_tiers": ["flex"], "tier_fallback": ([], "Flex")}),
             ("retries", {"retries": 11}),
             ("concurrency", {"concurrency": 0}),
             ("concurrency", {"concurrency": 17}),
@@ -1393,7 +1507,10 @@ class OcrHttpTest(unittest.TestCase):
             began = time.monotonic()
             outcomes = engine.recognize(requests, cancel=token)
             ended = time.monotonic()
-        self.assertEqual(outcomes, [almiladoc.OcrFailure(attempted=False, status=503)])
+        cancelled = almiladoc.OcrFailure(
+            kind="cancelled", attempted=False, status=503, retry_after=60
+        )
+        self.assertEqual([outcome.failure for outcome in outcomes], [cancelled])
         self.assertLess(ended - began, 10)
         self.assertEqual(len(server.seen), 1)
 
@@ -1404,10 +1521,12 @@ class OcrHttpTest(unittest.TestCase):
             api_key="sk-secret",
             prompt="A secret prompt",
             extra_body={"seed": 7},
+            service_tiers=["flex", "default"],
+            tier_fallback=(["flex_busy"], "A secret prefix"),
         )
         shown = repr(engine)
         self.assertIn("vision.example", shown)
-        for secret in ["sk-secret", "A secret prompt"]:
+        for secret in ["sk-secret", "A secret prompt", "A secret prefix"]:
             self.assertNotIn(secret, shown)
         with self.assertRaises(almiladoc.ConfigError) as caught:
             almiladoc.OcrHttp("https://vision.example/v1?token=q", "vision", api_key="sk-secret")

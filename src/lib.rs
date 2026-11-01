@@ -50,11 +50,14 @@ pub use json::JSON_SCHEMA_VERSION;
 pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 pub use ocr::{
-    GapError, GapFill, OcrEngine, OcrFailure, OcrImage, OcrLine, OcrOutcome, OcrRequest,
-    OcrSummary, RasterSpec,
+    GapError, GapFill, OcrEngine, OcrFailure, OcrFailureKind, OcrImage, OcrLine, OcrOutcome,
+    OcrRequest, OcrSummary, RasterSpec, RetryAfter,
 };
 #[cfg(feature = "ocr-http")]
-pub use ocr::{OcrHttp, OcrHttpConfig};
+pub use ocr::{
+    ImageDetail, MessageLayout, OcrAttempt, OcrHttp, OcrHttpConfig, OcrReport, TierFallback,
+    TokenLimitField, TokenUsage,
+};
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = {

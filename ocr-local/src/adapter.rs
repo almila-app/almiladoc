@@ -1,8 +1,8 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 
 use almiladoc::{
-    CancelToken, GapFill, OcrEngine, OcrFailure, OcrImage, OcrLine, OcrOutcome, OcrRequest,
-    RasterSpec,
+    CancelToken, GapFill, OcrEngine, OcrFailure, OcrFailureKind, OcrImage, OcrLine, OcrOutcome,
+    OcrRequest, RasterSpec,
 };
 use image::{ImageFormat, RgbImage};
 
@@ -91,27 +91,30 @@ impl LocalOcr {
 
     pub(crate) fn read(&self, image: &OcrImage, budget: u64, cancel: &CancelToken) -> OcrOutcome {
         if cancel.is_cancelled() {
-            return unattempted();
+            return unattempted(OcrFailureKind::Cancelled);
         }
-        let result = self.try_read(image, budget, cancel);
+        let mut backend = match self.backend.try_lock() {
+            Ok(backend) => backend,
+            Err(TryLockError::WouldBlock) => return unattempted(OcrFailureKind::Busy),
+            Err(TryLockError::Poisoned(_)) => return unattempted(OcrFailureKind::Unreachable),
+        };
+        let result = self.try_read(&mut **backend, image, budget, cancel);
         if cancel.is_cancelled() {
-            return unattempted();
+            return unattempted(OcrFailureKind::Cancelled);
         }
+        let failed = |kind| OcrOutcome::Failed(OcrFailure::new(kind, None));
         match result {
             Ok(lines) => OcrOutcome::Fill(GapFill::Lines(lines)),
-            Err(
-                Error::ImageFormat
-                | Error::ImageDecode
-                | Error::ImageLimit
-                | Error::EmptyRecognition
-                | Error::OutputLimit,
-            ) => OcrOutcome::Failed(OcrFailure::default()),
-            Err(_) => unattempted(),
+            Err(Error::ImageFormat | Error::ImageDecode) => failed(OcrFailureKind::Rejected),
+            Err(Error::ImageLimit | Error::OutputLimit) => failed(OcrFailureKind::TooLarge),
+            Err(Error::EmptyRecognition) => failed(OcrFailureKind::NoText),
+            Err(_) => unattempted(OcrFailureKind::Unreachable),
         }
     }
 
     fn try_read(
         &self,
+        backend: &mut dyn Recognizer,
         image: &OcrImage,
         budget: u64,
         cancel: &CancelToken,
@@ -127,7 +130,6 @@ impl LocalOcr {
         if image.media_type != mime {
             return Err(Error::ImageFormat);
         }
-        let mut backend = self.backend.try_lock().map_err(|_| Error::Runtime)?;
         let mut limits = self.limits.clone();
         limits.max_text_bytes =
             limits.max_text_bytes.min(usize::try_from(budget).unwrap_or(usize::MAX));
@@ -151,24 +153,25 @@ impl OcrEngine for LocalOcr {
     }
 
     fn recognize(&self, requests: &[OcrRequest], cancel: &CancelToken) -> Vec<OcrOutcome> {
-        let mut stopped = false;
+        let mut stopped = None;
         requests
             .iter()
             .map(|request| {
-                let outcome = if stopped {
-                    unattempted()
-                } else {
-                    self.read(&request.image, request.max_text_bytes, cancel)
-                };
-                stopped |= matches!(outcome, OcrOutcome::Unattempted(_));
+                let outcome = stopped.map_or_else(
+                    || self.read(&request.image, request.max_text_bytes, cancel),
+                    unattempted,
+                );
+                if let OcrOutcome::Unattempted(failure) = &outcome {
+                    stopped = Some(failure.kind);
+                }
                 outcome
             })
             .collect()
     }
 }
 
-fn unattempted() -> OcrOutcome {
-    OcrOutcome::Unattempted(OcrFailure::default())
+fn unattempted(kind: OcrFailureKind) -> OcrOutcome {
+    OcrOutcome::Unattempted(OcrFailure::new(kind, None))
 }
 
 pub(crate) fn located(

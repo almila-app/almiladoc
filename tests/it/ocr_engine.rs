@@ -5,8 +5,8 @@ use crate::build::{docx_with, relationships};
 use crate::support::{configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr, Input,
-    Limit, OcrEngine, OcrFailure, OcrLine, OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed,
-    RasterSpec,
+    Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrLine, OcrOutcome, OcrRequest, OcrSummary,
+    OnLoss, Parsed, RasterSpec,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -62,8 +62,8 @@ impl OcrEngine for Scripted {
             .zip(requests)
             .map(|(letter, request)| match letter {
                 'F' => OcrOutcome::Fill(GapFill::Markdown(read(request))),
-                'L' => OcrOutcome::Failed(OcrFailure::new(Some(500))),
-                _ => OcrOutcome::Unattempted(OcrFailure::new(None)),
+                'L' => OcrOutcome::Failed(OcrFailure::new(OcrFailureKind::Busy, Some(500))),
+                _ => OcrOutcome::Unattempted(OcrFailure::new(OcrFailureKind::Unreachable, None)),
             })
             .collect()
     }

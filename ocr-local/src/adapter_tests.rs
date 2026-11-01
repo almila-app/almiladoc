@@ -7,8 +7,8 @@ use std::sync::{
 };
 
 use almiladoc::{
-    CancelToken, Converter, Format, GapFill, ImageOcr, Input, OcrEngine, OcrFailure, OcrImage,
-    OcrOutcome, OnLoss, RasterSpec,
+    CancelToken, Converter, Format, GapFill, ImageOcr, Input, OcrEngine, OcrFailure,
+    OcrFailureKind, OcrImage, OcrOutcome, OnLoss, RasterSpec,
 };
 use image::{DynamicImage, ImageFormat, RgbImage};
 use oar_ocr_core::{domain::TextRegion, processors::BoundingBox};
@@ -94,6 +94,14 @@ fn parsed(count: usize) -> almiladoc::Parsed {
     Converter::new(config).unwrap().parse(Input::new(rtf.as_bytes(), Format::Rtf)).unwrap()
 }
 
+fn failed(kind: OcrFailureKind) -> OcrOutcome {
+    OcrOutcome::Failed(OcrFailure::new(kind, None))
+}
+
+fn unattempted(kind: OcrFailureKind) -> OcrOutcome {
+    OcrOutcome::Unattempted(OcrFailure::new(kind, None))
+}
+
 #[test]
 fn located_output_preserves_text_and_detector_order_and_normalizes_only_boxes() {
     for format in [ImageFormat::Png, ImageFormat::Jpeg] {
@@ -153,7 +161,7 @@ fn zero_detections_settles_blank_through_core_but_missing_recognition_never_does
     let (engine, _) = local(vec![Err(Error::EmptyRecognition)], false);
     assert_eq!(
         engine.read(&image(ImageFormat::Png), 1024, &CancelToken::new()),
-        OcrOutcome::Failed(OcrFailure::default())
+        failed(OcrFailureKind::NoText)
     );
 }
 
@@ -166,7 +174,7 @@ fn fill_budget_includes_geometry_and_every_owned_text_byte() {
         let result = engine.read(&image(ImageFormat::Png), budget, &CancelToken::new());
         assert_eq!(matches!(result, OcrOutcome::Fill(GapFill::Lines(_))), accepted);
         if !accepted {
-            assert_eq!(result, OcrOutcome::Failed(OcrFailure::default()));
+            assert_eq!(result, failed(OcrFailureKind::TooLarge));
         }
     }
 }
@@ -181,7 +189,7 @@ fn bad_images_fail_before_any_producer_call() {
         let (engine, calls) = local(vec![], false);
         assert_eq!(
             engine.read(&image, 1024, &CancelToken::new()),
-            OcrOutcome::Failed(OcrFailure::default())
+            failed(OcrFailureKind::Rejected)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
@@ -193,10 +201,7 @@ fn bad_images_fail_before_any_producer_call() {
     ] {
         let (mut engine, calls) = local(vec![], false);
         change(&mut engine.limits);
-        assert_eq!(
-            engine.read(&good, 1024, &CancelToken::new()),
-            OcrOutcome::Failed(OcrFailure::default())
-        );
+        assert_eq!(engine.read(&good, 1024, &CancelToken::new()), failed(OcrFailureKind::TooLarge));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }
@@ -209,7 +214,7 @@ fn runtime_faults_stop_the_batch_while_per_image_refusals_keep_exact_cardinality
     let (engine, calls) = local(vec![Ok(page()), Ok(page())], false);
     let outcomes = engine.recognize(&requests, &CancelToken::new());
     assert_eq!(outcomes.len(), 3);
-    assert_eq!(outcomes[0], OcrOutcome::Failed(OcrFailure::default()));
+    assert_eq!(outcomes[0], failed(OcrFailureKind::Rejected));
     assert!(
         outcomes[1..].iter().all(|outcome| matches!(outcome, OcrOutcome::Fill(GapFill::Lines(_))))
     );
@@ -221,7 +226,7 @@ fn runtime_faults_stop_the_batch_while_per_image_refusals_keep_exact_cardinality
         let (engine, calls) = local(vec![Err(error)], false);
         assert_eq!(
             engine.recognize(&requests, &CancelToken::new()),
-            vec![OcrOutcome::Unattempted(OcrFailure::default()); 3]
+            vec![unattempted(OcrFailureKind::Unreachable); 3]
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
@@ -239,7 +244,7 @@ fn crop_limit_refusal_fails_only_its_image_and_keeps_later_requests() {
     let (engine, calls) = local(vec![Err(error), Ok(page()), Ok(page())], false);
     let outcomes = engine.recognize(&requests, &CancelToken::new());
     assert_eq!(outcomes.len(), 3);
-    assert_eq!(outcomes[0], OcrOutcome::Failed(OcrFailure::default()));
+    assert_eq!(outcomes[0], failed(OcrFailureKind::TooLarge));
     assert!(
         outcomes[1..].iter().all(|outcome| matches!(outcome, OcrOutcome::Fill(GapFill::Lines(_))))
     );
@@ -257,20 +262,20 @@ fn cancellation_before_decode_after_native_return_and_busy_engine_never_fill() {
         let (engine, calls) = local(vec![Ok(page())], during);
         assert_eq!(
             engine.recognize(&requests, &cancel),
-            vec![OcrOutcome::Unattempted(OcrFailure::default()); 3]
+            vec![unattempted(OcrFailureKind::Cancelled); 3]
         );
         assert_eq!(calls.load(Ordering::Relaxed), usize::from(during));
     }
     let (engine, _) = local(vec![Err(Error::EmptyRecognition)], true);
     assert_eq!(
         engine.read(&image(ImageFormat::Png), 1024, &CancelToken::new()),
-        OcrOutcome::Unattempted(OcrFailure::default())
+        unattempted(OcrFailureKind::Cancelled)
     );
     let (engine, calls) = local(vec![], false);
     let _held = engine.backend.lock().unwrap();
     assert_eq!(
         engine.recognize(&requests, &CancelToken::new()),
-        vec![OcrOutcome::Unattempted(OcrFailure::default()); 3]
+        vec![unattempted(OcrFailureKind::Busy); 3]
     );
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }

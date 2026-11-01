@@ -16,10 +16,13 @@ use crate::error::ConvertError;
 use crate::limits::Limit;
 
 pub(crate) use driver::{Target, run};
-pub use engine::{OcrEngine, OcrFailure, OcrOutcome, OcrSummary};
+pub use engine::{OcrEngine, OcrFailure, OcrFailureKind, OcrOutcome, OcrSummary, RetryAfter};
 pub(crate) use fill::{GapFills, GapState, gaps};
 #[cfg(feature = "ocr-http")]
-pub use http::{OcrHttp, OcrHttpConfig};
+pub use http::{
+    ImageDetail, MessageLayout, OcrAttempt, OcrHttp, OcrHttpConfig, OcrReport, TierFallback,
+    TokenLimitField, TokenUsage,
+};
 pub(crate) use images::leave_image_gaps;
 pub use lines::OcrLine;
 pub(crate) use lines::blocks as line_blocks;

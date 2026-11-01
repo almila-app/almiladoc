@@ -1,4 +1,5 @@
 import collections.abc
+import datetime
 import os
 from typing import Any, ClassVar, Literal, final
 
@@ -31,15 +32,18 @@ __all__ = [
     "MalformedError",
     "MissingPartError",
     "NeedsOcrError",
+    "OcrAttempt",
     "OcrFailure",
     "OcrHttp",
     "OcrLine",
     "OcrRequest",
+    "OcrResult",
     "OcrSummary",
     "OnLoss",
     "Parsed",
     "ResourceLimitError",
     "RevisionPolicy",
+    "TokenUsage",
     "UnsupportedError",
     "sniff",
 ]
@@ -466,21 +470,44 @@ class OcrRequest:
     def dpi(self) -> int | None:
         """The resolution a page was painted at; `None` for an embedded image."""
 
+_OcrFailureKind = Literal[
+    "rejected",
+    "too_large",
+    "refused",
+    "unfinished",
+    "no_text",
+    "protocol",
+    "wrong_model",
+    "busy",
+    "unreachable",
+    "cancelled",
+]
+
 @final
 class OcrHttp:
     """Reads gaps' images through an OpenAI-compatible vision server, posting
     each to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the
     `ocr` of `Converter.convert`, or `recognize`. `api_key` goes only over
     `https` or to loopback; `prompt`, `None` for the default, asks for each
-    image's Markdown, after the image when `image_first`; `extra_body` adds
-    JSON fields to each request; `max_tokens` and `temperature`, 0 to 2, set
-    the sampling; a page is painted as `Parsed.ocr_requests` paints it at
-    `dpi` and `max_pixels`; a request the server cannot take yet is tried up
-    to `retries` more times, at most 10; and `concurrency`, 1 to 16, requests
-    go out at once. A field out of range raises `ConfigError` naming it. No
-    socket opens before a request and no redirect is followed. `root_certificates_pem`
-    replaces Mozilla roots, including for an HTTPS proxy; `proxy` explicitly selects
-    an HTTP(S) CONNECT proxy and requires HTTPS when `api_key` is set."""
+    image's Markdown; `layout` places it: `image_then_text` or
+    `text_then_image` in one user message, or `developer_then_image` or
+    `system_then_image` in a message of its own before the image's;
+    `extra_body` adds JSON fields to each request; `max_tokens` is sent as
+    `token_limit_field`, `max_tokens` or `max_completion_tokens`, and
+    `temperature`, 0 to 2, unless `None`; `image_detail` sends `low`, `high`
+    or `auto` with each image; a reply must name `answer_model` when one is
+    set; the first of up to 4 `service_tiers` is sent, and a 429 whose error
+    code is among `tier_fallback`'s codes or whose message starts with its
+    prefix moves the request once to the next; `preserve_table_spans` makes
+    a reply a `fill_gap_tables` fill, failing a gap below the top level;
+    a page is painted as
+    `Parsed.ocr_requests` paints it at `dpi` and `max_pixels`; a request the
+    server cannot take yet is tried up to `retries` more times, at most 10;
+    and `concurrency`, 1 to 16, requests go out at once. A field out of range
+    raises `ConfigError` naming it. No socket opens before a request and no
+    redirect is followed. `root_certificates_pem` replaces Mozilla roots,
+    including for an HTTPS proxy; `proxy` explicitly selects an HTTP(S)
+    CONNECT proxy and requires HTTPS when `api_key` is set."""
 
     def __new__(
         cls,
@@ -489,10 +516,18 @@ class OcrHttp:
         *,
         api_key: str | None = None,
         prompt: str | None = None,
-        image_first: bool = True,
+        layout: Literal[
+            "image_then_text", "text_then_image", "developer_then_image", "system_then_image"
+        ] = "image_then_text",
         extra_body: dict[str, Any] | None = None,
         max_tokens: int = 8192,
-        temperature: float = 0.0,
+        token_limit_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+        temperature: float | None = 0.0,
+        image_detail: Literal["low", "high", "auto"] | None = None,
+        answer_model: str | None = None,
+        service_tiers: collections.abc.Sequence[str] = (),
+        tier_fallback: tuple[collections.abc.Sequence[str], str] | None = None,
+        preserve_table_spans: bool = False,
         dpi: int = 150,
         max_pixels: int = 12_845_056,
         retries: int = 3,
@@ -511,28 +546,115 @@ class OcrHttp:
         requests: collections.abc.Sequence[OcrRequest],
         *,
         cancel: CancelToken | None = None,
-    ) -> list[str | OcrFailure]:
-        """The text the server reads for each of `requests`, in order, with the
-        GIL released once their images are copied: a `str` that fills its gap,
-        or an `OcrFailure`. Once one is not attempted or `cancel` is
-        cancelled, no later request is sent. A request whose image is not its
-        `media_type` raises `ValueError`."""
+    ) -> list[OcrResult]:
+        """An `OcrResult` for each of `requests`, in order, with the GIL released
+        once their images are copied. Once one is not attempted or `cancel` is
+        cancelled, no later request is sent, and a cancel ends those in flight.
+        A request whose image is not its `media_type` raises `ValueError`."""
+
+@final
+class OcrResult:
+    """What OCR made of one request, which pickles and holds no reply text but
+    its fill: `text`, the Markdown that fills its gap, through
+    `Parsed.fill_gap_tables` when `tables`, else `Parsed.fill_gap`; or
+    `failure`; with `usage`, the tokens a reply billed, `realized_tier`, the
+    index in `service_tiers` of the tier a reply was served on, and
+    `attempts`, each request sent."""
+
+    def __new__(
+        cls,
+        *,
+        text: str | None = None,
+        tables: bool = False,
+        failure: OcrFailure | None = None,
+        usage: TokenUsage | None = None,
+        realized_tier: int | None = None,
+        attempts: collections.abc.Sequence[OcrAttempt] = (),
+    ) -> OcrResult: ...
+    def __getnewargs_ex__(self) -> tuple[tuple[()], dict[str, object]]: ...
+    @property
+    def text(self) -> str | None:
+        """The Markdown that fills the gap; `None` with a failure."""
+    @property
+    def tables(self) -> bool:
+        """Whether `text` fills through `Parsed.fill_gap_tables`."""
+    @property
+    def failure(self) -> OcrFailure | None:
+        """Why no text was read; `None` with a text."""
+    @property
+    def usage(self) -> TokenUsage | None:
+        """The tokens a reply billed, a refused one included, when it named them."""
+    @property
+    def realized_tier(self) -> int | None:
+        """The index in `service_tiers` of the tier a reply was served on."""
+    @property
+    def attempts(self) -> list[OcrAttempt]:
+        """Each request sent, in order."""
 
 @final
 class OcrFailure:
-    """Why OCR read no text for a request, which pickles: `attempted` false when
-    it was not tried, which leaves its gap for a later call, and true when it
-    failed, which fails its gap; `status`, the HTTP status of its last
-    attempt, if it had one."""
+    """Why OCR read no text for a request, which pickles: `kind`, what kept it
+    from text, one of `rejected`, `too_large`, `refused`, `unfinished`,
+    `no_text`, `protocol`, `wrong_model`, `busy`, `unreachable` or
+    `cancelled`; `attempted` false when it was not tried, which leaves its
+    gap for a later call, and true when it failed, which fails its gap;
+    `status`, the HTTP status of its last attempt, if it had one; and
+    `retry_after`, the longest wait a server asked for, as seconds or an
+    aware UTC `datetime`, a later wait of the other form replacing it."""
 
-    def __new__(cls, *, attempted: bool = True, status: int | None = None) -> OcrFailure: ...
+    def __new__(
+        cls,
+        *,
+        kind: _OcrFailureKind,
+        attempted: bool = True,
+        status: int | None = None,
+        retry_after: int | datetime.datetime | None = None,
+    ) -> OcrFailure: ...
     def __getnewargs_ex__(self) -> tuple[tuple[()], dict[str, object]]: ...
+    @property
+    def kind(self) -> _OcrFailureKind:
+        """What kept the request from text."""
     @property
     def attempted(self) -> bool:
         """False when the request was not tried, true when it failed."""
     @property
     def status(self) -> int | None:
         """The HTTP status of the last attempt, if it had one."""
+    @property
+    def retry_after(self) -> int | datetime.datetime | None:
+        """The longest wait a server asked for, a later wait of the other form
+        replacing it: seconds, or an aware UTC `datetime`."""
+
+@final
+class TokenUsage:
+    """The tokens one reply billed, which pickles."""
+
+    def __new__(cls, input_uncached: int, input_cached: int, output: int) -> TokenUsage: ...
+    def __getnewargs__(self) -> tuple[int, int, int]: ...
+    @property
+    def input_uncached(self) -> int:
+        """Prompt tokens not read from a cache."""
+    @property
+    def input_cached(self) -> int:
+        """Prompt tokens read from a cache."""
+    @property
+    def output(self) -> int:
+        """Reply tokens."""
+
+@final
+class OcrAttempt:
+    """One request sent for an image, which pickles: `tier`, the index in
+    `service_tiers` of the tier asked for, and `status`, the reply's HTTP
+    status, when one arrived."""
+
+    def __new__(cls, tier: int | None = None, status: int | None = None) -> OcrAttempt: ...
+    def __getnewargs__(self) -> tuple[int | None, int | None]: ...
+    @property
+    def tier(self) -> int | None:
+        """The index in `service_tiers` of the tier asked for."""
+    @property
+    def status(self) -> int | None:
+        """The reply's HTTP status, when one arrived."""
 
 @final
 class OcrSummary:

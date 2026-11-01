@@ -13,9 +13,11 @@ import zlib
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import almiladoc
 from test_almiladoc import vision_server
 
 ROOT = Path(__file__).resolve().parents[2]
+TABLE = '<table><tr><td colspan="2">second fill</td></tr></table>'
 
 
 def png(width=64, height=64):
@@ -30,6 +32,12 @@ def png(width=64, height=64):
         + chunk(b"IDAT", zlib.compress((b"\0" + b"\xff" * width) * height))
         + chunk(b"IEND", b"")
     )
+
+
+def result(outcome):
+    if isinstance(outcome, almiladoc.OcrFailure):
+        return almiladoc.OcrResult(failure=outcome)
+    return almiladoc.OcrResult(text=outcome)
 
 
 class CorpusTest(unittest.TestCase):
@@ -61,7 +69,7 @@ class CorpusTest(unittest.TestCase):
 
     def recognize(self, outcomes):
         engine = Mock()
-        engine.recognize.side_effect = [[outcome] for outcome in outcomes]
+        engine.recognize.side_effect = [[result(outcome)] for outcome in outcomes]
         with patch.object(self.live.almiladoc, "OcrHttp", return_value=engine) as constructor:
             statuses = self.live.recognize_corpus(self.live.arguments(self.argv))
         return statuses, engine, constructor
@@ -172,7 +180,7 @@ class CorpusTest(unittest.TestCase):
 
     def test_failure_and_wrong_outcome_count_cannot_pass(self):
         for attempted, status in [(True, 400), (False, 503), (False, None)]:
-            failure = self.live.almiladoc.OcrFailure(attempted=attempted, status=status)
+            failure = almiladoc.OcrFailure(kind="busy", attempted=attempted, status=status)
             statuses, engine, _ = self.recognize([failure])
             self.assertEqual(
                 statuses,
@@ -259,7 +267,7 @@ class CorpusTest(unittest.TestCase):
         for code, content, status in [
             (200, reply, "match"),
             (200, "private raw reply", "text-mismatch"),
-            (400, "", "failed-400"),
+            (400, "", "unattempted-400"),
         ]:
             with (
                 vision_server(status=code, content=content) as server,
@@ -283,11 +291,14 @@ class CorpusTest(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as out,
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            constructor.return_value.recognize.return_value = ["first fill", "second fill"]
+            constructor.return_value.recognize.return_value = [
+                result("first fill"),
+                almiladoc.OcrResult(text=TABLE, tables=True),
+            ]
             self.assertEqual(self.live.main(["http://localhost:1/v1", "chosen-model"]), 0)
         requests = constructor.return_value.recognize.call_args.args[0]
         self.assertEqual([request.gap[3] for request in requests], [2, 5])
         self.assertEqual(out.getvalue().count("Text on the first page"), 3)
         self.assertIn("first fill", out.getvalue())
-        self.assertIn("second fill", out.getvalue())
+        self.assertIn(TABLE, out.getvalue())
         self.assertNotIn("ocr-needed", out.getvalue())

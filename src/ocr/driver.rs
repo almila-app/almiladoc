@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use crate::limits::Limit;
     use crate::model::{AssetId, OcrOrigin};
-    use crate::ocr::{OcrFailure, OcrImage};
+    use crate::ocr::{OcrFailure, OcrFailureKind, OcrImage};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Settled {
@@ -196,8 +196,10 @@ mod tests {
                 .zip(ordinals.iter().chain(std::iter::repeat(&0)))
                 .map(|(letter, n)| match letter {
                     'F' => OcrOutcome::Fill(GapFill::Markdown(format!("text {n}"))),
-                    'L' => OcrOutcome::Failed(OcrFailure::new(Some(500))),
-                    _ => OcrOutcome::Unattempted(OcrFailure::new(None)),
+                    'L' => OcrOutcome::Failed(OcrFailure::new(OcrFailureKind::Busy, Some(500))),
+                    _ => {
+                        OcrOutcome::Unattempted(OcrFailure::new(OcrFailureKind::Unreachable, None))
+                    }
                 })
                 .collect()
         }
