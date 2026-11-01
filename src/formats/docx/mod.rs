@@ -258,7 +258,8 @@ impl TypedPart {
 const HIDING_PROPERTY: &[u8] = b"vanish";
 
 fn unparsed_styles_role(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Role, ConvertError> {
-    let hides = tag_scan::any_tag(parse_ctx, bytes, enables_hiding)?;
+    let hides =
+        !parse_ctx.hidden_requested() && tag_scan::any_tag(parse_ctx, bytes, enables_hiding)?;
     Ok(if hides { Role::Content(Region::Body) } else { Role::Formatting })
 }
 
@@ -347,8 +348,12 @@ mod tests {
     use std::assert_matches;
     use std::fmt::Debug;
 
-    fn policy_converted(body: &str, revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
-        let ctx = ParseCtx::default().with_revisions(revisions);
+    fn policy_converted(
+        body: &str,
+        hidden: crate::HiddenPolicy,
+        revisions: crate::RevisionPolicy,
+    ) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_hidden(hidden).with_revisions(revisions);
         let document = parse(&ctx, &zip_package(&[("word/document.xml", document(body))])).unwrap();
         (document_to_markdown(&document), diagnostic_rows(&ctx.into_diagnostics()))
     }
@@ -362,7 +367,29 @@ mod tests {
             ("<w:p><m:oMath><w:del><m:r><m:t>old</m:t></m:r></w:del><w:ins><m:r><m:t>new</m:t></m:r></w:ins></m:oMath></w:p>".into(), "$old$\n", 1),
         ] {
             let reported = if count == 0 { vec![] } else { vec![(DiagnosticCode::RevisionOmitted, Region::Body, count)] };
-            assert_eq!(policy_converted(&body, crate::RevisionPolicy::Reject), (expected.into(), reported), "{body}");
+            assert_eq!(policy_converted(&body, crate::HiddenPolicy::Omit, crate::RevisionPolicy::Reject), (expected.into(), reported), "{body}");
+        }
+    }
+
+    #[test]
+    fn source_policy_hidden_emit_restores_text_math_and_hidden_marks() {
+        for (body, expected) in [
+            (p("", &format!("{}{}", shown("one"), hidden_run("<w:t>hidden</w:t>"))), "onehidden\n"),
+            (
+                format!(
+                    "{}{}",
+                    p("<w:pPr><w:rPr><w:specVanish/></w:rPr></w:pPr>", &shown("one")),
+                    p("", &shown("two"))
+                ),
+                "one\n\ntwo\n",
+            ),
+            (p("", HIDDEN_MATH), "$y$\n"),
+        ] {
+            assert_eq!(
+                policy_converted(&body, crate::HiddenPolicy::Emit, crate::RevisionPolicy::Accept),
+                (expected.into(), vec![]),
+                "{body}"
+            );
         }
     }
 

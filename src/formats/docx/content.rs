@@ -693,7 +693,9 @@ fn mark_drops(
     if ppr.and_then(|pr| pr.find(ns::W, "sectPr")).is_some() {
         return Ok(false);
     }
-    if rpr.is_some_and(|rpr| on_off(rpr, "specVanish") == Some(true)) {
+    if !ctx.parse_ctx.hidden_requested()
+        && rpr.is_some_and(|rpr| on_off(rpr, "specVanish") == Some(true))
+    {
         return Ok(true);
     }
     hidden_beside_runs(ctx, rpr, base, hides)
@@ -712,6 +714,9 @@ fn hidden_beside_runs(
     base: Style,
     hides: bool,
 ) -> Result<bool, ConvertError> {
+    if ctx.parse_ctx.hidden_requested() {
+        return Ok(false);
+    }
     or_when_malformed(run_properties(ctx, rpr, base, hides).map(|(_, hidden)| hidden), || {
         rpr.and_then(|rpr| on_off(rpr, "vanish")).unwrap_or(hides)
     })
@@ -984,7 +989,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Self {
             ctx,
             base,
-            hides,
+            hides: hides && !ctx.parse_ctx.hidden_requested(),
             fonts,
             pieces: Vec::new(),
             current: Vec::new(),
@@ -1484,7 +1489,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
         let rpr = run.find(ns::W, "rPr");
         let (style, hidden) = run_properties(self.ctx, rpr, self.base, self.hides)?;
-        if hidden {
+        if hidden && !self.ctx.parse_ctx.hidden_requested() {
             return self.drop_run(run, &Dropped::Hidden);
         }
         let fonts = self.run_fonts(rpr)?;

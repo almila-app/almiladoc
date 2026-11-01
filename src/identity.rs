@@ -40,6 +40,7 @@ fn fingerprinted(config: &Config) -> String {
         image_ocr,
         headers_footers,
         comments,
+        hidden,
         revisions,
     } = config;
     let mut fields = format!(
@@ -53,6 +54,9 @@ fn fingerprinted(config: &Config) -> String {
     }
     if *comments == crate::CommentPolicy::Emit {
         fields.push_str("comments=emit;");
+    }
+    if *hidden == crate::HiddenPolicy::Emit {
+        fields.push_str("hidden=emit;");
     }
     if *revisions == crate::RevisionPolicy::Reject {
         fields.push_str("revisions=reject;");
@@ -70,12 +74,13 @@ mod tests {
         let config = Config {
             headers_footers: crate::HeaderFooterPolicy::Emit,
             comments: crate::CommentPolicy::Emit,
+            hidden: crate::HiddenPolicy::Emit,
             revisions: crate::RevisionPolicy::Reject,
             ..Config::default()
         };
         assert_eq!(
             fingerprinted(&config),
-            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;revisions=reject;"
+            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;hidden=emit;revisions=reject;"
         );
     }
 

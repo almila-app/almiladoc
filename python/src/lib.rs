@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 mod _almiladoc {
     #[pymodule_export]
     use crate::config::{
-        CommentPolicy, Config, HeaderFooterPolicy, ImageOcr, ImagePolicy, Limits, OnLoss,
-        RevisionPolicy,
+        CommentPolicy, Config, HeaderFooterPolicy, HiddenPolicy, ImageOcr, ImagePolicy, Limits,
+        OnLoss, RevisionPolicy,
     };
     #[pymodule_export]
     use crate::converter::{

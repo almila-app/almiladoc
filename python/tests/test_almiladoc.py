@@ -919,14 +919,54 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(len({omitted, emitted}), 2)
         self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
 
-    def test_revision_policy_is_frozen_and_fingerprinted(self):
+    def test_hidden_and_revision_policies_reach_model_and_markdown(self):
+        ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        source = archive(
+            {
+                "word/document.xml": f'<w:document xmlns:w="{ns}"><w:body><w:p>'
+                "<w:r><w:t>Start</w:t></w:r>"
+                "<w:r><w:rPr><w:vanish/></w:rPr><w:t> hidden</w:t></w:r>"
+                "<w:del><w:r><w:delText> old</w:delText></w:r></w:del>"
+                "<w:ins><w:r><w:t> new</w:t></w:r></w:ins>"
+                "<w:r><w:t> end</w:t></w:r></w:p></w:body></w:document>"
+            }
+        )
+        selected = almiladoc.Config(
+            hidden=almiladoc.HiddenPolicy.EMIT, revisions=almiladoc.RevisionPolicy.REJECT
+        )
+        for config, expected in [
+            (almiladoc.Config(), "Start new end"),
+            (selected, "Start hidden old end"),
+        ]:
+            with self.subTest(config=config):
+                parsed = almiladoc.Converter(config).parse(source, format="docx")
+                inlines = json.loads(parsed.to_json())["document"]["blocks"][0]["value"]
+                self.assertEqual("".join(i["value"]["text"] for i in inlines), expected)
+                self.assertEqual(parsed.render().markdown, expected + "\n")
+
+    def test_hidden_and_revision_policies_are_frozen_and_fingerprinted(self):
         base = almiladoc.Config()
-        selected = almiladoc.Config(revisions=almiladoc.RevisionPolicy.REJECT)
-        self.assertEqual(base.revisions, almiladoc.RevisionPolicy.ACCEPT)
-        self.assertEqual(almiladoc.Config(revisions=None), base)
-        self.assertEqual(repr(selected.revisions), "RevisionPolicy.REJECT")
-        self.assertEqual(len({base, selected}), 2)
-        self.assertEqual(len({almiladoc.Converter(c).identity for c in (base, selected)}), 2)
+        configs = [base]
+        cases = [
+            ("hidden", almiladoc.HiddenPolicy.OMIT, almiladoc.HiddenPolicy.EMIT),
+            ("revisions", almiladoc.RevisionPolicy.ACCEPT, almiladoc.RevisionPolicy.REJECT),
+        ]
+        for name, default, selected in cases:
+            with self.subTest(name=name):
+                configured = almiladoc.Config(**{name: selected})
+                self.assertEqual(getattr(base, name), default)
+                self.assertEqual(almiladoc.Config(**{name: None}), base)
+                self.assertEqual(getattr(configured, name), selected)
+                self.assertEqual(
+                    repr(selected),
+                    type(selected).__name__ + "." + ("EMIT" if name == "hidden" else "REJECT"),
+                )
+                with self.assertRaises(AttributeError):
+                    setattr(configured, name, default)
+                configs.append(configured)
+        configs.append(almiladoc.Config(hidden=cases[0][2], revisions=cases[1][2]))
+        self.assertEqual(len(set(configs)), 4)
+        self.assertEqual(len({almiladoc.Converter(c).identity for c in configs}), 4)
 
     def test_defaults_are_almiladocs(self):
         limits = almiladoc.Limits()
@@ -945,7 +985,8 @@ class ConfigTest(unittest.TestCase):
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
             r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT, "
-            r"comments=CommentPolicy\.OMIT, revisions=RevisionPolicy\.ACCEPT\)$",
+            r"comments=CommentPolicy\.OMIT, hidden=HiddenPolicy\.OMIT, "
+            r"revisions=RevisionPolicy\.ACCEPT\)$",
         )
 
     def test_limits_and_config_are_frozen_keyword_only_values(self):

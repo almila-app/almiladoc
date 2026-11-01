@@ -37,8 +37,8 @@ mod render;
 mod shared;
 
 pub use config::{
-    CommentPolicy, Config, ConfigError, HeaderFooterPolicy, ImageOcr, ImagePolicy, PageSelection,
-    RevisionPolicy,
+    CommentPolicy, Config, ConfigError, HeaderFooterPolicy, HiddenPolicy, ImageOcr, ImagePolicy,
+    PageSelection, RevisionPolicy,
 };
 pub use converter::{Conversion, Converter, Input, Parsed, UnitSpan};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, LossClass, OnLoss, Region};

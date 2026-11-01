@@ -57,6 +57,8 @@ pub struct Config {
     pub headers_footers: HeaderFooterPolicy,
     /// Whether supported source comments appear as isolated footnotes.
     pub comments: CommentPolicy,
+    /// Whether explicitly hidden source content appears.
+    pub hidden: HiddenPolicy,
     /// Which tracked text revision view appears.
     pub revisions: RevisionPolicy,
 }
@@ -113,6 +115,7 @@ impl Default for Config {
             image_ocr: ImageOcr::None,
             headers_footers: HeaderFooterPolicy::Omit,
             comments: CommentPolicy::Omit,
+            hidden: HiddenPolicy::Omit,
             revisions: RevisionPolicy::Accept,
         }
     }
@@ -137,6 +140,17 @@ pub enum CommentPolicy {
     #[default]
     Omit,
     /// Preserve comments as GFM footnotes, with replies inside their parent.
+    Emit,
+}
+
+/// Whether explicitly hidden source content appears in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum HiddenPolicy {
+    /// Count hidden content without reading its side parts.
+    #[default]
+    Omit,
+    /// Preserve supported hidden text, structures and units.
     Emit,
 }
 

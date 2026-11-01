@@ -21,6 +21,7 @@ __all__ = [
     "EncryptedError",
     "GapRefused",
     "HeaderFooterPolicy",
+    "HiddenPolicy",
     "Identity",
     "ImageOcr",
     "ImagePolicy",
@@ -177,6 +178,14 @@ class CommentPolicy:
     def __repr__(self) -> str: ...
 
 @final
+class HiddenPolicy:
+    """Whether supported hidden source content appears in the output."""
+
+    OMIT: ClassVar[HiddenPolicy]
+    EMIT: ClassVar[HiddenPolicy]
+    def __repr__(self) -> str: ...
+
+@final
 class RevisionPolicy:
     """Which tracked text revision view appears in the output."""
 
@@ -295,7 +304,7 @@ class Config:
     than one), what a loss does, how images appear and which leave gaps for
     OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
     1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
-    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT` and
+    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and
     `RevisionPolicy.ACCEPT`.
     A thread count out of range raises `ConfigError`."""
 
@@ -309,6 +318,7 @@ class Config:
         image_ocr: ImageOcr | None = None,
         headers_footers: HeaderFooterPolicy | None = None,
         comments: CommentPolicy | None = None,
+        hidden: HiddenPolicy | None = None,
         revisions: RevisionPolicy | None = None,
     ) -> Config: ...
     @property
@@ -327,6 +337,10 @@ class Config:
     def image_ocr(self) -> ImageOcr:
         """Which images a parse leaves a gap after for OCR."""
 
+    @property
+    def hidden(self) -> HiddenPolicy:
+        """Whether supported hidden source content appears."""
+        ...
     @property
     def revisions(self) -> RevisionPolicy:
         """Which tracked text revision view appears."""

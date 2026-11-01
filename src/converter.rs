@@ -289,6 +289,7 @@ impl Converter {
             .with_image_ocr(self.config.image_ocr)
             .with_headers_footers(self.config.headers_footers)
             .with_comments(self.config.comments)
+            .with_hidden(self.config.hidden)
             .with_revisions(self.config.revisions)
             .with_cancel(cancel);
         #[cfg(test)]
