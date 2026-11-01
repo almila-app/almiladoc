@@ -105,8 +105,8 @@ Check unpdf pull requests at the start of each wave with
 | iyulab/unpdf | [#19](https://github.com/iyulab/unpdf/pull/19) | the lines beside a column gutter counted by baseline (`handmade-legacy-cmap.pdf`) | merged |
 | iyulab/unpdf | [#20](https://github.com/iyulab/unpdf/pull/20) | codes a composite font's ToUnicode leaves out, read through its own data or counted (`undecoded_text_codes`) | in 0.50.0 |
 | iyulab/unpdf | [#21](https://github.com/iyulab/unpdf/pull/21) | unreadable runs counted only where the clip shows them | in 0.51.0 |
-| iyulab/unpdf | to open | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | to open |
-| iyulab/unpdf | to open | link annotations read as links on the text they cover (`text.pdf`) | to open |
+| iyulab/unpdf | [#25](https://github.com/iyulab/unpdf/pull/25) | a page fact counting the bare page numbers dropped from a page's margins, so `footer_omitted` reports them | open |
+| iyulab/unpdf | [#26](https://github.com/iyulab/unpdf/pull/26) | URI link annotations read as links on the text they cover (`text.pdf`) | open |
 | iyulab/unpdf | [#24](https://github.com/iyulab/unpdf/pull/24) | `RasterGaps` counts only the unpaintable runs a page shows (unpdf-clip) | open |
 | iyulab/unpdf | [#23](https://github.com/iyulab/unpdf/pull/23) | a paint budget each operation charges by the pixels it covers (raster-hook) | in 0.51.0 |
 
