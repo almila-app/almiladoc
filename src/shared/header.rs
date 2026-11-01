@@ -50,12 +50,10 @@ pub(crate) fn resolve_header_rows(table: &Table, declared: usize) -> usize {
         return 0;
     }
 
-    let (header_votes, data_votes) = column_votes(&head, &body, width);
-    if header_votes == 0 && data_votes == 0 {
-        let labelled = head.iter().take(width).all(|v| v.chars().count() <= MAX_LABEL);
-        return usize::from(labelled);
+    match column_votes(&head, &body, width).verdict() {
+        Some(is_header) => usize::from(is_header),
+        None => usize::from(head.iter().take(width).all(|v| v.chars().count() <= MAX_LABEL)),
     }
-    usize::from(header_votes > data_votes)
 }
 
 fn labels_fit(head: &[String], width: usize) -> bool {
@@ -68,8 +66,22 @@ fn labels_fit(head: &[String], width: usize) -> bool {
     })
 }
 
-fn column_votes(head: &[String], body: &[Vec<String>], width: usize) -> (usize, usize) {
-    let (mut header_votes, mut data_votes) = (0, 0);
+#[derive(Default)]
+struct Votes {
+    header: usize,
+    data: usize,
+    repeated: usize,
+}
+
+impl Votes {
+    fn verdict(&self) -> Option<bool> {
+        (self.header + self.data + self.repeated > 0)
+            .then(|| self.header > self.data && self.header >= self.data + self.repeated)
+    }
+}
+
+fn column_votes(head: &[String], body: &[Vec<String>], width: usize) -> Votes {
+    let mut votes = Votes::default();
     for (c, label) in head.iter().enumerate().take(width) {
         let values: Vec<&str> = body
             .iter()
@@ -84,19 +96,19 @@ fn column_votes(head: &[String], body: &[Vec<String>], width: usize) -> (usize, 
         match dominant_kind(&values) {
             Some(kind) if kind != Kind::Text => {
                 if classify(label) == Some(Kind::Text) {
-                    header_votes += 1;
+                    votes.header += 1;
                 } else {
-                    data_votes += 1;
+                    votes.data += 1;
                 }
             }
             _ => {
                 if values.iter().any(|v| fold(v) == fold(label)) {
-                    data_votes += 1;
+                    votes.repeated += 1;
                 }
             }
         }
     }
-    (header_votes, data_votes)
+    votes
 }
 
 /// Frequency ties break toward the wider shape so the result never depends on hash-map iteration order.
@@ -207,6 +219,23 @@ mod tests {
     #[test]
     fn a_label_repeated_below_is_data() {
         assert_eq!(detect(&[&["x", "aka"], &["y", "aka"], &["z", "aka"]]), 0);
+        assert_eq!(
+            detect(&[
+                &["Male", "Group A", "—"],
+                &["Male", "Group A", "34"],
+                &["Female", "Group B", "29"]
+            ]),
+            0
+        );
+        assert_eq!(
+            detect(&[
+                &["TR", "Ankara", "f", "n/a"],
+                &["TR", "Izmir", "f", "3"],
+                &["DE", "Berlin", "m", "4"],
+                &["TR", "Bursa", "f", "5"]
+            ]),
+            0
+        );
     }
 
     #[test]
@@ -229,7 +258,25 @@ mod tests {
 
     #[test]
     fn a_tied_vote_is_not_a_header() {
-        assert_eq!(detect(&[&["name", "kind"], &["1", "kind"], &["2", "x"]]), 0);
+        assert_eq!(detect(&[&["name", "7"], &["1", "2"], &["2", "3"]]), 0);
+    }
+
+    #[test]
+    fn a_body_cell_repeating_its_label_does_not_outvote_typed_columns() {
+        let head = ["city", "region", "pop"];
+        let cases = [
+            [head, ["city", "north", "100"], ["Lyon", "south", "200"]],
+            [head, ["Paris", "north", "100"], ["Lyon", "region", "200"]],
+            [head, ["Paris", "north", "100"], ["Lyon", "REGION", "200"]],
+            [head, ["Paris", "north", "100"], ["Lyon", "ReGiOn", "200"]],
+            [head, ["Paris", "north", "100"], ["Lyon", "  region  ", "200"]],
+            [head, ["Paris", "region", "100"], ["Lyon", "south", "200"]],
+            [["city", "Status", "pop"], ["Paris", "active", "100"], ["Lyon", "status", "200"]],
+            [head, ["Paris", "north", "100"], ["Lyon", "south", "200"]],
+        ];
+        for [labels, first, second] in cases {
+            assert_eq!(detect(&[&labels, &first, &second]), 1, "{labels:?} {first:?} {second:?}");
+        }
     }
 
     #[test]
