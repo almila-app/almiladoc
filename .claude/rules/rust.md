@@ -5,14 +5,9 @@ paths:
 
 # Rust
 
-This file adds code shape and refactor safety to the invariants in `AGENTS.md`.
-
-Default to no comment: names, types and tests carry intent. A `//` comment is allowed only for
-a trap the code cannot show, an external constraint cited (`[MS-DOC] 2.9.336`, a producer's
-quirk, an upstream defect), or a tool directive with its reason. Never narration, banners,
-change history, commented-out code or a restated signature; a change that touches a commented
-line fixes or deletes the comment.
-
+- Cite external constraints (`[MS-DOC] 2.9.336`, producer quirks, upstream defects) in trap
+  comments;
+  fix or delete comments on touched lines. General comment policy: `CLAUDE.md`.
 - Silence a lint with `#[expect(lint, reason = "...")]`, never `#[allow]`; a lint that fires on
   some targets only takes `#[cfg_attr(<cfg>, expect(...))]`; a change under one re-reads its
   reason.
@@ -33,8 +28,8 @@ line fixes or deletes the comment.
   charges, emits or fails lazy or eager (`unwrap_or(f())` and `unwrap_or_else(f)`).
 - A refactor pins the behaviour it touches with rows in an existing case table, and closes a gap
   that predates it only where the change could break that path.
-- Past `AGENTS.md`'s fatal-error rule, an error is swallowed without the `is_fatal()` arm only
+- Past `CLAUDE.md`'s fatal-error rule, an error is swallowed without the `is_fatal()` arm only
   where the callee returns no fatal variant (`path::resolve` returns only `Malformed`).
 
-Clippy's workspace lints and `clippy.toml` hold what `-D warnings` can check; `verify.py` adds
-only its policy lints, on changed lines. A `clippy.toml` threshold binds only a lint that is on.
+- Workspace Clippy lints/`clippy.toml` own compiler checks; `verify.py` adds changed-line policy
+  lints. A `clippy.toml` threshold binds only an enabled lint.

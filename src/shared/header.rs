@@ -1,30 +1,17 @@
-//! Header-row detection for grids whose format designates no header row. CSV
-//! and spreadsheets have no notion of one; Word, RTF, and DrawingML carry only
-//! pagination and table-style flags (`w:tblHeader`, `\trhdr`,
-//! `a:tblPr/@firstRow`), none of which means "this row labels the columns".
-//! The first row is a header when the columns below it are consistently typed
-//! and the row itself is not: a label sits above a column of numbers, dates or
-//! booleans without being one of them.
+//! Pagination and table-style flags do not identify column labels, so header detection uses the data shape.
 
 use crate::model::{Block, CellSlot, Table, inlines_to_plain_text};
 use std::collections::{HashMap, HashSet};
 
-/// Body rows the column types are read from. A header shows in the first
-/// screenful of data, so a full pass over a million-row export buys nothing.
+/// A header shows in the first screenful of data, so a full pass over a million-row export buys nothing.
 const SAMPLE_ROWS: usize = 50;
 
-/// Share of a column's non-empty body cells that must agree on one type
-/// before the column votes, as a numerator over [`DOMINANCE_DEN`]. Stray
-/// `N/A` and footnote markers are common enough that exact agreement would
-/// silence otherwise obvious columns.
+/// Stray `N/A` and footnote markers are common enough that exact agreement would silence otherwise obvious columns.
 const DOMINANCE_NUM: usize = 9;
 const DOMINANCE_DEN: usize = 10;
 
-/// Longest a label can be when nothing else distinguishes the first row.
-/// Beyond this the text reads as prose, which is data.
 const MAX_LABEL: usize = 64;
 
-/// What a cell value looks like, at the granularity the vote needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Number,
@@ -33,9 +20,7 @@ enum Kind {
     Text,
 }
 
-/// A grid's [`Table::header_rows`]: what the format `declared`, or - when it
-/// declared none - 1 if the first row labels the columns and 0 otherwise. Only
-/// the first row is ever considered, since that is where labels go.
+/// A grid's [`Table::header_rows`]: what the format `declared`, or - when it declared none - 1 if the first row labels the columns and 0 otherwise.
 pub(crate) fn resolve_header_rows(table: &Table, declared: usize) -> usize {
     if declared > 0 {
         return declared.min(table.grid.len());
@@ -76,8 +61,6 @@ pub(crate) fn resolve_header_rows(table: &Table, declared: usize) -> usize {
 fn labels_fit(head: &[String], width: usize) -> bool {
     let mut seen: HashSet<String> = HashSet::new();
     head.iter().enumerate().take(width).all(|(c, value)| {
-        // Every column carries a label, with one exception: the unnamed index
-        // column that pandas and R write as a leading empty field.
         if value.trim().is_empty() {
             return c == 0;
         }
@@ -85,7 +68,6 @@ fn labels_fit(head: &[String], width: usize) -> bool {
     })
 }
 
-/// Columns whose first-row value reads as a header and as data, in that order.
 fn column_votes(head: &[String], body: &[Vec<String>], width: usize) -> (usize, usize) {
     let (mut header_votes, mut data_votes) = (0, 0);
     for (c, label) in head.iter().enumerate().take(width) {
@@ -117,9 +99,7 @@ fn column_votes(head: &[String], body: &[Vec<String>], width: usize) -> (usize, 
     (header_votes, data_votes)
 }
 
-/// The field count most sampled body rows agree on. Frequency ties break
-/// toward the wider shape so the result never depends on hash-map iteration
-/// order.
+/// Frequency ties break toward the wider shape so the result never depends on hash-map iteration order.
 fn modal_width(rows: &[Vec<CellSlot>]) -> usize {
     let mut tally: HashMap<usize, usize> = HashMap::new();
     for row in rows {
@@ -128,8 +108,6 @@ fn modal_width(rows: &[Vec<CellSlot>]) -> usize {
     tally.into_iter().max_by_key(|&(width, n)| (n, width)).map_or(0, |(width, _)| width)
 }
 
-/// A slot's text. Covered positions and cells holding anything but paragraphs
-/// yield nothing: neither is a plain value, and both then read as empty.
 fn slot_text(slot: &CellSlot) -> String {
     let CellSlot::Origin(cell) = slot else { return String::new() };
     let mut out = String::new();
@@ -143,14 +121,11 @@ fn slot_text(slot: &CellSlot) -> String {
     out
 }
 
-/// Case- and padding-insensitive form used to compare a label against the
-/// values below it.
 fn fold(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-/// The kind at least [`DOMINANCE_NUM`]/[`DOMINANCE_DEN`] of the values share,
-/// if any. Values are non-empty, so they all classify.
+/// Values are non-empty, so they all classify.
 fn dominant_kind(values: &[&str]) -> Option<Kind> {
     [Kind::Number, Kind::Bool, Kind::Date, Kind::Text].into_iter().find(|&kind| {
         let n = values.iter().filter(|v| classify(v) == Some(kind)).count();
@@ -158,7 +133,6 @@ fn dominant_kind(values: &[&str]) -> Option<Kind> {
     })
 }
 
-/// Classify one value; `None` when it is blank and carries no type at all.
 fn classify(value: &str) -> Option<Kind> {
     let value = value.trim();
     if value.is_empty() {
@@ -175,23 +149,16 @@ fn classify(value: &str) -> Option<Kind> {
     })
 }
 
-/// A numeric literal as data files write them: sign, digit grouping, either
-/// decimal convention, exponent, and a percent suffix. Which convention a
-/// value uses does not matter here, only that it is a number.
 fn is_number(value: &str) -> bool {
     let value = value.strip_suffix('%').unwrap_or(value);
     let cleaned: String =
         value.chars().filter(|c| !matches!(c, ',' | ' ' | '_' | '\u{a0}')).collect();
-    // `f64` also parses `inf` and `NaN`; a number here has digits in it.
     cleaned.chars().any(|c| c.is_ascii_digit()) && cleaned.parse::<f64>().is_ok()
 }
 
-/// A numeric date triple in any field order, optionally followed by a time,
-/// or a bare clock time. Month names stay `Text`: a column of them is a
-/// column of labels, and it would cast the same vote either way.
+/// Month names stay `Text`: a column of them is a column of labels, and it would cast the same vote either way.
 fn is_temporal(value: &str) -> bool {
     let (date, time) = value.split_once(['T', ' ']).unwrap_or((value, ""));
-    // Fractional seconds and a trailing zone marker are not part of the shape.
     let time = time.trim_end_matches('Z').split('.').next().unwrap_or_default();
     let is_clock = |t: &str| matches!(digit_groups(t, &[':']), 2 | 3);
     if digit_groups(date, &['-', '/', '.']) == 3 {
@@ -200,8 +167,6 @@ fn is_temporal(value: &str) -> bool {
     time.is_empty() && is_clock(date)
 }
 
-/// How many components `value` has when split on the first of `seps` it
-/// contains, or 0 unless every component is a short digit run.
 fn digit_groups(value: &str, seps: &[char]) -> usize {
     let Some(sep) = seps.iter().copied().find(|&s| value.contains(s)) else { return 0 };
     let short_digits =

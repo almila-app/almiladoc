@@ -1,6 +1,3 @@
-//! The piece table: where each character position lies in the file, and the property
-//! modifier its piece carries, read in place from the checked Clx.
-
 use super::Plc;
 use super::sprm::{
     SPRM_C_ISS, SPRM_CF_BOLD, SPRM_CF_ITALIC, SPRM_CF_RMARK_DEL, SPRM_CF_RMARK_INS, SPRM_CF_STRIKE,
@@ -12,27 +9,20 @@ use crate::error::ConvertError;
 use crate::shared::binary::{get_u16, get_u32};
 use std::ops::Range;
 
-/// The `Prc`s a 15-bit `Prm1.igrpprl` can name.
 pub(super) const MAX_PRCS: usize = 1 << 15;
 
-/// What a piece table must cover and where its text may lie.
 #[derive(Clone, Copy)]
 pub(super) struct Coverage {
-    /// The last CP the stories declare, which `PlcPcd`'s last CP must equal.
     pub(super) terminal_cp: usize,
-    /// `FibRgLw97.cbMac`: the WordDocument bytes that have meaning.
     pub(super) cb_mac: usize,
 }
 
-/// A checked `PlcPcd` and the `Prc`s before it, borrowed from the table stream.
 pub(super) struct PieceTable<'t> {
     clx: &'t [u8],
-    /// The offset in `clx` of each `Prc`, up to [`MAX_PRCS`].
     prcs: Vec<u32>,
     plc: Plc<'t>,
 }
 
-/// One piece: its CPs, the file offset of its first character and its width.
 #[derive(Clone, Copy)]
 pub(super) struct Pcd {
     pub(super) cps: (usize, usize),
@@ -46,7 +36,6 @@ impl Pcd {
         self.cps.0..self.cps.1
     }
 
-    /// The bytes one character position of the piece takes.
     pub(super) fn width(self) -> usize {
         if self.compressed { 1 } else { 2 }
     }
@@ -58,8 +47,6 @@ impl Pcd {
     }
 }
 
-/// A piece's property modifier: the grpprl of the `Prc` a `Prm1` names, or the one sprm a
-/// `Prm0` carries.
 pub(super) enum Prm<'t> {
     None,
     Prc(&'t [u8]),
@@ -77,9 +64,6 @@ impl Prm<'_> {
 }
 
 impl<'t> PieceTable<'t> {
-    /// The Clx at `fc`/`lcb` of `table`, its `PlcPcd` checked against `coverage`: exactly one
-    /// first CP of 0, ascending CPs ending at the terminal CP, and text inside `cbMac`. Each
-    /// piece is charged; any other shape is `Malformed`.
     pub(super) fn parse(
         parse_ctx: &ParseCtx<'_>,
         table: &'t [u8],
@@ -157,7 +141,6 @@ impl<'t> PieceTable<'t> {
         self.plc.n
     }
 
-    /// Piece `i`, which is below [`Self::len`].
     pub(super) fn pcd(&self, i: usize) -> Pcd {
         let data = self.plc.data(i);
         let fc_raw = get_u32(data, 2).unwrap_or_default();
@@ -171,7 +154,6 @@ impl<'t> PieceTable<'t> {
         }
     }
 
-    /// The piece that holds `cp`, which is below the terminal CP.
     pub(super) fn find(&self, cp: usize) -> usize {
         let (mut lo, mut hi) = (0, self.plc.n);
         while lo + 1 < hi {
@@ -231,17 +213,14 @@ mod tests {
 
     #[test]
     fn prm0_decodes_modeled_sprms() {
-        // isprm 0x55 = sprmCFBold (0x0835), val 0x01, fComplex clear.
         let prm = (0x55u16 << 1) | (0x01 << 8);
         assert_eq!(prm0_grpprl(prm), Some([0x35, 0x08, 0x01]));
-        // isprm 0x18 = sprmPFInTable (0x2416).
         let prm = (0x18u16 << 1) | (0x01 << 8);
         assert_eq!(prm0_grpprl(prm), Some([0x16, 0x24, 0x01]));
         for (isprm, sprm) in [(0x41u16, [0x00, 0x08]), (0x42, [0x01, 0x08]), (0x5C, [0x3C, 0x08])] {
             let prm = (isprm << 1) | (0x81 << 8);
             assert_eq!(prm0_grpprl(prm), Some([sprm[0], sprm[1], 0x81]), "isprm {isprm:#x}");
         }
-        // isprm 0x05 (sprmPJc) is outside the converted model.
         assert_eq!(prm0_grpprl(0x05 << 1), None);
     }
 

@@ -22,7 +22,6 @@ const SPRM_S_F_TITLE_PAGE: u16 = 0x300A;
 const F_FACING_PAGES: u8 = 0x01;
 const SEPARATOR_STORIES: usize = 6;
 const STORIES_PER_SECTION: usize = 6;
-/// Each side's (even, odd, first) story within a section's six.
 const SLOTS: [(Side, [usize; 3]); 2] = [(Side::Header, [0, 1, 4]), (Side::Footer, [2, 3, 5])];
 
 const FLD_SIZE: usize = 2;
@@ -32,11 +31,8 @@ const FIELD_SEPARATOR: u8 = 0x14;
 const FIELD_END: u8 = 0x15;
 const F_LOCKED: u8 = 0x10;
 
-/// The end and lock of each header-document field, keyed by the CP of its begin character,
-/// paired from its table only once a shown field needs a lock.
 #[derive(Default)]
 pub(super) enum FieldLocks<'t> {
-    /// The document declares no field table: no field is locked.
     #[default]
     Absent,
     Unpaired {
@@ -51,7 +47,6 @@ pub(super) enum FieldLocks<'t> {
     Unread,
 }
 
-/// Whether a field's result is locked, or its lock does not read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Lock {
     Unlocked,
@@ -59,7 +54,6 @@ pub(super) enum Lock {
     Unread,
 }
 
-/// The fields one header story's delimiters pair, kept only if they all nest.
 #[derive(Default)]
 struct StoryFields {
     open: Vec<usize>,
@@ -77,9 +71,7 @@ impl StoryFields {
 }
 
 impl<'t> FieldLocks<'t> {
-    /// The field table of the header document, read without pairing: `PlcfFldHdr`, a
-    /// [MS-DOC] `PlcFld` holding a `Fld` for each field delimiter, whose last CP locates
-    /// nothing. One that does not read is `Unread`.
+    /// The field table of the header document, read without pairing: `PlcfFldHdr`, a [MS-DOC] `PlcFld` holding a `Fld` for each field delimiter, whose last CP locates nothing.
     fn of(layout: &Layout<'t>, hdd: Option<Plc<'t>>, headers: &Range<usize>) -> Self {
         let Some(hdd) = hdd else { return Self::Absent };
         match read_plc(layout.fib, layout.table, Fib::FC_PLCF_FLD_HDR, FLD_SIZE) {
@@ -89,9 +81,6 @@ impl<'t> FieldLocks<'t> {
         }
     }
 
-    /// Pair the table's delimiters within each `PlcfHdd` story, charged once: the end's
-    /// `grffldEnd.fLocked` locks its field, a story whose delimiters do not nest keeps none,
-    /// and a table whose CPs do not rise is `Unread`.
     pub(super) fn pair(&mut self, parse_ctx: &ParseCtx<'_>) -> Result<(), ConvertError> {
         if let Self::Unpaired { table, hdd, headers } = self {
             let paired = pair_fields(parse_ctx, table, hdd, headers)?;
@@ -136,7 +125,6 @@ fn pair_fields<'t>(
     Ok(FieldLocks::Read { headers: headers.clone(), fields })
 }
 
-/// What the document needs to place its sections' headers and footers.
 pub(super) struct Layout<'d> {
     pub(super) fib: Fib<'d>,
     pub(super) table: &'d [u8],
@@ -144,7 +132,6 @@ pub(super) struct Layout<'d> {
     pub(super) stories: &'d Stories,
 }
 
-/// Whether a setting turns a variant on, or was declared and does not read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Setting {
     Off,
@@ -158,8 +145,6 @@ impl Setting {
     }
 }
 
-/// Each section of the main story, with its first-page setting; each `Sepx` is read once,
-/// charged by its length, and a reference to one that does not lie in the stream is `Unread`.
 fn sections(
     parse_ctx: &ParseCtx<'_>,
     layout: &Layout<'_>,
@@ -196,7 +181,6 @@ fn sections(
     Ok(sections)
 }
 
-/// Whether the `Sepx` at `at` sets `sprmSFTitlePage`.
 fn title_page(
     parse_ctx: &ParseCtx<'_>,
     word_doc: &[u8],
@@ -210,8 +194,6 @@ fn title_page(
     Ok(Setting::of(sprm::sets_flag(grpprl, SPRM_S_F_TITLE_PAGE)))
 }
 
-/// Where a section's story slot stands: empty, a span of the header document, or a span that
-/// does not lie in it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Slot {
     Empty,
@@ -219,9 +201,6 @@ enum Slot {
     Unread,
 }
 
-/// The body: under `HeaderFooterPolicy::Emit` read section by section, each section's headers
-/// and footers before it where they change, unless the document declares no header or footer
-/// story.
 pub(super) fn body<'w>(
     parse_ctx: &ParseCtx<'_>,
     layout: &Layout<'w>,
@@ -271,7 +250,6 @@ pub(super) fn body<'w>(
     Ok(publisher.blocks)
 }
 
-/// The story slot `index` of the header document stands for.
 fn slot_at(hdd: Option<&Plc<'_>>, headers: &Range<usize>, index: usize) -> Slot {
     let Some(hdd) = hdd.filter(|hdd| index < hdd.n) else { return Slot::Empty };
     let (from, to) = (hdd.cp(index), hdd.cp(index + 1));
@@ -294,7 +272,6 @@ struct Publisher<'p, 'c, 'w> {
 }
 
 impl Publisher<'_, '_, '_> {
-    /// Publish the headers and footers a section shows from the stories `shown` holds.
     fn section(
         &mut self,
         shown: &[Option<Slot>; STORIES_PER_SECTION],
@@ -343,8 +320,6 @@ impl Publisher<'_, '_, '_> {
     }
 }
 
-/// The story `slot` holds, read as `side`'s `variant`: one whose span does not lie in the
-/// header document, or whose setting does not read, reports the loss and shows unread.
 fn read_story(
     parse_ctx: &ParseCtx<'_>,
     assembler: &Assembler<'_, '_>,

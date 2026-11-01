@@ -1,5 +1,3 @@
-//! Helpers shared by more than one format reader.
-
 pub(crate) mod assets;
 #[deny(
     clippy::indexing_slicing,

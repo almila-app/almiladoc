@@ -1,5 +1,3 @@
-//! ZIP archive access with decompression limits.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -14,30 +12,18 @@ use std::io::{BufReader, Cursor, ErrorKind, Read};
 use std::rc::Rc;
 use zip::CompressionMethod;
 
-/// The family of a ZIP-based package: OPC, OpenDocument or EPUB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PackageKind {
-    /// Open Packaging Conventions: DOCX, PPTX, XLSX and XLSB.
     Opc,
-    /// OpenDocument: ODT, ODS and ODP.
     Odf,
-    /// EPUB's Open Container Format.
     Epub,
 }
 
-/// What a part's loss costs the output, named by the reader that asks for
-/// it: it decides what an unreadable part and an unresolved reference
-/// report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
-    /// Content that renders in the region: losing it is `part_unreadable`.
     Content(Region),
-    /// Content whose selected text and attributes report their own unresolved references.
     DeferredContent(Region),
-    /// A part whose loss changes formatting alone.
     Formatting,
-    /// A part whose loss the reader, or each consumer of the part, reports;
-    /// its unresolved references still report in the region.
     Reported(Region),
     Probe,
 }
@@ -69,16 +55,12 @@ pub(crate) fn report(parse_ctx: &ParseCtx<'_>, diagnostic: Option<(DiagnosticCod
     }
 }
 
-/// Whether an absent part is a loss: it is once a relationship or reference
-/// names it, and never when only its conventional name pointed at it.
 #[derive(Clone, Copy)]
 enum Absent {
     Valid,
     Lost,
 }
 
-/// A ZIP-based document package (OOXML, ODF, EPUB). Each borrow of its
-/// caches is scoped to one method, and none is held while an entry inflates.
 pub(crate) struct Package<'a> {
     parse_ctx: &'a ParseCtx<'a>,
     kind: PackageKind,
@@ -86,22 +68,14 @@ pub(crate) struct Package<'a> {
     /// Entry indices by stored name, ASCII-lowercased for OPC: its part names
     /// compare case-insensitively in ASCII (ECMA-376 Part 2).
     names: HashMap<Vec<u8>, usize>,
-    /// Each entry's first read, which inflated once and counted what it
-    /// inflated against `max_total_bytes`.
     cache: RefCell<HashMap<usize, FirstRead>>,
-    /// Shared trees by entry, `None` for a part that could not be read or
-    /// parsed. Together they hold at most `max_xml_nodes` nodes, so the
-    /// cache never keeps more than one part at its limit could.
+    /// The tree cache holds at most `max_xml_nodes` nodes.
     trees: RefCell<HashMap<usize, Option<SharedTree>>>,
     cached_nodes: Cell<u64>,
 }
 
-/// An entry's decompressed bytes, shared (`Rc`), or the reason it failed
-/// non-fatally.
 type FirstRead = Result<Rc<[u8]>, &'static str>;
 
-/// A parsed part shared by every reference that names it, beside the node
-/// count each reuse charges and the marks each reuse reports.
 #[derive(Clone)]
 struct SharedTree {
     root: Rc<Element>,
@@ -122,8 +96,6 @@ impl<'a> Package<'a> {
         Self::assemble(parse_ctx, kind, zip)
     }
 
-    /// The same archive read as a package of `kind`, without admitting its
-    /// directory again.
     pub(crate) fn reopen(&self, kind: PackageKind) -> Result<Self, ConvertError> {
         Self::assemble(self.parse_ctx, kind, self.zip.clone())
     }
@@ -160,14 +132,8 @@ impl<'a> Package<'a> {
         .copied()
     }
 
-    /// Read a part's bytes. `Ok(None)` means the part is absent (a valid
-    /// state for optional parts); `Err` means it exists but cannot be read.
-    /// Callers apply the unified policy: skip and report by role when useful
-    /// output remains, propagate when the part is the primary content. An
-    /// entry inflates once, and one that fails non-fatally fails again from
-    /// memory at every later call.
+    /// An entry inflates once, and one that fails non-fatally fails again from memory at every later call.
     pub(crate) fn part(&self, name: &str) -> Result<Option<Rc<[u8]>>, ConvertError> {
-        // OPC part URIs may carry a leading slash; entries never do.
         let name = name.trim_start_matches('/');
         let Some(index) = self.index_of(name) else {
             return Ok(None);
@@ -211,9 +177,6 @@ impl<'a> Package<'a> {
         Ok(bytes)
     }
 
-    /// The first `cap` bytes of a part, whatever size it declares, counted
-    /// against the entry and total budgets and never cached. An absent or
-    /// unreadable part reads as absent; a fatal error propagates.
     pub(crate) fn probe_head(&self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ConvertError> {
         Ok(self.probe(name, cap)?.map(|(mut bytes, cap)| {
             bytes.truncate(usize::try_from(cap).unwrap_or(usize::MAX));
@@ -221,9 +184,6 @@ impl<'a> Package<'a> {
         }))
     }
 
-    /// A part of at most `cap` bytes, and within the entry and total
-    /// budgets: a larger part, or one that does not read, reads as absent; a
-    /// fatal error propagates.
     pub(crate) fn probe_part(&self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ConvertError> {
         Ok(self.probe(name, cap)?.and_then(|(bytes, cap)| {
             u64::try_from(bytes.len()).is_ok_and(|len| len <= cap).then_some(bytes)
@@ -246,8 +206,6 @@ impl<'a> Package<'a> {
         skip_unreadable(self.parse_ctx, Role::Probe, read.map(|bytes| Some((bytes, cap))))
     }
 
-    /// [`Package::probe_part`], parsed as XML: a part that does not parse
-    /// reads as absent too.
     pub(crate) fn probe_xml_part(
         &self,
         name: &str,
@@ -265,14 +223,10 @@ impl<'a> Package<'a> {
         self.index_of(name.trim_start_matches('/')).is_some()
     }
 
-    /// Read a part that must exist for any meaningful output.
     pub(crate) fn required_part(&self, name: &str) -> Result<Rc<[u8]>, ConvertError> {
         self.part(name)?.ok_or_else(|| ConvertError::missing_part(name))
     }
 
-    /// Read an optional part a conventional name points at: absent is a
-    /// valid state, and an unreadable part reports by `role` and reads as
-    /// absent; a fatal error propagates.
     pub(crate) fn optional_part(
         &self,
         name: &str,
@@ -281,8 +235,6 @@ impl<'a> Package<'a> {
         self.read_part(name, role, Absent::Valid)
     }
 
-    /// Read a part a relationship or reference names: absent or unreadable,
-    /// it reports by `role` and reads as absent; a fatal error propagates.
     pub(crate) fn related_part(
         &self,
         name: &str,
@@ -291,8 +243,6 @@ impl<'a> Package<'a> {
         self.read_part(name, role, Absent::Lost)
     }
 
-    /// [`Package::optional_part`], parsed as XML: a part that does not parse
-    /// reports by `role` and reads as absent.
     pub(crate) fn optional_xml_part(
         &self,
         name: &str,
@@ -301,8 +251,6 @@ impl<'a> Package<'a> {
         self.read_xml_part(name, role, Absent::Valid, &mut WholeTree)
     }
 
-    /// [`Package::related_part`], parsed as XML: a part that does not parse
-    /// reports by `role` and reads as absent.
     pub(crate) fn related_xml_part(
         &self,
         name: &str,
@@ -311,10 +259,7 @@ impl<'a> Package<'a> {
         self.read_xml_part(name, role, Absent::Lost, &mut WholeTree)
     }
 
-    /// [`Package::related_xml_part`], with every node `sink` takes handed to
-    /// it as it completes instead of joining the tree. A part that does not
-    /// parse reads as absent after the sink has seen part of it, so the
-    /// caller discards what the sink holds.
+    /// A part that does not parse reads as absent after the sink has seen part of it, so the caller discards what the sink holds.
     pub(crate) fn related_xml_part_streamed(
         &self,
         name: &str,
@@ -324,11 +269,7 @@ impl<'a> Package<'a> {
         self.read_xml_part(name, role, Absent::Lost, sink)
     }
 
-    /// [`Package::related_xml_part`], shared while the shared trees stay
-    /// within `max_xml_nodes` in total: every reuse charges the tree's node
-    /// count before it gets the tree, and every reference reports the
-    /// part's loss and marks by its own role, in its region and unit. A part
-    /// past that budget parses at every reference.
+    /// A part beyond the shared-tree budget parses at every reference.
     pub(crate) fn related_xml_tree(
         &self,
         name: &str,
@@ -369,8 +310,6 @@ impl<'a> Package<'a> {
         Ok(Some(shared.root))
     }
 
-    /// Read and parse an XML part that must exist and parse for any
-    /// meaningful output; its unresolved references report by `role`.
     pub(crate) fn required_xml_part(
         &self,
         name: &str,
@@ -417,8 +356,6 @@ impl<'a> Package<'a> {
         }))
     }
 
-    /// A part read and parsed, its loss reported by `role` and its marks
-    /// left to the caller.
     fn read_xml(
         &self,
         name: &str,
@@ -453,9 +390,7 @@ fn entry_names(
     Ok(names)
 }
 
-/// An entry opened raw and inflated here, so the bytes a deflate stream
-/// writes before it breaks count too. It reads at most one byte past `cap`;
-/// a stream past its declared size or failing its checksum is `Malformed`.
+/// An entry opened raw and inflated here, so the bytes a deflate stream writes before it breaks count too.
 fn read_entry<R: Read>(
     parse_ctx: &ParseCtx<'_>,
     file: &mut zip::read::ZipFile<'_, R>,
@@ -508,8 +443,6 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
-/// A read's value, or `None` after reporting `role.unreadable()` for a
-/// non-fatal error; a fatal error propagates.
 pub(crate) fn skip_unreadable<T>(
     parse_ctx: &ParseCtx<'_>,
     role: Role,
@@ -549,8 +482,6 @@ pub(crate) fn read_capped(
     Ok(bytes)
 }
 
-/// `bytes` opened as an OOXML package; a zip failure on an OLE compound file reports as what
-/// the file is.
 pub(crate) fn open_ooxml<'a>(
     parse_ctx: &'a ParseCtx<'a>,
     bytes: &'a [u8],
@@ -561,9 +492,6 @@ pub(crate) fn open_ooxml<'a>(
     })
 }
 
-/// A zip-open failure on OOXML input may actually be an OLE compound file:
-/// an encrypted package, or a legacy binary document with the wrong
-/// extension.
 pub(crate) fn probe_ole(bytes: &[u8]) -> Option<ConvertError> {
     const OLE_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     if !bytes.starts_with(&OLE_MAGIC) {
@@ -823,8 +751,6 @@ mod tests {
         assert_eq!(parse_ctx.archive_bytes(), 22);
     }
 
-    /// `sound` parts, after deflated entries whose stream inflates their
-    /// prefix in a stored block, then breaks on a block of the reserved type.
     fn broken_deflate(broken: &[(&str, &[u8])], sound: &[(&str, &[u8])]) -> Vec<u8> {
         let streams = broken.iter().map(|(name, prefix)| {
             let len = u16::try_from(prefix.len()).unwrap().to_le_bytes();

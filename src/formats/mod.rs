@@ -1,5 +1,3 @@
-//! One frontend per input format; each parses bytes into the document model.
-
 mod csv;
 pub(crate) mod detect;
 mod doc;
@@ -19,7 +17,6 @@ use crate::error::{ConvertError, UnsupportedKind};
 use crate::inspect::PageVerdict;
 use crate::model::Document;
 
-/// What a parse keeps of its input, beside its document, to paint its pages: a PDF's parser.
 #[derive(Default)]
 pub(crate) struct Source {
     #[cfg(feature = "raster")]
@@ -27,7 +24,6 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    /// Whether it keeps pages to paint.
     #[cfg_attr(
         not(feature = "raster"),
         expect(clippy::unused_self, reason = "without painting no source keeps pages")
@@ -55,7 +51,6 @@ pub(crate) fn parse(
     parse_keeping(parse_ctx, bytes, format).map(|(document, _)| document)
 }
 
-/// The document of `bytes` and the source its pages are painted from.
 pub(crate) fn parse_keeping(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
@@ -84,7 +79,6 @@ pub(crate) fn parse_keeping(
     Ok((document, Source::default()))
 }
 
-/// A PDF's document and each page's verdict, in page order; any other format is not inspectable.
 #[cfg_attr(
     not(feature = "pdf"),
     expect(unused_variables, reason = "without the PDF reader nothing reads the input")

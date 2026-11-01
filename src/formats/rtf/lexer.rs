@@ -1,6 +1,4 @@
-//! Position-explicit RTF lexer. `\binN` consumes exactly N raw bytes, so
-//! binary payloads can never corrupt group state; unbalanced groups are the
-//! caller's to recover and report.
+//! `\binN` consumes exactly N raw bytes so binary payloads cannot corrupt group state.
 
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
@@ -8,18 +6,10 @@ use crate::error::ConvertError;
 pub(super) enum Token<'a> {
     Open,
     Close,
-    /// Control word with optional numeric parameter.
-    Word {
-        name: &'a str,
-        param: Option<i32>,
-    },
-    /// Control symbol (`\~`, `\*`, `\{`, ...).
+    Word { name: &'a str, param: Option<i32> },
     Symbol(u8),
-    /// `\'xx` hex-escaped byte in the current code page.
     Hex(u8),
-    /// One plain text byte.
     Byte(u8),
-    /// The raw payload of a `\binN` control.
     Bin(&'a [u8]),
 }
 
@@ -38,8 +28,6 @@ impl<'a> Lexer<'a> {
         self.pos
     }
 
-    /// The next token, charging one unit of work per token and per skipped
-    /// line break or NUL.
     pub(super) fn next_token(&mut self) -> Result<Option<Token<'a>>, ConvertError> {
         loop {
             let Some(&b) = self.bytes.get(self.pos) else {
@@ -61,8 +49,6 @@ impl<'a> Lexer<'a> {
         let b = *self.bytes.get(self.pos)?;
         if !b.is_ascii_alphabetic() {
             self.pos += 1;
-            // A reader treats `\` before CR or LF as a paragraph mark; the
-            // trailing LF of a CRLF pair is skipped as plain-text whitespace.
             if b == b'\r' || b == b'\n' {
                 return Some(Token::Word { name: "par", param: None });
             }
@@ -84,7 +70,6 @@ impl<'a> Lexer<'a> {
         }
         let name = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or("");
         let param = self.parameter();
-        // One space after a control word is part of the control.
         if self.bytes.get(self.pos) == Some(&b' ') {
             self.pos += 1;
         }

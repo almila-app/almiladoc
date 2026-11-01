@@ -1,6 +1,3 @@
-//! Text reading: CPs count UTF-16 units, scalars decode in place from the
-//! pieces of one story as a charged cursor walks them.
-
 use super::pieces::{Pcd, PieceTable, Prm};
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
@@ -13,8 +10,6 @@ pub(super) struct TextView<'w> {
     pieces: PieceTable<'w>,
 }
 
-/// One decoded scalar: its first CP, the file offset and piece of its leading unit, and
-/// whether it stands in for units that did not decode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Scalar {
     pub(super) c: char,
@@ -24,7 +19,6 @@ pub(super) struct Scalar {
     pub(super) replaced: bool,
 }
 
-/// CPs of a piece whose bytes the stream does not hold.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Gap {
     pub(super) cps: Range<usize>,
@@ -37,7 +31,6 @@ pub(super) enum Event {
     Gap(Gap),
 }
 
-/// A piece the cursor stands in: its geometry and its bytes, when the stream holds them.
 #[derive(Clone, Copy)]
 struct Placed<'w> {
     index: usize,
@@ -45,7 +38,6 @@ struct Placed<'w> {
     bytes: Option<&'w [u8]>,
 }
 
-/// Units charged at once while decoding.
 const CHUNK: u64 = 1 << 16;
 
 /// [MS-DOC] 2.9.73 `FcCompressed`: the characters of bytes 0x80-0x9F; every other byte is its own.
@@ -91,8 +83,6 @@ impl<'w> TextView<'w> {
         self.pieces.prm(index as usize)
     }
 
-    /// Refuse `range` before any of it decodes when the CPs its readable pieces hold exceed
-    /// the work left, charging the seek and each piece it looks at.
     pub(super) fn preflight(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -121,9 +111,6 @@ impl<'w> TextView<'w> {
         Ok(())
     }
 
-    /// A cursor over the scalars of `range` in `story`: the scalars whose first CP lies in
-    /// it, a surrogate pair decoding whole across pieces but never across the story's
-    /// bounds. The seek is charged.
     pub(super) fn cursor<'v>(
         &'v self,
         parse_ctx: &ParseCtx<'_>,
@@ -158,13 +145,11 @@ impl<'w> TextView<'w> {
     }
 }
 
-/// The UTF-16 unit at `cp` of `piece`, when it holds one and its bytes are present.
 fn unit_of(piece: &Placed<'_>, cp: usize) -> Option<u16> {
     let bytes = piece.bytes.filter(|_| !piece.pcd.compressed)?;
     get_u16(bytes, cp.checked_sub(piece.pcd.cps.0)? * 2)
 }
 
-/// A charged walk over the scalars of one range of a story.
 #[derive(Clone)]
 pub(super) struct Cursor<'v, 'w> {
     view: &'v TextView<'w>,
@@ -172,20 +157,15 @@ pub(super) struct Cursor<'v, 'w> {
     end: usize,
     cp: usize,
     piece: Option<Placed<'w>>,
-    /// Units charged and not yet read.
     paid: u64,
-    /// The most units charged at once.
     chunk: u64,
 }
 
 impl Cursor<'_, '_> {
-    /// A cursor from here that charges again each unit it reads, one at a time, since a
-    /// lookahead may stop at any unit.
     pub(super) fn fork(&self) -> Self {
         Self { paid: 0, chunk: 1, ..self.clone() }
     }
 
-    /// Charge reading one more unit, a chunk of the units up to `limit` at a time.
     fn pay(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -201,7 +181,6 @@ impl Cursor<'_, '_> {
         Ok(())
     }
 
-    /// The unit at `cp` of the current piece, charged as read.
     fn unit(&mut self, parse_ctx: &ParseCtx<'_>, cp: usize) -> Result<Option<u16>, ConvertError> {
         let Some(piece) = self.piece else {
             return Ok(None);

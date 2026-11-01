@@ -22,16 +22,8 @@ pub(super) const LEVELS: usize = crate::shared::numbering::OFFICE_LEVELS;
 pub(super) struct LevelDef {
     pub marker: Option<MarkerKind>,
     pub start: u64,
-    /// Restart rule, as in WordprocessingML `lvlRestart`: `None` = restart
-    /// after any more significant level (`fNoRestart` clear), `Some(0)` =
-    /// never restart, `Some(n)` = restart when a level with ilvl < n is used
-    /// (`fNoRestart` set with `ilvlRestartLim`).
     pub restart: Option<u32>,
-    /// The level's number text (`xst` with `rgbxchNums` placeholders and
-    /// LVLF `fLegal`); empty for bullets and malformed levels.
     pub pattern: NumberPattern,
-    /// The table-stream offset of the LVL when its number text holds an
-    /// unpaired surrogate: reported where a label shows it, once per region.
     pub damaged_at: Option<usize>,
 }
 
@@ -47,17 +39,13 @@ impl Default for LevelDef {
     }
 }
 
-/// The numbering sequence a list continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ListId {
-    /// A list the `PlfLst` defines, by its `lsid`.
     Lsid(u32),
-    /// The stand-in for an ilfo whose list no table defines.
     UnknownLfo(u16),
 }
 
 impl ListId {
-    /// The list's assembly identity, every stand-in above every `lsid`.
     pub(super) fn instance(self) -> u64 {
         match self {
             Self::Lsid(lsid) => u64::from(lsid),
@@ -72,8 +60,6 @@ pub(super) struct ListDef {
     /// every override referencing the same list continues its sequence.
     pub id: ListId,
     pub levels: [LevelDef; LEVELS],
-    /// LFOLVL start-at overrides; each restarts the shared sequence at its
-    /// value when this LFO is first used at that level.
     pub start_override: [Option<u64>; LEVELS],
 }
 
@@ -82,8 +68,6 @@ impl ListDef {
         &self.levels[LevelCounters::<LEVELS>::clamp(ilvl)]
     }
 
-    /// Fallback definition for an ilfo with no parsed list behind it, under
-    /// an identity of its own.
     pub(super) fn unknown(ilfo: u16) -> Self {
         Self {
             id: ListId::UnknownLfo(ilfo),
@@ -93,12 +77,8 @@ impl ListDef {
     }
 }
 
-/// The resolved definition of each 1-based ilfo.
 pub(super) type Lists = HashMap<u16, ListDef>;
 
-/// List tables that do not read in full are `part_unreadable`: the labels
-/// of the lists they lose do not render. A level's undecodable number text
-/// is reported where a paragraph shows it, not here.
 pub(super) fn parse(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8]) -> Lists {
     let lst_fc = fib.size(Fib::FC_PLF_LST);
     let lst_lcb = fib.size(Fib::LCB_PLF_LST);
@@ -109,8 +89,6 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8]) -> Lis
     if lst_lcb == 0 {
         return lists;
     }
-    // lcbPlfLst covers only the LSTF array; each list's LVL structures
-    // follow it in the table stream, uncounted.
     let (by_lsid, lst_complete) = parse_plf_lst(table, lst_fc, lst_lcb);
     let lfo_complete = lfo_lcb == 0
         || table
@@ -124,7 +102,6 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8]) -> Lis
 
 const LSTF_SIZE: usize = 28;
 
-/// Each list's levels by `lsid`, and whether every list read.
 fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> (HashMap<u32, [LevelDef; LEVELS]>, bool) {
     let mut out = HashMap::new();
     let Some(plf) = table.get(fc..).filter(|plf| plf.len() >= lcb) else {
@@ -137,7 +114,6 @@ fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> (HashMap<u32, [LevelDef
     let Some(lstfs) = lstfs.get(..usize::from(count)) else {
         return (out, false);
     };
-    // The LVL array begins where lcbPlfLst ends, still relative to `plf`.
     let mut pos = lcb;
     for lstf in lstfs {
         let Some((lsid, levels)) = parse_list(plf, lstf, &mut pos, fc) else {
@@ -148,7 +124,6 @@ fn parse_plf_lst(table: &[u8], fc: usize, lcb: usize) -> (HashMap<u32, [LevelDef
     (out, true)
 }
 
-/// The `lsid` and levels of the list `lstf` declares, whose LVLs follow at `pos`.
 fn parse_list(
     plf: &[u8],
     lstf: &[u8; LSTF_SIZE],
@@ -169,9 +144,6 @@ fn parse_list(
     Some((get_u32(lstf, 0)?, levels))
 }
 
-/// One LVL at `pos` of `plf`, which starts at table-stream offset `origin`:
-/// an LVLF header, then PAPX and CHPX grpprls, then the number text, whose
-/// unpaired surrogates mark the level damaged.
 fn parse_lvl(plf: &[u8], pos: usize, origin: usize) -> Option<(LevelDef, usize)> {
     const LVLF_SIZE: usize = 28;
     let record = plf.get(pos..)?;
@@ -181,8 +153,6 @@ fn parse_lvl(plf: &[u8], pos: usize, origin: usize) -> Option<(LevelDef, usize)>
     let flags = header[5];
     let legal = flags & 0x04 != 0;
     let no_restart = flags & 0x08 != 0;
-    // rgbxchNums: one-based offsets of number placeholders within xst,
-    // zero-terminated unless full.
     let placeholders = header[6..15].split(|&b| b == 0).next().unwrap_or_default();
     let restart_lim = header[26];
     let cb_papx = header[25] as usize;
@@ -225,10 +195,6 @@ fn parse_lvl(plf: &[u8], pos: usize, origin: usize) -> Option<(LevelDef, usize)>
 
 const LFO_SIZE: usize = 16;
 
-/// Resolve each LFO of `plf`, which starts at table-stream offset `origin`,
-/// into `lists`, and whether every LFOLVL read. Each LFO's LFOData opens
-/// with a 4-byte `cp`, overrides or none; one missing at the end loses
-/// nothing.
 fn parse_plf_lfo(
     plf: &[u8],
     origin: usize,
@@ -264,8 +230,6 @@ fn parse_plf_lfo(
     complete
 }
 
-/// Apply the LFOLVL at `pos` of `plf` (and the LVL it embeds) to `def`, and
-/// move `pos` past them; a failed embedded LVL leaves `pos` after the LFOLVL.
 fn read_lfolvl(plf: &[u8], pos: &mut usize, origin: usize, def: &mut ListDef) -> Option<()> {
     let record = plf.get(*pos..)?.first_chunk::<8>()?;
     let start_at = get_u32(record, 0)?;
@@ -274,7 +238,6 @@ fn read_lfolvl(plf: &[u8], pos: &mut usize, origin: usize, def: &mut ListDef) ->
     let f_formatting = record[4] & 0x20 != 0;
     *pos += 8;
     if f_formatting {
-        // The override embeds a full LVL; its own start wins.
         let (lvl_def, next) = parse_lvl(plf, *pos, origin)?;
         if ilvl < LEVELS {
             if f_start_at {
@@ -292,17 +255,11 @@ fn read_lfolvl(plf: &[u8], pos: &mut usize, origin: usize, def: &mut ListDef) ->
 
 #[derive(Default)]
 pub(super) struct Counters {
-    /// Numbering state keyed by list identity: every LFO referencing the
-    /// same list continues its sequence.
     state: HashMap<ListId, LevelCounters<LEVELS>>,
-    /// (ilfo, level) pairs whose first-use start-at override has fired.
     overridden: std::collections::HashSet<(u16, usize)>,
 }
 
 impl Counters {
-    /// Advance the sequence for a paragraph numbered by (`ilfo`, `level`)
-    /// and return its effective number plus, when the level's number text is
-    /// not reproducible from the marker kind alone, the composite label.
     pub(super) fn next(
         &mut self,
         ilfo: u16,

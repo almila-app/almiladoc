@@ -1,5 +1,3 @@
-//! Inline normalization and rendering.
-
 use crate::error::ConvertError;
 use crate::model::{Inline, LinkTarget, Style};
 use crate::render::markdown::Ctx;
@@ -14,21 +12,10 @@ use crate::render::markdown::sink::{Meter, Text};
 use crate::shared::uri::is_safe_link;
 use std::borrow::Cow;
 
-/// One piece of the effective view of a text scope.
 pub(crate) enum Norm<'a> {
-    /// Unstyled text whole; styled text one line's stretch at a time, edge whitespace apart.
-    Text {
-        text: Cow<'a, str>,
-        style: Style,
-    },
-    Link {
-        label: Label<'a>,
-        target: &'a LinkTarget,
-    },
-    Image {
-        alt: Cow<'a, str>,
-        presentation: Presentation<'a>,
-    },
+    Text { text: Cow<'a, str>, style: Style },
+    Link { label: Label<'a>, target: &'a LinkTarget },
+    Image { alt: Cow<'a, str>, presentation: Presentation<'a> },
     Anchor(&'a str),
     NoteRef(&'a str),
     CommentRef(&'a str),
@@ -42,11 +29,7 @@ pub(crate) enum Label<'a> {
     Url(&'a str),
 }
 
-/// The effective view of `inlines` in `ctx`, every run also carrying `base`'s marks: what
-/// renders nothing drops out, an image label written as text joins the text beside it, a link
-/// that keeps no destination gives its content to the scope around it, and a nested link splits
-/// the link around it, so no link holds another. Each inline read is charged one unit, and so
-/// is each one a link's look at its content reads.
+/// The effective view of `inlines` in `ctx`, every run also carrying `base`'s marks: what renders nothing drops out, an image label written as text joins the text beside it, a link that keeps no destination gives its content to the scope around it, and a nested link splits the link around it, so no link holds another.
 pub(crate) fn normalize<'a>(
     inlines: &'a [Inline],
     ctx: InlineContext,
@@ -78,13 +61,9 @@ struct Flatten<'a, 'r, 'd> {
     rc: &'r Ctx<'d>,
     meter: &'r Meter<'r>,
     out: Vec<Norm<'a>>,
-    /// The pieces of the link `owner` read since it last opened or was split.
     segment: Vec<Norm<'a>>,
     owner: Owner<'a>,
-    /// Adjacent runs of one style and owner, joined before they split into stretches.
     pending: Option<(Cow<'a, str>, Style, Owner<'a>)>,
-    /// Where the pieces of the outermost link being read start in `out`: only links split out
-    /// of one source link join.
     group: usize,
 }
 
@@ -243,8 +222,6 @@ fn join<'a>(items: &mut Vec<Norm<'a>>, item: Norm<'a>) {
     items.push(item);
 }
 
-/// The byte ranges of `text` as whitespace and the stretches between, each stretch marked: one
-/// per line, or one for a code run, whose span writes its line breaks as spaces.
 fn stretches(text: &str, code: bool) -> impl Iterator<Item = (usize, usize, bool)> + '_ {
     let mut at = 0;
     std::iter::from_fn(move || {
@@ -269,7 +246,6 @@ fn shows(items: &[Norm<'_>], ctx: InlineContext) -> bool {
     })
 }
 
-/// Render `inlines` into `out`, as if `out` started where they start.
 pub(crate) fn render_inlines(
     inlines: &[Inline],
     ctx: InlineContext,
@@ -279,8 +255,6 @@ pub(crate) fn render_inlines(
     render_based(inlines, ctx, Style::PLAIN, rc, out)
 }
 
-/// Render `inlines` into `out` as [`render_inlines`] does, every run also carrying `base`'s
-/// marks.
 pub(crate) fn render_based(
     inlines: &[Inline],
     ctx: InlineContext,
@@ -292,9 +266,6 @@ pub(crate) fn render_based(
     render_scope(&items, Scope { ctx, in_label: false, base: Stack::of(base) }, rc, out)
 }
 
-/// What a scope holds from one piece on: the marks its first visible piece keeps open, whether
-/// that piece is this one, the side this piece shows a delimiter written before it, and the
-/// delimiters written from here to the scope's end.
 #[derive(Clone, Copy)]
 struct Ahead {
     marks: Stack,
@@ -306,7 +277,6 @@ struct Ahead {
 const END: Ahead =
     Ahead { marks: Stack::EMPTY, visible: true, first: Side::Space, delims: Delims::NONE };
 
-/// Where a scope's pieces render, and the marks its pieces of markup carry.
 #[derive(Clone, Copy)]
 struct Scope {
     ctx: InlineContext,
@@ -352,18 +322,13 @@ fn lookahead(items: &[Norm<'_>], scope: Scope, out: &Text<'_>) -> Result<Vec<Ahe
     Ok(ahead)
 }
 
-/// Whether a piece's first and last characters are written as numeric references.
 #[derive(Clone, Copy, Default)]
 struct Ends {
     first: bool,
     last: bool,
 }
 
-/// Which of each piece's first and last characters are written as numeric references, so that
-/// every cluster of delimiters flanks. Decided from the scope's end back, as a reference given
-/// to the first character of a piece changes what the cluster before that piece sees; a piece
-/// of one character shows that one reference to both its clusters, so referencing it re-decides
-/// the cluster after it.
+/// Decided from the scope's end back, as a reference given to the first character of a piece changes what the cluster before that piece sees; a piece of one character shows that one reference to both its clusters, so referencing it re-decides the cluster after it.
 fn references(items: &[Norm<'_>], ahead: &[Ahead]) -> Vec<Ends> {
     let mut open = Stack::EMPTY;
     let mut clusters = Vec::with_capacity(items.len());
@@ -409,7 +374,6 @@ fn references(items: &[Norm<'_>], ahead: &[Ahead]) -> Vec<Ends> {
     refs
 }
 
-/// The side a delimiter written after `item` sees.
 fn last_side(item: &Norm<'_>) -> Side {
     match item {
         Norm::Text { style, .. } if style.code => Side::Fixed,
@@ -518,8 +482,6 @@ fn trailing(follower: Option<&Norm<'_>>) -> EscapeOpts {
     }
 }
 
-/// Escape `text` into `out`, writing its first or last character as a numeric reference where
-/// the delimiters beside it need one to flank.
 fn write_text(
     text: &str,
     ctx: InlineContext,
@@ -617,9 +579,6 @@ fn render_image(
     }
 }
 
-/// What one piece contributes to an earlier piece's pairing partners: closer-capable literals
-/// in plain text, and the markup the other pieces write. Emphasis cannot cross a link boundary,
-/// but a code span can: a backtick in a label or destination pairs with one outside.
 fn delims_of(item: &Norm<'_>) -> Delims {
     let mut delims = Delims::NONE;
     match item {
@@ -628,9 +587,7 @@ fn delims_of(item: &Norm<'_>) -> Delims {
             for c in Stack::of(*style).delimiters() {
                 delims.insert(c);
             }
-            // Emphasis content is escaped, which neutralizes everything but backticks: code
-            // spans ignore backslash escapes, so an emitted `\`` still closes a span an earlier
-            // raw backtick opens. `]` is the one character escaping leaves raw.
+            // Emphasis content is escaped, which neutralizes everything but backticks: code spans ignore backslash escapes, so an emitted `\`` still closes a span an earlier raw backtick opens.
             if style.code || text.contains('`') {
                 delims.insert('`');
             }
@@ -667,8 +624,6 @@ fn delims_of(item: &Norm<'_>) -> Delims {
     delims
 }
 
-/// True when a link label writes a backtick an earlier raw one can pair with: any backtick in
-/// its text counts even where the label escapes it, since code spans ignore backslash escapes.
 fn emits_backtick(label: &Label<'_>) -> bool {
     match label {
         Label::Url(_) => false,
@@ -688,7 +643,6 @@ fn starts_with_space(item: &Norm<'_>) -> bool {
     }
 }
 
-/// GFM inline math: `$` hugging both ends of the source.
 pub(crate) fn push_math_span(
     tex: &str,
     ctx: InlineContext,
@@ -700,14 +654,7 @@ pub(crate) fn push_math_span(
     out.push('$')
 }
 
-/// A code span; line breaks inside it become spaces. A row is split into
-/// cells before any code span is parsed, so in a cell a pipe is syntax even
-/// though everything else between the fences is literal: a backslash run
-/// already in front of one would pair off with its escape and leave it bare,
-/// so the run is doubled to keep the escape intact. That doubling survives
-/// into the rendered code span: GFM has no encoding for a code span that
-/// contains a backslash immediately before a pipe, and an intact row is worth
-/// more than the exact backslash count.
+/// A row is split into cells before any code span is parsed, so in a cell a pipe is syntax even though everything else between the fences is literal: a backslash run already in front of one would pair off with its escape and leave it bare, so the run is doubled to keep the escape intact.
 pub(crate) fn push_code_span(
     text: &str,
     ctx: InlineContext,

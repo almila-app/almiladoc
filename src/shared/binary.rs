@@ -8,23 +8,18 @@ use crate::limits::Limit;
 use crate::package::archive::read_capped;
 use std::io::Read;
 
-/// Little-endian `u16` at `off`; `None` when out of bounds.
 pub(crate) fn get_u16(b: &[u8], off: usize) -> Option<u16> {
     b.get(off..)?.first_chunk().copied().map(u16::from_le_bytes)
 }
 
-/// Little-endian `u32` at `off`; `None` when out of bounds.
 pub(crate) fn get_u32(b: &[u8], off: usize) -> Option<u32> {
     b.get(off..)?.first_chunk().copied().map(u32::from_le_bytes)
 }
 
-/// Little-endian `u64` at `off`; `None` when out of bounds.
 pub(crate) fn get_u64(b: &[u8], off: usize) -> Option<u64> {
     b.get(off..)?.first_chunk().copied().map(u64::from_le_bytes)
 }
 
-/// A sequential little-endian reader over a byte slice: every read returns
-/// `None` when too few bytes remain and then leaves the position unchanged.
 #[derive(Debug, Clone)]
 pub(crate) struct ByteReader<'a> {
     rest: &'a [u8],
@@ -72,13 +67,10 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-/// The UTF-16LE code units of `bytes`; a trailing odd byte is dropped.
 pub(crate) fn utf16le_units(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
     bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair))
 }
 
-/// The text of UTF-16 code units, each unpaired surrogate replaced, and
-/// whether any was.
 pub(crate) fn decode_utf16(units: impl IntoIterator<Item = u16>) -> (String, bool) {
     let mut replaced = false;
     let text = char::decode_utf16(units)
@@ -92,10 +84,6 @@ pub(crate) fn decode_utf16(units: impl IntoIterator<Item = u16>) -> (String, boo
     (text, replaced)
 }
 
-/// Read a named stream from an OLE2 compound file. A missing stream is
-/// `MissingPart` and an entry that is no stream `Malformed`; the read
-/// is hard-capped at `max_entry_bytes` so a corrupt sector chain cannot
-/// expand without bound.
 pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
     parse_ctx: &ParseCtx<'_>,
     ole: &mut cfb::CompoundFile<R>,
@@ -114,7 +102,6 @@ pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
     Ok(bytes)
 }
 
-/// A stream the conversion can do without, as read.
 #[derive(Debug)]
 pub(crate) enum OptionalStream {
     Absent,
@@ -123,7 +110,6 @@ pub(crate) enum OptionalStream {
 }
 
 impl OptionalStream {
-    /// The stream's bytes, empty when it is absent or unreadable.
     pub(crate) fn or_empty(self) -> Vec<u8> {
         match self {
             Self::Read(bytes) => bytes,
@@ -132,8 +118,6 @@ impl OptionalStream {
     }
 }
 
-/// Read a stream the conversion can do without; only a fatal error
-/// propagates.
 pub(crate) fn optional_ole_stream<R: Read + std::io::Seek>(
     parse_ctx: &ParseCtx<'_>,
     ole: &mut cfb::CompoundFile<R>,

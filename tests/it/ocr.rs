@@ -1,5 +1,3 @@
-//! The caller's OCR filling or failing a PDF's gaps between parse and render.
-
 use std::assert_matches;
 use std::num::NonZeroU32;
 

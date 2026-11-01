@@ -49,7 +49,6 @@ policy_sync = UV_PROJECT_ENVIRONMENT=$(POLICY) $(UV) sync --locked --only-group 
 policy_env = $(call need,$(firstword $(UV))); $(policy_sync)
 native_cargo = CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),target))" $(CARGO)
 
-# fetch(url, sha256, members): an archive's binaries, installed beside $@ only once its sha256 matches.
 define fetch
 if [ -z "$(2)" ]; then echo "$(notdir $@): no pinned binary for $$(uname -sm)"; exit 0; fi
 rm -rf $@.download
@@ -236,7 +235,6 @@ fuzz: $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
 	done
 	RUSTDOCFLAGS="$$RUSTDOCFLAGS --cfg docsrs" cargo doc --locked --manifest-path ../Cargo.toml --no-deps
 
-# FUZZ_MODE is empty for a campaign, or drill, cmin or proptest; FUZZ_TARGET names the fuzz target.
 fuzz-campaign: $(CARGO_FUZZ) $(AGE)
 	$(call need_tool,$(CARGO_FUZZ))
 	$(call need_tool,$(AGE))

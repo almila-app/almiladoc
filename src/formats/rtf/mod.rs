@@ -1,9 +1,3 @@
-//! RTF frontend: a position-explicit lexer feeding a state machine in one
-//! pass, with the font/style/list tables parsed into typed definitions as
-//! their groups close. Numbering comes from the list tables - never guessed
-//! from label text. Page headers and footers are skipped where they stand and read where a
-//! section shows them (`sides`).
-
 mod comments;
 mod lexer;
 mod sides;
@@ -55,12 +49,9 @@ enum Capture {
     FieldInstr,
     Bookmark,
     CommentMetadata,
-    /// Inside a `\pict` destination: bytes route to the picture collector.
     Pict,
     PicturePropertyName,
     PicturePropertyValue,
-    /// Inside a math zone: text routes to the math element under
-    /// construction.
     Math,
 }
 
@@ -75,22 +66,15 @@ struct CharState {
     ls: Option<i32>,
     legacy_list: Option<MarkerKind>,
     outline: Option<u8>,
-    /// The block container this paragraph's style names.
     block: Option<BlockStyle>,
-    /// Emphasis the paragraph style itself carries, subtracted from headings.
     style_base: Style,
     suppress: bool,
-    /// Inside content left out of the output, which no inner destination
-    /// brings back.
     omit: bool,
-    /// Text marked deleted, which accepted revisions drop.
     deleted: bool,
     inserted: bool,
-    /// Hidden text, which the output leaves out.
     hidden: bool,
     capture: Capture,
     in_note: bool,
-    /// Inside a header or footer story read under `HeaderFooterPolicy::Emit`.
     side: Option<Side>,
 }
 
@@ -99,7 +83,6 @@ impl CharState {
         self.itap.max(1)
     }
 
-    /// The table depth of the paragraph, 0 outside tables.
     fn container(&self) -> usize {
         if self.in_table { self.row_depth() } else { 0 }
     }
@@ -134,14 +117,10 @@ impl Default for CharState {
 struct FieldFrame {
     depth: usize,
     instr: String,
-    /// The token a header or footer writes in place of the result, which is not read.
     token: Option<&'static str>,
-    /// Whether `\fldlock` locks the field, its result never updated.
     locked: bool,
-    /// What each damaged character of the instruction lost.
     losses: Vec<InstrLoss>,
     start: usize,
-    /// Whether the field opened in hidden text.
     opened_hidden: bool,
 }
 
@@ -167,7 +146,6 @@ impl FieldFrame {
     }
 }
 
-/// A character of a field instruction that decoding damaged.
 struct InstrLoss {
     /// Its byte offset in the cleaned instruction; one that cleaning
     /// removed takes the offset where it would have sat.
@@ -177,13 +155,11 @@ struct InstrLoss {
 }
 
 impl InstrLoss {
-    /// Whether the character sits in `span`, or was removed at its end.
     fn within(&self, span: &std::ops::Range<usize>) -> bool {
         span.contains(&self.at) || (self.removed && self.at == span.end)
     }
 }
 
-/// What decoding with `loss` did to the character `c`.
 fn char_loss(c: char, loss: TextLoss) -> TextLoss {
     TextLoss {
         invalid: loss.invalid && c == char::REPLACEMENT_CHARACTER,
@@ -191,11 +167,7 @@ fn char_loss(c: char, loss: TextLoss) -> TextLoss {
     }
 }
 
-/// `text` with what it lost in decoding marked before each character it
-/// touched, for a capture that finds out later whether the text shows; the
-/// source's own marker characters are left out, so they mark nothing. It
-/// runs on the decoded text before `clean_text`, which keeps the markers, so
-/// a character that cleaning removes or makes ASCII is still marked.
+/// `text` with what it lost in decoding marked before each character it touched, for a capture that finds out later whether the text shows; the source's own marker characters are left out, so they mark nothing.
 fn mark_loss(text: &str, loss: TextLoss) -> String {
     let mut marked = String::with_capacity(text.len());
     for c in text.chars().filter(|&c| c != GUESSED && c != DROPPED) {
@@ -217,28 +189,21 @@ struct NoteFrame {
     kind: NoteKind,
 }
 
-/// The numbering sequence a list paragraph continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Sequence {
-    /// A list-table list, by its `\lsN`.
     Table(i32),
-    /// Legacy `\pn` numbering, one sequence for the document.
     Legacy,
 }
 
-/// The list identity of legacy `\pn` paragraphs, above every `\lsN`'s.
 const LEGACY_LIST: u64 = u64::MAX;
-/// The list identity of a bare `\listtext`, above every `\lsN`'s.
 const LISTTEXT_LIST: u64 = u64::MAX - 1;
 
-/// The list identity of `\lsN`: every `i32` keeps its own.
 fn table_list(ls: i32) -> u64 {
     u64::from(ls.cast_unsigned())
 }
 
 type Levels = LevelCounters<LIST_LEVELS>;
 
-/// Per-sequence numbering counters with restart-on-shallower semantics.
 #[derive(Default)]
 struct Counters {
     state: HashMap<Sequence, Levels>,
@@ -275,14 +240,11 @@ impl Counters {
         (value, label, def.loss)
     }
 
-    /// Pin a counter to a number taken from the source (legacy `\pn` labels).
     fn seed(&mut self, sequence: Sequence, level: usize, value: u64) {
         self.state.entry(sequence).or_default().seed(level, value, every_deeper);
     }
 }
 
-/// Byte-level text decoding: pending code-page bytes, `\uN` fallback skips,
-/// and surrogate pairing.
 struct TextDecoder {
     default_encoding: Codepage,
     pending: Vec<u8>,
@@ -295,8 +257,6 @@ impl TextDecoder {
         Self { default_encoding, pending: Vec::new(), skip: 0, surrogate: None }
     }
 
-    /// Buffer one text byte, honoring an active `\uN` fallback skip, and
-    /// whether it was buffered.
     fn byte(&mut self, b: u8) -> bool {
         let buffered = !self.skip_char();
         if buffered {
@@ -305,13 +265,10 @@ impl TextDecoder {
         buffered
     }
 
-    /// Discard a held high surrogate that something other than its pair
-    /// followed, and whether one was held.
     fn interrupt(&mut self) -> bool {
         self.surrogate.take().is_some()
     }
 
-    /// True when an active fallback skip consumed the character.
     fn skip_char(&mut self) -> bool {
         let skipped = self.skip > 0;
         self.skip = self.skip.saturating_sub(1);
@@ -322,18 +279,12 @@ impl TextDecoder {
         Some(std::mem::take(&mut self.pending)).filter(|bytes| !bytes.is_empty())
     }
 
-    /// Decode and take the buffered bytes with the current font's encoding,
-    /// with what the text lost.
     fn take_pending(&mut self, encoding: Option<Codepage>) -> Option<(String, TextLoss)> {
         let bytes = self.take_bytes()?;
         Some(encoding.unwrap_or(self.default_encoding).decode(&bytes))
     }
 
-    /// `\uN`: the completed scalar (surrogate pairs are held and combined),
-    /// arming the `uc_skip`-length fallback skip, and whether a character
-    /// was dropped: an unpaired surrogate or a value that is no scalar.
     fn unicode(&mut self, param: Option<i32>, uc_skip: u32) -> (Option<char>, bool) {
-        // A new \u ends the previous one's fallback range.
         self.skip = 0;
         let Some(n) = param else {
             return (None, false);
@@ -357,12 +308,8 @@ impl TextDecoder {
     }
 }
 
-/// An accumulating `\pict` destination: the payload arrives as ASCII hex
-/// characters (or one `\binN` run), typed by a format control word.
 #[derive(Default)]
 struct PictState {
-    /// Group depth of the `\pict` destination itself: payload bytes live at
-    /// this depth only (subgroups like `\*\picprop` carry properties).
     depth: usize,
     hex: Vec<u8>,
     alt: String,
@@ -371,13 +318,10 @@ struct PictState {
     property_name: String,
     property_value: String,
     binary: Option<Vec<u8>>,
-    /// (media type, extension) from `\pngblip`/`\jpegblip`/`\emfblip`/
-    /// `\wmetafile`; `None` = unsupported format.
     format: Option<(&'static str, &'static str)>,
 }
 
 impl PictState {
-    /// Close the property groups the stack has unwound past `depth`.
     fn close_properties(&mut self, depth: usize) {
         if self.property_depth.is_some_and(|opened| depth < opened) {
             if self.property_name.trim() == "wzDescription" {
@@ -406,16 +350,9 @@ impl PictState {
     }
 }
 
-/// An accumulating `\mmath` zone. Its groups mirror OMML elements, each
-/// named by its first control word (`\mf` is `m:f`), so they are built into
-/// the same element tree the OOXML readers hand the converter: a property
-/// group's text is its value, a run's text is its content, and a property
-/// written as a parameter word on the run (`\msty2`) is a child element.
+/// RTF math groups mirror OMML elements, so both use the same converter.
 struct MathState {
-    /// Group depth of the zone's own group.
     depth: usize,
-    /// Open groups, innermost last, each with the depth it opened at. The
-    /// first is the zone itself. Its text is marked by [`mark_loss`].
     open: Vec<(usize, Element)>,
 }
 
@@ -428,8 +365,6 @@ impl MathState {
         self.open.push((depth, math_elem("")));
     }
 
-    /// Attach the groups opened deeper than `depth` to their parents. A
-    /// group that named no element is transparent.
     fn close_groups(&mut self, depth: usize) {
         while self.open.len() > 1
             && let Some((_, elem)) = self.open.pop_if(|(d, _)| *d > depth)
@@ -443,8 +378,6 @@ impl MathState {
         }
     }
 
-    /// A math control word inside a group: the first names the group, a
-    /// later one is a property of it, its parameter the value.
     fn word(&mut self, name: &str, param: Option<i32>) {
         let Some((_, elem)) = self.open.last_mut() else { return };
         if elem.local.is_empty() {
@@ -468,13 +401,6 @@ impl MathState {
         self.push_text(DROPPED.to_string());
     }
 
-    /// The zone's equations, whether they are a math paragraph
-    /// (`\moMathPara`), which displays on its own line, and what the
-    /// displayed equations lost. The zone is converted once with the
-    /// [`mark_loss`] markers in its text, and a loss counts when its marker
-    /// is in that output, which keeps a marker on run text and on a
-    /// delimiter, accent, operator or group character it shows; the
-    /// equations returned are converted again without the markers.
     fn finish(mut self) -> (Vec<String>, bool, TextLoss) {
         self.close_groups(0);
         let (_, mut zone) = self.open.remove(0);
@@ -515,7 +441,6 @@ fn math_elem(local: &str) -> Element {
     }
 }
 
-/// Every OMML element name, as its rtf control word without the `m` prefix.
 #[rustfmt::skip]
 const OMML_NAMES: &[&str] = &[
     "acc", "accPr", "aln", "alnScr", "argPr", "argSz", "bar", "barPr", "baseJc", "begChr",
@@ -533,8 +458,6 @@ const OMML_NAMES: &[&str] = &[
     "vertJc", "wrapIndent", "wrapRight", "zeroAsc", "zeroDesc", "zeroWid",
 ];
 
-/// Field, note, bookmark, and list-label destination state: frames open at a
-/// group depth and close when the group stack unwinds past it.
 #[derive(Default)]
 struct Destinations {
     fields: Vec<FieldFrame>,
@@ -542,7 +465,6 @@ struct Destinations {
     notes: Vec<Note>,
     bookmark: String,
     listtext: Option<String>,
-    /// What the captured label lost in decoding.
     listtext_loss: TextLoss,
     pict: Option<PictState>,
     math: Option<MathState>,
@@ -556,8 +478,6 @@ impl Destinations {
         self.math_display = false;
     }
 
-    /// Close note frames opened deeper than `depth`, replacing their content
-    /// with a reference to the collected note.
     fn close_notes(&mut self, depth: usize, inlines: &mut Vec<Inline>) {
         while let Some(frame) = self.note_frames.pop_if(|f| f.depth > depth) {
             let start = frame.start.min(inlines.len());
@@ -574,7 +494,6 @@ impl Destinations {
         }
     }
 
-    /// Emit a completed bookmark capture as an anchor.
     fn close_bookmark(&mut self, still_capturing: bool, inlines: &mut Vec<Inline>) {
         if still_capturing {
             return;
@@ -587,8 +506,6 @@ impl Destinations {
     }
 }
 
-/// Destinations whose content the body never shows: headers and footers, read apart where a
-/// section shows them, and metadata and binary destinations, which carry no document text.
 #[rustfmt::skip]
 const SUPPRESSED_DESTINATIONS: &[&str] = &[
     "fonttbl", "colortbl", "stylesheet", "info", "object", "header", "footer", "headerl", "headerr",
@@ -610,20 +527,11 @@ struct Parser<'a> {
     prelude: Prelude,
     tables: TableScan,
     decoder: TextDecoder,
-    /// Whether `\ansicpg` has declared the code page; the first one holds.
     codepage_declared: bool,
-    /// Whether `encoding_assumed` has been reported; it is reported once.
     assumed_reported: bool,
-    /// The font `\deffN` names, for text no `\fN` sets.
     deff: Option<i32>,
-    /// The face of the last symbol `\fN` (a font a glyph table names, or
-    /// `\fcharset2`) text could be set in, which
-    /// U+F020-F0FF in a text font is drawn through, as RTF 1.9.1 says.
     last_symbol: Option<Face>,
-    /// The `\fN` the font table lacks that have been reported.
     undefined_fonts: HashSet<i32>,
-    /// The list levels (`\ls`, level) whose damaged label text has been
-    /// reported.
     labels_reported: HashSet<(i32, usize)>,
     /// The region of the deleted range the last text dropped or kept was
     /// in, so a deleted range is reported once in its region.
@@ -631,8 +539,6 @@ struct Parser<'a> {
     /// The region of the hidden range that last dropped something other
     /// than whitespace, so such a range is reported once in its region.
     hidden_range: Option<Region>,
-    /// The state at the dropped mark the open paragraph continues from,
-    /// whose container and properties it keeps if it ends before joining.
     held: Option<CharState>,
 
     inlines: Vec<Inline>,
@@ -643,7 +549,6 @@ struct Parser<'a> {
     table: TableState<'a>,
     dest: Destinations,
     assets: AssetSink,
-    /// Under `HeaderFooterPolicy::Emit`, the headers and footers each section shows.
     sides: Option<sides::Sections>,
     comments: comments::Comments,
     comment_story: bool,
@@ -685,8 +590,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The one lexing pass: the prelude's tables are read as their groups
-    /// close, before the body that uses them.
     fn run(&mut self) -> Result<(), ConvertError> {
         while let Some(token) = self.lexer.next_token()? {
             let depth = self.stack.len() + usize::from(matches!(token, Token::Open));
@@ -762,7 +665,6 @@ impl<'a> Parser<'a> {
         self.close_fields(depth);
         self.dest.close_notes(depth, &mut self.inlines);
         self.dest.close_bookmark(self.state.capture == Capture::Bookmark, &mut self.inlines);
-        // Inner property groups close before the picture finishes.
         if let Some(pict) = &mut self.dest.pict {
             pict.close_properties(depth);
         }
@@ -779,7 +681,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The picture collector while its own group takes payload bytes.
     fn pict_payload(&mut self) -> Option<&mut PictState> {
         let depth = self.stack.len();
         let capturing = self.state.capture == Capture::Pict;
@@ -798,7 +699,6 @@ impl<'a> Parser<'a> {
         self.state.hidden && !self.parse_ctx.hidden_requested()
     }
 
-    /// Whether body text in the current state reaches the output.
     fn renders(&self) -> bool {
         self.state.capture == Capture::None
             && !self.state.suppress
@@ -817,7 +717,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Report `loss` in text that reaches the output in `region`.
     fn report(&mut self, loss: TextLoss, region: Region) {
         if loss.invalid {
             self.parse_ctx.emit(DiagnosticCode::InvalidEncoding, region);
@@ -828,11 +727,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Route `loss` with the text the current capture takes: reported for
-    /// rendered body text, held with a list label until it is shown, and
-    /// dropped with a bookmark name or text that does not render. A field
-    /// instruction records its own by offset, and an equation marks its own
-    /// in its text.
     fn text_loss(&mut self, loss: TextLoss) {
         match self.state.capture {
             Capture::ListText => self.dest.listtext_loss |= loss,
@@ -848,14 +742,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the current capture takes deleted text, which accepted
-    /// revisions drop from a field instruction and an equation.
     fn captures_deleted(&self) -> bool {
         self.revision_drops() && matches!(self.state.capture, Capture::FieldInstr | Capture::Math)
     }
 
-    /// Whether the current capture takes hidden text, which an equation
-    /// drops and a field instruction keeps.
     fn captures_hidden(&self) -> bool {
         self.hides() && self.state.capture == Capture::Math
     }
@@ -884,14 +774,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Drop a held high surrogate that its pair did not follow.
     fn settle_surrogate(&mut self) {
         if self.decoder.interrupt() {
             self.drop_char();
         }
     }
 
-    /// Drop deleted content, reporting each deleted range once.
     fn drop_deleted(&mut self) {
         self.hidden_range = None;
         let region = self.region();
@@ -901,8 +789,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Leave out a structure that opens in deleted text, reporting its
-    /// range, and whether it did.
     fn omit_deleted(&mut self) -> bool {
         self.revision_drops() && self.omit(Self::drop_deleted)
     }
@@ -925,8 +811,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Drop hidden text read as `tokens` and `unmapped` codes; whitespace
-    /// alone reports nothing.
     fn drop_hidden_text(&mut self, tokens: &[symbol::Token], unmapped: u64) {
         let any = unmapped > 0
             || tokens.iter().any(|token| !matches!(token, symbol::Token::Text(t) if t.is_empty()));
@@ -938,8 +822,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Leave out a structure that opens in hidden text, reporting its
-    /// range, and whether it did; deleted text is left to `omit_deleted`.
     fn omit_hidden(&mut self) -> bool {
         self.hides() && !self.revision_drops() && self.omit(Self::drop_hidden)
     }
@@ -949,9 +831,6 @@ impl<'a> Parser<'a> {
         self.hidden_range = None;
     }
 
-    /// Report what a suppressed destination takes from the output, judged
-    /// by the group that holds it (a `\*` has already suppressed its own),
-    /// and whether policy leaves its whole content out.
     fn report_destination(&self, word: &str) -> bool {
         let (code, region) = match word {
             "header" | "headerl" | "headerr" | "headerf" => {
@@ -975,8 +854,6 @@ impl<'a> Parser<'a> {
         code != DiagnosticCode::EmbeddedObject
     }
 
-    /// Close field frames opened deeper than `depth`, folding their results
-    /// back into the inline stream.
     fn close_fields(&mut self, depth: usize) {
         while let Some(frame) = self.dest.fields.pop_if(|f| f.depth > depth) {
             let start = frame.start.min(self.inlines.len());
@@ -999,8 +876,6 @@ impl<'a> Parser<'a> {
             if !inlines_are_empty(&content)
                 && let Some((target, spans)) = hyperlink_target_spans(&frame.instr)
             {
-                // An anchor shows only as a slug or not at all: a damaged
-                // character it keeps never reaches the output.
                 let anchor = matches!(target, LinkTarget::Anchor { .. });
                 let mut loss = TextLoss::default();
                 for lost in &frame.losses {
@@ -1024,8 +899,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Dispatch a control word to its subsystem handler; unhandled words
-    /// that name a suppressed destination silence their group.
     fn control_word(&mut self, word: &str, param: Option<i32>) -> Result<(), ConvertError> {
         let handled = self.comment_control(word, param)?
             || self.side_control(word, param)?
@@ -1049,8 +922,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Under `HeaderFooterPolicy::Emit`, skip a header or footer group whose holder shows, to
-    /// read where a section shows it, and follow the settings that choose its pages.
     fn side_control(&mut self, word: &str, param: Option<i32>) -> Result<bool, ConvertError> {
         let in_body = self.renders() && self.state.side.is_none() && !self.state.omit;
         let reject = self.parse_ctx.reject_revisions();
@@ -1086,9 +957,6 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// The document's code page: its first `\ansicpg`, else the last of
-    /// `\mac` (10000), `\pc` (437) and `\pca` (850); a document naming no
-    /// character set reads as declared windows-1252, RTF's `\ansi` default.
     fn codepage_control(&mut self, word: &str, param: Option<i32>) -> bool {
         let codepage = match (word, param) {
             ("ansicpg", Some(cp)) => codepage::windows(u16::try_from(cp).unwrap_or(0)),
@@ -1189,9 +1057,6 @@ impl<'a> Parser<'a> {
                 self.state.block = None;
                 self.state.style_base = Style::PLAIN;
             }
-            // \page and \column break the flow without ending the
-            // paragraph; the page they start is unrepresentable, the word
-            // boundary they carry is not.
             "line" | "lbr" | "page" | "column" => {
                 self.flush_pending();
                 if !self.state.suppress {
@@ -1226,8 +1091,6 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// `\par` or `\sect`: end the paragraph, or drop a deleted or hidden
-    /// mark other than a section break, joining the next paragraph.
     fn paragraph_mark(&mut self, section: bool) -> Result<(), ConvertError> {
         self.flush_pending();
         let dropped = self.revision_drops() || self.hides();
@@ -1263,8 +1126,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// End a held paragraph as it stands, in its own container and with its
-    /// own properties, unless it continues in `container`.
     fn release_held(&mut self, container: Option<usize>) -> Result<(), ConvertError> {
         let Some(held) = self.held else {
             return Ok(());
@@ -1283,8 +1144,6 @@ impl<'a> Parser<'a> {
         ended
     }
 
-    /// Release a held paragraph that the container now in force does not
-    /// continue.
     fn enter_container(&mut self) -> Result<(), ConvertError> {
         if self.table_active() {
             self.release_held(Some(self.state.container()))?;
@@ -1334,8 +1193,6 @@ impl<'a> Parser<'a> {
                     self.end_row(if word == "row" { 1 } else { self.state.itap.max(2) })?;
                 }
             }
-            // Nested row properties arrive in a `{\*\nesttableprops ...}`
-            // destination; its \trowd/\cellx/\nestrow must still act.
             "nesttableprops" => self.state.suppress = self.state.omit,
             _ => return Ok(false),
         }
@@ -1387,8 +1244,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// A field's result, which a header or footer does not read where the field's token stands
-    /// in for it.
     fn field_result(&mut self) -> Result<(), ConvertError> {
         self.flush_pending();
         self.state.capture = Capture::None;
@@ -1403,7 +1258,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The token a header or footer writes for a page number, date or time control word.
     fn page_token(&mut self, word: &str) {
         self.flush_pending();
         if self.renders() {
@@ -1448,7 +1302,6 @@ impl<'a> Parser<'a> {
                 });
             }
             "ftnalt" => {
-                // Marks the enclosing \footnote as an endnote.
                 if let Some(frame) = self.dest.note_frames.last_mut() {
                     frame.kind = NoteKind::Endnote;
                 }
@@ -1459,10 +1312,6 @@ impl<'a> Parser<'a> {
                 self.state.capture = Capture::Bookmark;
                 self.state.suppress = self.state.omit;
             }
-            // Destinations inside a suppressed group that still hold content:
-            // the preferred picture of `\shppict` (its `\nonshppict` fallback
-            // duplicate stays suppressed), the text of a `\shpinst` shape and the
-            // rendering of an `\object`.
             "shppict" | "shptxt" | "result" => self.state.suppress = self.state.omit,
             "pict" => {
                 self.flush_pending();
@@ -1484,9 +1333,6 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// Math zone controls: `\mmath` opens a zone, and inside one every math
-    /// control word names the group it starts or sets a property on it.
-    /// The `\mmathPict` fallback picture is skipped.
     fn math_control(&mut self, word: &str, param: Option<i32>) -> bool {
         if self.dest.math.is_none() {
             if word != "mmath" {
@@ -1601,7 +1447,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Table controls act outside suppressed groups and note bodies.
     fn table_active(&self) -> bool {
         !self.state.suppress && !self.state.in_note
     }
@@ -1617,8 +1462,6 @@ impl<'a> Parser<'a> {
         f(&mut self.state.style);
     }
 
-    /// Whether a character a control writes is taken, flushing the text
-    /// before it; a `\uN` fallback skip consumes it.
     fn take_char(&mut self) -> bool {
         if !self.accepts_text() || self.decoder.skip_char() {
             return false;
@@ -1627,14 +1470,12 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// A character the source escapes, read through its font as text is.
     fn push_char(&mut self, c: char) {
         if self.take_char() {
             self.push_text(c.encode_utf8(&mut [0; 4]), TextLoss::default());
         }
     }
 
-    /// A character a control word stands for, which no font recodes.
     fn push_generated(&mut self, c: char) {
         if !self.take_char() {
             return;
@@ -1648,14 +1489,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The font text is set in: its group's `\fN`, else the document's
-    /// `\deffN`; `None` when the font table lacks the one chosen.
     fn font(&self) -> Option<Font> {
         self.state.font.or(self.deff).and_then(|n| self.prelude.fonts.get(&n).copied())
     }
 
-    /// Body text read through the face of its font: a symbol font draws each
-    /// code, and a text font draws U+F020-F0FF through the last symbol font.
     fn decode(&self, text: &str) -> Decoded {
         match self.font().map(|font| font.face) {
             Some(Face::Glyphs(font)) => symbol::decode_run(text, |_| Some(font)),
@@ -1677,8 +1514,6 @@ impl<'a> Parser<'a> {
         self.flush_text();
     }
 
-    /// Take the buffered bytes as text: a symbol font's body text as its
-    /// font codes, any other through the font's code page.
     fn flush_text(&mut self) {
         let font = self.font();
         if self.state.capture == Capture::None
@@ -1748,13 +1583,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            // Picture payload bytes are collected raw in the token loop.
             Capture::Pict | Capture::FieldInstr | Capture::Math | Capture::None => {}
         }
     }
 
-    /// Body text read through its font, with what its decoding lost: shown,
-    /// or reported as the range that leaves it out.
     fn push_body(&mut self, decoded: Decoded, loss: TextLoss) {
         self.text_loss(loss);
         let Decoded { mut tokens, unmapped } = decoded;
@@ -1817,8 +1649,6 @@ impl<'a> Parser<'a> {
         }
         self.flush_top_table()?;
 
-        // A styled container absorbs its blank paragraphs: they are the
-        // blank lines of a code block.
         if let Some(style) = self.state.block {
             flush_list(&mut self.blocks, &mut self.list_run);
             self.styled.push(style, inlines, &mut self.blocks);
@@ -1828,9 +1658,6 @@ impl<'a> Parser<'a> {
             self.flush_runs();
             return Ok(());
         }
-        // Numbering identity comes from the list tables; the captured label
-        // text only seeds legacy Word-95 numbering. Numbered headings
-        // advance the sequence and keep their number visible.
         let entry = self.list_entry(listtext.as_deref(), listtext_loss);
         if let Some(level) = self.state.outline {
             self.flush_runs();
@@ -1858,8 +1685,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// A captured `\listtext` as a literal marker label, trimmed and
-    /// non-empty, with what it lost, to report once it is shown.
     fn listtext_label(listtext: Option<&str>, loss: TextLoss) -> (Option<String>, TextLoss) {
         let label = listtext.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
         let loss = if label.is_some() { loss } else { TextLoss::default() };
@@ -1889,9 +1714,6 @@ impl<'a> Parser<'a> {
                 let key = ListKey { instance: table_list(ls), marker };
                 return Some((ListMark { key, level, number, label }, TextLoss::default()));
             }
-            // No table definition behind the \ls: the captured \listtext is
-            // the only surviving evidence of the real marker; carry it as
-            // the item's literal label over a bullet base.
             let (label, loss) = Self::listtext_label(listtext, listtext_loss);
             let key = ListKey { instance: table_list(ls), marker: MarkerKind::Bullet };
             return Some((ListMark { key, level, number: 0, label }, loss));
@@ -1918,8 +1740,6 @@ impl<'a> Parser<'a> {
             let mark = ListMark { key, level: self.state.ilvl, number, label: None };
             return Some((mark, TextLoss::default()));
         }
-        // A bare \listtext with no list state still marks a list paragraph
-        // (some producers omit \ls); its text is the literal marker.
         if listtext.is_some_and(|t| !t.trim().is_empty()) {
             let (label, loss) = Self::listtext_label(listtext, listtext_loss);
             let key = ListKey { instance: LISTTEXT_LIST, marker: MarkerKind::Bullet };
@@ -1964,7 +1784,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Close what is still open and take the blocks read.
     fn finish_blocks(&mut self) -> Result<Vec<Block>, ConvertError> {
         for depth in (1..=self.table.depth()).rev() {
             if self.table.has_partial_row(depth) {
@@ -1977,8 +1796,6 @@ impl<'a> Parser<'a> {
         Ok(std::mem::take(&mut self.blocks))
     }
 
-    /// `blocks` with each section's headers and footers before its first block where they
-    /// change, each group read once where a section first shows it.
     fn with_sides(
         &mut self,
         mut sections: sides::Sections,
@@ -2022,7 +1839,6 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Read the story of the definition `key` names as its side and variant, once.
     fn read_once(
         &mut self,
         read: &mut HashMap<(usize, Side, Variant), SideStory>,
@@ -2040,8 +1856,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// One header or footer group's blocks, read by a parser of its own over its bytes, from
-    /// the state it opened in, with this document's tables, code page and assets.
     fn read_story(
         &mut self,
         definition: sides::Definition,
@@ -2073,8 +1887,6 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Whether text read as `tokens` and `unmapped` codes shows anything: a
-/// checkbox, a code no table maps, or text other than whitespace.
 fn shows(tokens: &[symbol::Token], unmapped: u64) -> bool {
     unmapped > 0
         || tokens.iter().any(|token| match token {
@@ -2258,7 +2070,6 @@ mod tests {
 
     #[test]
     fn backslash_before_a_line_break_breaks_the_paragraph() {
-        // The paragraph mark Cocoa's RTF writer emits instead of `\par`.
         for src in
             ["{\\rtf1 Alpha\\\nBeta\\\nGamma\\\n}", "{\\rtf1 Alpha\\\r\nBeta\\\rGamma\\\r\n}"]
         {
@@ -3117,9 +2928,7 @@ mod tests {
         let cases = [
             (format!(r"{y}\cell\row"), format!("{}\n$x$\n", table("$y$"))),
             (format!(r"{y}\row"), format!("{}\n$x$\n", table("$y$"))),
-            // An empty display equation shows nothing, so its `\row` closes no cell.
             (r"a\cell {\mmath{\*\moMathPara}}\row".to_owned(), format!("{}\n$x$\n", table("a"))),
-            // With no `\row`, the row closes at the end of the document, after `x`.
             (format!(r"{y}\cell"), format!("$x$\n\n{}", table("$y$"))),
         ];
         for (row, expected) in cases {

@@ -1,4 +1,4 @@
-//! Integration tests: the public API over the fixture corpus, and the crate's own architecture.
+//! Conversion integration tests.
 #![expect(
     clippy::cast_possible_truncation,
     clippy::disallowed_methods,

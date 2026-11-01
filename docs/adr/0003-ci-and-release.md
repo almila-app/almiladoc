@@ -1,77 +1,40 @@
 # 0003. CI and release
 
-Status: accepted
-Date: 2026-10-14, revised 2026-10-27
-
-## Context
-
-- An organisation ruleset requires GitHub Actions' `ci / required` on every push to `main`.
-- Runners are GitHub-hosted, without organisation secrets; no allowlisted action builds Rust or wheels.
+Accepted. Organisation rules require `ci / required`; GitHub-hosted runners have no organisation secrets, and allowed actions do not build Rust/wheels.
 
 ## Decision
 
-1. **Topology.** ADR 0004 decision 4's `ci.yml` cancels superseded runs; its job `ci` calls `gates.yml`, whose `required` needs every gate. `cache.yml`, on each push to `main` and on dispatch, cancels superseded runs and calls `gates.yml` with `warm`, which skips `policy` and `required` (decision 3). Jobs hold least privilege. Release and scheduled runs never cancel.
+1. **Topology.** ADR 0004's `ci.yml` calls reusable `gates.yml`; `required` needs every gate. `cache.yml` warms on main pushes/dispatch, skipping policy/required; CI/cache cancel superseded runs, release/schedules never cancel, and jobs use least privilege.
+2. **Gates.** Makefile targets are canonical; `make ci` is final pre-flight, default runner `ubuntu-26.04`, and `LICENCE_SET` is `LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES`.
+   - `rust`: locked fmt/clippy/tests/docs, all features, `-D warnings`, fixed proptest seeds, byte-compared snapshots never updated; `rust-arm`: non-PDF snapshot tests on `ubuntu-26.04-arm`.
+   - `features`: clippy of crate/tests for each feature alone and no defaults, selecting `-p almiladoc` because workspace feature unification otherwise pulls in the binding's features.
+   - `python`: only the unpacked sdist's wheel in isolated CPython 3.11/3.15, pytest/stubtest/py.typed and licence/metadata tests.
+   - `policy`: cargo-deny for workspace all-features and fuzz; `deny-offline.toml` allows ureq only as almiladoc's HTTP dependency and excludes hyper/reqwest/libloading/rten from the binding graph; default `cargo tree -p almiladoc` excludes all of them because deny sees unified binding features. Reproduce fuzz lock, workspace/all-feature third-party notices including PyO3, REUSE, hygiene and online pedantic zizmor.
+   - `dco`: sign-offs, no assistant author/committer, MIT-bearing REUSE preservation (ADR 0004), then setup validation/self-test; `fuzz`: build every target/declared feature, require real seeds, replay seeds/regressions once and pass docs.rs build.
+3. **Tools/cache.** Pin latest stable Rust, matching minor `rust-version`, SHA-256 cargo-tool binaries and uv-locked Python tools including maturin/ziglang. Tests use opt-level 1 with overflow/debug assertions; recursion-ceiling proof also runs opt-level 0, the pool stack's sizing profile.
+   - Each compiling gate restores registry and only its own target/fuzz profile directories under an exact job/OS/arch/toolchain/locks/manifests/Makefile/gates.yml hash, without restore keys; disable incremental and use line-tables-only debug info.
+   - Only warm runs on `refs/heads/main` save after misses or skip work on exact lookup-only hits; every other run restores then executes its full target. `caches.py` in `make actions` holds these guards; reviewed green fast-forward main is the cache trust boundary, candidates/forks/PRs only read main entries, and GitHub scopes isolate their writes.
+   - Never cache checksum-verified `target/make`; Cargo fingerprints force changed-input rebuilds, and online zizmor audits poisoning. Release/setup-uv use no cache.
+4. **Schedules.** Daily per-target fuzz campaigns, random-seed proptests and latest-stable staleness checks; weekly corpus minimization; only scheduled runs save corpus. Staleness covers runner labels, tool versions/SHA-256s, uv pins, supported `PYTHONS`/`requires-python`, advisory ignores, clarification checksums and image digests; [fuzz guide](../../fuzz/README.md) owns encrypted finding/reproducer handling.
+5. **OCR goldens.** Optional native OCR quality proof awaits labelled consumer scans ([roadmap](../roadmap.md)).
+6. **Release.** `release.yml` publishes only on `v*` tag pushes, rehearsing weekly/on dispatch; only publish/attest jobs have `id-token: write`.
+   - `guard`: clean advisories, FAQ/tree checks and toolchain-minor rust-version; tag pushes additionally require an annotated version-matching tag on main with green `ci / required` and dates covering earlier finals.
+   - Linux: native-arch Ubuntu, maturin `--zig`, `manylinux_2_28`/`musllinux_1_2`; smoke inside matching digest-pinned PyPA image, CPython 3.11/3.15, CMap PDF, correctly sized painted PNG, licence test, compressed wheels below 12 MB. Native runners: `macos-26`, `macos-26-intel`, `windows-2025`, `windows-11-arm`, same smoke.
+   - Crate/sdist carry `LICENCE_SET`, sdist-built wheel is smoked, every file is attested. RC tags publish signed attestations via trusted publishing to `testpypi`; final tags to `pypi` and `crates-io` environments.
+   - Cargo uses an OIDC-exchanged token revoked afterward; first final uses a `publish-new` environment secret deleted after use. Verify registry files/checksums against attestations, PyPI workflow/environment provenance and, after first crate, crates.io trusted repository/run/commit.
+   - GitHub release starts as draft, receiving tag-message notes, distributions and SHA256SUMS before publication because immutable releases accept no later assets.
+7. **Dates.** BUSL's fourth-anniversary Change Date starts on the earliest UTC [repository activity](https://docs.github.com/en/rest/repos/repos#list-repository-activities) whose `after` contains the tagged commit. Release notes record availability/MIT dates; later `docs/release-dates.tsv` records earlier finals.
+8. **Supply chain.** Dependabot groups daily cargo/uv minor+patch and GitHub actions, updates root stable Rust, and moves fuzz nightly monthly (only cargo-fuzz must build); `/fuzz` handles libfuzzer-sys alone. Adopt latest stable updates as soon as released/green, with maintainer sign-offs (ADR 0004), root/fuzz cfb+zip together and rust-version matching toolchain; this immediate policy disables zizmor cooldown.
+   - `deny.toml` owns permissive licence policy with BUSL exceptions only for project crates, NCSA for libfuzzer-sys, fuzz metadata `BUSL-1.1 AND MIT`, crates.io-only sources and wheel targets; reject yanks, non-path wildcards, openssl-sys, ort-sys and aws-lc-sys.
+9. **Before first release.** Enable SHA pinning, immutable releases, private vulnerability reporting and CodeQL default setup outside required; environments pypi/testpypi/crates-io require maintainer review, v* only, no admin bypass, and bind trusted publishers to release.yml/environment (PyPI pending publishers precede RC).
+   - Two v* rulesets separate admin-bypassable creation from unbypassable update/deletion because [bypass spans a ruleset](https://github.com/github/docs/blob/bcb11fe40765ec7935bdcff0da8cd3cee0bfba50/content/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository.md#L23).
+   - [Trusted publishing cannot create crates](https://github.com/rust-lang/crates.io/blob/e15f258b77b9e73dded45339bb695960f660d33b/src/controllers/krate/publish.rs#L190-L195); add publisher and trustpub_only after first token publication.
 
-2. **Gates** are Makefile targets, `make ci` the pre-flight; jobs run on `ubuntu-26.04` unless named. `LICENCE_SET` is `LICENSE LICENSES/ NOTICE REUSE.toml THIRD-PARTY-LICENSES`.
-   - `rust`: fmt, clippy, locked tests and docs, all features, `-D warnings`; snapshots byte-compared and never updated; proptest seeds fixed.
-   - `rust-arm`: `make test` on `ubuntu-26.04-arm`, byte-comparing non-PDF snapshots only.
-   - `features`: clippy of `almiladoc` and its tests without default features (a workspace build takes the binding's features, so only `-p almiladoc` builds without them); each feature alone.
-   - `python`: the wheel built from the unpacked sdist, alone in CPython 3.11 and 3.15; pytest, stubtest, `py.typed`; a licence test checks `$(LICENCE_SET)` and `BUSL-1.1 AND MIT` metadata.
-   - `policy`: cargo deny over the workspace, all features, and `fuzz/`; `deny-offline.toml`, beside ADR 0001's lints, bans `ureq` but as `almiladoc`'s, which its `ocr-http` takes, and `hyper`, `reqwest`, `libloading` and `rten` from the binding's graph, and `cargo tree -p almiladoc` finds none of them in the default graph (cargo deny sees the binding's features in every workspace graph); a reproduced `fuzz/Cargo.lock`; `cargo about --workspace --all-features`, reaching pyo3, reproduces `THIRD-PARTY-LICENSES`; `reuse lint`; `hygiene`; online pedantic zizmor.
-   - `dco`: `make dco`, which checks sign-offs, that no assistant is a commit's author or committer, and REUSE.toml's MIT-bearing annotations (ADR 0004); then `make setup`, the tracked agent setup's own check and its self-test.
-   - `fuzz`: every target builds, with each declared feature; an empty seed directory fails; seeds and `fuzz/regressions/` replay once; the docs.rs build passes.
+## Limits and rejected routes
 
-3. **Tools and caches.** `rust-toolchain.toml` pins the latest stable release; `rust-version` equals its minor. Cargo tools are sha256-pinned release binaries. Python tools, maturin and ziglang included, are locked `uv` groups. Workspace tests build at `opt-level = 1`, overflow checks and debug assertions on; `make test` also runs the recursion ceiling test at `opt-level = 0`, the dev profile the pool stack is sized for.
-   - Each compiling gate job restores one entry, the Cargo registry and its own profile directories under `target/` and `fuzz/target`, keyed exactly by job, OS, architecture and a hash of its toolchain file, lockfiles, manifests, `Makefile` and `gates.yml`, without restore keys. Gate runs set `CARGO_INCREMENTAL=0` and line-tables-only debuginfo, which keeps entries small.
-   - Only a `warm` run on `refs/heads/main` saves, after a miss, and only there does an exact lookup-only hit end a job early; every other run restores and runs its whole target. `.github/scripts/caches.py`, in `make actions`, holds these guards.
-   - Threat model: `main` moves only by fast-forward to a green, reviewed candidate, so only reviewed code writes an entry. Pull requests, forks and candidates read `main`'s entries and save none; GitHub keeps their own scopes from `main`'s. `target/make`, holding the sha256-checked tools and the policy environment, is never cached, so no restored binary skips its checksum. Cargo rebuilds any artefact whose inputs differ from its fingerprint. zizmor's cache-poisoning audit runs in `make actions`. `release.yml` and every `setup-uv` use no cache.
-
-4. **Schedules.** `scheduled.yml` runs weekly `cargo fuzz cmin` and daily per-target fuzz campaigns, random-seed proptests and a staleness check, against each newest stable release, of what Dependabot cannot reach: runner labels, the Makefile's tool versions and sha256s, the uv pins, `PYTHONS` and `requires-python` against supported CPython series, `deny.toml`'s advisory ignores, `about.toml`'s clarification checksums, and image digests; it alone saves the corpus cache. Public logs name only target, exit kind and input hash; failing inputs upload only encrypted, committed as reproducers after the fix's release.
-
-5. **OCR goldens.** Deferred with ADR 0002's local OCR, a separate crate.
-
-6. **Release.** `release.yml` runs on `v*` tag pushes, which alone publish, and rehearses on dispatch and weekly. Only publish jobs and `attest` hold `id-token: write`.
-   - `guard`: advisories pass; on a tag push, the licensing FAQ exists, the annotated tag equals the workspace version, `rust-version` the toolchain minor, its commit on `main` with green `ci / required`, and `docs/release-dates.tsv` covers earlier final tags.
-   - `linux`: maturin `--zig` builds `manylinux_2_28` and `musllinux_1_2` wheels on native-arch Ubuntu runners. Smoke, in PyPA's matching digest-pinned image: CPython 3.11 and 3.15 tests, a CMap-needing PDF, a page painted to a PNG of the size its dpi gives, the licence test; compressed wheels under 12 MB.
-   - `native`: `macos-26`, `macos-26-intel`, `windows-2025`, `windows-11-arm`; same smoke.
-   - `sdist`, `crate`: both carry `$(LICENCE_SET)`; the sdist's own wheel is smoked. `attest` covers every file.
-   - `publish-testpypi` (rc tags, environment `testpypi`) and `publish-pypi` (final tags, environment `pypi`): signed attestations, trusted publishing only.
-   - `publish-crates` (environment `crates-io`, final tags): `cargo publish` with an OIDC-exchanged token, revoked after use; the first final tag uses a `publish-new`-scoped environment secret, deleted after use.
-   - `verify-published` checks PyPI's files and provenance publisher (workflow, environment) against attestations; crates.io's checksum against the attested `.crate` and, after the first version, its trusted-publishing repository, run and commit.
-   - `github-release`: the tag message, dists and `SHA256SUMS`, uploaded to a draft that is then published, as an immutable release takes no asset after publication.
-
-7. **Dates.** The BUSL-1.1 Change Date is the fourth anniversary of the day a version is first made publicly available: the UTC day of the earliest repository activity entry (https://docs.github.com/en/rest/repos/repos#list-repository-activities) whose `after` contains the tagged commit. The release notes, with the day its BUSL-1.1 portions become MIT, and later `docs/release-dates.tsv` record it.
-
-8. **Supply chain.** Dependabot covers daily `cargo` (minor and patch grouped; `/fuzz` for `libfuzzer-sys` only), `uv` (minor and patch grouped), the root's `rust-toolchain` and `github-actions` (grouped), and monthly fuzz's nightly, which moves every day and only has to build cargo-fuzz. An update, Dependabot's or the maintainer's, is adopted as soon as it is released and its candidate is green, so zizmor's `dependabot-cooldown` audit is off. The maintainer adopts each update as an own signed-off commit (ADR 0004), moving fuzz's `cfb` and `zip` with the root and `rust-version` with the toolchain. `deny.toml`: permissive licences; exceptions BUSL-1.1 for `almiladoc`, the binding and fuzz crates alone, fuzz's declaring `BUSL-1.1 AND MIT`; NCSA for `libfuzzer-sys`; yanked crates, non-path wildcards, `openssl-sys`, `ort-sys` and `aws-lc-sys` denied; crates.io only; wheel targets.
-
-9. **Settings** the maintainer checks before the first release:
-   - `sha_pinning_required`; immutable releases; private vulnerability reporting; CodeQL default setup outside `required`.
-   - Two `v*` tag rulesets, as a bypass spans its ruleset (https://github.com/github/docs/blob/bcb11fe40765ec7935bdcff0da8cd3cee0bfba50/content/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository.md#L23): creation, admin-bypassable only; update and deletion, unbypassable.
-   - Environments `pypi`, `testpypi`, `crates-io`: maintainer-reviewed, `v*` tags only, no admin bypass.
-   - Trusted publishers bind `release.yml` and the environment, optional in both registries; pending PyPI publishers precede the first rc tag.
-   - Trusted publishing cannot create a crate (https://github.com/rust-lang/crates.io/blob/e15f258b77b9e73dded45339bb695960f660d33b/src/controllers/krate/publish.rs#L190-L195): the maintainer adds the trusted publisher and `trustpub_only` after decision 6's first token publish.
-
-## Consequences
-
-- The first candidate owes every gate input: `THIRD-PARTY-LICENSES`, with cargo-about clarifications for Adobe's BSD-3-Clause CMaps (ADR 0001 decision 6), eight fuzz seeds, a tracked `fuzz/Cargo.lock`; schedules, the recipient key and a decryption drill; the first tag, the licensing FAQ.
-- New advisories red unrelated pull requests; schedules stop after 60 inactive days.
-- A Dependabot `cargo` pull request moving a crate in fuzz's graph fails `locks` and `licences`: it is a notice, adopted by decision 8's own commit.
-- Unexercised: zig musl builds, unguaranteed by maturin; CPython 3.11 on `windows-11-arm`, where setup-python's last arm64 build is 3.11.9 (https://github.com/actions/python-versions/blob/49858b91c92d27403416ee43117032e91d00ce24/versions-manifest.json#L10809-L10812); attestations; crates.io's exchange.
-
-## Alternatives considered
-
-- A plain job `ci / required`: never seen satisfying this ruleset.
-- Offline zizmor: impostor commits pass.
-- Gates joining `required` stepwise: earlier candidates land unjudged.
-- PyPA build containers: no Rust; Dockerfiles to maintain.
-- Network namespaces around tests: sudo, for exercised paths only.
-- An ambient-read scanner: a custom script.
-- Signed tags: rulesets and environment approval suffice.
-- Gated reproducibility: double builds.
-- A settings probe: a script for one reading.
-- `group-by: dependency-name` across `/fuzz`: spans only shared dependencies.
-- Encrypting the pull-request-readable corpus cache (https://github.com/github/docs/blob/bcb11fe40765ec7935bdcff0da8cd3cee0bfba50/content/actions/reference/workflows-and-actions/dependency-caching.md#L243): needs a secret; crash inputs never enter it (https://github.com/llvm/llvm-project/blob/fa24f6dba7cd2e71b665af642c19b0f879fe2279/llvm/docs/LibFuzzer.md#L146-L154).
-- `published_at` as the date: candidates publish source earlier.
-- `Swatinem/rust-cache`: outside the organisation's allowed actions; its prefix restore saves entries that depend on history.
-- Saving from candidates, or `ci.yml` on `main`: a `land/owner/*` scope is unreadable by the next candidate, and `main` would show a second `ci / required`.
-- Caching `target/make` or the rustup toolchain: a restored tool skips its checksum; the toolchain saves 10 s for about 600 MB.
+- First candidate requires third-party notices/CMap clarifications, eight starting seeds, tracked fuzz lock, schedules, encryption recipient/decryption drill; first tag requires FAQ. New advisories fail unrelated PRs, inactive schedules stop after 60 days, and Dependabot changes shared with fuzz fail locks/licences until maintainer adoption.
+- Unproved release paths remain zig-musl (maturin offers no guarantee), CPython 3.11 windows-arm ([last setup-python build: 3.11.9](https://github.com/actions/python-versions/blob/49858b91c92d27403416ee43117032e91d00ce24/versions-manifest.json#L10809-L10812)), attestations and crates.io exchange.
+- Plain `ci / required` jobs were not observed satisfying this ruleset; staged gate adoption would land unjudged candidates; offline zizmor admits impostor commits.
+- PyPA build containers lack Rust and require maintained Dockerfiles; test network namespaces need sudo and cover only exercised paths; ambient-read scanners/settings probes add custom machinery; signed tags add nothing required beyond rulesets/approval; reproducibility gates double builds.
+- Dependency-name grouping across fuzz reaches only shared packages. Encrypting a [PR-readable corpus cache](https://github.com/github/docs/blob/bcb11fe40765ec7935bdcff0da8cd3cee0bfba50/content/actions/reference/workflows-and-actions/dependency-caching.md#L243) needs a secret; [crash inputs never enter it](https://github.com/llvm/llvm-project/blob/fa24f6dba7cd2e71b665af642c19b0f879fe2279/llvm/docs/LibFuzzer.md#L146-L154); published_at misses earlier candidate source publication.
+- Swatinem/rust-cache is outside allowed actions and prefix-restores history-dependent entries; candidate cache scopes are unreadable by later candidates, and CI on main adds a second required check. Caching target/make bypasses checksums; a rustup cache trades about 600 MB for 10 seconds.

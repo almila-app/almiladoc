@@ -1,12 +1,7 @@
-//! A scan of the tags in XML text that does not parse, outside comments, character data,
-//! processing instructions and document type declarations.
-
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::package::xml::to_utf8;
 
-/// Whether `judges` accepts any tag of `bytes`, called with its name and attributes. The scan
-/// charges the length of `bytes`.
 pub(crate) fn any_tag(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
@@ -55,13 +50,11 @@ pub(crate) fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|&b| b == b':').next().unwrap_or(name)
 }
 
-/// The attributes of a tag as name and raw value, up to the first that does not read.
 pub(crate) struct Attributes<'a> {
     rest: &'a [u8],
 }
 
 impl Attributes<'_> {
-    /// Whether text other than the end of the tag remains after the last attribute read.
     pub(crate) fn stopped(&self) -> bool {
         !matches!(self.rest.trim_ascii(), b"" | b"/")
     }
@@ -103,9 +96,6 @@ fn past_unmarked(rest: &[u8]) -> Option<&[u8]> {
     Some(close.map_or(&[][..], |at| &body[at + closer.len()..]))
 }
 
-/// The text after a document type declaration, read as quick-xml reads one: its keyword in any
-/// case, quoted literals to their closing quote, and an internal subset to its `]`, with the
-/// comments and processing instructions in it skipped.
 fn past_doctype(rest: &[u8]) -> Option<&[u8]> {
     const KEYWORD: &[u8] = b"!DOCTYPE";
     let mut rest = rest
@@ -136,8 +126,6 @@ fn past_doctype(rest: &[u8]) -> Option<&[u8]> {
     Some(&[])
 }
 
-/// The tag's length: a `>` inside a quoted value does not end it, and a `<` always does, since
-/// a value holds none.
 fn tag_len(rest: &[u8]) -> usize {
     let mut quote = None;
     for (at, &b) in rest.iter().enumerate() {

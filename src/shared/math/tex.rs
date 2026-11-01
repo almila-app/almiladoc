@@ -1,8 +1,3 @@
-//! LaTeX emission shared by the OMML and MathML converters: a buffer that
-//! keeps control words separated from following letters, and the Unicode
-//! to LaTeX mappings for symbols, delimiters, accents and function names.
-
-/// Accumulates LaTeX source.
 #[derive(Default)]
 pub(super) struct Tex {
     out: String,
@@ -51,8 +46,7 @@ impl Tex {
         self.after_macro = false;
     }
 
-    /// A control word, with its backslash (`\alpha`, `\{`). The backslash
-    /// ends any control word before it, so no separator is needed.
+    /// The backslash ends any control word before it, so no separator is needed.
     pub(super) fn push_macro(&mut self, name: &str) {
         self.out.push_str(name);
         self.after_macro = ends_with_control_word(name);
@@ -67,14 +61,12 @@ impl Tex {
         self.after_macro = other.after_macro;
     }
 
-    /// `{inner}`.
     pub(super) fn push_group(&mut self, inner: &Self) {
         self.push_char('{');
         self.push_tex(inner);
         self.push_char('}');
     }
 
-    /// `^{inner}` or `_{inner}`.
     pub(super) fn push_script(&mut self, mark: char, inner: &Self) {
         self.push_char(mark);
         self.push_group(inner);
@@ -132,15 +124,11 @@ impl Tex {
         if atom { self.push_tex(inner) } else { self.push_group(inner) }
     }
 
-    /// `\name{inner}`.
     pub(super) fn push_command(&mut self, name: &str, inner: &Self) {
         self.push_macro(name);
         self.push_group(inner);
     }
 
-    /// Text in math mode: symbols become control words, styled
-    /// mathematical alphanumerics fold back to their base letters inside
-    /// the matching font command, and TeX specials are escaped.
     pub(super) fn push_math_text(&mut self, text: &str) {
         let mut pending: Option<(Variant, String)> = None;
         for c in text.chars() {
@@ -168,7 +156,6 @@ impl Tex {
         self.push_command(variant.command(), &inner);
     }
 
-    /// One character in math mode.
     pub(super) fn push_math_char(&mut self, c: char) {
         if let Some(mapped) = symbol(c) {
             if mapped.starts_with('\\') {
@@ -193,7 +180,6 @@ impl Tex {
         }
     }
 
-    /// `\text{...}`: literal text inside a formula.
     pub(super) fn push_text_mode(&mut self, text: &str) {
         let mut inner = Self::default();
         for c in text.chars() {
@@ -244,7 +230,6 @@ fn ends_with_control_word(s: &str) -> bool {
     stem.len() < s.len() && stem.ends_with('\\')
 }
 
-/// Font variant of a mathematical alphanumeric symbol.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Variant {
     Plain,
@@ -271,8 +256,6 @@ impl Variant {
         }
     }
 
-    /// The variant a MathML `mathvariant` names; `None` for the default
-    /// and for values without a LaTeX font command.
     pub(super) fn from_mathvariant(value: &str) -> Option<Self> {
         Some(match value {
             "bold" => Self::Bold,
@@ -293,9 +276,7 @@ const GREEK_UPPER: &str = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡϴΣΤΥΦΧΨΩ";
 const GREEK_LOWER: &str = "αβγδεζηθικλμνξοπρςστυφχψω";
 const GREEK_EXTRA: &str = "∂ϵϑϰϕϱϖ";
 
-/// Fold a Mathematical Alphanumeric Symbol (or a letterlike symbol in the
-/// same role) to its base character and font variant. Italic is the
-/// default math style, so it folds to `Plain`.
+/// Italic is the default math style, so it folds to `Plain`.
 fn fold_alnum(c: char) -> Option<(char, Variant)> {
     let cp = u32::from(c);
     fold_letterlike(c)
@@ -380,7 +361,6 @@ fn fold_digit(cp: u32) -> Option<(char, Variant)> {
     Some(((b'0' + (digit % 10) as u8) as char, STYLES[(digit / 10) as usize]))
 }
 
-/// The control word of an n-ary operator character (`∑` is `\sum`).
 #[rustfmt::skip]
 pub(super) fn big_operator(c: char) -> Option<&'static str> {
     Some(match c {
@@ -393,8 +373,6 @@ pub(super) fn big_operator(c: char) -> Option<&'static str> {
     })
 }
 
-/// LaTeX for a Unicode math character: a control word, a literal
-/// replacement, or an empty string for characters with no visible form.
 #[rustfmt::skip]
 pub(super) fn symbol(c: char) -> Option<&'static str> {
     big_operator(c).or_else(|| Some(match c {
@@ -456,8 +434,6 @@ pub(super) fn symbol(c: char) -> Option<&'static str> {
     }))
 }
 
-/// LaTeX for a character in a `\left` / `\right` position; characters
-/// that cannot stretch are written as themselves.
 pub(super) fn delimiter(c: char) -> &'static str {
     match c {
         '(' | '⟮' => "(",
@@ -486,8 +462,6 @@ pub(super) fn delimiter(c: char) -> &'static str {
     }
 }
 
-/// Accent command for a combining mark or its spacing equivalent, as used
-/// by OMML `acc` and MathML `mover`/`munder`.
 pub(super) fn accent(c: char) -> Option<&'static str> {
     Some(match c {
         '\u{300}' | '`' => "\\grave",
@@ -515,8 +489,6 @@ pub(super) fn accent(c: char) -> Option<&'static str> {
     })
 }
 
-/// Control word for a function name LaTeX predefines (`\sin`), or an
-/// `\operatorname` for any other alphabetic name.
 pub(super) fn function_name(name: &str) -> Option<String> {
     const KNOWN: &[&str] = &[
         "arccos", "arcsin", "arctan", "arg", "cos", "cosh", "cot", "coth", "csc", "deg", "det",

@@ -1,6 +1,3 @@
-//! Running headers and footers: those of the master pages text and sheets use (ODF 1.3 Part 3,
-//! 16.10 and 16.11), and a slide's header, footer and date-time declarations and frames.
-
 use super::styles::odf_boolean;
 use super::text::{self, Ctx, FrameContent, parse_children, parse_container};
 use crate::diagnostics::DiagnosticCode;
@@ -17,15 +14,12 @@ const RUNNING: [(Side, [&str; 3]); 2] = [
 ];
 const REGIONS: [&str; 3] = ["region-left", "region-center", "region-right"];
 
-/// What a master page shows for one side and variant.
 enum Shown<'e> {
     UsesDefault,
     Nothing,
     Content(&'e Element),
 }
 
-/// Each master page side read once, and the values in force for each master, kept under its
-/// `style:name`, as masters take effect.
 pub(super) struct MasterSides<'c, 'a, 'b> {
     ctx: &'c Ctx<'a, 'b>,
     read: HashMap<(*const Element, Side, Variant), SideStory>,
@@ -60,8 +54,6 @@ impl<'c, 'a, 'b> MasterSides<'c, 'a, 'b> {
         Ok(())
     }
 
-    /// Push the default, first-page and left-page sides `master` shows onto `blocks` where they
-    /// change.
     fn publish(
         &mut self,
         master: &'b Element,
@@ -119,8 +111,6 @@ impl<'c, 'a, 'b> MasterSides<'c, 'a, 'b> {
     }
 }
 
-/// What a master page side shows: `absent` where the master has none, nothing where its
-/// `style:display` is `false` (ODF 1.3 Part 3, 19.475), else its content.
 fn shown<'e>(side: Option<&'e Element>, absent: Shown<'e>) -> Shown<'e> {
     match side {
         None => absent,
@@ -131,9 +121,6 @@ fn shown<'e>(side: Option<&'e Element>, absent: Shown<'e>) -> Shown<'e> {
     }
 }
 
-/// What a first-page or left-page side shows: the default where the master has none or its
-/// `style:display` is `false`, which LibreOffice writes for content shared with the default
-/// (ODF 1.3 Part 3, 16.11, 16.14), else its content, an empty one showing nothing.
 fn variant_shown(side: Option<&Element>) -> Shown<'_> {
     match side {
         Some(side) if side.attr(ns::STYLE, "display").and_then(odf_boolean) != Some(false) => {
@@ -143,7 +130,6 @@ fn variant_shown(side: Option<&Element>) -> Shown<'_> {
     }
 }
 
-/// A side's content: its left, center and right regions in turn where it has them.
 fn side_blocks<'b>(side: &'b Element, ctx: &Ctx<'_, 'b>) -> Result<Vec<Block>, ConvertError> {
     let selected = ctx.selected_story(side)?;
     let side = selected.as_ref().unwrap_or(side);
@@ -159,9 +145,6 @@ fn side_blocks<'b>(side: &'b Element, ctx: &Ctx<'_, 'b>) -> Result<Vec<Block>, C
     Ok(blocks)
 }
 
-/// A text document's blocks with the sides of each master page before the text it starts: the
-/// first master's unless the first paragraph, heading or table starts another, then each that
-/// a paragraph, heading or table style names, before the top-level block that holds it.
 pub(super) fn text_with_masters(
     text: &Element,
     ctx: &Ctx<'_, '_>,
@@ -189,8 +172,6 @@ pub(super) fn text_with_masters(
     Ok(blocks)
 }
 
-/// Parse `container`'s children in runs that the masters they start split, entering the
-/// containers the body flattens and publishing a nested start before the block that holds it.
 fn walk_masters<'b>(
     container: &Element,
     ctx: &Ctx<'_, 'b>,
@@ -226,8 +207,6 @@ fn walk_masters<'b>(
     Ok(())
 }
 
-/// Visit `root`'s page-flow paragraphs, headings and tables in order until `visit` returns
-/// `false`; table cells (ODF 1.3 Part 3, 19.501), notes and frames are outside the flow.
 fn in_flow<'e>(
     root: &'e Element,
     ctx: &Ctx<'_, '_>,
@@ -255,7 +234,6 @@ fn is_list_part(elem: &Element) -> bool {
         && matches!(elem.local.as_str(), "list" | "list-item" | "list-header")
 }
 
-/// The family and style a paragraph, heading or table names.
 fn styled_block(elem: &Element) -> Option<(&'static str, Option<&str>)> {
     if elem.is(ns::TEXT, "p") || elem.is(ns::TEXT, "h") {
         Some(("paragraph", elem.attr(ns::TEXT, "style-name")))
@@ -266,7 +244,6 @@ fn styled_block(elem: &Element) -> Option<(&'static str, Option<&str>)> {
     }
 }
 
-/// The master page a paragraph, heading or table starts through its style.
 fn applied<'b>(elem: &Element, ctx: &Ctx<'_, 'b>) -> Result<Option<&'b Element>, ConvertError> {
     let Some((family, Some(style))) = styled_block(elem) else { return Ok(None) };
     let styles = ctx.styles;
@@ -275,7 +252,6 @@ fn applied<'b>(elem: &Element, ctx: &Ctx<'_, 'b>) -> Result<Option<&'b Element>,
         .and_then(|name| styles.master_page(name)))
 }
 
-/// Whether the body writes a container's children in its place, as `parse_block_elem` does.
 fn flattened(elem: &Element, ctx: &Ctx<'_, '_>) -> bool {
     elem.ns.as_deref() == Some(ns::TEXT)
         && match elem.local.as_str() {
@@ -289,7 +265,6 @@ fn flattened(elem: &Element, ctx: &Ctx<'_, '_>) -> bool {
         }
 }
 
-/// Read a running frame a slide or notes page holds into the side it stands for.
 pub(super) fn read_frame(
     sides: &mut PageSides,
     frame: &Element,
@@ -306,7 +281,6 @@ pub(super) fn read_frame(
     })
 }
 
-/// Add a declaration's text, or the date token for one that shows the current date.
 pub(super) fn read_declaration(
     sides: &mut PageSides,
     decl: &Element,

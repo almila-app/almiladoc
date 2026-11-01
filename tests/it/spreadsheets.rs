@@ -1,7 +1,3 @@
-//! One workbook converts alike from its OpenDocument and Excel forms: the
-//! sheets, rows and columns it hides drop, and the merges they cut keep the
-//! part that shows.
-
 use crate::build::{REL, odf_styled, relationships};
 use crate::support::{converter, reported, zip_package};
 use almiladoc::{Format, Input};
@@ -107,8 +103,6 @@ impl Sheet<'_> {
 
 const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
-/// A workbook of `sheets`, each with its name, its worksheet body and whether
-/// it is hidden.
 fn xlsx(sheets: &[(&str, String, bool)]) -> Vec<u8> {
     let listed: String = sheets
         .iter()

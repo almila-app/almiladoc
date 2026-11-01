@@ -1,13 +1,7 @@
-//! Office Math (OMML) to LaTeX. The same element tree serves docx and pptx
-//! directly, and rtf through its math destinations, which mirror OMML
-//! element for element: there, an attribute arrives as the element's text
-//! (`{\mtype lin}`) and a run's text sits directly in the run.
-
 use super::tex::{Fraction, Tex, accent, delimiter, function_name, symbol};
 use super::{DROPPED, GUESSED};
 use crate::package::xml::{Element, Node, ns};
 
-/// One `m:oMath` as LaTeX source without delimiters.
 #[cfg(test)]
 pub(crate) fn omath_to_tex(omath: &Element) -> String {
     omath_with_damage(omath).0
@@ -17,7 +11,6 @@ pub(crate) fn omath_with_damage(omath: &Element) -> (String, bool) {
     children_tex(omath, Mode::Math).finish_with_damage()
 }
 
-/// The equations of an `m:oMathPara`, one per `m:oMath` line.
 pub(crate) fn omath_para_to_tex(para: &Element) -> Vec<String> {
     omath_para_with_damage(para).0
 }
@@ -42,9 +35,7 @@ pub(crate) fn omath_para_with_damage(para: &Element) -> (Vec<String>, bool) {
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Math,
-    /// Inside `m:fName`: run text names a function (`\sin`, `\lim`).
     FuncName,
-    /// Inside an equation-array row: `&` marks an alignment point.
     Array,
 }
 
@@ -56,7 +47,6 @@ fn walk_children(elem: &Element, tex: &mut Tex, mode: Mode) {
 
 fn walk_elem(e: &Element, tex: &mut Tex, mode: Mode) {
     if e.ns.as_deref() != Some(ns::M) {
-        // Revision and bookmark markup from the host document.
         match e.local.as_str() {
             "del" | "moveFrom" | "rPr" | "pPr" => {}
             _ => walk_children(e, tex, mode),
@@ -118,7 +108,6 @@ fn children_tex(elem: &Element, mode: Mode) -> Tex {
     tex
 }
 
-/// Child argument `name` of `parent`, converted on its own.
 fn arg(parent: &Element, name: &str, mode: Mode) -> Tex {
     parent.find(ns::M, name).map_or_else(Tex::default, |child| children_tex(child, mode))
 }
@@ -155,8 +144,6 @@ fn prop(parent: &Element, pr: &str, name: &str) -> Option<String> {
     Some(value.chars().filter(|&c| !is_marker(c)).collect::<String>().trim().to_string())
 }
 
-/// A property value: `parent/pr/name/@m:val`, or the element's own text
-/// where the tree came from rtf, with any reader markers in it.
 fn marked_prop(parent: &Element, pr: &str, name: &str) -> Option<String> {
     parent.find(ns::M, pr)?.find(ns::M, name).map(val_or_text)
 }
@@ -210,7 +197,6 @@ fn is_marker(c: char) -> bool {
     c == GUESSED || c == DROPPED
 }
 
-/// An on/off property: absent is `None`; present with no value is on.
 fn flag(parent: &Element, pr: &str, name: &str) -> Option<bool> {
     prop(parent, pr, name).map(|value| is_on(&value))
 }
@@ -229,8 +215,6 @@ fn direct_text(elem: &Element) -> String {
         .collect()
 }
 
-/// A run's text: its `m:t` children, or its own text where the tree came
-/// from rtf.
 fn run_text(r: &Element) -> String {
     let mut texts = r.find_all(ns::M, "t").peekable();
     if texts.peek().is_some() {
@@ -250,8 +234,6 @@ fn run(r: &Element, tex: &mut Tex, mode: Mode) {
     } else {
         !r.text_damage().is_empty()
     });
-    // Run properties sit under `m:rPr`; rtf writes them on the run itself,
-    // with `sty` and `scr` as numbers in their enumeration order.
     let value = |name: &str| {
         r.find(ns::M, "rPr")
             .and_then(|p| p.find(ns::M, name))
@@ -310,7 +292,6 @@ fn fraction(e: &Element, tex: &mut Tex) {
 }
 
 fn delimited(e: &Element, tex: &mut Tex) {
-    // An explicitly empty character means no delimiter on that side.
     let chr = |name: &str, default: char, tex: &mut Tex| -> Option<char> {
         match marked_prop(e, "dPr", name) {
             Some(_) => char_property(e, "dPr", name, tex),
@@ -388,7 +369,6 @@ fn limit(e: &Element, tex: &mut Tex, mode: Mode) {
     let base = arg(e, "e", mode);
     let lim = arg(e, "lim", Mode::Math);
     if mode == Mode::FuncName {
-        // `\lim_{x \to 0}`: the operator takes its own limits.
         tex.push_tex(&base);
         tex.push_script(if upper { '^' } else { '_' }, &lim);
         return;

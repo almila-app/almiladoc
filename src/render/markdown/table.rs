@@ -1,5 +1,3 @@
-//! Table rendering over the canonical grid; an opted-in OCR fill preserves merged cells as HTML.
-
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, CellSlot, List, MarkerKind, Style, Table};
 use crate::render::markdown::Ctx;
@@ -9,8 +7,6 @@ use crate::render::markdown::inline::{
 };
 use crate::render::markdown::sink::{Meter, Sink, Text};
 
-/// One row's cells that show text, by column, and how many columns of the row
-/// show anything: a covered position counts, a blank cell does not.
 struct RenderedRow<'m> {
     shown: usize,
     texts: Vec<(usize, Text<'m>)>,
@@ -38,9 +34,6 @@ fn render_row<'m>(
     Ok(rendered)
 }
 
-/// Write `table`, rendering every cell first and holding the texts until
-/// written: trailing blank rows and columns are only known once all are
-/// rendered, and a blank position is held as nothing.
 pub(crate) fn write_table(
     table: &Table,
     rc: &Ctx<'_>,
@@ -160,11 +153,7 @@ fn write_blank_cells(count: usize, sink: &mut Sink<'_>) -> Result<(), ConvertErr
     sink.write(CHUNK.get(..count % PER_CHUNK * BLANK.len()).unwrap_or_default())
 }
 
-/// Flatten arbitrary block content into a single table-cell line in `out`:
-/// its parts joined by `<br>`, each line trimmed, blank lines dropped and
-/// the rest joined by `<br>` as `out` takes them. A cell's edge whitespace
-/// is padding the table's own padding would swallow anyway, and
-/// spreadsheets carry it by the thousand.
+/// A cell's edge whitespace is padding the table's own padding would swallow anyway, and spreadsheets carry it by the thousand.
 pub(crate) fn render_cell(
     cell: &Cell,
     rc: &Ctx<'_>,
@@ -177,7 +166,6 @@ pub(crate) fn render_cell(
     Ok(())
 }
 
-/// Parts rendered in place into one text, `sep` between those kept.
 struct Join {
     sep: &'static str,
     any: bool,
@@ -188,9 +176,6 @@ impl Join {
         Self { sep, any: false }
     }
 
-    /// Render one part after the separator it needs; `render` reports
-    /// whether it keeps what it rendered since the mark it is given, and a
-    /// part not kept is taken back with its separator.
     fn part(
         &mut self,
         out: &mut Text<'_>,

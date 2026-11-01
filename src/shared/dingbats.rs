@@ -1,31 +1,9 @@
-//! The dingbat fonts' codes as Unicode: one 256-entry table per font, each built at compile time
-//! from its data file in `dingbats/`, the mapping's single source.
-//!
-//! Wingdings, Wingdings 2, Wingdings 3 and Webdings follow WG2 N4384 / UTC L2/12-368, "Status of
-//! encoding of Wingdings and Webdings Symbols" (Unicode, 2012-11-06), whose glyph id `w-FNNN` is
-//! decimal code NNN of font F (0 Webdings, 1 Wingdings, 2 Wingdings 2, 3 Wingdings 3). Zapf
-//! Dingbats follows Unicode's `zdingbat.txt`, "Adobe Zapf Dingbats Encoding to Unicode" (table
-//! version 1.0, 2011-07-12), whose PostScript glyph name is the source id. Each name is the
-//! character's name in `UnicodeData.txt` 18.0.0; a note marks each row reconciled with its
-//! source: a character the source names otherwise, a Corporate Use value replaced by the
-//! standard character of the name the source gives it, one of two values the source gives, or
-//! the space every font draws at code 20, which N4384 does not list.
-//!
-//! A data file has one row per glyph its source lists, and N4384's files a row for code 20, in
-//! ascending code order, each row ending in a newline and its fields separated by tabs: the code
-//! as two hex digits; the character as `U+` and four to six hex digits, or `-` where no character
-//! encodes the glyph; the character's name; the source id; and, on a reconciled row only, the
-//! note. A malformed row, a code out of order or repeated, or a value that is no scalar value
-//! fails the build.
-
 pub(crate) const WINGDINGS: [char; 256] = table(include_str!("dingbats/wingdings.tsv"));
 pub(crate) const WINGDINGS_2: [char; 256] = table(include_str!("dingbats/wingdings2.tsv"));
 pub(crate) const WINGDINGS_3: [char; 256] = table(include_str!("dingbats/wingdings3.tsv"));
 pub(crate) const WEBDINGS: [char; 256] = table(include_str!("dingbats/webdings.tsv"));
 pub(crate) const ZAPF_DINGBATS: [char; 256] = table(include_str!("dingbats/zapfdingbats.tsv"));
 
-/// The table a data file gives, `'\0'` at each code it gives no character; panics on a malformed
-/// file, which in a constant fails the build.
 #[expect(clippy::panic, reason = "a const fn fails the build on a malformed table by panicking")]
 const fn table(tsv: &str) -> [char; 256] {
     let tsv = tsv.as_bytes();
@@ -67,8 +45,6 @@ const fn table(tsv: &str) -> [char; 256] {
     table
 }
 
-/// The end of the field at `start`, the tab or newline that closes it; panics on an empty field
-/// or one the data ends in.
 const fn field_end(tsv: &[u8], start: usize) -> usize {
     let mut end = start;
     while end < tsv.len() && tsv[end] != b'\t' && tsv[end] != b'\n' {
@@ -79,13 +55,11 @@ const fn field_end(tsv: &[u8], start: usize) -> usize {
     end
 }
 
-/// The end of the field after the one `end` closes; panics unless a tab closes it.
 const fn next_field_end(tsv: &[u8], end: usize) -> usize {
     assert!(tsv[end] == b'\t', "a dingbats row has four or five fields");
     field_end(tsv, end + 1)
 }
 
-/// The value of the hex digits in `tsv[start..end]`, at most six of them.
 #[expect(clippy::panic, reason = "a const fn fails the build on a malformed table by panicking")]
 const fn hex(tsv: &[u8], start: usize, end: usize) -> u32 {
     let mut value = 0;

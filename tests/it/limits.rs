@@ -1,7 +1,3 @@
-//! Each abuse input trips its limit at default `Limits`: a committed fixture
-//! named `<limit>--<shape>--errors.<ext>`, or an input over 1 MiB built here.
-//! An ordinary input as large as `max_input_bytes` converts.
-
 use crate::build::{epub, odf, ole, record};
 use crate::support::{
     configured, converter, count, fixture_root, format_of, limit_mut, limited, trips, walk,
@@ -47,8 +43,6 @@ fn an_input_past_max_input_bytes_is_refused_before_any_parse() {
     assert_matches!(error, ConvertError::Malformed { .. });
 }
 
-/// An RTF of one picture in Word's hex form, 128 digits a line, filling
-/// `max_input_bytes`: one token per byte.
 fn hex_picture_rtf() -> Vec<u8> {
     let max_input = usize::try_from(Limits::default().max_input_bytes).unwrap();
     let head = b"{\\rtf1\\ansi\\ansicpg1252{\\fonttbl{\\f0 Calibri;}}\\pard Figure\\par{\\pict\\pngblip\\picw64\\pich64\r\n89504e470d0a1a0a".as_slice();
@@ -70,8 +64,6 @@ fn a_hex_picture_rtf_at_max_input_bytes_converts() {
     assert_eq!(parsed.document().assets.len(), 1);
 }
 
-/// A legacy PowerPoint file whose `PowerPoint Document` stream is `records`,
-/// with no `Current User` stream, so it is read in stream order.
 fn ppt(records: &[u8]) -> Vec<u8> {
     ole(&[("PowerPoint Document", records)])
 }
@@ -160,7 +152,6 @@ const NOISE: usize = 128 << 10;
 const LOCAL_HEADER_CRC: u64 = 14;
 const CENTRAL_HEADER_CRC: u64 = 16;
 
-/// `len` bytes that deflate cannot shrink, the same on every run.
 fn noise(len: usize) -> Vec<u8> {
     let mut state = 0x2545_F491_4F6C_DD1D_u64;
     (0..len)
@@ -173,8 +164,6 @@ fn noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A zip of one entry of `len` zero bytes ending in noise, which keeps its
-/// compression ratio under `max_compression_ratio`.
 fn picture_zip(len: usize) -> Vec<u8> {
     let payload = [vec![0u8; len - NOISE], noise(NOISE)].concat();
     zip_package(&[("picture", payload)])
@@ -198,9 +187,6 @@ fn fail_checksums(data: &mut [u8], names: &[String]) {
     }
 }
 
-/// An EPUB of `entries` copies of the one entry of `picture`, each failing its
-/// checksum and named `p<i>.png`, whose chapter holds an `<img>` per index of
-/// `references`.
 fn corrupt_picture_epub(picture: &[u8], entries: usize, references: &[usize]) -> Vec<u8> {
     let body: String = references.iter().map(|i| format!(r#"<img src="p{i}.png"/>"#)).collect();
     let names: Vec<String> = (0..entries).map(|i| format!("p{i}.png")).collect();

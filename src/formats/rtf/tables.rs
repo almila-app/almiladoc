@@ -1,7 +1,3 @@
-//! RTF prelude tables parsed into typed definitions: the font table (with
-//! per-font charsets and faces), the style sheet, and the list/list-override
-//! tables.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -18,8 +14,6 @@ use std::ops::Range;
 
 pub(super) const LIST_LEVELS: usize = crate::shared::numbering::OFFICE_LEVELS;
 
-/// The heading level an `\outlinelevelN` parameter names: 0 to 8 are levels
-/// 1 to 9, and anything else names none.
 pub(super) fn outline_level(n: i32) -> Option<u8> {
     u8::try_from(n).ok().filter(|&n| n < 9).map(|n| n + 1)
 }
@@ -28,9 +22,7 @@ pub(super) fn outline_level(n: i32) -> Option<u8> {
 pub(super) struct ListLevelDef {
     pub marker: Option<MarkerKind>,
     pub start: u64,
-    /// `\leveltext` with `\levelnumbers` placeholders and `\levellegal`.
     pub pattern: NumberPattern,
-    /// What the pattern's literal text lost in decoding.
     pub loss: TextLoss,
 }
 
@@ -45,10 +37,6 @@ impl Default for ListLevelDef {
     }
 }
 
-/// Build a number pattern from a `\leveltext` payload (first byte = length,
-/// then the characters) and the 1-based placeholder positions listed in
-/// `\levelnumbers` (each placeholder byte is a zero-based level index),
-/// with what its literal text lost in decoding.
 fn build_pattern(text: &[u8], positions: &[u8], enc: Codepage) -> (Vec<NumberText>, TextLoss) {
     let mut loss = TextLoss::default();
     let Some((&count, rest)) = text.split_first() else {
@@ -84,7 +72,6 @@ pub(super) struct ListDef {
 pub(super) struct StyleDef {
     pub outline: Option<u8>,
     pub delta: StyleDelta,
-    /// The block container the style's name designates.
     pub block: Option<BlockStyle>,
 }
 
@@ -157,21 +144,13 @@ impl Table {
     }
 }
 
-/// Finds the table groups (`{\name ...}` or `{\*\name ...}`) in the one
-/// lexing pass over the input, bin-aware since it follows the lexer.
 #[derive(Debug, Default)]
 pub(super) struct TableScan {
-    /// The depth of the group whose first control word, after any `\*`, is
-    /// still to come.
     opening: Option<usize>,
-    /// Each open table group: its table, its depth and where its body starts.
     open: Vec<(Table, usize, usize)>,
 }
 
 impl TableScan {
-    /// Follow `token`, lexed at group depth `depth` (after an `Open` pushes,
-    /// before a `Close` pops) and ending at byte `end`: the table and body
-    /// range of the table group it closes.
     pub(super) fn token(
         &mut self,
         token: &Token<'_>,
@@ -199,18 +178,15 @@ impl TableScan {
     }
 }
 
-/// What a font draws for the text set in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Face {
     Text,
     Glyphs(SymbolFont),
-    /// A symbol-charset font no glyph table knows, whose text stays as stored.
     Charset2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Font {
-    /// The code page its `\fcharsetN` names; `None` reads in the document's.
     pub codepage: Option<Codepage>,
     pub face: Face,
 }
@@ -225,7 +201,6 @@ pub(super) struct Prelude {
 }
 
 impl Prelude {
-    /// Read the body of one `table` group, decoding its text in `enc`.
     pub(super) fn read(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -241,22 +216,18 @@ impl Prelude {
         }
     }
 
-    /// The list definition `\lsN` names, resolved through the list table
-    /// read by its first use, wherever the two tables sit.
     pub(super) fn list(&mut self, ls: i32) -> Option<&ListDef> {
         let over = self.overrides.get(&ls)?;
         Some(self.lists.entry(ls).or_insert_with(|| over.resolve(&self.by_list_id)))
     }
 }
 
-/// One `\listoverride`: the list it names and what it overrides per level.
 #[derive(Debug)]
 struct Override {
     list_id: i32,
     levels: [LevelOverride; LIST_LEVELS],
 }
 
-/// One `\lfolevel`: an overridden start, marker or number text.
 #[derive(Debug, Default)]
 struct LevelOverride {
     start: Option<u64>,
@@ -310,8 +281,6 @@ enum LevelDest {
     Numbers,
 }
 
-/// Collector for the byte payloads of `\leveltext` / `\levelnumbers`
-/// destinations inside one level group.
 #[derive(Default)]
 struct LevelTextCollector {
     active: Option<LevelDest>,
@@ -343,8 +312,6 @@ impl LevelTextCollector {
         (NumberPattern { text, legal: self.legal }, loss)
     }
 
-    /// The finished pattern for an ordered level, with what its literal
-    /// text lost; bullets carry glyph text, not a pattern.
     fn finish(&mut self, marker: Option<MarkerKind>, enc: Codepage) -> (NumberPattern, TextLoss) {
         let finished = if marker.is_some_and(MarkerKind::ordered) {
             self.pattern(enc)
@@ -361,8 +328,6 @@ struct FontEntry {
     id: i32,
     depth: usize,
     charset: Option<i32>,
-    /// The name with its leading whitespace dropped, capped at the longest
-    /// name a glyph table knows; `overlong` once text runs past the cap.
     name: Vec<u8>,
     overlong: bool,
     named: bool,
@@ -439,7 +404,6 @@ fn parse_fonttbl(
     Ok(())
 }
 
-/// The null style id: `\sbasedon222` means "based on nothing".
 const NULL_STYLE: i32 = 222;
 
 fn parse_stylesheet(
@@ -452,7 +416,6 @@ fn parse_stylesheet(
     let mut depth = 0usize;
     let mut current: Option<(i32, StyleDef, Option<i32>)> = None;
     let mut raw: BTreeMap<i32, (StyleDef, Option<i32>)> = BTreeMap::new();
-    // A style's name is the text at the end of its group, before the `;`.
     let mut name: Vec<u8> = Vec::new();
     while let Some(token) = lexer.next_token()? {
         match token {
@@ -556,7 +519,6 @@ struct ListReader {
 
 impl ListReader {
     fn close(&mut self, by_list_id: &mut HashMap<i32, ListDef>, enc: Codepage) {
-        // A leveltext/levelnumbers destination ends at its group.
         self.collector.active = None;
         if self.in_level && Some(self.depth) == self.list_depth.map(|d| d + 1) {
             self.in_level = false;
@@ -632,7 +594,6 @@ struct OverrideReader {
     lfo_depth: Option<usize>,
     list_id: Option<i32>,
     ls: Option<i32>,
-    /// One per `\lfolevel` group, in level order.
     levels: [LevelOverride; LIST_LEVELS],
     level_index: usize,
     collector: LevelTextCollector,
@@ -669,7 +630,6 @@ impl OverrideReader {
     fn control(&mut self, overrides: &mut HashMap<i32, Override>, word: &str, param: Option<i32>) {
         match word {
             "listoverride" => {
-                // A previous override group left unclosed still counts.
                 self.flush(overrides);
                 self.over_depth = Some(self.depth);
                 self.level_index = 0;

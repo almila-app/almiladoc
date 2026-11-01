@@ -1,8 +1,3 @@
-//! PresentationML text-property cascade: run properties resolve through
-//! paragraph `pPr` -> shape `lstStyle` -> layout placeholder -> master
-//! placeholder / `txStyles` -> presentation `defaultTextStyle`, with
-//! explicit-off states honored at every layer.
-
 use std::cmp::Ordering;
 
 use crate::model::VerticalPosition;
@@ -16,34 +11,27 @@ pub(super) const LEVELS: usize = OFFICE_LEVELS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Bullet {
-    /// Not specified at this layer; inherit from the next one.
     #[default]
     Inherit,
-    /// Explicitly no bullet (`a:buNone`).
     None,
-    /// Character bullet (`a:buChar`).
     Char,
-    /// Auto-numbered (`a:buAutoNum`).
-    AutoNum { marker: MarkerKind, start: u64, wrap: NumWrap },
+    AutoNum {
+        marker: MarkerKind,
+        start: u64,
+        wrap: NumWrap,
+    },
 }
 
-/// The punctuation an `ST_TextAutoNumberScheme` wraps around the ordinal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum NumWrap {
-    /// `1.` — matches the renderer's default label.
     #[default]
     Period,
-    /// `1)`
     ParenR,
-    /// `(1)`
     ParenBoth,
-    /// Bare `1`.
     Plain,
 }
 
 impl NumWrap {
-    /// The literal marker label for ordinal `n`; `None` when the default
-    /// label (`n.`) is already faithful.
     pub(super) fn label(self, marker: MarkerKind, n: u64) -> Option<String> {
         match self {
             Self::Period => None,
@@ -62,7 +50,6 @@ pub(super) struct TextProps {
 }
 
 impl TextProps {
-    /// Overlay `over` on `self`: explicit values win, `Inherit` falls through.
     pub(super) fn merge(self, over: Self) -> Self {
         Self {
             delta: self.delta.merge(over.delta),
@@ -72,8 +59,6 @@ impl TextProps {
     }
 }
 
-/// Per-level text properties from a `lstStyle`-shaped element
-/// (`a:lvl1pPr`..`a:lvl9pPr` children).
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct LevelStyle {
     levels: [TextProps; LEVELS],
@@ -103,8 +88,6 @@ pub(super) fn parse_level_styles(elem: Option<&Element>) -> LevelStyle {
     out
 }
 
-/// Properties carried by one `pPr`-shaped element (direct paragraph
-/// properties or one `lvlNpPr` level).
 pub(super) fn paragraph_props(ppr: &Element) -> TextProps {
     let bullet = if ppr.find(ns::A, "buNone").is_some() {
         Bullet::None
@@ -141,7 +124,6 @@ pub(super) fn paragraph_props(ppr: &Element) -> TextProps {
     TextProps { delta, bullet, faces }
 }
 
-/// Delta from an `a:rPr`/`a:defRPr` element's attributes.
 pub(super) fn rpr_delta(rpr: &Element) -> StyleDelta {
     let on_off = |name: &str| rpr.attr(ns::A, name).map(|v| matches!(v, "1" | "true" | "on"));
     StyleDelta {
@@ -154,8 +136,6 @@ pub(super) fn rpr_delta(rpr: &Element) -> StyleDelta {
     }
 }
 
-/// The shift an `a:rPr@baseline` names: a percentage of the font height, written as a number
-/// or with a trailing `%`, whose sign raises or lowers; anything else names none.
 fn baseline_position(value: &str) -> Option<VerticalPosition> {
     let number = value.strip_suffix('%').unwrap_or(value);
     if !number.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')) {
@@ -168,8 +148,6 @@ fn baseline_position(value: &str) -> Option<VerticalPosition> {
     })
 }
 
-/// The Latin and symbol faces an `a:rPr`/`a:defRPr` element names; a theme reference
-/// (`+mn-lt`) is a plain face and an empty `typeface` names none.
 pub(super) fn rpr_faces(rpr: &Element) -> Slots {
     let face = |name: &str| {
         rpr.find(ns::A, name)
@@ -193,7 +171,6 @@ impl<'e> Ph<'e> {
     }
 }
 
-/// A placeholder shape's identity and level styles inside a layout/master.
 #[derive(Debug)]
 pub(super) struct Placeholder {
     pub ph_type: String,
@@ -216,8 +193,6 @@ pub(super) fn collect_placeholders(sp_tree: &Element) -> Vec<Placeholder> {
         .collect()
 }
 
-/// Find the placeholder a shape inherits from: match by `idx` first, then by
-/// type (title variants unify).
 pub(super) fn match_placeholder<'p>(
     placeholders: &'p [Placeholder],
     ph: Ph<'_>,

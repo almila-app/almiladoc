@@ -1,15 +1,3 @@
-//! Fixture corpus snapshot harness.
-//!
-//! One snapshot per fixture of the single conversion result under
-//! `OnLoss::Report`: the Markdown output, or the terminal error. A fixture
-//! with diagnostics has a second snapshot, `<name>.diagnostics`, of each
-//! diagnostic and the outcome of converting it under `OnLoss::Fail`. Logs are never
-//! snapshotted. A reader that panics fails the sweep. Fixtures under
-//! `abuse/` are resource-abuse shapes, each asserted against its limit in
-//! `tests/it/limits.rs`, not by the corpus sweep. Malformed fixtures encode their
-//! expected outcome as `name--<outcome>.ext` where outcome is one of
-//! `recovers`, `skips`, `ignores`, `errors`.
-
 use crate::support::{self, converter, fixture, fixture_root, format_of, inlines, reporting, walk};
 use almiladoc::model::{Block, Document, ImageSource, Inline, inlines_are_empty};
 use almiladoc::{Conversion, ConvertError, Converter, Diagnostics, Format, Input};
@@ -32,8 +20,6 @@ fn document(rel: &str, format: Format) -> Document {
     converter(1).parse(Input::new(&fixture(rel), format)).unwrap().into_document()
 }
 
-/// The Markdown and diagnostics of a conversion, or the error it ended in;
-/// the pool reports a panic in a reader as `Internal`, which fails the sweep.
 fn outcome(name: &str, result: Result<Conversion, ConvertError>) -> (String, Diagnostics) {
     match result {
         Ok(conversion) => (conversion.markdown().to_string(), conversion.diagnostics().clone()),
@@ -49,7 +35,6 @@ fn assert_snapshot(name: &str, value: &str) {
     settings.bind(|| insta::assert_snapshot!(format!("snapshots__{name}"), value));
 }
 
-/// Each diagnostic on a line, then the code of the error `failed` ended in, else `complete`.
 fn diagnostics_snapshot(
     diagnostics: &Diagnostics,
     failed: &Result<Conversion, ConvertError>,
@@ -126,13 +111,11 @@ fn an_internal_error_fails_the_sweep() {
     outcome("fixture.docx", Err(ConvertError::Internal));
 }
 
-/// Non-PDF output is byte-identical on every tested target.
 #[test]
 fn corpus() {
     sweep(false);
 }
 
-/// PDF output is pinned on the reference target alone.
 #[test]
 #[cfg(feature = "pdf")]
 #[cfg_attr(
@@ -362,8 +345,6 @@ fn repeated_part_references_convert_and_dedupe() {
     assert_eq!(doc.assets.len(), 1, "one shared asset for seventy references");
 }
 
-/// The binary DOC inline picture (sprmCPicLocation -> PICF + OfficeArt in
-/// the Data stream) is retained as an asset.
 #[test]
 fn doc_inline_picture_is_retained() {
     let doc = document("doc/text.doc", Format::Doc);

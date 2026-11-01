@@ -1,5 +1,3 @@
-//! Headers and footers each source reader preserves under `HeaderFooterPolicy::Emit`.
-
 use crate::build::{W, relationships};
 use crate::support::{configured, reported, zip_package};
 use almiladoc::{DiagnosticCode, Format, HeaderFooterPolicy, Input, OnLoss, Region};
@@ -958,8 +956,6 @@ fn a_theme_picture_background_resolves_through_the_theme_and_a_slide_s_own_overr
     assert_eq!(rows, [(DiagnosticCode::HeaderOmitted, Region::Header, None, 1)]);
 }
 
-/// Two slides of a layout whose background a theme's picture fill gives, the second slide
-/// filling its own.
 fn themed_deck() -> Vec<u8> {
     let tree = |root: &str, background: &str| {
         format!("<p:{root} {PML_NS}><p:cSld>{background}<p:spTree/></p:cSld></p:{root}>")
@@ -997,8 +993,6 @@ fn themed_deck() -> Vec<u8> {
     zip_package(&parts)
 }
 
-/// Two slides of a layout, which hides its master, with a picture background and a shape of
-/// its own, the second slide filling its own background.
 fn layered_deck() -> Vec<u8> {
     let text = |name: &str, ph: &str, body: &str| {
         format!(

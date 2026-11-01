@@ -1,7 +1,3 @@
-//! Tri-state style deltas used during cascade resolution. A property is
-//! either explicitly on, explicitly off, or unset (inherit); only after the
-//! full cascade is a delta collapsed into the model's resolved [`Style`].
-
 use crate::model::{Inline, Style, VerticalPosition};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -17,8 +13,6 @@ pub(crate) struct StyleDelta {
 }
 
 impl StyleDelta {
-    /// Overlay `child` on `self`: an explicit child value (on **or** off)
-    /// wins; unset inherits.
     pub(crate) fn merge(self, child: Self) -> Self {
         Self {
             bold: child.bold.or(self.bold),
@@ -45,10 +39,7 @@ impl StyleDelta {
     }
 }
 
-/// Drop from every run the emphasis `base` already carries. A heading style
-/// defines its own typography, so its runs should carry only what they add
-/// beyond it - otherwise the bold in `## **Heading**` is the style's, not the
-/// author's.
+/// A heading style defines its own typography, so its runs should carry only what they add beyond it - otherwise the bold in `## **Heading**` is the style's, not the author's.
 pub(crate) fn rebase_emphasis(inlines: &mut [Inline], base: Style) {
     if base == Style::PLAIN {
         return;

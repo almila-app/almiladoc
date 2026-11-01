@@ -1,35 +1,20 @@
-//! Edge-based table assembly shared by RTF (`\cellx` boundaries) and binary
-//! DOC (TAP `rgdxaCenter` boundaries): grid columns come from the clustered
-//! union of every row's cell edges, horizontal merges collapse into column
-//! spans, and vertical chains start at an explicit restart flag and are
-//! continued by continuation cells whose boundaries match the chain's.
-
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, GridBuilder};
 use crate::shared::header::resolve_header_rows;
 use std::collections::HashMap;
 
-/// Merge/boundary properties of one cell.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CellProp {
-    /// First cell of a horizontally merged set.
     pub merge_first: bool,
-    /// Horizontal continuation: folds into the preceding first cell.
     pub merge_cont: bool,
-    /// First cell of a vertically merged chain.
     pub vmerge_first: bool,
-    /// Vertical continuation: covered by the chain's origin above.
     pub vmerge_cont: bool,
-    /// The cell's right boundary in twips - vertical merge chains match on
-    /// actual boundaries, not cell ordinals.
     pub right: i64,
 }
 
 type RowCells = Vec<(Vec<Block>, CellProp)>;
 
-/// One logical row: its cells with their properties, and whether the row is
-/// a header row.
 #[derive(Debug)]
 pub(crate) struct GridRow {
     pub cells: RowCells,
@@ -41,7 +26,6 @@ const EDGE_TOLERANCE: i64 = 10;
 
 struct Origin {
     blocks: Vec<Block>,
-    /// Half-open global column range.
     col_l: usize,
     col_r: usize,
     row_span: u32,
@@ -49,8 +33,6 @@ struct Origin {
     covered: bool,
 }
 
-/// Each row's cells with strictly increasing right edges (cells past the declared boundaries get
-/// synthetic ones).
 fn normalized_edges(rows: Vec<GridRow>) -> (Vec<RowCells>, Vec<i64>) {
     let rows: Vec<RowCells> = rows
         .into_iter()
@@ -127,7 +109,6 @@ fn chain_vertical(rows: &mut [Vec<Origin>]) {
     }
 }
 
-/// Assemble logical rows into the canonical grid.
 pub(crate) fn build_edge_table(
     parse_ctx: &ParseCtx<'_>,
     rows: Vec<GridRow>,

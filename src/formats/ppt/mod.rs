@@ -1,11 +1,3 @@
-//! Legacy PowerPoint 97-2003 binary (.ppt): OLE2 container, record stream.
-//! Slides resolve through the persist directory (the only default path);
-//! text comes from TextHeaderAtom + TextCharsAtom/TextBytesAtom with
-//! StyleTextPropAtom runs and TxMasterStyleAtom defaults applied. Raw
-//! stream-order scanning exists only as an explicitly labelled recovery for
-//! files whose persist directory is unusable. Speaker notes are included
-//! (fixed policy), rendered as a quote after their slide.
-
 mod fonts;
 mod hidden;
 mod records;
@@ -38,14 +30,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use styletext::{MasterLevel, StyleCursor, StyleRuns, TextType};
 
-/// The slide that owns a notes page: its `NotesAtom`'s `slideIdRef`, 0 for none.
 fn notes_owner(notes: &[u8]) -> Option<u32> {
     let atom = officeart::records(notes).find(|r| r.rec_type == rt::NOTES_ATOM)?;
     get_u32(atom.body, 0).filter(|&id| id != 0)
 }
 
-/// One master's per-text-type level defaults, keyed by TxMasterStyleAtom
-/// instance (the text type).
 type MasterStyles = HashMap<TextType, Vec<MasterLevel>>;
 
 pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, ConvertError> {
@@ -88,17 +77,13 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     })
 }
 
-/// The deck's pictures, kept as document-level assets, and what keeps a
-/// slide from showing one.
 #[derive(Debug, Default)]
 struct Pictures {
     assets: Vec<Asset>,
-    /// Offsets of the `Pictures` records that do not decode.
     undecodable: HashSet<usize>,
     unreadable: bool,
 }
 
-/// Retain embedded pictures; failed stores report only at their source uses.
 fn collect_pictures<R: std::io::Read + std::io::Seek>(
     parse_ctx: &ParseCtx<'_>,
     ole: &mut cfb::CompoundFile<R>,
@@ -151,9 +136,7 @@ fn count_record(parse_ctx: &ParseCtx<'_>, seen: &mut u64) -> Result<(), ConvertE
 
 fn listed_elsewhere(record: Record<'_>) -> bool {
     match record.rec_type {
-        // Notes, master, and handout containers are walked via their own lists, not inline.
         rt::NOTES | rt::MAIN_MASTER | rt::HANDOUT => true,
-        // Only the slide list holds slide text here.
         rt::SLIDE_LIST_WITH_TEXT => record.instance() != rt::SLIDE_LIST_INSTANCE,
         _ => false,
     }
@@ -167,12 +150,10 @@ fn check_record_depth(parse_ctx: &ParseCtx<'_>, depth: usize) -> Result<(), Conv
     Ok(())
 }
 
-/// The records of `data`, each charged as one unit of work.
 fn scan<'a>(parse_ctx: &ParseCtx<'_>, data: &'a [u8]) -> Result<Vec<Record<'a>>, ConvertError> {
     officeart::records(data).map(|record| parse_ctx.charge(1).map(|()| record)).collect()
 }
 
-/// The bodies of the records of `rec_type` in `data`, every record charged.
 fn children<'a>(
     parse_ctx: &ParseCtx<'_>,
     data: &'a [u8],
@@ -185,17 +166,12 @@ fn children<'a>(
 const FSP_PATRIARCH: u32 = 0x0004;
 const FSP_BACKGROUND: u32 = 0x0400;
 
-/// What a master shows on the slides that show it.
 #[derive(Default)]
 struct MasterFacts {
-    /// A shape other than the patriarch, the background and placeholders.
     objects: bool,
-    /// Under `HeaderFooterPolicy::Emit`, what the extractor reads of those shapes once.
     content: Option<MasterContent>,
-    /// A background filled with a picture or texture.
     picture_background: bool,
     shown: MasterUse,
-    /// A title master's main master and what of it the title master shows.
     follows: Option<(u32, MasterUse)>,
 }
 
@@ -221,8 +197,6 @@ impl MasterFacts {
         Ok(())
     }
 
-    /// Whether the slides showing `shown` of this master show something no
-    /// output carries.
     fn omits(&self, shown: MasterUse) -> bool {
         let own_background = !self.follows.is_some_and(|(_, own)| own.background);
         self.objects && shown.objects
@@ -230,8 +204,6 @@ impl MasterFacts {
     }
 }
 
-/// What of a master its slides show: `SlideAtom.slideFlags`' `fMasterObjects`
-/// and `fMasterBackground`.
 #[derive(Default, Clone, Copy)]
 struct MasterUse {
     objects: bool,
@@ -258,7 +230,6 @@ impl MasterUse {
     }
 }
 
-/// A shape's `fillType`, `fillBlip` and whether `fFilled` is cleared.
 #[derive(Default, Clone, Copy)]
 struct Fill {
     kind: Option<u32>,
@@ -278,14 +249,12 @@ impl Fill {
         }
     }
 
-    /// The `pib` of the picture or texture the shape is filled with.
     fn picture(&self) -> Option<u32> {
         let shown = matches!(self.kind, Some(2 | 3)) && !self.unfilled;
         self.blip.filter(|&pib| shown && pib != 0)
     }
 }
 
-/// A `BStore` entry: its `cRef` and the `Pictures` offset of its file block.
 #[derive(Clone, Copy)]
 struct StoreEntry {
     refs: u32,
@@ -302,7 +271,6 @@ impl StoreEntry {
     }
 }
 
-/// A master's shape: its `FSP` flags, whether it is a placeholder, and its fill.
 #[derive(Default)]
 struct MasterShape {
     flags: u32,
@@ -320,8 +288,6 @@ impl MasterShape {
     }
 }
 
-/// A master's objects as the extractor reads them: their blocks, what reading them reported,
-/// and how many pictures they place, which no output carries.
 struct MasterContent {
     blocks: Vec<Block>,
     held: crate::diagnostics::Diagnostics,
@@ -351,21 +317,16 @@ fn master_shape(parse_ctx: &ParseCtx<'_>, container: &[u8]) -> Result<MasterShap
 #[derive(Default)]
 struct ShapeFacts {
     pib: Option<u32>,
-    /// The picture previews an object or control reported in its stead.
     preview: bool,
     fill: Fill,
     background: bool,
     links: Vec<u32>,
     text: bool,
     outline: Option<usize>,
-    /// Drawn as a header or footer placeholder.
     side: Option<Kind>,
-    /// A placeholder of any kind.
     placeholder: bool,
 }
 
-/// A listed slide or notes page: its container when the persist reference
-/// resolves to one, and its pairing id.
 struct Page<'a> {
     container: Option<&'a [u8]>,
     id: Option<u32>,
@@ -374,9 +335,7 @@ struct Page<'a> {
 
 struct PendingShape {
     tx_type: TextType,
-    /// Drawn as a header or footer placeholder.
     side: Option<Kind>,
-    /// A placeholder a master draws, which its slides do not show.
     master_placeholder: bool,
     text: String,
     units: Vec<u16>,
@@ -391,7 +350,6 @@ impl PendingShape {
     }
 }
 
-/// (blocks, pairing id, `is_notes`).
 type Segment = (Vec<Block>, Option<u32>, bool);
 
 struct Extractor<'c> {
@@ -404,57 +362,35 @@ struct Extractor<'c> {
     omit_page: bool,
     list_run: Vec<ListEntry>,
     pending: Option<PendingShape>,
-    /// Master style tables in master-list order: (masterId, styles).
     masters: Vec<(u32, MasterStyles)>,
-    /// Index into `masters` for the slide being extracted (0 fallback).
     active_master: usize,
     shape_counter: u64,
     encrypted: bool,
     /// Raw-stream recovery: no persist lists, so notes descend inline.
     recovering: bool,
-    /// Records visited across the whole extraction, capped.
     records: u64,
-    /// Each `ExHyperlink`'s target by id, empty for an internal jump.
     links: HashMap<u32, String>,
-    /// What each external object the slides name by id loses.
     objects: HashMap<u32, DiagnosticCode>,
-    /// The `BStore` entries, in `pib` order.
     bstore: Vec<StoreEntry>,
     shape: Option<ShapeFacts>,
-    /// The hyperlink whose text range has not been read yet.
     link: Option<u32>,
-    /// The unit the page being walked reports to.
     unit: Option<AdmittedUnit>,
-    /// Pictures the slides place: (unit, region, pib).
     placed: BTreeSet<(Option<AdmittedUnit>, Region, u32)>,
-    /// Each main and title master's facts by masterId, in master-list order.
     master_facts: Vec<(u32, MasterFacts)>,
-    /// The slide being walked has its own background, not its master's.
     own_background: bool,
-    /// The page's outline text blocks in `TextHeaderAtom` order.
     outline: Vec<String>,
     hidden_outline: BTreeSet<usize>,
-    /// The slide list's outline text of the page is being read.
     reading_outline: bool,
-    /// What slides show of masters they cannot name, as in recovery.
     recovered_use: MasterUse,
     recovered_slides: usize,
     fonts: FontCollection,
-    /// What the document shows on a slide or notes page that has no container of its own.
     defaults: Defaults,
-    /// What the page being walked shows of its headers, footers and comments.
     page: PageFacts,
-    /// The slide headers and footers in force, under `HeaderFooterPolicy::Emit`.
     slide_sides: SideTimeline,
-    /// The master the slide being walked names, and what of it the slide shows.
     slide_master: Option<(Option<u32>, MasterUse)>,
-    /// While a master's drawing is walked under `HeaderFooterPolicy::Emit`, the pictures its
-    /// objects place.
     master: Option<u64>,
 }
 
-/// The persist-resolved layout of the presentation: slide/notes lists from
-/// the current DocumentContainer, persist id -> offset for every container.
 struct DocLayout<'a> {
     persist: HashMap<u32, usize>,
     document: &'a [u8],
@@ -463,9 +399,6 @@ struct DocLayout<'a> {
     master_list: Option<&'a [u8]>,
 }
 
-/// Resolve the UserEditAtom chain into the persist directory and find the
-/// DocumentContainer's SlideListWithText instances. `None` means the persist
-/// directory is unusable and the caller falls back to raw-order recovery.
 fn locate_document<'a>(data: &'a [u8], current_user: &[u8]) -> Option<DocLayout<'a>> {
     let mut persist: HashMap<u32, usize> = HashMap::new();
     let mut doc_persist: Option<u32> = None;
@@ -492,7 +425,6 @@ fn locate_document<'a>(data: &'a [u8], current_user: &[u8]) -> Option<DocLayout<
                 let count = head >> 20;
                 pos += 4;
                 for k in 0..count {
-                    // Newer edits win: keep the first offset seen.
                     persist.entry(id + k).or_insert(get_u32(dir, pos)? as usize);
                     pos += 4;
                 }
@@ -520,8 +452,6 @@ fn locate_document<'a>(data: &'a [u8], current_user: &[u8]) -> Option<DocLayout<
     Some(DocLayout { persist, document: doc, slide_list, notes_list, master_list })
 }
 
-/// One master's TxMasterStyleAtoms, keyed by text-type instance, reporting
-/// the level defaults that do not parse.
 fn master_styles(parse_ctx: &ParseCtx<'_>, master: &[u8]) -> MasterStyles {
     let mut styles = MasterStyles::new();
     for record in officeart::records(master) {
@@ -636,10 +566,6 @@ impl<'c> Extractor<'c> {
         }
     }
 
-    /// Walk slides in presentation order: the UserEditAtom chain yields the
-    /// persist directory, the DocumentContainer's SlideListWithText yields
-    /// slide order and outline text, each slide container its own textboxes.
-    /// `Ok(false)` means the persist directory was unusable.
     fn parse_slides(&mut self, data: &[u8], current_user: &[u8]) -> Result<bool, ConvertError> {
         let Some(layout) = locate_document(data, current_user) else {
             return Ok(false);
@@ -665,9 +591,6 @@ impl<'c> Extractor<'c> {
         Ok(true)
     }
 
-    /// Walk one `SlideListWithText`, each page in its unit: a slide by its place
-    /// in the list, a notes page in its owning slide's unit (`slide_units`).
-    /// Returns the unit of each slide id.
     fn walk_slide_list(
         &mut self,
         list: &[u8],
@@ -761,8 +684,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Emit a page's own textboxes after its outline text, or report it
-    /// unreadable, and report the headers, footers and comments it shows.
     fn finish_slide(&mut self, page: Option<Page<'_>>) -> Result<(), ConvertError> {
         self.reading_outline = false;
         let Some(page) = page else {
@@ -788,8 +709,6 @@ impl<'c> Extractor<'c> {
         self.end_segment(page.id)
     }
 
-    /// Write or report the headers and footers of the page just read, and report its comments;
-    /// the page must still be inside its unit's scope.
     fn settle_page(&mut self) -> Result<(), ConvertError> {
         let notes = self.current_is_notes;
         let default = if notes { &self.defaults.notes } else { &self.defaults.slides };
@@ -860,8 +779,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Read the `DocumentContainer`'s font collection, external objects, picture store and the
-    /// header and footer defaults, which slides and notes pages inherit.
     fn read_document(&mut self, document: &[u8]) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         for record in scan(parse_ctx, document)? {
@@ -897,8 +814,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Read an `ExObjList`: hyperlink targets, and what each OLE object,
-    /// control and media clip the slides name by id loses.
     fn read_objects(&mut self, list: &[u8]) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         for Record { rec_type, body, .. } in scan(parse_ctx, list)? {
@@ -939,8 +854,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Note what the master `id` repeats on the slides that show it, and for a
-    /// title master, which main master it follows and what of it it shows.
     fn read_master(&mut self, id: u32, master: &[u8]) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         let mut facts = MasterFacts::default();
@@ -961,8 +874,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Read what a master's objects show, in the header region, its placeholders left out and its
-    /// text styled by its own levels, else its main master's.
     fn walk_master(&mut self, id: u32, master: &[u8]) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         let Some(index) = self.master_facts.iter().position(|&(master, _)| master == id) else {
@@ -994,7 +905,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// The facts of the master `id`, else of the first main master.
     fn master_facts_mut(&mut self, id: Option<u32>) -> Option<&mut MasterFacts> {
         let fallback = self.masters.first().map(|&(id, _)| id);
         let at = |id: u32| self.master_facts.iter().position(|&(master, _)| master == id);
@@ -1002,9 +912,6 @@ impl<'c> Extractor<'c> {
         self.master_facts.get_mut(index).map(|(_, facts)| facts)
     }
 
-    /// Report each master whose shapes or background picture its slides
-    /// show, directly or through a title master, and no output carries,
-    /// charging each master once.
     fn report_masters(&self) -> Result<(), ConvertError> {
         let masters = u64::try_from(self.master_facts.len()).unwrap_or(u64::MAX);
         self.parse_ctx.charge(masters)?;
@@ -1027,9 +934,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Report each picture the slides show: once per page that places it, or
-    /// in recovery once per `BStore` entry with references, unless its record
-    /// does not decode, which is reported once instead.
     fn report_pictures(&self, pictures: &Pictures) {
         let shown: Vec<(Option<AdmittedUnit>, Region, Option<usize>)> = if self.recovering {
             let referenced = self.bstore.iter().filter(|entry| entry.refs > 0);
@@ -1075,7 +979,6 @@ impl<'c> Extractor<'c> {
 
     fn into_blocks(mut self) -> Result<Vec<Block>, ConvertError> {
         self.end_segment(None)?;
-        // Pair notes to slides by stored id, not position: the notes list may be sparse.
         let (mut notes, slides): (Vec<_>, Vec<_>) =
             self.segments.into_iter().partition(|&(.., is_notes)| is_notes);
         let slide_ids: HashSet<u32> = slides.iter().filter_map(|&(_, id, _)| id).collect();
@@ -1093,8 +996,6 @@ impl<'c> Extractor<'c> {
         Ok(out)
     }
 
-    /// Pick the master the slide references (SlideAtom.masterIdRef at
-    /// offset 12); the first listed master is the deterministic fallback.
     fn select_master(&mut self, slide: Option<&[u8]>) {
         self.active_master = slide
             .and_then(|body| officeart::records(body).find(|r| r.rec_type == rt::SLIDE_ATOM))
@@ -1103,9 +1004,6 @@ impl<'c> Extractor<'c> {
             .unwrap_or(0);
     }
 
-    /// Iterative container walk over an explicit stack with fixed depth and
-    /// record-count bounds — nesting or record counts beyond any real
-    /// presentation are attack shapes and hard-fail.
     fn walk(&mut self, data: &[u8]) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         let mut stack: Vec<(&[u8], usize, u16, Option<UnitScope<'_>>)> = vec![(data, 0, 0, None)];
@@ -1149,10 +1047,7 @@ impl<'c> Extractor<'c> {
                 }
                 rt::PROG_BINARY_TAG => self.read_tag(body)?,
                 rt::MAIN_MASTER if self.recovering => self.read_master(0, body)?,
-                // Notes containers are walked via the notes list; recovery
-                // has no lists, so their text is taken inline (as notes).
-                // A NotesAtom slideIdRef in the masters range (high bit
-                // set) marks the notes master: template chrome, excluded.
+                // Notes containers are walked via the notes list; recovery has no lists, so their text is taken inline (as notes).
                 rt::NOTES if self.recovering => {
                     if notes_owner(body).is_none_or(|id| id & 0x8000_0000 == 0) {
                         check_record_depth(parse_ctx, stack.len())?;
@@ -1192,7 +1087,6 @@ impl<'c> Extractor<'c> {
         Ok(false)
     }
 
-    /// The unit a container opens: in recovery a slide's, which has no list to open it.
     fn open_unit(&mut self, rec_type: u16) -> Result<Option<UnitScope<'c>>, ConvertError> {
         let unit = if self.recovering && rec_type == rt::SLIDE {
             self.end_segment(None)?;
@@ -1225,7 +1119,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// One atom; `in_client_data` when it sits in a shape's `OfficeArtClientData`.
     fn atom(&mut self, record: Record<'_>, in_client_data: bool) -> Result<(), ConvertError> {
         let Record { rec_type, body, .. } = record;
         let region = self.region();
@@ -1322,8 +1215,6 @@ impl<'c> Extractor<'c> {
                     }
                 }
             }
-            // Action 4 follows a hyperlink, the shape's own under its client
-            // data, else a text range's.
             rt::INTERACTIVE_INFO_ATOM => {
                 let link = get_u32(body, 4).filter(|_| body.get(8) == Some(&4));
                 if in_client_data {
@@ -1346,7 +1237,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// The pending shape's text in the UTF-16 range `begin..end`, charged per unit.
     fn pending_range(&self, begin: Option<u32>, end: Option<u32>) -> Result<String, ConvertError> {
         let (Some(pending), Some(begin), Some(end)) = (&self.pending, begin, end) else {
             return Ok(String::new());
@@ -1359,7 +1249,6 @@ impl<'c> Extractor<'c> {
         Ok(decode_utf16(range.iter().copied()).0)
     }
 
-    /// Report a hyperlink whose label does not show its external target.
     fn report_link(&self, id: u32, label: &str) -> Result<(), ConvertError> {
         let target = self.links.get(&id);
         let compared = label.len().saturating_add(target.map_or(0, String::len));
@@ -1374,7 +1263,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Report a hyperlink that no text range followed: it labels nothing.
     fn settle_link(&mut self) -> Result<(), ConvertError> {
         match self.link.take() {
             Some(id) => self.report_link(id, ""),
@@ -1382,9 +1270,6 @@ impl<'c> Extractor<'c> {
         }
     }
 
-    /// Keep the finished shape's picture, unless it previews a reported object,
-    /// and its picture fill, unless it is a background the slide does not show;
-    /// report its click hyperlinks against the text read in it.
     fn finish_shape(&mut self) -> Result<(), ConvertError> {
         let Some(shape) = self.shape.take() else {
             return Ok(());
@@ -1415,13 +1300,10 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// Whether the pending text is a drawn header or footer placeholder's, which no output carries.
     fn suppressed(&self) -> bool {
         self.pending.as_ref().is_some_and(|pending| pending.side.is_some() || pending.omitted)
     }
 
-    /// What the shape being walked is drawn as: a header or footer placeholder, and a
-    /// placeholder on the master being walked.
     fn drawn_side(&self) -> (Option<Kind>, bool) {
         let shape = self.shape.as_ref();
         let placeholder = self.master.is_some() && shape.is_some_and(|shape| shape.placeholder);
@@ -1440,8 +1322,6 @@ impl<'c> Extractor<'c> {
         pending.text.push_str(text);
     }
 
-    /// Emit the pending shape: paragraphs split on CR, styled by the
-    /// character runs, listed by paragraph depth/bullet with master defaults.
     fn flush_shape(&mut self) -> Result<(), ConvertError> {
         let Some(shape) = self.pending.take() else {
             return Ok(());
@@ -1501,7 +1381,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// A drawn placeholder's paragraphs, its field mark the token of the field it shows.
     fn side_blocks(&self, shape: &PendingShape, kind: Kind) -> Vec<Block> {
         let unstyled = StyleRuns::default();
         let styles = shape.styles.as_ref().unwrap_or(&unstyled);
@@ -1527,9 +1406,6 @@ impl<'c> Extractor<'c> {
         blocks
     }
 
-    /// The master content the slide just walked shows, as its header: the text of the master's
-    /// objects, and through a title master the objects of its main master it shows; their
-    /// pictures and a picture background are unplaced, as every picture here is.
     fn master_header(&mut self, sides: &mut PageSides) -> Result<(), ConvertError> {
         let Some((id, shown)) = self.slide_master.take() else { return Ok(()) };
         let own_background = self.own_background;
@@ -1579,7 +1455,6 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    /// The CR-ended paragraphs of `source` as `(inlines, depth, own bullet)`.
     fn paragraphs(
         &self,
         source: &str,
@@ -1589,7 +1464,6 @@ impl<'c> Extractor<'c> {
         self.paragraphs_in(source, styles, levels, self.region())
     }
 
-    /// [`Self::paragraphs`], reporting what does not map in `region`.
     fn paragraphs_in(
         &self,
         source: &str,

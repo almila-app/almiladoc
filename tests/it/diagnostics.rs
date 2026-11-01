@@ -18,8 +18,6 @@ enum Edit {
     Set(usize, u8),
 }
 
-/// The package with each named part corrupted, left unclosed, removed,
-/// written anew or patched at one byte.
 fn repack(bytes: &[u8], edits: &[(&str, Edit)]) -> Vec<u8> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -70,9 +68,6 @@ fn converter(on_loss: OnLoss) -> Converter {
     configured(|config| config.on_loss = on_loss)
 }
 
-/// What `conversion` reports beyond `baseline`, the same input before an
-/// edit: the policy drops a fixture holds stay out of each case. Only
-/// increases count; a code the edit lowers or removes is not seen.
 fn added(conversion: &Conversion, baseline: &Conversion) -> Vec<Expected> {
     let before = reported(baseline.diagnostics());
     reported(conversion.diagnostics())
@@ -113,8 +108,6 @@ fn graphic_pptx() -> Vec<u8> {
     )
 }
 
-/// A DOCX whose body draws one chart and one diagram, both empty, so that
-/// nothing is lost before an edit.
 fn graphic_docx() -> Vec<u8> {
     let drawing = |reference: &str| {
         format!(
@@ -148,8 +141,6 @@ const NO_PART_TARGET: &str = r#"<Relationships xmlns="http://schemas.openxmlform
 const FOOTNOTE_RELS: &str =
     r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
 
-/// The visibility of the fixture xlsb's hidden second sheet, in its
-/// workbook's `BrtBundleSh` record.
 const HIDDEN_SHEET_STATE: usize = 0x35;
 
 const HIDING_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Hidden"><w:rPr><w:vanish/></w:rPr></w:style>"#;
@@ -226,9 +217,6 @@ use Source::{Fixture, GraphicDocx, GraphicPptx};
 const EACH_EPUB_CHAPTER: &[Expected] =
     &[(PART, Body, Some(1), 1), (PART, Body, Some(2), 1), (PART, Body, Some(3), 1)];
 
-/// One case per site that names a part's role: each corrupts, removes or
-/// leaves unclosed the part it reads, and expects that role's report in its
-/// unit.
 const CASES: &[Row] = &[
     (DOCX, &[("_rels/.rels", Corrupt)], &[(CONVENTIONAL, Container, None, 1)]),
     (DOCX, &[("_rels/.rels", Put(NO_PART_TARGET))], &[(CONVENTIONAL, Container, None, 1)]),

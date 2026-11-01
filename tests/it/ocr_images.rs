@@ -1,5 +1,3 @@
-//! The caller's OCR filling the gaps a parse leaves after each embedded PNG or JPEG.
-
 use std::num::NonZeroU32;
 
 use crate::build::{W, docx_with, relationships};
@@ -19,7 +17,6 @@ fn pictured(text: &str, rel: &str) -> String {
     )
 }
 
-/// A paragraph, a list item, a table cell, a gif and a footnote, each with a picture.
 fn pictures() -> Vec<u8> {
     let item = |text: &str| {
         format!(r#"<w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>{text}</w:p>"#)
@@ -39,7 +36,6 @@ fn pictures() -> Vec<u8> {
 const NOTE_REFERENCE: &str =
     r#"<w:p><w:r><w:t>note</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>"#;
 
-/// A document of `body` whose footnote 2 holds `note`, with its pictures and list numbering.
 fn package(body: &str, note: &str) -> Vec<u8> {
     let footnotes =
         format!(r#"<w:footnotes {W}><w:footnote w:id="2">{note}</w:footnote></w:footnotes>"#);
@@ -94,7 +90,6 @@ fn fill_all(parsed: &mut Parsed, fills: [&str; 4], order: [usize; 4]) {
     }
 }
 
-/// The diagnostics image OCR adds.
 fn rows(parsed: &Parsed) -> Vec<(DiagnosticCode, Region, Option<u32>, u64)> {
     parsed
         .diagnostics()
@@ -208,7 +203,6 @@ fn without_image_ocr_no_image_leaves_a_gap() {
     assert!(rows(&parsed).iter().all(|row| row.0 != DiagnosticCode::ImageNotOcred));
 }
 
-/// What `python/tests` expects of the same fixture and fill.
 const RICH_FILLED: &str = "Rich objects follow.\n\n**Quarterly Widgets**\n\n\
                            | Quarter | Widgets |\n| --- | --- |\n| Q1 | 10 |\n| Q2 | 14 |\n\n\
                            - Plan\n- Build\n- Ship\n\n\

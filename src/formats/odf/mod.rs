@@ -1,5 +1,3 @@
-//! OpenDocument Text (.odt), Spreadsheet (.ods), and Presentation (.odp).
-
 mod axes;
 mod comments;
 mod datastyle;
@@ -114,9 +112,6 @@ fn parse_body(
     }
 }
 
-/// A spreadsheet's styles part that does not read costs formatting alone, unless its entry
-/// cannot be inflated, or it does not parse and sets a `display` that may hide a sheet or text.
-/// Returns its tree, and whether formatting alone was lost with it.
 fn read_spreadsheet_styles(
     parse_ctx: &ParseCtx<'_>,
     pkg: &Package<'_>,
@@ -137,11 +132,7 @@ fn read_spreadsheet_styles(
     Ok((None, lost == Role::Formatting))
 }
 
-/// Encrypted ODF packages carry `manifest:encryption-data` elements on file
-/// entries. The manifest is parsed properly - substring matching would
-/// classify a document as encrypted over a mere comment. An absent or
-/// unreadable manifest proves nothing (content parsing decides), but fatal
-/// resource-limit errors propagate.
+/// An absent or unreadable manifest proves nothing (content parsing decides), but fatal resource-limit errors propagate.
 fn is_encrypted(pkg: &Package<'_>) -> Result<bool, ConvertError> {
     let Some(tree) = pkg.optional_xml_part("META-INF/manifest.xml", Role::Probe)? else {
         return Ok(false);
@@ -149,9 +140,6 @@ fn is_encrypted(pkg: &Package<'_>) -> Result<bool, ConvertError> {
     Ok(tree.first_descendant(ns::MANIFEST, "encryption-data").is_some())
 }
 
-/// The master pages a text document's pages use: the first, which starts
-/// a document naming none, those a paragraph or table style applied in the
-/// text starts, and each one's next.
 fn text_master_pages<'a>(
     parse_ctx: &ParseCtx<'_>,
     text: &Element,
@@ -184,8 +172,6 @@ fn text_master_pages<'a>(
     Ok(used.into_iter().filter_map(|name| styles.master_page(name)).collect())
 }
 
-/// Report the header and footer a master page shows on every page it
-/// starts.
 fn report_running(master: &Element, parse_ctx: &ParseCtx<'_>) {
     let running = [
         (["header", "header-left", "header-first"], DiagnosticCode::HeaderOmitted, Region::Header),
@@ -202,7 +188,6 @@ fn report_running(master: &Element, parse_ctx: &ParseCtx<'_>) {
     }
 }
 
-/// The running header or footer a presentation frame class stands for.
 fn running_frame(frame: &Element) -> Option<crate::model::HeaderFooterRegion> {
     use crate::model::HeaderFooterRegion as Side;
     match frame.attr(ns::PRESENTATION, "class")? {
@@ -281,13 +266,8 @@ fn parse_presentation(
     Ok(blocks)
 }
 
-/// A master page's own content as a slide shows it: its bitmap background and its shapes that
-/// are no placeholder, read once for each way slides show it.
 type Decoration = (Vec<Block>, crate::diagnostics::Diagnostics);
 
-/// Under `HeaderFooterPolicy::Emit`, add to a slide's header the master page content it shows:
-/// the master's bitmap background where its page style shows the background, and its shapes
-/// that are no placeholder where it shows background objects.
 fn decorate(
     ctx: &Ctx<'_, '_>,
     (master, shown): (&Element, Shown),
@@ -341,14 +321,11 @@ fn master_content(
     Ok(blocks)
 }
 
-/// What a slide's shapes write: its title, body and notes, and under `HeaderFooterPolicy::Emit`
-/// the running header and footer of the slide and of its notes page.
 struct Slide {
     title: Vec<Block>,
     body: Vec<Block>,
     notes: Vec<Block>,
     sides: Option<PageSides>,
-    /// Set once the slide's notes page is walked.
     notes_sides: Option<PageSides>,
 }
 
@@ -364,7 +341,6 @@ impl Slide {
     }
 }
 
-/// What some slide using a master page shows of it.
 #[derive(Default, Clone, Copy)]
 struct Shown {
     objects: bool,
@@ -377,13 +353,10 @@ fn page_properties<'a>(page: &Element, ctx: &Ctx<'_, 'a>) -> Option<&'a Element>
         .and_then(|style| style.find(ns::STYLE, "drawing-page-properties"))
 }
 
-/// Whether a slide's page properties leave `attr` at its default, shown.
 fn shows(props: Option<&Element>, attr: &str) -> bool {
     props.and_then(|p| p.attr(ns::PRESENTATION, attr)) != Some("false")
 }
 
-/// The header, footer and date-time declarations that show anything, by
-/// kind and name; the first of a name wins.
 fn declarations(pres: &Element) -> HashMap<(&str, &str), &Element> {
     let mut declared = HashMap::new();
     for d in pres.child_elems().filter(|d| {
@@ -398,8 +371,6 @@ fn declarations(pres: &Element) -> HashMap<(&str, &str), &Element> {
     declared
 }
 
-/// The header, footer and date a slide shows from its presentation's declarations, unless its
-/// page style hides them: written into `sides`, else reported.
 fn report_declared(
     page: &Element,
     props: Option<&Element>,
@@ -427,9 +398,6 @@ fn report_declared(
     Ok(())
 }
 
-/// Whether a master page shows anything of its own on the slides using it:
-/// a shape that is no placeholder, or a background picture, each where
-/// some slide leaves it visible.
 fn decorates(master: &Element, shown: Shown, ctx: &Ctx<'_, '_>) -> bool {
     let shape = shown.objects
         && master.child_elems().any(|shape| {
@@ -441,7 +409,6 @@ fn decorates(master: &Element, shown: Shown, ctx: &Ctx<'_, '_>) -> bool {
     shape || background
 }
 
-/// Walk a page's shapes in document order, recursing into `draw:g` groups.
 fn walk_shapes(parent: &Element, ctx: &Ctx<'_, '_>, slide: &mut Slide) -> Result<(), ConvertError> {
     for child in parent.child_elems() {
         walk_shape(child, ctx, slide)?;
@@ -507,8 +474,6 @@ fn walk_shape(child: &Element, ctx: &Ctx<'_, '_>, slide: &mut Slide) -> Result<(
     Ok(())
 }
 
-/// A notes page's text boxes, through its groups; its running header and
-/// footer frames and every other shape are reported, not rendered.
 fn walk_notes(
     page: &Element,
     ctx: &Ctx<'_, '_>,
@@ -534,8 +499,6 @@ fn walk_notes(
     Ok(())
 }
 
-/// Collapse a title frame's paragraphs into one slide heading; any other
-/// block there is reported.
 fn push_title_heading(inner: Vec<Block>, blocks: &mut Vec<Block>, ctx: &Ctx<'_, '_>) {
     let mut inlines: Vec<Inline> = Vec::new();
     for block in inner {
@@ -603,7 +566,6 @@ mod tests {
 
     #[test]
     fn repeated_rows_parse_content_once() {
-        // A note inside a repeated row must register once, not per copy.
         let rows = r#"<table:table-row table:number-rows-repeated="3">
             <table:table-cell><text:p>cell<text:note text:id="n1">
             <text:note-body><text:p>note body</text:p></text:note-body>
@@ -3006,8 +2968,6 @@ mod tests {
         vec![(HiddenOmitted, BODY, Some(1), count)]
     }
 
-    /// The first table's grid as text, `text:columns x rows` for a span and
-    /// `~` for a covered position.
     fn table_text(doc: &Document) -> Vec<Vec<String>> {
         use crate::model::{CellSlot, inlines_to_plain_text};
         let table = doc.blocks.iter().find_map(|block| match block {

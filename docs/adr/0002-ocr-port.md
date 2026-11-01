@@ -1,86 +1,28 @@
-# 0002. OCR as gaps an engine or the caller fills
+# 0002. OCR gaps and engine port
 
-Status: accepted
-Date: 2026-10-14, revised 2026-10-26
-
-## Context
-
-- One page needing OCR fails a whole PDF; ADR 0001 makes it a `Block::Gap`. Required: no network
-  unless configured, no global state, explicit configuration, no truncated success.
-- The primary consumer converts in a child process without network and OCRs in its parent through a
-  vision model behind an OpenAI-compatible server, which returns Markdown.
+Accepted. The consumer parses without network in a child process, then OCRs in its parent through an OpenAI-compatible vision server returning Markdown; gaps avoid failing an otherwise readable PDF or returning truncated success.
 
 ## Decision
 
-1. **Port.** A synchronous `OcrEngine: Send + Sync`, passed per call, maps `OcrRequest`s (a gap's
-   `GapId`, origin, reasons and PNG or JPEG `OcrImage`) to one `OcrOutcome` each: `Fill(GapFill)`,
-   `Failed(OcrFailure)` or `Unattempted(OcrFailure)`, a failure holding at most an HTTP status.
-   `Parsed::ocr(&dyn OcrEngine, gaps)` runs it on the export in batches of `batch_size()`, applying
-   each outcome as `fill_gap` or `fail_gap` and stopping after a batch with a gap unattempted.
-2. **Two phases.** Between `parse` and `render` the caller calls `Parsed::fill_gap(GapId, GapFill)`
-   or `fail_gap(GapId)`, which records `ocr_failed`. `ocr_pages: PageSelection` makes each selected
-   PDF page a gap with reason `caller_requested`, its text discarded without loss.
-   `Parsed::ocr_requests(&RasterSpec, gaps)` exports requests, which pickle, for a parent's engine.
-3. **Routing.** `ocr_pages`, the page verdicts and `ImageOcr` decide which gaps exist; one `ocr`
-   call runs one engine on a subset, and a later one gets only what it left unfilled.
-4. **Images.** Under opt-in `ImageOcr::All` each embedded PNG or JPEG gains an `Image(AssetId)` gap
-   after its innermost block, its request carrying the asset's bytes undecoded; other images count
-   `image_not_ocred`. Image text follows its block, `<br>`-joined in a cell; a gap not filled
-   writes nothing and raises no `NeedsOcr`, which names pages only.
-5. **Rendering.** A page gap's image is its crop box, an sRGB PNG unpdf paints from the parser
-   `Parsed` keeps, so the page rendered is the one extracted, with no system font read. Pages render
-   on the call's pool at the largest dpi up to the spec's at which its media box fits `max_pixels`,
-   charged one work unit per 128 of those pixels and per 16 PNG bytes. While a page paints, unpdf's
-   `render_page_with` prices each step before it is taken, and a ledger the pages painting at once
-   share takes one unit per 128 of its pixels of work, rounded up: its `ResourceLimit` or
-   `Cancelled` stops the page at that step. Unpainted text runs, images, inline images and
-   undecodable content streams report `raster_incomplete`; shadings and soft masks, none.
-6. **Raster spec.** `RasterSpec` defaults to 150 dpi and MiMo-VL's cap of 12 845 056 pixels; it
-   comes from the engine or the caller and stays outside `Config`, as it shapes requests, not fills.
-7. **`ocr-http`.** `OcrHttp` (feature `ocr-http`) posts to OpenAI-compatible `chat/completions` one
-   image per request, `concurrency` at once on the calling thread and `pool.rs`'s scoped workers,
-   a leading `<think>` block stripped. 408, 429, 500 and 502-504 retry with backoff, which a
-   cancel ends; a rejected reply fails its gap, any other failure leaves it unattempted and its
-   batch takes no further request. ureq on rustls, with ring unless the process installs another
-   provider, asks before it sends a body, follows no redirect, caps the body, uses only an explicit
-   proxy and leaves no thread behind a call. A caller's PEM bundle replaces Mozilla roots for the
-   endpoint and HTTPS proxy. A key needs an HTTPS endpoint or direct loopback; `new` opens no socket.
-8. **Local OCR.** The separately locked `ocr-local/` crate wraps Oar core on private CPU workers
-   and sessions, outside the core and Python dependency graphs. Its verified ONNX Runtime supports
-   API 27; process-wide initialization precedes other ORT use and cannot retry a native failure.
-9. **Files.** The local crate SHA-256-checks caller-supplied models, dictionary and runtime; it
-   downloads none. Native calls have no hard cancellation, memory or total-thread cap; a caller
-   needing those bounds owns the process.
-10. **Identity.** ADR 0001 decision 15 holds over fills; engines stay outside `config_fingerprint`.
-11. **Untrusted output.** `GapFill`, `#[non_exhaustive]`, takes `Markdown(String)` or
-    `Lines(Vec<OcrLine>)`: normalized horizontal lines are ordered and grouped in the core,
-    literal and NFC, with 32 bytes per box also counted against `max_ocr_text_bytes`.
-    Markdown stays within `max_ocr_text_bytes` (1 MiB) and `max_nesting_depth`, each event charged; raw
-    HTML becomes escaped text, a link its label, an image its alt; NFC. A refused fill changes
-    nothing. `MarkdownTables(String)` opts top-level gaps into standalone, text-only
-    `table`/`tr`/`td` HTML with positive spans, preserving merged cells as safe HTML; unsupported
-    markup or nested contexts refuse atomically as `InvalidTable`. A fill limit is
-    `GapError::Refused { limit }`, never fatal like `max_work`.
-12. **Containment.** An engine sees only its requests, each with the parse's fill limit; its panic
-    is `Internal`. Python passes only the crate's engines; its own OCR fills through `ocr_requests`
-    and `fill_gap`. No error, diagnostic or `Debug` holds OCR text, a response body, a key, a
-    prompt or a URL's userinfo or query; ureq's trace log holds the key, so the binding compiles
-    `log` out. Sockets exist only in `src/ocr/http/`.
-13. **Tests.** Engines run as fakes and `ocr-http` on loopback. The owner accepts the consumer's
-    existing Xiaomi endpoint without another live run before the first release.
+1. **Port.** Per-call synchronous `OcrEngine: Send + Sync` maps each `OcrRequest` (gap id, origin, reasons, PNG/JPEG image) to `Fill(GapFill)`, `Failed` or `Unattempted`, failures carrying at most HTTP status. `Parsed::ocr(engine, gaps)` exports `batch_size()` batches, applies fills/failures and stops after a batch with an unattempted gap.
+2. **Two phases.** Between parse/render, `fill_gap` supplies content and `fail_gap` records `ocr_failed`; `ocr_requests(&RasterSpec, gaps)` exports pickleable requests. `ocr_pages: PageSelection` forces selected PDF pages to gaps (`caller_requested`), discarding their text without loss.
+3. **Routing.** Page verdicts, explicit page selection and `ImageOcr` create gaps; each OCR call uses one engine/subset, and later calls receive only unsettled gaps.
+4. **Images.** Opt-in `ImageOcr::All` adds embedded PNG/JPEG gaps after their innermost block, carrying asset bytes undecoded; other images report `image_not_ocred`. Filled text follows the block (`<br>` in cells); unsettled image gaps write nothing and never cause page-only `NeedsOcr`.
+5. **Painting.** Reuse the retained unpdf parser, without system fonts, for crop-box sRGB PNGs at the largest dpi within the media-box pixel cap, on the call pool. Charge one unit/128 pixels and /16 PNG bytes; `render_page_with` charges each operation before it runs against a ledger shared by concurrent pages, rounding covered-pixel work up per 128, and stops on resource limit/cancellation.
+   - Unpainted runs/images/inline images/undecodable streams report `raster_incomplete`; shadings and soft masks do not. Hidden/off-page unpaintable runs currently overcount until [unpdf-clip](../roadmap.md).
+6. **Raster spec.** Default 150 dpi, 12 845 056 pixels (MiMo-VL cap); engine/caller supplied, outside `Config` because it shapes requests rather than fills.
+7. **HTTP.** Feature `ocr-http` posts one image to `chat/completions`, at configured concurrency on the calling thread and scoped pool workers, stripping a leading `<think>` block. Retry 408/429/500/502–504 with cancellable backoff; rejected/empty replies fail, other failures leave a gap unattempted and stop taking requests in that batch.
+   - ureq/rustls uses ring unless another process provider is installed, asks before sending bodies, refuses redirects, caps replies, uses only explicit proxies and leaves no workers behind. Caller PEM replaces Mozilla roots for endpoint/HTTPS proxy; keys require an HTTPS endpoint or direct loopback, and construction opens no socket.
+8. **Local OCR.** Separately locked `ocr-local/` wraps Oar core on private CPU workers/sessions outside core/Python graphs; verified ONNX Runtime API 27 initialization must precede any other ORT use and cannot retry native failure.
+9. **Files/bounds.** Local OCR verifies caller model/dictionary/runtime SHA-256s and downloads nothing; native work has no hard cancellation, memory or total-thread cap, so stronger bounds require caller-owned processes.
+10. **Identity.** ADR 0001 decision 15 includes fills; engines stay outside `config_fingerprint`.
+11. **Untrusted fills.** Non-exhaustive `GapFill` supports `Markdown`, `Lines(Vec<OcrLine>)` and `MarkdownTables`; every fill is NFC and atomic, limited by `max_ocr_text_bytes` (default 1 MiB), nesting and charged events. Lines have normalized horizontal boxes, are ordered/grouped by the core, stay literal and cost 32 additional bytes/box; Markdown escapes HTML and keeps only link labels/image alt text.
+    - Tables opt top-level gaps into standalone text-only `table`/`tr`/`td` HTML with positive spans and safe merged cells; unsupported markup/nested contexts fail `InvalidTable`. Per-fill limits return `GapError::Refused { limit }`, unlike fatal work exhaustion.
+12. **Containment.** Engines see only requests plus fill limits; panics become `Internal`, Python accepts only built-in engines and exports requests for custom OCR. Errors, diagnostics and Debug exclude OCR text, response bodies, keys, prompts and URL userinfo/query; ureq trace leaks keys, so Python compiles `log` out; sockets exist only in `src/ocr/http/`.
+13. **Tests.** Fake engines and loopback HTTP suffice; the owner accepts the consumer's existing Xiaomi endpoint/settings without another live run before the first release.
 
-## Consequences
+## Limits and rejected routes
 
-- The rasterizer adds 1.02 MB to the wheel and `ocr-http` 0.88 MB, ring's C build needing clang on
-  `windows-11-arm`. A PDF's `Parsed` holds unpdf's parser.
-- Glyphs a stand-in face lacks, annotation appearances and Lab or DeviceN colour paint wrong
-  unreported.
-- A run unpdf cannot paint reports `raster_incomplete` even where the clip hides it or it lies off
-  the page, until unpdf counts only what a page shows (unpdf-clip).
-
-## Alternatives considered
-
-- hayro: +2.82 MB, a second parser, silent on unpainted text. PDFium, MuPDF: native. reqwest: tokio.
-  Located lines grouped in the crate: vision models return Markdown, and `GapFill` can gain lines.
-- An engine in `Config` or a registry: `Config` loses `Eq`, or global state. A white gap to the
-  engine: a model may invent text. tract-onnx: +20.6 MB, 1.8× slower.
+- Raster/HTTP add 1.02/0.88 MB to the wheel; ring requires clang on `windows-11-arm`. Missing stand-in glyphs, annotation appearances and Lab/DeviceN colours paint incorrectly without a diagnostic.
+- hayro adds 2.82 MB and a second parser while hiding unpainted text; PDFium/MuPDF require native dependencies; reqwest requires tokio; tract-onnx adds 20.6 MB and runs 1.8× slower.
+- Vision engines return Markdown, so located-line grouping belongs in the core rather than an engine. Putting an engine in Config loses Eq; a registry adds global state; white gap images invite invented text.

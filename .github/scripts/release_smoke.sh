@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# release_smoke.sh WHEEL SDIST REQUIREMENTS, from the repository root: the wheel's size, its
-# licence set beside the sdist's, and the binding's tests under each CPython in PYTHONS, taken
-# from a PyPA image's /opt/python or else from uv.
 set -euo pipefail
 
 wheel=$1 sdist=$2 requirements=$3

@@ -1,11 +1,4 @@
-//! Anchor resolution: maps every internal anchor id to the fragment it will
-//! have in the rendered Markdown. Heading-coincident anchors reuse the
-//! heading's GFM auto-generated slug; an anchor a link targets gets a
-//! sanitized, stable HTML id rendered as `<a id="..."></a>` at its position.
-//!
-//! Anchors nothing links to render nothing: producers mark up far more
-//! positions than they reference (a bookmark per paragraph, an id per EPUB
-//! element), and an unreachable target is only noise in the output.
+//! Unreferenced anchors render nothing because producers often mark positions that no link targets.
 
 use crate::ImagePolicy;
 use crate::model::{Block, Inline, LinkTarget, Note, Unit};
@@ -24,9 +17,6 @@ pub(crate) struct AnchorMap {
 
 struct Resolved {
     fragment: String,
-    /// True when the anchor needs an explicit `<a id>` emitted at its
-    /// position (false for heading-coincident anchors - the heading's own
-    /// slug carries them).
     emit_html: bool,
 }
 
@@ -35,19 +25,15 @@ impl AnchorMap {
         self.units.get(&unit).map(String::as_str)
     }
 
-    /// The `#fragment` a link to `id` should use, if the target exists.
     pub(crate) fn fragment(&self, id: &str) -> Option<&str> {
         self.resolved.get(id).map(|r| r.fragment.as_str())
     }
 
-    /// The HTML id to emit for an `Inline::Anchor` node, when one is needed.
     pub(crate) fn html_id(&self, id: &str) -> Option<&str> {
         self.resolved.get(id).filter(|r| r.emit_html).map(|r| r.fragment.as_str())
     }
 }
 
-/// Where anchors resolve: the body and its notes, or one side story, whose ids open with its own
-/// reserved prefix and whose headings, written as paragraphs, claim no slug.
 #[derive(Clone, Copy)]
 pub(crate) enum AnchorScope<'a> {
     Body,
@@ -66,7 +52,6 @@ pub(crate) fn resolve_anchors(
     let mut ids = UniqueIds::default();
     let mut resolved: HashMap<String, Resolved> = HashMap::new();
 
-    // Anchor ids some link in the document targets, notes included.
     let mut linked: HashSet<&str> = HashSet::new();
     let mut linked_units = HashSet::new();
     walk_all(blocks, fills, notes, &mut |block| {
@@ -78,9 +63,6 @@ pub(crate) fn resolve_anchors(
         return side_anchors(blocks, prefix, fills, &linked);
     }
 
-    // Pass 1: headings claim their GFM slugs in render order, binding any
-    // heading-coincident anchor ids (the `anchor` field and anchor nodes
-    // inside the heading content) to those slugs.
     let mut heading = |block: &Block| {
         if let Block::Heading { anchor, content, .. } = block {
             let label = heading_label(content, images, note_numbers, comment_numbers);
@@ -103,7 +85,6 @@ pub(crate) fn resolve_anchors(
     };
     walk_all(blocks, fills, notes, &mut heading);
 
-    // Pass 2: every remaining anchor a link targets gets a sanitized HTML id.
     let mut assign = |id: &str| {
         if linked.contains(id)
             && !resolved.contains_key(id)
@@ -132,7 +113,6 @@ pub(crate) fn resolve_anchors(
     AnchorMap { resolved, units }
 }
 
-/// A side story's anchors: each a link targets, a heading's included, under `prefix`.
 fn side_anchors(
     blocks: &[Block],
     prefix: &str,
@@ -270,7 +250,6 @@ fn for_each_anchor(inlines: &[Inline], f: &mut impl FnMut(&str)) {
     }
 }
 
-/// Every id handed out, mapped to the numeric suffix to try next for it as a base.
 #[derive(Default)]
 struct UniqueIds {
     next_suffix: HashMap<String, usize>,
@@ -295,10 +274,7 @@ impl UniqueIds {
     }
 }
 
-/// GFM-style heading slugs: full-Unicode lowercase, spaces and line breaks become hyphens,
-/// and everything except word-forming characters (letters, numbers, marks,
-/// connector punctuation) and hyphens drops. An empty result becomes
-/// `section` so the anchor stays linkable.
+/// An empty result becomes `section` so the anchor stays linkable.
 fn gfm_slug(text: &str) -> String {
     let slug: String = text
         .trim()
@@ -316,8 +292,6 @@ fn gfm_slug(text: &str) -> String {
     if slug.is_empty() { "section".to_string() } else { slug }
 }
 
-/// Combining-mark blocks `is_alphanumeric` misses (marks outside
-/// `Other_Alphabetic`, such as viramas and cantillation/stress signs).
 fn is_combining_mark(c: char) -> bool {
     matches!(
         u32::from(c),
@@ -334,7 +308,6 @@ fn is_combining_mark(c: char) -> bool {
     )
 }
 
-/// Connector punctuation (category Pc): joins words, kept like `_`.
 fn is_connector_punctuation(c: char) -> bool {
     matches!(
         u32::from(c),
@@ -342,7 +315,6 @@ fn is_connector_punctuation(c: char) -> bool {
     )
 }
 
-/// Sanitize a source anchor id into a stable `[a-z0-9-_]` HTML id.
 fn sanitize_id(id: &str) -> String {
     let mut out = String::with_capacity(id.len());
     let mut prev_dash = false;

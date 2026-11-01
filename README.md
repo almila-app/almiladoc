@@ -1,31 +1,27 @@
 # almiladoc
 
-Converts documents (Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF) to GitHub-Flavored Markdown, from a Rust core with a Python binding. It runs in-process and makes no network call unless the caller passes it an `OcrHttp` engine, which posts images to the OCR server it names.
+Rust library and Python binding converting Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF to GitHub-Flavored Markdown. Runs in-process; network access requires a caller-configured `OcrHttp` engine.
 
-almiladoc is Fair Source (source-available) software, not open source: see [Licence](#licence).
-
-## Status
-
-No release yet. The first release candidate goes to TestPyPI once the OCR stack fills a PDF's gaps; PyPI and crates.io receive the first final release. The API below will change before it.
+Fair Source (source-available), under the [licence terms](#licence). No release yet: TestPyPI receives the first candidate after the OCR stack; PyPI and crates.io receive the first final, and the API may change before then.
 
 ## Formats
 
-| Format           | Extensions                                                 |
-| ---------------- | ---------------------------------------------------------- |
-| Word             | `.doc`, `.docx`, `.docm`                                   |
-| PowerPoint       | `.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
-| Excel            | `.xls`, `.xlsx`, `.xlsm`, `.xlsb`                          |
-| OpenDocument     | `.odt`, `.ods`, `.odp`                                     |
-| Rich Text Format | `.rtf`                                                     |
-| EPUB             | `.epub`                                                    |
-| CSV              | `.csv`                                                     |
-| PDF              | `.pdf`                                                     |
+| Format | Extensions |
+|---|---|
+| Word | `.doc`, `.docx`, `.docm` |
+| PowerPoint | `.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
+| Excel | `.xls`, `.xlsx`, `.xlsm`, `.xlsb` |
+| OpenDocument | `.odt`, `.ods`, `.odp` |
+| Rich Text Format | `.rtf` |
+| EPUB | `.epub` |
+| CSV | `.csv` |
+| PDF | `.pdf` |
 
-The format is detected from the content; CSV carries no signature, so in-memory CSV has to be named. A PDF page that is scanned or image-only becomes a gap awaiting OCR: under the default `OnLoss::Fail` the document fails with `NeedsOcr`, naming the pages, rather than returning partial text, and under `OnLoss::Report` each gap writes `<!-- needs-ocr page N -->`. Between parse and render the caller fills a gap with the Markdown its own OCR read, which renders in the gap's place, or records that its OCR failed, which writes `<!-- ocr-failed page N -->`.
+Content determines the format; CSV has no signature and must be named or supplied as a fallback. [Support](docs/support.md) lists retained content, losses and OCR markers per format.
 
 ## Install
 
-Until the first release, build the wheel from source, which needs a Rust toolchain:
+Before release, build from source with a Rust toolchain:
 
 ```sh
 pip install git+https://github.com/almila-app/almiladoc
@@ -75,15 +71,14 @@ except almiladoc.NeedsOcrError as error:
     print(error.pages, error.page_count)
 ```
 
-A `Converter` is built once from a frozen `Config` and shared across threads; each call releases the GIL. `bytes` is read in place, any other buffer is copied once after `Limits.max_input_bytes` admits its length, and `convert_path` checks a file's size before reading it. Without a `format`, a call detects it from the content under the converter's limits, as `Converter.sniff` does, and `convert_path` falls back to the extension; a `format` the content contradicts raises `UnsupportedError` with `kind` `format_mismatch` and `detected`, the format to retry with. A `CancelToken` cancelled from any thread stops the call at its next unit of work, with PDF extraction checked between pages and painting before each step; Ctrl-C is not seen while a call runs. `ocr_pages="all"` or a set of 1-based pages makes each selected PDF page a gap with reason `caller_requested`, whatever its text; other formats ignore it. `Parsed.fill_gap_tables(gap, markdown)` accepts standalone text-only `table`/`tr`/`td` HTML at top-level gaps, preserving merged cells as safe HTML and refusing unsupported tables atomically. `Parsed.fill_gap(gap, markdown)` fills a row of `Parsed.gaps` with the Markdown OCR read for it, its raw HTML kept as text, a link as its label and an image as its alt, and `Parsed.fail_gap(gap)` records that its OCR failed; `Config(image_ocr=ImageOcr.ALL)` also leaves a gap after each embedded PNG or JPEG, its row naming the image's index in `Parsed.assets()`, whose text renders after the block that shows it; `Parsed.ocr_requests(gaps=None, *, dpi=150, max_pixels=12_845_056)` exports an `OcrRequest`, which pickles, for each such gap, its embedded image or its page painted as a PNG at the largest dpi up to `dpi` at which its media box fits `max_pixels`, for an OCR run in another process whose text comes back through `fill_gap(request.gap, text)`; a gap no row names raises `KeyError`, one already filled or failed `ValueError`, and a fill past a per-fill size, nesting, node, grid or expansion limit raises `GapRefused` (a `ValueError` with `limit`), each leaving the document unchanged. `OcrHttp(base_url, model, *, api_key=None, …)` reads gaps through an OpenAI-compatible vision server, as the `ocr-http` feature below does: `Parsed.ocr(engine)` fills a parse's gaps and gives an `OcrSummary`, `convert(…, ocr=engine)` and `convert_path` fill them before rendering, and `engine.recognize(requests)` reads another process's requests, giving for each a `str` or an `OcrFailure`, which pickles. Every conversion failure subclasses `almiladoc.ConvertError` and carries `code`, its snake_case name such as `needs_ocr`: `UnsupportedError` (with `kind`, such as `unknown_format`, and `detected`), `NeedsOcrError` (with `pages` and `page_count`), `MalformedError` and `MissingPartError` (with `part`), `EncryptedError`, `ResourceLimitError` (with `limit` and `max`), `IncompleteError` (with `diagnostics`, a tuple of `Diagnostic`), `InvalidConfigError` (with `page` and `page_count`), `CancelledError` and `InternalError`. A `Limits`, `Config` or `OcrHttp` field out of range raises `ConfigError`, a `ValueError` naming the field as `limit` (`raster` for a refused `dpi` or `max_pixels`); an unknown `format` name raises `ValueError`, an input that is not a contiguous byte buffer `TypeError`, and an unreadable file, a directory, or a FIFO or device on Unix, `OSError`.
+- Share a frozen-config `Converter`; calls release the GIL, borrow `bytes`, admit other contiguous buffers before copying and check path size before reading. Omitted format detects content, paths fall back to extension, and mismatches expose `UnsupportedError.detected` for explicit retry.
+- A cross-thread `CancelToken` stops work at the next charged unit, between PDF pages and before painting steps; Ctrl-C is unseen during calls.
+- `parse` → `Parsed.gaps` → fill/fail → render supports external OCR; `ocr_pages="all"` or 1-based pages forces PDF gaps (ignored for other formats), and `Config(image_ocr=ImageOcr.ALL)` adds embedded PNG/JPEG gaps after their blocks, naming the asset index.
+- `fill_gap` accepts Markdown, `fill_gap_lines` accepts literal `OcrLine(text, (left, top, right, bottom))` with normalized bounds and no inferred headings/tables, and `fill_gap_tables` accepts standalone text-only table/tr/td HTML at top-level gaps. All refusals are atomic: unknown/settled gaps raise KeyError/ValueError and per-fill limits GapRefused with limit.
+- Pickleable `ocr_requests(gaps=None, *, dpi=150, max_pixels=12_845_056)` carry embedded images or PDF PNGs; return text with `fill_gap(request.gap, text)`, or use `Parsed.ocr(engine)`/`convert(..., ocr=engine)`. `OcrHttp.recognize(requests)` returns strings/pickleable failures for requests from another process.
+- `Conversion.units` contains `(kind, ordinal, start, end)` offsets into Python Unicode Markdown; `Parsed.to_json()` uses the Rust schema and `assets()` returns `(id, media_type, data)`.
 
-`Parsed.fill_gap_lines(gap, lines)` takes `OcrLine(text, (left, top, right, bottom))` values with normalized image bounds. The core orders horizontal lines into columns and paragraphs; text stays literal. Rust uses `GapFill::Lines(Vec<OcrLine>)`. No headings or tables are inferred.
-
-`Conversion.units` contains `(kind, ordinal, start, end)` tuples whose offsets slice the Python Markdown string, including non-ASCII characters. Empty readable units keep zero-length ranges and original ordinals.
-
-`Config(images=ImagePolicy.ALT_TEXT)` writes image labels; `ImagePolicy.OMIT` drops images. The default `PLACEHOLDER` preserves asset references and visible markers, and external images become text links.
-
-`Parsed.to_json()` returns the document model and its diagnostics as the JSON the Rust `Parsed::to_json` writes, and `Parsed.assets()` the embedded assets as `(id, media_type, data)` tuples.
+The [typed binding](python/almiladoc/_almiladoc.pyi) owns signatures, exception fields and configuration defaults. Conversion failures derive from `ConvertError` with stable snake_case codes; invalid fields raise `ConfigError(ValueError)` naming `limit` (`raster` for dpi/pixels), unknown formats ValueError, invalid buffers TypeError and unreadable paths/directories/Unix FIFOs/devices OSError.
 
 ## Rust
 
@@ -98,35 +93,23 @@ fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), Box<dyn std::e
 }
 ```
 
-The crate reads no file: pass bytes through `Input::new(bytes, format)` or `Input::auto(bytes, None)`. Automatic detection shares parsing and rendering’s limits; `Input::auto(bytes, Some(format))` supplies a fallback only when the content is unrecognized. CSV carries no signature and must be named or supplied as the fallback. A `Converter` is built once from a `Config` (its `Limits`, `threads`, default 1, `on_loss`, `images`, `image_ocr`, `headers_footers`, `comments`, `hidden` and `revisions`), which `Converter::new` validates, and is shared across threads. `convert` returns a `Conversion` with the Markdown; `parse` stops at the document model, which also carries the embedded assets, and `Parsed::render` finishes it; `Parsed::gaps` lists a PDF's pages that need OCR and, under `ImageOcr::All`, each embedded PNG or JPEG, filled and failed ones included, `Parsed::fill_gap` fills one with a `GapFill::Markdown` and `Parsed::fail_gap` records that its OCR failed, each refusing with a `GapError` (`UnknownGap`, `Settled`, `InvalidTable`, `Refused` naming a fill limit, or `Convert`) that leaves the document unchanged, while an `OcrEngine` fills them in-process: `Parsed::ocr` runs it over the gaps that ask for an image, in batches of its `batch_size`, each `OcrOutcome` filling or failing its gap, `Converter::convert_with_ocr` parses, runs it and renders, and `Parsed::ocr_requests` exports the same `OcrRequest`s for an engine elsewhere; with the default `raster` feature a PDF page's request carries the page painted as a PNG, at the largest dpi up to the engine's `RasterSpec` (150 dpi, 12 845 056 pixels) at which the page's media box fits its pixel cap; and `Converter::inspect` reports a PDF's pages and the verdict ruled for each (`text`, `no_text` or `needs_ocr` with its reasons), any other format being `Unsupported`. Each call runs on a pool of its own `threads` threads. `Limits::max_input_bytes` refuses an input before parsing starts, and `Limits::max_work` bounds each call by deterministic units of work. `Input::with_cancel` takes a `CancelToken`, which any thread may cancel: the call then fails `Cancelled` at its next unit of work, with PDF extraction checked between pages and painting before each step, and so do `render`, `to_json`, `fill_gap`, `ocr` and `ocr_requests` on the `Parsed` it made. `Input::with_ocr_pages` takes a `PageSelection` of PDF pages the caller will OCR, each becoming a gap with reason `CallerRequested` whatever its text, and a page past the last fails `InvalidConfig`; other formats ignore it. `ConvertError` is `Unsupported`, `NeedsOcr`, `Malformed`, `Encrypted`, `ResourceLimit`, `MissingPart`, `Incomplete`, `InvalidConfig`, `Cancelled` or `Internal`; its messages carry no input text beyond an escaped, capped part name. A panic inside a call is `Internal`: recycle the worker that raised it.
-
-What a conversion cannot carry into its output is reported as `Diagnostics`: each `Diagnostic` is a `DiagnosticCode` with its fixed `LossClass` (`Omitted` by a policy, `Deferred` behind a placeholder or gap, `Lost`, or `Info`), the `Region` it sat in, an optional unit and a count, and holds no input text. Under the default `Config::on_loss`, `OnLoss::Fail`, a conversion that lost content fails `Incomplete` with its diagnostics; `OnLoss::Report` returns the `Conversion`, whose `diagnostics()` lists them and whose `is_complete()` is false. `parse` never fails on a loss: `Parsed::diagnostics` lists them and `Parsed::render` decides. [docs/support.md](docs/support.md) states, per format, what each reader leaves out and the code that reports it.
-
-`Config::comments` defaults to `CommentPolicy::Omit`, which counts references without reading comment parts. `Emit` preserves supported comments as GFM footnotes labelled `almiladoc-comment-N`, with replies inside their parent; their anchors resolve locally and their ordinary note references stay unresolved. Header and footer comment references resolve when both policies emit. Ordinary note labels remain numeric, and comment assets follow header and footer assets.
-
-`Config::headers_footers` defaults to `HeaderFooterPolicy::Omit`; `Emit` preserves supported headers and footers as labelled blockquotes, fields a printed page updates as tokens and fixed or locked ones as their stored result. See [support](docs/support.md) for the readers.
-
-`Config::revisions` defaults to `RevisionPolicy::Accept`. In Word, RTF and OpenDocument, `Reject` preserves deleted text, drops inserted text and joins paragraphs when the removed revision contains their paragraph mark. It selects stored text and structural boundaries; it does not reconstruct earlier formatting.
-
-`Config::hidden` defaults to `HiddenPolicy::Omit`. `Emit` preserves supported hidden text, sections, slides, sheets, rows, columns, shapes and controls, and EPUB text hidden by CSS. Unsupported selected content reports its usual loss. Explicitly hidden slides are omitted by default, retaining their original ordinals.
-
-`Conversion::units()` returns typed source units and UTF-8 byte ranges into `markdown()`. Ranges contain unit content, excluding unit anchors, separators, boundary whitespace, the final newline and appended note definitions. Empty readable units keep zero-length ranges and original ordinals; omitted hidden sheets or slides and unreadable units have no range, bar a PPT slide whose slide-list text outlives its lost container. Slides with content are separated by one `---`; empty slides add no separator.
-
-The `serde` feature derives `Serialize` for the model, `Diagnostic`, `EngineIdentity` and `Conversion`, and adds `Parsed::to_json`: one object, `{schema_version, identity, document, diagnostics}`, in which a data enum is `{"kind", "value"}`, a field-less one its `snake_case` name, absent document metadata is omitted, other `None` fields are `null`, and an asset carries `byte_len` instead of its bytes. It returns the JSON when content was lost, since the diagnostics travel in it, and counts it against `Limits::max_output_bytes` and `Limits::max_work`. `JSON_SCHEMA_VERSION` rises only when a field or `kind` is removed, renamed or changes meaning, so a reader ignores those it does not know. Schema 3 distinguishes image source read failures (`unread`) from intentional source-free stand-ins (`unavailable`); every image carries its source `{region, unit}` as `origin`. Anchor targets are `{id, unit}`; `unit` identifies its source destination when known, so unread content suppresses only its own missing links. Schema 4 removes a table's `kind`. PDF pages are `page` units, and a `gap` block, `{id: {unit, ordinal}, origin, reasons}`, stands for a page or an image awaiting OCR. Schema 5 lets a gap's `unit` be `null`, in a document without units.
-
-PDF support is the default `pdf` feature, read with [unpdf](https://docs.rs/unpdf) page by page on the call's own thread; without it, a PDF is `Unsupported`. Limits and cancellation reach the PDF engine between pages and before each step of painting one, since inside a page its stream decoding takes no caller budget: isolate PDF work in a memory-capped worker that is recycled after a failure.
-
-The `ocr-http` feature adds `OcrHttp`, an `OcrEngine` that posts each image to an OpenAI-compatible server's `chat/completions`, as `OcrHttpConfig` sets out: a base URL, a model, an optional key sent only over `https` or directly to loopback, the prompt and sampling fields, and how many requests go out at once (`concurrency`, 1 by default, a batch holding twice as many), on the calling thread and threads of the engine's own that end before the call returns. A request the server cannot take yet is retried, a reply it rejects or that holds no Markdown fails its gap, and any other failure leaves its gap for a later call; `OcrHttp::new` opens no socket, and it follows no redirect. Only an explicit `proxy` is used; `root_certificates_pem` replaces Mozilla roots, also for an HTTPS proxy. A key sent through a proxy requires an HTTPS endpoint. `OcrHttp::recognize_images` reads `OcrImage`s outside a parse, such as another process's requests.
+- Pass bytes through checked `Input::new` or `Input::auto(bytes, fallback)`, which uses fallback only for unrecognized content. Share a validated converter; calls use private thread pools (default 1), while parse retains configuration, assets, cancellation and diagnostics for render; [converter rustdoc](src/converter.rs) owns API details.
+- [Limits](src/limits.rs) admit input before parsing and charge deterministic work; cancellation continues through render, JSON, fills, OCR and request export. PDF page selection outside the document fails InvalidConfig; inspect supports PDF only.
+- Diagnostics carry code/class/region/unit/count, never input text: Omitted is policy, Deferred a placeholder/gap, Lost unread content and Info formatting/repair. Parse retains losses; default Fail renders Lost as Incomplete and unfilled/failed pages as NeedsOcr first; Report returns diagnostics with is_complete false ([support](docs/support.md)).
+- [Typed errors](src/error.rs) contain only escaped/capped input part names; boundary panics become Internal, requiring worker recycling. [Unit ranges](src/converter.rs) are UTF-8 bytes, while Python ranges count characters; empty readable units keep original ordinals and zero-length ranges.
+- `serde` adds model/diagnostic/identity/conversion serialization and `Parsed::to_json`, including losses under output/work limits; [JSON rustdoc](src/converter.rs) owns the envelope and [schema version](src/json.rs) changes only for removal, rename or changed meaning, so readers ignore additions. Images distinguish unread/unavailable and carry source origins, anchors carry destination units, tables have no kind and gap ids allow null units.
+- Default pdf/raster features use [unpdf](https://docs.rs/unpdf); without pdf, PDF is Unsupported. Page decoding has no caller budget inside a page: isolate PDF work in memory-capped workers recycled after failure.
+- Optional `ocr-http` adds `OcrHttp` for OpenAI-compatible chat/completions; construction opens no socket, redirects are refused and workers finish before return. Keys require HTTPS or direct loopback (HTTPS endpoint through proxies), only explicit proxies are used, and replacement PEM roots apply to endpoint/HTTPS proxy; [HTTP rustdoc](src/ocr/http/mod.rs) owns configuration, batches/retries and recognize_images, [ADR 0002](docs/adr/0002-ocr-port.md) owns engine/fill constraints.
 
 ### Identity
 
-`Converter::identity()` returns the `EngineIdentity` that fixes a conversion's output: the crate `version` and a `config_fingerprint`, the SHA-256 of every `Config` field that shapes output (all but `limits` and `threads`). Under the committed `Cargo.lock`, equal identities and equal input give byte-identical output across threads, calls and, except for PDF, architectures.
+`Converter::identity()` fixes version and SHA-256 `config_fingerprint` of output-affecting fields (excluding limits and threads). With committed `Cargo.lock`, equal identity, input and gap fills produce byte-identical output across calls, threads and, except PDF, architectures.
 
-The optional Rust [offline OCR adapter](ocr-local/) uses verified caller files and shares the core’s located-line layout.
+The optional [offline OCR adapter](ocr-local/) uses verified caller files and the core's located-line layout.
 
 ## Development
 
-`make ci` runs every gate CI runs, with the toolchain `rust-toolchain.toml` pins; it needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs the locked Python tools and CPython 3.11 and 3.15. Each gate is also a target of its own: `fmt`, `clippy`, `test`, `doc`, `features` and `python`, which builds the wheel from the sdist and tests it installed; `policy` (cargo-deny), `locks`, `licences` (regenerates `THIRD-PARTY-LICENSES`), `reuse`, `hygiene`, `actions` (zizmor, online when `GH_TOKEN` is set), `dco` and `fuzz`. `make tools` fetches the sha256-pinned cargo-deny, cargo-about and cargo-fuzz binaries into the build directory. A target the host cannot run reports `NOT RUN` and its reason.
+`make ci` runs the CI gates using `rust-toolchain.toml`; prerequisites are GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs locked tools and CPython 3.11/3.15. [ADR 0003](docs/adr/0003-ci-and-release.md) owns gate, tool and release policy; [CLAUDE.md](CLAUDE.md) owns contributor-agent instructions; unavailable targets report `NOT RUN` with a reason.
 
 ## Licence
 

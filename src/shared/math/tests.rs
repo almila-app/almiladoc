@@ -60,8 +60,6 @@ fn omml_normal_text_and_styled_alphanumerics() {
 
 #[test]
 fn omml_rtf_shaped_tree_reads_values_from_text() {
-    // rtf math destinations carry a property value as element text, a run's
-    // text directly in the run, and run properties as numbered children.
     let tex = omml(concat!(
         "<m:f><m:fPr><m:type>lin</m:type></m:fPr>",
         "<m:num><m:r>a</m:r></m:num><m:den><m:r><m:sty>0</m:sty>b</m:r></m:den></m:f>",

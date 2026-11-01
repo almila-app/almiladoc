@@ -1,18 +1,13 @@
-//! Presentation MathML to LaTeX, for EPUB chapters and OpenDocument
-//! formula objects. A TeX annotation, when the producer kept one, is taken
-//! verbatim over a reconversion of the presentation tree.
+//! A producer-supplied TeX annotation takes precedence over presentation-tree conversion.
 
 use super::tex::{Fraction, Tex, Variant, accent, big_operator, delimiter, function_name};
 use crate::package::xml::{Element, Node};
 
-/// A formula as LaTeX, with the image glyphs it could not carry.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MathTex {
-    /// LaTeX source without delimiters.
     pub tex: String,
     /// The `mglyph` images it would show, which have no character.
     pub glyphs: u64,
-    /// Whether selected source text contains an unresolved XML reference.
     pub unresolved: bool,
 }
 
@@ -25,7 +20,6 @@ pub(crate) fn mathml_to_tex(math: &Element) -> MathTex {
     MathTex { tex, glyphs, unresolved }
 }
 
-/// Whether a `math` element asks for display (block) layout.
 pub(crate) fn mathml_is_display(math: &Element) -> bool {
     math.attr_any("display").is_some_and(|d| d == "block")
 }
@@ -39,8 +33,6 @@ fn walk_children(glyphs: &mut u64, elem: &Element, tex: &mut Tex) {
     }
 }
 
-/// Child elements, skipping nothing: MathML layout schemata count their
-/// arguments by position.
 fn args(elem: &Element) -> Vec<&Element> {
     elem.child_elems().collect()
 }
@@ -150,8 +142,6 @@ fn token(e: &Element) -> Tex {
 }
 
 fn space(e: &Element, tex: &mut Tex) {
-    // Only the sign of the width survives: zero (the default) is
-    // nothing, negative a thin backspace, anything else a space.
     let width = e.attr_any("width").unwrap_or("0").trim();
     let negative = width.starts_with('-') || width.starts_with("negative");
     let digits = width.trim_start_matches('-');
@@ -187,7 +177,6 @@ fn fenced(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     tex.push_str(open.chars().next().map_or(".", delimiter));
     for (i, part) in e.child_elems().enumerate() {
         if i > 0 {
-            // The last separator repeats for any further arguments.
             let sep = separators.get(i - 1).or(separators.last());
             if let Some((sep, damaged)) = sep {
                 tex.push_math_char(*sep);
@@ -328,16 +317,12 @@ fn under_over(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
         "mover" => (None, parts.get(1)),
         _ => (parts.get(1), parts.get(2)),
     };
-    // Limits on a big operator or a named function take script form,
-    // which LaTeX places under and over by itself.
     if is_big_operator(base) || is_named_function(base) {
         tex.push_tex(&sub(glyphs, base));
         script(glyphs, tex, '_', under);
         script(glyphs, tex, '^', over);
         return;
     }
-    // An explicit accent="false" / accentunder="false" asks for a plain
-    // over- or under-script even on an accent character.
     let plain_over = e.attr_any("accent").is_some_and(|v| v == "false");
     let plain_under = e.attr_any("accentunder").is_some_and(|v| v == "false");
     let mut body = sub(glyphs, base);
@@ -427,7 +412,6 @@ fn table(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
     tex.push_environment("matrix", &rows);
 }
 
-/// An `mo` holding an n-ary operator (∑, ∫, ...).
 fn is_big_operator(e: &Element) -> bool {
     e.local == "mo" && {
         let text = e.text();
@@ -436,7 +420,6 @@ fn is_big_operator(e: &Element) -> bool {
     }
 }
 
-/// An `mi` or `mo` naming a function that takes limits (`lim`, `max`).
 fn is_named_function(e: &Element) -> bool {
     matches!(e.local.as_str(), "mi" | "mo") && {
         let text = e.text();

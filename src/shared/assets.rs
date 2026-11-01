@@ -1,5 +1,3 @@
-//! Embedded-asset accumulation under the retained-bytes cap.
-
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
@@ -101,8 +99,6 @@ impl AssetSink {
         }
     }
 
-    /// Retain an asset's bytes (copied only when the part is not already
-    /// retained). Crossing the retained-bytes cap is a hard error.
     pub(crate) fn add(
         &mut self,
         media_type: String,
@@ -123,10 +119,6 @@ impl AssetSink {
     }
 }
 
-/// Resolve an image relationship to its source. External-mode relationships
-/// carry the image's URL directly; internal-mode targets load from the
-/// package and are retained as assets. Failures degrade to `None` per the
-/// unified policy; fatal errors propagate.
 pub(crate) fn rel_image_source(
     pkg: &Package<'_>,
     rels: &Relationships,
@@ -148,7 +140,6 @@ pub(crate) fn rel_image_source(
     Ok(Some(ImageSource::Asset(id)))
 }
 
-/// Retain an embedded OLE object's payload as an asset, when its relationship resolves to a part.
 pub(crate) fn retain_ole_payload(
     pkg: &Package<'_>,
     rels: &Relationships,
@@ -164,7 +155,6 @@ pub(crate) fn retain_ole_payload(
     Ok(())
 }
 
-/// MIME type from a part path's extension.
 pub(crate) fn media_type_for(part: &str) -> String {
     let ext = part.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {

@@ -14,8 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / ".github/scripts"))
 from hygiene import licence_text
 
-INSTRUCTIONS = ("AGENTS.md", "CLAUDE.md")
-OVERRIDE = "AGENTS.override.md"
+LEGACY_INSTRUCTIONS = ("AGENTS.md", "AGENTS.override.md")
+INSTRUCTIONS = ("CLAUDE.md", *LEGACY_INSTRUCTIONS)
 SETUP_DIR = ".claude"
 LOCAL_FILES = (
     "CLAUDE.local.md",
@@ -114,14 +114,18 @@ def setup_files(root: Path) -> list[Path]:
 
 
 def entrypoint_problems(root: Path) -> list[str]:
-    shared, adapter = (root / name for name in INSTRUCTIONS)
+    shared = root / "CLAUDE.md"
     problems = []
     if not shared.is_file() or not shared.read_text(encoding="utf-8").strip():
-        problems.append("AGENTS.md: missing shared instructions")
-    if not adapter.is_file() or adapter.read_text(encoding="utf-8").strip() != "@AGENTS.md":
-        problems.append("CLAUDE.md: must contain only @AGENTS.md")
-    if (root / OVERRIDE).exists():
-        problems.append(f"{OVERRIDE}: shadows AGENTS.md, which Codex loads in its place")
+        problems.append("CLAUDE.md: missing shared instructions")
+    elif "@AGENTS.md" in shared.read_text(encoding="utf-8"):
+        problems.append("CLAUDE.md: must own instructions, not import AGENTS.md")
+    legacy = {path for path in instruction_files(root) if path.name in LEGACY_INSTRUCTIONS}
+    legacy |= {root / name for name in LEGACY_INSTRUCTIONS if (root / name).exists()}
+    problems += [
+        f"{rel(root, path)}: instructions belong in CLAUDE.md and .claude/"
+        for path in sorted(legacy)
+    ]
     return problems
 
 
@@ -370,7 +374,6 @@ paths:
 
 | File | Ceiling |
 |---|---|
-| `**/AGENTS.md` | 5 lines |
 | `**/CLAUDE.md` | 5 lines |
 | `.claude/rules/*.md` | 20 lines |
 | `.claude/skills/*/SKILL.md` | 20 lines |
@@ -397,8 +400,7 @@ def seed(root: Path) -> None:
     files = {
         ".gitignore": LOCAL_IGNORE,
         "README.md": "# demo\n",
-        "AGENTS.md": "# demo\n",
-        "CLAUDE.md": "@AGENTS.md\n",
+        "CLAUDE.md": "# demo\n",
         STYLE: GOOD_STYLE,
         ".claude/skills/verify/SKILL.md": GOOD_SKILL.format(script=SCRIPT),
         SCRIPT: "",
@@ -458,20 +460,32 @@ def self_test() -> int:
 
 def self_test_cases() -> tuple[list[str], int]:
     defects = {
-        "AGENTS.md: missing shared instructions": lambda r: (r / "AGENTS.md").unlink(),
-        "missing shared instructions": write("AGENTS.md", "\n"),
-        "CLAUDE.md: must contain only @AGENTS.md": lambda r: (r / "CLAUDE.md").unlink(),
-        "must contain only @AGENTS.md": write("CLAUDE.md", "Read AGENTS.md.\n"),
-        "must contain only": write("CLAUDE.md", "@AGENTS.md\n\nDuplicated instructions.\n"),
-        "AGENTS.override.md: shadows AGENTS.md": write("AGENTS.override.md", "# mine\n"),
-        "AGENTS.md: ignored by .gitignore": write(".gitignore", LOCAL_IGNORE + "AGENTS.md\n"),
-        "AGENTS.md: not tracked": lambda r: git(r, "rm", "-q", "--cached", "AGENTS.md"),
-        "AGENTS.md: 6 lines, budget 5": write("AGENTS.md", "x\n" * 6),
-        "AGENTS.md:1: 101 columns": write("AGENTS.md", "x" * 101 + "\n"),
-        "AGENTS.md:1: home path": write("AGENTS.md", f"see {HOME}/x\n"),
-        "docs/AGENTS.md: not tracked": write("docs/AGENTS.md", "# docs\n"),
-        "docs/AGENTS.md:1: home path": write("docs/AGENTS.md", f"see {HOME}/x\n"),
-        "docs/AGENTS.md: 6 lines, budget 5": write("docs/AGENTS.md", "x\n" * 6),
+        "CLAUDE.md: missing shared instructions": lambda r: (r / "CLAUDE.md").unlink(),
+        "missing shared instructions": write("CLAUDE.md", "\n"),
+        "must own instructions": write("CLAUDE.md", "@AGENTS.md\n"),
+        "AGENTS.md: instructions belong in CLAUDE.md": write("AGENTS.md", "# mine\n"),
+        "AGENTS.override.md: instructions belong in CLAUDE.md": write(
+            "AGENTS.override.md", "# mine\n"
+        ),
+        "AGENTS.override.md: instructions belong in CLAUDE.md and .claude/": lambda r: (
+            write(".gitignore", LOCAL_IGNORE + "AGENTS.override.md\n")(r),
+            write("AGENTS.override.md", "# mine\n")(r),
+        ),
+        "AGENTS.md: instructions belong in CLAUDE.md and .claude/": lambda r: (
+            write(".gitignore", LOCAL_IGNORE + "AGENTS.md\n")(r),
+            write("AGENTS.md", "# mine\n")(r),
+        ),
+        "docs/AGENTS.md: instructions belong in CLAUDE.md": write("docs/AGENTS.md", "# mine\n"),
+        "docs/AGENTS.override.md: instructions belong in CLAUDE.md": write(
+            "docs/AGENTS.override.md", "# mine\n"
+        ),
+        "docs/CLAUDE.md: ignored by .gitignore": lambda r: (
+            write("docs/CLAUDE.md", "# docs\n")(r),
+            git(r, "add", "docs/CLAUDE.md"),
+            write(".gitignore", LOCAL_IGNORE + "docs/CLAUDE.md\n")(r),
+        ),
+        "docs/CLAUDE.md:2: 101 columns": write("docs/CLAUDE.md", "# docs\n" + "x" * 101 + "\n"),
+        "docs/CLAUDE.md:2: home path": write("docs/CLAUDE.md", f"# docs\nsee {HOME}/x\n"),
         "CLAUDE.local.md: tracked although .gitignore ignores it": lambda r: (
             write("CLAUDE.local.md", "notes\n")(r),
             git(r, "add", "-f", "CLAUDE.local.md"),
@@ -563,7 +577,7 @@ def self_test_cases() -> tuple[list[str], int]:
     benign = "UTF-16, SHA-256, ECMA-376, RUSTSEC-2000-0000, BUSL-1.1, v0.15.0, E402, padding\n"
     local_facts = f"build host {HOME} at {PRIVATE_IP}\n"
     unreported = {
-        "AGENTS.md": benign,
+        "CLAUDE.md": benign,
         "CLAUDE.local.md": local_facts,
         ".claude/settings.local.json": local_facts,
         ".claude/worktrees/w/CLAUDE.md": local_facts,

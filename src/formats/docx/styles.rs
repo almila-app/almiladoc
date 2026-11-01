@@ -1,10 +1,4 @@
-//! WordprocessingML style table.
-//!
-//! Bold/italic/strike/vanish are *toggle properties* (ECMA-376 §17.7.3): within the
-//! style hierarchy a `true` specification toggles the inherited value and a
-//! `false` specification leaves it unchanged, so the style layers contribute
-//! a true-count *parity* XORed over the `docDefaults` base. Direct run
-//! formatting is absolute on/off.
+//! ECMA-376 §17.7.3 style toggles compose by parity, while direct run formatting is absolute.
 
 use super::numbering::Instance;
 use crate::ctx::ParseCtx;
@@ -16,11 +10,8 @@ use crate::shared::chain::{Memo, StyleChains};
 use crate::shared::delta::StyleDelta;
 use crate::shared::symbol::{self, SymbolFont};
 
-/// The font Word applies where no level of the hierarchy names one (MS-OI29500 2.1.88 c).
 const DEFAULT_FONT: &str = "Times New Roman";
 
-/// One font slot of `w:rFonts`: unset, a font name, or a theme font, which overrides the name
-/// on the same element (MS-OI29500 2.1.88 e).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Face<'a> {
     #[default]
@@ -65,7 +56,6 @@ impl<'a> Face<'a> {
     }
 }
 
-/// The run fonts a level of the style hierarchy specifies, each slot nearest-wins.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct RunFonts<'a> {
     ascii: Face<'a>,
@@ -90,7 +80,6 @@ impl<'a> RunFonts<'a> {
         }
     }
 
-    /// These fonts with every slot they leave unset taken from `base`.
     pub(super) fn over(self, base: Self) -> Self {
         Self {
             ascii: self.ascii.or(base.ascii),
@@ -102,10 +91,6 @@ impl<'a> RunFonts<'a> {
         }
     }
 
-    /// Which symbol font draws each character of a run in these fonts, as Word picks the slot
-    /// (MS-OI29500 2.1.88 b); `None` when no slot is a symbol font. A complex-script or
-    /// right-to-left run draws in its `cs` font, which is not read, and the Chinese-language
-    /// exceptions to the Latin-1 rows are not applied.
     pub(super) fn route(self) -> Option<FontRoute> {
         if self.complex == Some(true) || self.rtl == Some(true) {
             return None;
@@ -125,7 +110,6 @@ impl<'a> RunFonts<'a> {
     }
 }
 
-/// The symbol font of each character class of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FontRoute {
     ascii: Option<SymbolFont>,
@@ -144,7 +128,6 @@ impl FontRoute {
     }
 }
 
-/// Per-property parity of `true` toggle specifications in a style chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Toggles {
     pub bold: bool,
@@ -190,7 +173,6 @@ impl Toggles {
 
 pub(super) struct Styles<'a> {
     chains: StyleChains<'a, Element>,
-    /// docDefaults as absolute values (the base the toggles flip over).
     pub doc_defaults: Style,
     pub(super) hidden_by_default: bool,
     default_fonts: RunFonts<'a>,
@@ -239,8 +221,6 @@ impl<'a> Styles<'a> {
         }
     }
 
-    /// The parity of `true` toggle specifications along a style's `basedOn`
-    /// chain. A `false` in a style leaves the inherited value unchanged.
     pub(super) fn run_toggles(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -258,7 +238,6 @@ impl<'a> Styles<'a> {
         )
     }
 
-    /// The run fonts a style specifies along its `basedOn` chain, each slot nearest-wins.
     pub(super) fn run_fonts(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -276,8 +255,6 @@ impl<'a> Styles<'a> {
         )
     }
 
-    /// The run fonts of a paragraph's text before its runs' own: its style's, or the default
-    /// paragraph style's when it names none that exists, over `docDefaults`.
     pub(super) fn paragraph_fonts(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -289,8 +266,6 @@ impl<'a> Styles<'a> {
         }
     }
 
-    /// Whether a paragraph's text is hidden before its runs' own properties: by its style, or
-    /// the default paragraph style when it names none that exists, over `docDefaults`.
     pub(super) fn paragraph_hidden(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -302,8 +277,6 @@ impl<'a> Styles<'a> {
         }
     }
 
-    /// The shift a style's runs take, from the nearest style along its `basedOn` chain that
-    /// names one.
     pub(super) fn run_position(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -313,8 +286,6 @@ impl<'a> Styles<'a> {
             .nearest(parse_ctx, &self.positions, id, |style| vert_align(style.find(ns::W, "rPr")?))
     }
 
-    /// The shift of a paragraph's text before its runs' own: its style's, or the default
-    /// paragraph style's when it names none that exists, over `docDefaults`.
     pub(super) fn paragraph_position(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -362,8 +333,6 @@ impl<'a> Styles<'a> {
         )
     }
 
-    /// The block container a paragraph style names, inherited through
-    /// `basedOn` (Word's `Quote`, Pandoc's `Source Code`, ...).
     pub(super) fn block_style(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -374,10 +343,7 @@ impl<'a> Styles<'a> {
         })
     }
 
-    /// The `numId` a paragraph style contributes, inherited through
-    /// `basedOn`. An `ilvl` inside a style's `numPr` is ignored per ECMA-376
-    /// §17.3.1.19 - the effective level comes from the abstract levels'
-    /// `w:pStyle` bindings ([`Styles::style_numbering_level`]).
+    /// An `ilvl` inside a style's `numPr` is ignored per ECMA-376 §17.3.1.19 - the effective level comes from the abstract levels' `w:pStyle` bindings ([`Styles::style_numbering_level`]).
     pub(super) fn style_num_pr(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -388,10 +354,7 @@ impl<'a> Styles<'a> {
         })
     }
 
-    /// The numbering level a paragraph style binds to: the first style along
-    /// the `basedOn` chain (child first) that one of the abstract levels of
-    /// `instance` references via `w:pStyle`. Walked on every call: a memo
-    /// per instance would grow with instances times styles.
+    /// Walked on every call: a memo per instance would grow with instances times styles.
     pub(super) fn style_numbering_level(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -401,9 +364,6 @@ impl<'a> Styles<'a> {
         self.chains.find(parse_ctx, id, |style| instance.style_level(style))
     }
 
-    /// The `numId` referenced by a numbering style's own `numPr`
-    /// (`numStyleLink` contract), without inheritance, each child the walk
-    /// passes charged one unit.
     pub(super) fn direct_num_id(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -438,8 +398,6 @@ fn charged_child<'e>(
     Ok(None)
 }
 
-/// A `w:rPr` element as a tri-state delta - used only for *direct* run
-/// formatting, where specifications are absolute on/off.
 pub(super) fn rpr_delta(rpr: &Element) -> StyleDelta {
     let (s, d) = (on_off(rpr, "strike"), on_off(rpr, "dstrike"));
     StyleDelta {
@@ -455,7 +413,6 @@ pub(super) fn rpr_delta(rpr: &Element) -> StyleDelta {
     }
 }
 
-/// `w:vertAlign`, whose `baseline` cancels a shift the style hierarchy applies.
 fn vert_align(rpr: &Element) -> Option<VerticalPosition> {
     match val(rpr, "vertAlign")? {
         "superscript" => Some(VerticalPosition::Superscript),
@@ -475,19 +432,15 @@ pub(super) fn outline(ppr: Option<&Element>) -> Outline {
         .map_or(Outline::Inherit, Outline::from_operand)
 }
 
-/// ST_OnOff: `1`/`true`/`on` (or no value) are true; `0`/`false`/`off` are
-/// false; an absent element is unspecified.
 pub(super) fn on_off(parent: &Element, name: &str) -> Option<bool> {
     let elem = parent.find(ns::W, name)?;
     Some(!elem.attr(ns::W, "val").is_some_and(|value| turns_off(value.as_bytes())))
 }
 
-/// Whether the ST_OnOff attribute `name` of `elem` is on; an absent one is off.
 pub(super) fn on_off_attr(elem: &Element, name: &str) -> bool {
     elem.attr(ns::W, name).is_some_and(|value| !turns_off(value.as_bytes()))
 }
 
-/// Whether an ST_OnOff value is one of the spellings of false.
 pub(super) fn turns_off(value: &[u8]) -> bool {
     matches!(value, b"0" | b"false" | b"off" | b"none")
 }
@@ -502,7 +455,6 @@ mod tests {
     use crate::shared::test_support::cancelled;
     use std::assert_matches;
 
-    // parse_xml returns a synthetic root wrapping the document element.
     fn parse(doc: &str) -> Element {
         parse_xml(&ParseCtx::default(), doc.as_bytes(), Role::Probe).unwrap()
     }

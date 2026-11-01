@@ -1,8 +1,4 @@
-//! The rows and columns of an ODF table in source order, and which of them a
-//! sheet hides: `table:visibility` on a row or column and `table:display` on
-//! the groups around them, and the default cell style its columns name, in a
-//! table of any kind. All are read before any cell is, so a hidden cell is
-//! decoded only where a merge it opens shows.
+//! Visibility is read before cells so hidden cells are decoded only when a merge exposes them.
 
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
@@ -12,12 +8,9 @@ use crate::package::xml::{Element, ns};
 use crate::shared::hidden_runs::HiddenRuns;
 use std::ops::Range;
 
-/// Whether a table drops the rows and columns it hides.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Visibility {
-    /// Any table but a sheet, which keeps every line.
     Ignored,
-    /// A sheet.
     Applied,
 }
 
@@ -35,21 +28,13 @@ impl Visibility {
     }
 }
 
-/// One step through a table's row containers, in document order.
 pub(super) enum Step<'e> {
     Shapes(&'e Element),
-    /// The start and end of the `table:table-header-rows` a table holds
-    /// directly.
     HeaderOpen,
     HeaderClose,
-    Row {
-        row: &'e Element,
-        repeat: u64,
-        hidden: bool,
-    },
+    Row { row: &'e Element, repeat: u64, hidden: bool },
 }
 
-/// The repeat count of a row, column or cell, at least 1.
 pub(super) fn repeats(elem: &Element, attr: &str) -> u64 {
     elem.attr(ns::TABLE, attr).and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
 }
@@ -103,18 +88,14 @@ fn collect_steps<'e>(
     }
 }
 
-/// The source rows and columns a sheet hides, and the default cell style its columns name.
 #[derive(Debug, Default)]
 pub(super) struct Axes<'e> {
     pub(super) rows: HiddenRuns,
     pub(super) cols: HiddenRuns,
-    /// The `table:default-cell-style-name` of each run of columns that names one, in column order.
     pub(super) col_styles: Vec<(Range<u64>, &'e str)>,
 }
 
 impl<'e> Axes<'e> {
-    /// Survey a table's rows and columns, charging each one declared; a
-    /// table that ignores visibility surveys only its columns' default styles.
     pub(super) fn of(
         table: &'e Element,
         steps: &[Step<'_>],
@@ -143,7 +124,6 @@ impl<'e> Axes<'e> {
         })
     }
 
-    /// The runs of columns that name a default cell style and overlap `cols`, in column order.
     pub(super) fn column_styles(&self, cols: &Range<u64>) -> &[(Range<u64>, &'e str)] {
         let from = self.col_styles.partition_point(|(run, _)| run.end <= cols.start);
         let to = self.col_styles.partition_point(|(run, _)| run.start < cols.end);
@@ -195,8 +175,6 @@ fn survey_columns<'e>(
     Ok(())
 }
 
-/// The coordinate after `count` more lines from `at`, refused as an
-/// expansion once it passes what a coordinate can count.
 pub(super) fn declared_end(
     parse_ctx: &ParseCtx<'_>,
     at: u64,

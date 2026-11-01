@@ -1,7 +1,3 @@
-//! RTF table assembly: cell properties captured at `\cellx` time, per-depth
-//! row accumulation (nested tables live at `\itap` depth); the canonical
-//! grid construction is the shared edge-based assembly (`shared::grid`).
-
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::model::{Block, Inline, inlines_are_empty};
@@ -11,11 +7,9 @@ use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 #[derive(Default)]
 struct TableBuild {
     rows: Vec<GridRow>,
-    /// Props declared by the current `\trowd ... \cellx` run.
     row_props: Vec<CellProp>,
     prop_cursor: usize,
     pending_prop: CellProp,
-    /// The open row's closed cells.
     cells: Vec<(Vec<Block>, CellProp)>,
     row_header: bool,
 }
@@ -26,8 +20,6 @@ struct PendingCell {
     run: StyledRun,
 }
 
-/// Table builders indexed by nesting depth - 1, plus the per-depth pending
-/// cell content.
 pub(super) struct TableState<'c> {
     parse_ctx: &'c ParseCtx<'c>,
     tables: Vec<TableBuild>,
@@ -70,12 +62,10 @@ impl<'c> TableState<'c> {
         self.table_at(depth).row_header = true;
     }
 
-    /// The property slot the next `\cellx` will seal.
     pub(super) fn pending_prop(&mut self, depth: usize) -> &mut CellProp {
         &mut self.table_at(depth).pending_prop
     }
 
-    /// `\cellxN`: seal the pending properties with the right boundary.
     pub(super) fn declare_cell(&mut self, depth: usize, right: i64) {
         let t = self.table_at(depth);
         let mut prop = std::mem::take(&mut t.pending_prop);
@@ -105,15 +95,11 @@ impl<'c> TableState<'c> {
         !self.cell(depth).blocks.is_empty()
     }
 
-    /// Whether a row at `depth` is partially built (pending cell content or
-    /// already-closed cells awaiting their `\row`).
     pub(super) fn has_partial_row(&mut self, depth: usize) -> bool {
         self.has_pending_cell(depth)
             || self.tables.get(depth - 1).is_some_and(|t| !t.cells.is_empty())
     }
 
-    /// `\cell` / `\nestcell`: close the cell, folding in any completed
-    /// deeper table.
     pub(super) fn end_cell(
         &mut self,
         depth: usize,
@@ -131,8 +117,6 @@ impl<'c> TableState<'c> {
         Ok(())
     }
 
-    /// `\row` / `\nestrow`: close the row (its last cell must already be
-    /// closed by the caller).
     pub(super) fn end_row(&mut self, depth: usize) {
         let t = self.table_at(depth);
         t.prop_cursor = 0;

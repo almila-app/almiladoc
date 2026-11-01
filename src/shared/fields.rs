@@ -1,31 +1,22 @@
-//! Word field-instruction parsing (DOC, DOCX, RTF), via a small
-//! case-insensitive lexer with known switch arities.
-
 use crate::model::{Inline, LinkTarget, inlines_are_empty};
 use std::ops::Range;
 
-/// Field accumulator: instruction text before the separator, result after.
 #[derive(Default)]
 pub(crate) struct FieldFrame {
     pub instr: String,
     pub unresolved: Vec<Range<usize>>,
     pub in_result: bool,
     pub inlines: Vec<Inline>,
-    /// The token a header or footer writes in place of the result, which is not read.
     pub token: Option<&'static str>,
-    /// Whether the field is locked, its result never updated.
     pub locked: bool,
 }
 
 impl FieldFrame {
-    /// The token a header or footer writes for this field, judged on its instruction so far.
     pub(crate) fn side_token(&self) -> Option<&'static str> {
         side_field_token(&self.instr, self.locked)
     }
 }
 
-/// Finish a field: wrap the result in a link when the instruction is a
-/// hyperlink, otherwise pass the result content through.
 pub(crate) fn field_result(instr: &str, content: Vec<Inline>) -> Vec<Inline> {
     match hyperlink_target(instr) {
         Some(target) if !inlines_are_empty(&content) => {
@@ -35,8 +26,6 @@ pub(crate) fn field_result(instr: &str, content: Vec<Inline>) -> Vec<Inline> {
     }
 }
 
-/// The token a header or footer writes for a field only a printed page resolves: its page,
-/// page count, date, time and file name. A locked field keeps the result it stores.
 pub(crate) fn side_field_token(instr: &str, locked: bool) -> Option<&'static str> {
     if locked {
         return None;
@@ -55,8 +44,6 @@ pub(crate) fn side_field_token(instr: &str, locked: bool) -> Option<&'static str
     })
 }
 
-/// Whether a field instruction is a check box or drop-down form field,
-/// whose state lives only in its form-field data.
 pub(crate) fn is_choice_form_field(instr: &str) -> bool {
     let keyword = instr.split_whitespace().next().unwrap_or_default();
     keyword.eq_ignore_ascii_case("FORMCHECKBOX") || keyword.eq_ignore_ascii_case("FORMDROPDOWN")
@@ -68,9 +55,6 @@ enum Token {
     Switch(char),
 }
 
-/// Tokenize a field instruction: quoted strings (with `\"` and `\\`
-/// escapes), backslash switches, bare words. A word carries the byte span
-/// of its raw text in `instr`, inside any quotes and trimmed of whitespace.
 fn tokenize(instr: &str) -> Vec<Token> {
     let mut out = Vec::new();
     let mut chars = instr.char_indices().peekable();
@@ -115,36 +99,28 @@ fn tokenize(instr: &str) -> Vec<Token> {
     out
 }
 
-/// `span` of `instr` without its leading and trailing whitespace.
 fn trimmed_span(instr: &str, span: Range<usize>) -> Range<usize> {
     let raw = instr.get(span.clone()).unwrap_or_default();
     let start = span.start + (raw.len() - raw.trim_start().len());
     start..start + raw.trim().len()
 }
 
-/// Byte spans in a HYPERLINK instruction of the text its target is made of.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct TargetSpans {
-    /// The URL token.
     pub url: Option<Range<usize>>,
-    /// The `\l` argument.
     pub anchor: Option<Range<usize>>,
 }
 
 impl TargetSpans {
-    /// The spans that are present.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Range<usize>> {
         self.url.iter().chain(self.anchor.iter())
     }
 }
 
-/// Interpret a HYPERLINK field instruction as a link target.
 pub(crate) fn hyperlink_target(instr: &str) -> Option<LinkTarget> {
     hyperlink_target_spans(instr).map(|(target, _)| target)
 }
 
-/// Interpret a HYPERLINK field instruction as a link target, with the byte
-/// spans in `instr` of the text the target is made of.
 pub(crate) fn hyperlink_target_spans(instr: &str) -> Option<(LinkTarget, TargetSpans)> {
     let mut tokens = tokenize(instr).into_iter().peekable();
     match tokens.next() {
@@ -163,7 +139,6 @@ pub(crate) fn hyperlink_target_spans(instr: &str) -> Option<(LinkTarget, TargetS
                 }
             }
             Token::Switch(s) => {
-                // Only a word is an argument: a following switch means it was omitted.
                 let arg = tokens
                     .next_if(|t| matches!(s, 'l' | 'o' | 't') && matches!(t, Token::Word(..)));
                 if s == 'l'
@@ -185,9 +160,6 @@ pub(crate) fn hyperlink_target_spans(instr: &str) -> Option<(LinkTarget, TargetS
     Some((target, spans))
 }
 
-/// Classify an OPC relationship target as a link target. External-mode
-/// targets are parsed like hyperlink field targets (scheme detection);
-/// internal-mode targets stay package-relative.
 pub(crate) fn classify_rel_target(external: bool, target: &str) -> LinkTarget {
     if external { classify(target.to_string()) } else { LinkTarget::Relative(target.to_string()) }
 }

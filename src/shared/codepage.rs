@@ -1,29 +1,4 @@
-//! Legacy single- and multi-byte code pages, named by a Windows code page
-//! number or an RTF font charset.
-//!
-//! The mappings are the WHATWG Encoding Standard's as `encoding_rs` implements
-//! it, which departs from Microsoft's and Apple's tables where WHATWG follows
-//! what browsers decode:
-//! - Mac Roman (10000) decodes 0xBD as U+03A9 GREEK CAPITAL LETTER OMEGA,
-//!   not cp10000's U+2126 OHM SIGN, and 0xDB as the euro sign (Apple's table
-//!   since Mac OS 8.5), not cp10000's U+00A4 CURRENCY SIGN.
-//! - Mac Cyrillic (10007) decodes as x-mac-cyrillic, the Mac OS Ukrainian
-//!   table: unlike Apple's `CYRILLIC.TXT` it reads 0xA2 as U+0490, 0xB6 as
-//!   U+0491 and 0xFF as the euro sign.
-//! - ISO-8859-7 (28597) decodes 0xA1 and 0xA2 as U+2018 and U+2019, not
-//!   Windows' U+02BD and U+02BC, and reads the 2003 edition's additions,
-//!   which Windows' 1987-edition table leaves unassigned: 0xA4 as the euro
-//!   sign, 0xA5 as U+20AF DRACHMA SIGN and 0xAA as U+037A GREEK
-//!   YPOGEGRAMMENI.
-//! - ISO-8859-8 (28598, and 38598, its logical-order form) decodes 0xAF as
-//!   U+00AF MACRON, not Windows' OVERLINE, and 0xFD and 0xFE as U+200E
-//!   LEFT-TO-RIGHT MARK and U+200F RIGHT-TO-LEFT MARK, the 1999 edition's
-//!   additions that older tables leave unassigned.
-//! - A byte a windows-125x code page leaves unassigned in 0x80-0x9F decodes
-//!   as the C1 control of that value.
-//!
-//! Code pages 437 and 850 decode through their own tables, Unicode's
-//! `CP437.TXT` and `CP850.TXT`.
+//! `encoding_rs` follows WHATWG mappings, which differ from some Microsoft and Apple code pages.
 
 use encoding_rs::{
     BIG5, EUC_KR, Encoding, GB18030, GBK, IBM866, ISO_8859_2, ISO_8859_3, ISO_8859_4, ISO_8859_5,
@@ -33,7 +8,6 @@ use encoding_rs::{
 };
 use std::ops::BitOrAssign;
 
-/// A text encoding, and whether the document left it to be guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Codepage {
     table: Table,
@@ -43,23 +17,18 @@ pub(crate) struct Codepage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Table {
     Whatwg(&'static Encoding),
-    /// The characters of bytes 0x80-0xFF; ASCII maps to itself.
     Upper(&'static [char; 128]),
 }
 
 impl Codepage {
-    /// An encoding the document declares.
     pub(crate) const fn declared(encoding: &'static Encoding) -> Self {
         Self { table: Table::Whatwg(encoding), assumed: false }
     }
 
-    /// The same encoding, marked as guessed.
     pub(crate) const fn marked_assumed(self) -> Self {
         Self { assumed: true, ..self }
     }
 
-    /// Decode `bytes`, and what a reader loses in the result. A byte order
-    /// mark is text like any other: it never switches the encoding.
     pub(crate) fn decode(self, bytes: &[u8]) -> (String, TextLoss) {
         let assumed = self.assumed && !bytes.is_ascii();
         let (text, invalid) = match self.table {
@@ -83,8 +52,6 @@ impl Codepage {
 }
 
 impl Codepage {
-    /// Decode `bytes`, with the span of each replacement character standing for bytes that did
-    /// not decode; a replacement character the bytes encode is text like any other.
     pub(crate) fn decode_marked(self, bytes: &[u8]) -> (String, Vec<std::ops::Range<usize>>) {
         let Table::Whatwg(encoding) = self.table else {
             return (self.decode(bytes).0, Vec::new());
@@ -112,8 +79,6 @@ impl Codepage {
     }
 }
 
-/// What decoded text loses: bytes that did not decode, and non-ASCII bytes
-/// read in a guessed code page.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TextLoss {
     pub invalid: bool,
@@ -127,8 +92,6 @@ impl BitOrAssign for TextLoss {
     }
 }
 
-/// The code page a Windows code page number names, declared; a number with
-/// no table here reads as windows-1252, assumed.
 pub(crate) fn windows(cp: u16) -> Codepage {
     let encoding = match cp {
         437 => return Codepage { table: Table::Upper(&CP437), assumed: false },
@@ -168,12 +131,8 @@ pub(crate) fn windows(cp: u16) -> Codepage {
     Codepage::declared(encoding)
 }
 
-/// The code page an RTF `\fcharsetN` names, declared; ANSI, default and
-/// symbol (0 to 2) and any charset with no table here keep `default`, the
-/// unknown ones marked assumed.
 pub(crate) fn charset(fcharset: i32, default: Codepage) -> Codepage {
     let encoding = match fcharset {
-        // The symbol charset maps glyphs, not a code page's letters.
         0..=2 => return default,
         77 => MACINTOSH,
         89 => X_MAC_CYRILLIC,
@@ -195,6 +154,7 @@ pub(crate) fn charset(fcharset: i32, default: Codepage) -> Codepage {
     Codepage::declared(encoding)
 }
 
+// Unicode's CP437.TXT and CP850.TXT define these tables, outside encoding_rs.
 const CP437: [char; 128] = [
     'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å', //
     'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ', //

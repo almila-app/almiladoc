@@ -1,21 +1,7 @@
-//! SpreadsheetML number format codes (ISO/IEC 29500-1 §18.8.30/31).
-//!
-//! A code parses into up to four `;`-separated sections. Numeric sections
-//! render the value here; date/time sections are only classified, because
-//! the sheet reader deliberately keeps its ISO-like date output (`mm/dd`
-//! versus `dd/mm` is ambiguous for a downstream reader, ISO is not). Any
-//! construct outside the implemented grammar makes [`NumberFormat::parse`]
-//! return `None` and the caller falls back to General: approximating a
-//! format silently would be worse than not applying it.
-
 use crate::shared::lossy;
 use std::cmp::Ordering;
 
-/// Implied format codes for built-in numFmtIds. Ids 5-8 are absent
-/// deliberately: the standard leaves them to the file's own formatCode, so
-/// an unresolved reference falls back to General rather than a guessed
-/// currency format. Ids 27-36 and 50-81 are locale-specific (zh, ja, ko, th)
-/// and unresolvable without a locale.
+/// Ids 5-8 are absent deliberately: the standard leaves them to the file's own formatCode, so an unresolved reference falls back to General rather than a guessed currency format.
 pub(super) fn builtin_code(id: u32) -> Option<&'static str> {
     Some(match id {
         1 => "0",
@@ -49,26 +35,17 @@ pub(super) fn builtin_code(id: u32) -> Option<&'static str> {
     })
 }
 
-/// What a resolved format asks the caller to do with a numeric value.
 #[derive(Debug, PartialEq)]
 pub(super) enum Rendered<'a> {
-    /// Render this value the way an unformatted cell renders.
     General { value: f64, prefix: &'a str, suffix: &'a str },
-    /// The section is a date/time format: render the serial as the parts it
-    /// asks for.
     DateTime(DateParts),
-    /// The formatted text, ready to emit.
     Text(String),
 }
 
-/// Which of a date/time format's parts it asks to see. A code naming only
-/// months and days must not gain a time, and one naming only hours must not
-/// gain a date.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct DateParts {
     pub(super) date: bool,
     pub(super) time: bool,
-    /// `[h]`, `[m]` or `[s]`: a span rather than a point in time.
     pub(super) elapsed: bool,
 }
 
@@ -83,26 +60,15 @@ enum Region {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
-    Digit {
-        place: char,
-        region: Region,
-    },
+    Digit { place: char, region: Region },
     Decimal,
     Percent,
     Literal(String),
-    /// Unquoted digits, valid only as a fixed fraction denominator.
     BareDigits(String),
-    /// A `,` pending resolution into grouping, scaling, or a literal.
     Comma,
-    /// `E+` / `E-`; `plus` keeps the sign on non-negative exponents.
-    Exp {
-        plus: bool,
-    },
-    /// Fraction bar between numerator and denominator placeholders.
+    Exp { plus: bool },
     Slash,
-    /// `@`, the text placeholder.
     At,
-    /// `_x`: skip the width of one character (one space here).
     Skip,
 }
 
@@ -139,17 +105,13 @@ impl Cond {
 struct NumSpec {
     toks: Vec<Tok>,
     grouping: bool,
-    /// Commas that follow a digit placeholder rather than a fixed denominator: each divides the
-    /// value by 1000.
     scale: u32,
-    /// Each `%` multiplies the value by 100.
     percents: u32,
     int_places: usize,
     frac_places: usize,
     exp: bool,
     num_places: usize,
     den_places: usize,
-    /// Fraction denominator written as literal digits.
     fixed_den: Option<u64>,
 }
 
@@ -179,7 +141,6 @@ impl Section {
     }
 }
 
-/// A parsed format code.
 #[derive(Debug)]
 pub(super) struct NumberFormat {
     sections: Vec<Section>,
@@ -216,8 +177,6 @@ impl NumberFormat {
         (!misplaced).then_some(Self { sections })
     }
 
-    /// The section text renders through, which may be an empty fourth
-    /// section that is not a text section.
     fn text_part(&self) -> Option<&Section> {
         self.sections.last().filter(|s| self.sections.len() == 4 || s.is_text())
     }
@@ -226,8 +185,6 @@ impl NumberFormat {
         &self.sections[..self.sections.len() - usize::from(self.text_part().is_some())]
     }
 
-    /// The section a finite value takes, the value to render (the magnitude
-    /// for the positional negative section) and whether to emit a minus.
     fn section_for(&self, v: f64) -> Option<(&Section, f64, bool)> {
         if !v.is_finite() {
             return None;
@@ -245,8 +202,6 @@ impl NumberFormat {
             _ if v < 0.0 => 1,
             _ => 2,
         };
-        // The positional negative section renders the magnitude; its code
-        // supplies the sign (parens, a literal minus).
         let negative_section = idx == 1;
         let value = if negative_section { v.abs() } else { v };
         Some((sections.get(idx)?, value, !negative_section && v < 0.0))
@@ -267,10 +222,6 @@ impl NumberFormat {
         }
     }
 
-    /// Whether `format_number` shows a literal outside ASCII for `v`, as the
-    /// code spells it, before the rendered text is cleaned: never for a
-    /// date/time section, whose literals the serial's rendering drops, nor
-    /// for a value that falls back to General.
     pub(super) fn number_shows_non_ascii(&self, v: f64) -> bool {
         let Some((section, value, minus)) = self.section_for(v) else {
             return false;
@@ -283,8 +234,6 @@ impl NumberFormat {
             }
     }
 
-    /// Whether the section `format_text` renders text with shows a literal
-    /// outside ASCII.
     pub(super) fn text_shows_non_ascii(&self) -> bool {
         self.text_part().is_some_and(|s| s.shows_non_ascii)
     }
@@ -296,7 +245,6 @@ impl NumberFormat {
     /// Apply the text section to a text value; `None` means the format has
     /// no section for text, so the value stays as it is.
     pub(super) fn format_text(&self, text: &str) -> Option<String> {
-        // An empty fourth section hides text.
         let Body::Text(toks) = &self.text_part()?.body else {
             return Some(String::new());
         };
@@ -313,27 +261,16 @@ impl NumberFormat {
     }
 }
 
-/// A code that does not parse, split at its text section: the numeric
-/// sections before it, which a number renders through, and whether the text
-/// section adds to a text cell what its fallback to General drops.
 pub(super) struct TextSection<'a> {
     pub(super) numeric: &'a str,
     pub(super) decorates: bool,
 }
 
-/// Split a code at its text section, at any length. The text section is the
-/// fourth section, else a last one holding an unquoted `@`, and it decorates
-/// with a quoted or escaped literal, a skip, a `[$…]` currency symbol, or any
-/// character but `@`, a fill, a digit placeholder or `General`. A code with
-/// no text section, or whose sections do not split, is numeric whole and
-/// decorates nothing. One pass over the bytes decides it with nothing
-/// copied, so a code past [`MAX_CODE_UNITS`] costs no parse.
+/// One pass over the bytes decides it with nothing copied, so a code past [`MAX_CODE_UNITS`] costs no parse.
 pub(super) fn text_section(code: &str) -> TextSection<'_> {
     scan(code).0
 }
 
-/// [`text_section`] with the bytes its scan steps over, a byte stepped over twice counted twice;
-/// a peek (the `General` lookahead, a bracket's `$` and the byte after it) is not counted.
 fn scan(code: &str) -> (TextSection<'_>, usize) {
     let whole = TextSection { numeric: code, decorates: false };
     let split_at = |start: usize, decorates: bool| TextSection {
@@ -376,7 +313,6 @@ fn scan(code: &str) -> (TextSection<'_>, usize) {
                 }
                 _ => adds = true,
             },
-            // A UTF-8 continuation byte belongs to a character already read.
             b'0' | b'#' | b'?' | 0x80..=0xBF => {}
             _ => adds = true,
         }
@@ -384,7 +320,6 @@ fn scan(code: &str) -> (TextSection<'_>, usize) {
     (if index == 3 || at { split_at(start, adds) } else { whole }, read)
 }
 
-/// Split a code on `;` outside quotes, brackets, and escapes.
 fn split_sections(code: &str) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -411,8 +346,6 @@ fn split_sections(code: &str) -> Option<Vec<&str>> {
 
 const COLORS: &[&str] = &["black", "blue", "cyan", "green", "magenta", "red", "white", "yellow"];
 
-/// The text literal tokens render as, used to carry the decoration around a
-/// `General` body.
 fn decoration(toks: &[Tok]) -> String {
     toks.iter()
         .map(|t| match t {
@@ -422,8 +355,7 @@ fn decoration(toks: &[Tok]) -> String {
         .collect()
 }
 
-/// Which parts a date/time section asks for. `m` is minutes when an hour run
-/// precedes it or a seconds run follows it, and months otherwise.
+/// `m` is minutes when an hour run precedes it or a seconds run follows it, and months otherwise.
 fn date_parts(runs: &[char], elapsed: bool) -> DateParts {
     let is_time = |(i, &run): (usize, &char)| match run {
         'h' | 's' | 'a' => true,
@@ -431,8 +363,6 @@ fn date_parts(runs: &[char], elapsed: bool) -> DateParts {
         _ => false,
     };
     let any = |time: bool| runs.iter().enumerate().any(|run| is_time(run) == time);
-    // An elapsed span is a duration whatever else the section names (`[m]`
-    // is elapsed minutes, never months).
     DateParts { date: !elapsed && any(false), time: elapsed || any(true), elapsed }
 }
 
@@ -443,7 +373,6 @@ fn push_literal(raw: &mut Vec<Tok>, c: char) {
     }
 }
 
-/// What one section's tokenizer read.
 #[derive(Default)]
 struct Tokens {
     raw: Vec<Tok>,
@@ -452,7 +381,6 @@ struct Tokens {
     /// The date/time runs in order, one letter each, so `m` can be read as
     /// months or minutes from what sits beside it.
     runs: Vec<char>,
-    /// Where `General` sits in the rendered decoration, when the section has it.
     general_at: Option<usize>,
 }
 
@@ -464,7 +392,6 @@ fn parse_section(s: &str) -> Option<Section> {
     Some(Section { condition, body: classify_body(tokens)?, shows_non_ascii })
 }
 
-/// The token one placeholder or operator character makes.
 fn single_token(c: char) -> Tok {
     match c {
         '.' => Tok::Decimal,
@@ -514,7 +441,6 @@ fn tokenize(s: &str) -> Option<Tokens> {
                 i += 2;
             }
             '*' => {
-                // Repeat-to-fill: no column width exists here, emit nothing.
                 chars.get(i + 1)?;
                 i += 2;
             }
@@ -538,8 +464,6 @@ fn tokenize(s: &str) -> Option<Tokens> {
     Some(t)
 }
 
-/// The body a section's tokens make: `General` with its decoration, a date or time, text
-/// around `@`, or a number; `None` for a mix the grammar has no reading of.
 fn classify_body(t: Tokens) -> Option<Body> {
     let Tokens { raw, elapsed, runs, general_at, .. } = t;
     Some(if let Some(general_at) = general_at {
@@ -583,8 +507,6 @@ fn classify_body(t: Tokens) -> Option<Body> {
 }
 
 impl Tokens {
-    /// Reads the letter-spelled token at `chars[i]`: an exponent, a date or
-    /// time run, AM/PM or `General`. Returns the index after it.
     fn word(&mut self, chars: &[char], i: usize) -> Option<usize> {
         let c = chars[i];
         Some(match c {
@@ -635,8 +557,6 @@ impl Tokens {
                 self.condition = Some(Cond { op, operand: rest.trim().parse().ok()? });
             }
             '$' => {
-                // `[$sym-lcid]`: the currency string emits literally, the
-                // locale id affects nothing rendered here.
                 let sym = inner.get(1..).and_then(|rest| rest.split('-').next()).unwrap_or("");
                 if !sym.is_empty() {
                     self.raw.push(Tok::Literal(sym.to_string()));
@@ -664,8 +584,6 @@ impl Tokens {
     }
 }
 
-/// Second pass over a numeric section: assign digit regions, resolve commas
-/// into grouping or scaling, and recognize the fraction form.
 fn resolve_number(raw: Vec<Tok>) -> Option<NumSpec> {
     let (toks, mut spec) = assign_regions(raw)?;
     spec.toks = classify_commas(toks, &mut spec);
@@ -676,8 +594,6 @@ fn resolve_number(raw: Vec<Tok>) -> Option<NumSpec> {
     valid.then_some(spec)
 }
 
-/// Places each digit placeholder in its region (integer, fraction, exponent, numerator,
-/// denominator) and reads the decimal point, exponent, fraction bar and percent signs.
 fn assign_regions(raw: Vec<Tok>) -> Option<(Vec<Tok>, NumSpec)> {
     let mut toks: Vec<Tok> = Vec::new();
     let mut region = Region::Int;
@@ -707,8 +623,6 @@ fn assign_regions(raw: Vec<Tok>) -> Option<(Vec<Tok>, NumSpec)> {
                 toks.push(Tok::Exp { plus });
             }
             Tok::Slash => {
-                // A fraction bar needs a numerator run directly before it;
-                // otherwise the slash is a literal.
                 let run = toks
                     .iter()
                     .rev()
@@ -736,8 +650,6 @@ fn assign_regions(raw: Vec<Tok>) -> Option<(Vec<Tok>, NumSpec)> {
                 spec.percents += 1;
                 toks.push(Tok::Percent);
             }
-            // Unquoted digits anywhere but a fixed denominator are outside
-            // the grammar.
             Tok::BareDigits(_) => return None,
             other => toks.push(other),
         }
@@ -800,12 +712,7 @@ fn render_number(spec: &NumSpec, v_abs: f64, minus: bool) -> Option<String> {
     Some(if minus { format!("-{body}") } else { body })
 }
 
-/// The digits of `v / 10^exp10`, rounded: the integer part (empty when
-/// zero, so `#` can drop it) and exactly `dp` fractional digits. Rounding
-/// happens on the 15-significant-digit decimal form, half away from zero,
-/// the way a spreadsheet displays - binary arithmetic would round 5.255 at
-/// two decimals to 5.25 - and the power of ten only moves the decimal
-/// point.
+/// Rounding happens on the 15-significant-digit decimal form, half away from zero, the way a spreadsheet displays - binary arithmetic would round 5.255 at two decimals to 5.25 - and the power of ten only moves the decimal point.
 fn split_digits(v: f64, dp: usize, exp10: i64) -> Option<(String, String)> {
     if !v.is_finite() || v < 0.0 || dp > 512 {
         return None;
@@ -813,13 +720,10 @@ fn split_digits(v: f64, dp: usize, exp10: i64) -> Option<(String, String)> {
     if v == 0.0 {
         return Some((String::new(), "0".repeat(dp)));
     }
-    // `{:.14e}` is the value at 15 significant decimal digits: an integer D
-    // of up to 15 digits and an exponent, v = D * 10^(e-14).
     let repr = format!("{v:.14e}");
     let (mantissa, e) = repr.split_once('e')?;
     let e: i64 = e.parse().ok()?;
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    // Digits of round(v * 10^(dp - exp10)), by shifting or by decimal rounding.
     let shift = e - 14 + i64::try_from(dp).ok()? - exp10;
     let scaled = if shift >= 0 {
         format!("{digits}{}", "0".repeat(usize::try_from(shift).ok()?))
@@ -856,9 +760,6 @@ fn places(toks: &[Tok], r: Region) -> Vec<char> {
         .collect()
 }
 
-/// Distribute a digit string over placeholders: the first takes any excess
-/// digits, and placeholders past the available digits pad per their kind
-/// (`0` a zero, `?` a space, `#` nothing).
 fn assign(digits: &str, places: &[char]) -> Vec<String> {
     let k = places.len();
     if k == 0 {
@@ -882,7 +783,6 @@ fn assign(digits: &str, places: &[char]) -> Vec<String> {
     }
 }
 
-/// Walk the token list emitting digits into placeholders.
 fn emit(
     spec: &NumSpec,
     int_digits: &str,
@@ -894,14 +794,10 @@ fn emit(
     let exp_assigned = assign(exp_digits, &places(&spec.toks, Region::Exp));
     let is_digit = |c: &char| c.is_ascii_digit();
     let total_int: usize = int_assigned.iter().map(|s| s.chars().filter(is_digit).count()).sum();
-    // Fractional digits kept: everything up to the rightmost `0` placeholder
-    // always shows; beyond that, trailing zeros drop from `#` and pad `?`.
     let frac_places = places(&spec.toks, Region::Frac);
     let min_frac = frac_places.iter().rposition(|&p| p == '0').map_or(0, |i| i + 1);
     let keep_frac = frac_digits.trim_end_matches('0').len().max(min_frac);
 
-    // The point hides only when its placeholders all produced nothing; a
-    // point with no placeholder at all (`0.`) is written as it stands.
     let show_decimal = keep_frac > 0 || frac_places.contains(&'?') || frac_places.is_empty();
 
     let mut out = String::new();
@@ -961,16 +857,10 @@ fn render_scientific(spec: &NumSpec, v: f64) -> Option<String> {
         let (i, f) = split_digits(0.0, spec.frac_places, 0)?;
         (i, f, 0i64)
     } else {
-        // The decimal exponent comes from the 15-digit form split_digits
-        // rounds; the float log10 misplaces boundaries like 1000.
         let repr = format!("{v:.14e}");
         let mut e: i64 = repr.split('e').nth(1)?.parse().ok()?;
-        // The exponent stays a multiple of the integer placeholder count
-        // (engineering notation for `##0.0E+0`).
         e = e.div_euclid(n_int) * n_int;
         let (mut i, mut f) = split_digits(v, spec.frac_places, e)?;
-        // Rounding at the display precision can carry into a new digit
-        // (9.99 -> 10.0): renormalize.
         if i.len() > usize::try_from(n_int).ok()? {
             e += n_int;
             (i, f) = split_digits(v, spec.frac_places, e)?;
@@ -994,12 +884,10 @@ fn render_fraction(spec: &NumSpec, v: f64) -> Option<String> {
         num = 0;
     }
     let int_digits = if whole == 0.0 {
-        // A zero integer part still shows when the whole value is zero.
         if num == 0 { "0".to_string() } else { String::new() }
     } else {
         split_digits(whole, 0, 0)?.0
     };
-    // A zero numerator blanks the fraction: "5", not "5 0/1".
     let hide = has_int && num == 0;
     let mut int_assigned = assign(&int_digits, &places(&spec.toks, Region::Int)).into_iter();
     let mut num_assigned = assign(&num.to_string(), &places(&spec.toks, Region::Num)).into_iter();
@@ -1057,14 +945,7 @@ fn best_fraction(x: f64, fixed: Option<u64>, den_places: usize) -> Option<(u64, 
     Some(closest_rational(x, max_den))
 }
 
-/// The closest rational to `x` with a denominator no larger than `max_den`.
-///
-/// Walks the continued fraction of the exact ratio the float stores, in a
-/// number of steps proportional to the digits of `max_den`. Repeatedly
-/// inverting the float remainder instead would compound rounding until the
-/// walk picks a non-closest fraction under large bounds. When the next term
-/// would overshoot the bound, the only other candidate is the semiconvergent
-/// with the largest term that fits, and the exact tail decides between them.
+/// When the next term would overshoot the bound, the only other candidate is the semiconvergent with the largest term that fits, and the exact tail decides between them.
 fn closest_rational(x: f64, max_den: u64) -> (u64, u64) {
     let Some((mut p, mut q)) = dyadic(x) else {
         return (0, 1);
@@ -1079,15 +960,11 @@ fn closest_rational(x: f64, max_den: u64) -> (u64, u64) {
         });
         let (nn, nd) = match next {
             Some((nn, nd)) if nd <= max_den => (nn, nd),
-            // The first term alone is past every u64 numerator.
             _ if d == 0 => return (0, 1),
             _ => {
                 let k = (max_den - pd) / d;
                 let semi =
                     k.checked_mul(n).and_then(|v| v.checked_add(pn)).map(|sn| (sn, k * d + pd));
-                // With the exact tail r = p/q, the semiconvergent is closer
-                // iff (r - k)d < kd + pd, i.e. rem*d < q*((2k - a)d + pd):
-                // certain for 2k > a, impossible for 2k < a (pd < d).
                 let better = match (u128::from(k) * 2).cmp(&a) {
                     Ordering::Greater => true,
                     Ordering::Less => false,
@@ -1105,10 +982,7 @@ fn closest_rational(x: f64, max_den: u64) -> (u64, u64) {
     if d == 0 { (0, 1) } else { (n, d) }
 }
 
-/// A finite non-negative float as the ratio it stores exactly. `None` when
-/// no exact ratio fits (under 2^-74 every u64-bounded fraction rounds to
-/// zero; past u128 no bounded denominator distinguishes it from an
-/// integer), which the walk treats as zero.
+/// `None` when no exact ratio fits (under 2^-74 every u64-bounded fraction rounds to zero; past u128 no bounded denominator distinguishes it from an integer), which the walk treats as zero.
 fn dyadic(x: f64) -> Option<(u128, u128)> {
     let bits = x.to_bits();
     let exp = (bits >> 52) as i32;
@@ -1125,7 +999,6 @@ fn dyadic(x: f64) -> Option<(u128, u128)> {
     (k <= 127).then(|| (u128::from(m >> shift), 1u128 << k))
 }
 
-/// `a * b` against `c * e`, exact in 192 bits.
 fn mul_cmp(a: u128, b: u64, c: u128, e: u64) -> Ordering {
     let wide = |x: u128, y: u64| {
         let lo = (x & u128::from(u64::MAX)) * u128::from(y);
@@ -1380,7 +1253,6 @@ mod tests {
             ("???", 42.0, " 42"),
             ("0.00", 0.001, "0.00"),
             ("0.00", 0.005, "0.01"),
-            // 0.075 is stored just under 0.075; the percent path must still show 7.5, not 7.4.
             ("0.0%", 0.075, "7.5%"),
             ("0", 2.5, "3"),
             ("0.", 5.0, "5."),
@@ -1437,7 +1309,6 @@ mod tests {
             ("0.00_);(0.00)", 3.5, "3.50 "),
             ("$* 0.00", 3.5, "$3.50"),
             ("0.0\\ \"m/s\"", 3.51, "3.5 m/s"),
-            // Quoted date letters must not turn the section into a date.
             ("0\"d\"", 3.0, "3d"),
             ("\"yes\";\"yes\";\"no\"", 1.0, "yes"),
             ("\"yes\";\"yes\";\"no\"", 0.0, "no"),
@@ -1462,7 +1333,6 @@ mod tests {
     fn general_renders_generally() {
         let f = NumberFormat::parse("General").unwrap();
         assert_eq!(f.format_number(3.5), Rendered::General { value: 3.5, prefix: "", suffix: "" });
-        // The positional negative section receives the magnitude.
         let f = NumberFormat::parse("General;General").unwrap();
         assert_eq!(f.format_number(-3.5), Rendered::General { value: 3.5, prefix: "", suffix: "" });
     }
@@ -1477,7 +1347,6 @@ mod tests {
         assert!(NumberFormat::parse("@;0").is_none());
         assert!(NumberFormat::parse("0;[>5]@").is_none());
         assert!(NumberFormat::parse("[>5][<3]0").is_none());
-        // Unquoted currency letters are outside the implemented grammar.
         assert!(NumberFormat::parse("€0.00").is_none());
     }
 
@@ -1510,9 +1379,7 @@ mod tests {
             ("yyyy-mm-dd hh:mm:ss", 45000.5, (true, true, false)),
             ("[h]:mm:ss", 45000.5, (false, true, true)),
             ("[hh]:mm:ss", 1.5, (false, true, true)),
-            // A lone elapsed `m` is minutes with no neighbour to say so.
             ("[m]", 45000.5, (false, true, true)),
-            // `m` is minutes beside an hour or a second, and months otherwise.
             ("mm:ss", 45000.5, (false, true, false)),
             ("mm/dd/yyyy", 45000.5, (true, false, false)),
         ];
@@ -1555,8 +1422,6 @@ mod tests {
 
     #[test]
     fn the_walk_stays_exact_past_float_precision() {
-        // 1/3 as a float is the dyadic 6004799503160661/2^54, which a large
-        // bound represents exactly; a float walk stops at 1/3 instead.
         assert_eq!(closest_rational(1.0 / 3.0, u64::MAX), (6004799503160661, 18014398509481984));
     }
 }

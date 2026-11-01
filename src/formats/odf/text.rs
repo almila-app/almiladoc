@@ -1,5 +1,3 @@
-//! Block and inline walking for ODF text content.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -31,12 +29,8 @@ pub(super) struct Ctx<'a, 'b> {
     revisions: RefCell<super::revisions::StoryViews<'b, 'b>>,
     pub damage: crate::shared::xml::DamageScope,
     note_ids: RefCell<std::collections::HashSet<String>>,
-    /// Continuation counters per (list style, depth): the next number a
-    /// `text:continue-numbering` list resumes at.
     list_counters: RefCell<HashMap<(String, usize), u64>>,
-    /// Next number per list `xml:id`, resolved by `text:continue-list`.
     list_ids: RefCell<HashMap<String, u64>>,
-    /// Heading numbering state for `text:outline-style` (values, started).
     heading_counters: RefCell<LevelCounters<LIST_LEVELS>>,
     region: Cell<Region>,
     held: Cell<Held>,
@@ -93,21 +87,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
         self.parse_ctx.emit_count(code, self.region.get(), count);
     }
 
-    /// `f`'s result and what the tables it parses hold, apart from the
-    /// tables around it.
     pub(super) fn holding<T>(&self, f: impl FnOnce() -> T) -> (T, Held) {
         let outer = self.held.take();
         let out = f();
         (out, self.held.replace(outer))
     }
 
-    /// Count what a parsed table holds toward the innermost
-    /// [`Ctx::holding`].
     pub(super) fn hold(&self, table: Held) {
         self.held.set(self.held.get().add(table));
     }
 
-    /// Walk `f` with its losses reported in `region`.
     pub(super) fn in_region<T>(&self, region: Region, f: impl FnOnce() -> T) -> T {
         let outer = self.region.replace(region);
         let out = f();
@@ -115,8 +104,6 @@ impl<'a, 'b> Ctx<'a, 'b> {
         out
     }
 
-    /// Walk a header or footer in `region` with list and heading numbering of its own, and
-    /// what its tables hold apart from the body's.
     pub(super) fn in_side<T>(&self, region: Region, f: impl FnOnce() -> T) -> T {
         let lists = self.list_counters.take();
         let ids = self.list_ids.take();
@@ -278,8 +265,6 @@ fn parse_heading(
     if let Some((mut inlines, boxes)) = parse_inline_content(elem, ctx)? {
         if !inlines_are_empty(&inlines) {
             rebase_emphasis(&mut inlines, paragraph_base(elem, ctx)?.resolve());
-            // ODF outline links target headings by their text; carry
-            // it as the heading's anchor id (without the number).
             let anchor = Some(crate::model::inlines_to_plain_text(&inlines));
             if let Some(label) = heading_label(elem, level, ctx) {
                 inlines.insert(0, Inline::plain(label));
@@ -304,9 +289,6 @@ fn parse_annotation(
     Ok(())
 }
 
-/// Report a drawing a container holds outside its text, which no output
-/// places: a frame's picture, text box, object or media, a form control,
-/// or a shape's text.
 pub(super) fn report_unplaced(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<(), ConvertError> {
     let code = if elem.is(super::DR3D, "scene") {
         holds_content(elem).then_some(DiagnosticCode::GraphicUnread)
@@ -352,9 +334,6 @@ pub(super) fn is_shape(local: &str) -> bool {
     )
 }
 
-/// What a frame no output places loses: its first text box, object or
-/// media, else its picture, which is only their replacement when they are
-/// present.
 fn frame_loss(frame: &Element, ctx: &Ctx<'_, '_>) -> Result<Option<DiagnosticCode>, ConvertError> {
     let Some(content) = frame
         .child_elems()
@@ -375,8 +354,6 @@ fn frame_loss(frame: &Element, ctx: &Ctx<'_, '_>) -> Result<Option<DiagnosticCod
     })
 }
 
-/// Whether a frame child is a picture, an object or media, which a frame
-/// shows as a graphic.
 pub(super) fn is_graphic(content: &Element) -> bool {
     content.ns.as_deref() == Some(ns::DRAW)
         && matches!(
@@ -385,8 +362,6 @@ pub(super) fn is_graphic(content: &Element) -> bool {
         )
 }
 
-/// The loss of a frame's OLE object, plugin (audio or video), floating
-/// frame or applet, of which only a preview picture can render.
 fn media_loss(content: &Element) -> Option<DiagnosticCode> {
     match content.local.as_str() {
         "plugin" => Some(DiagnosticCode::GraphicUnread),
@@ -395,9 +370,6 @@ fn media_loss(content: &Element) -> Option<DiagnosticCode> {
     }
 }
 
-/// Whether an element shows anything: text, a picture, an object, media or
-/// a note reference. Comments and tracked deletions, which no output shows,
-/// do not count.
 pub(super) fn holds_content(elem: &Element) -> bool {
     let mut pending = vec![elem];
     while let Some(parent) = pending.pop() {
@@ -421,24 +393,11 @@ pub(super) fn holds_content(elem: &Element) -> bool {
     false
 }
 
-/// Whether text shows anything but white space once cleaned for output.
 fn renders(text: &str) -> bool {
     !clean_text(text).trim().is_empty()
 }
 
-/// One `text:list` -> blocks appended to `blocks`, the container it sits
-/// in: list headers render without markers (as plain blocks alongside the
-/// list), and every `text:start-value` restart after the first item splits
-/// the run into a new list with that start. A continuation's blocks nest
-/// under the item before it, or, leading the list, under the last item of
-/// a list ending `blocks` when `after_list`; after a header or a dropped
-/// item, or with neither, they sit alongside like a header's.
-/// `ancestors` carries the enclosing levels' current numbers so composite
-/// labels (`text:display-levels` > 1) render the full chain. Returns
-/// whether a continuation leading the next sibling list may nest under the
-/// last item of the list then ending `blocks`: after an item or a
-/// continuation nested under one, not after a header, a continuation set
-/// alongside, or nothing placed.
+/// `ancestors` carries the enclosing levels' current numbers so composite labels (`text:display-levels` > 1) render the full chain.
 fn parse_list(
     elem: &Element,
     ctx: &Ctx<'_, '_>,
@@ -510,8 +469,6 @@ fn parse_list(
     Ok(run.continuable)
 }
 
-/// Where an ordered list resumes: an explicit `continue-list` target (by
-/// `xml:id`) wins over the style-scoped `continue-numbering`.
 fn resumed_start(elem: &Element, ctx: &Ctx<'_, '_>, key: &(String, usize)) -> Option<u64> {
     match elem.attr(ns::TEXT, "continue-list") {
         Some(target) => ctx.list_ids.borrow().get(target).copied(),
@@ -569,8 +526,6 @@ impl ListRun {
     }
 }
 
-/// ODF 1.3 Part 3 5.3.5 shows no label on "a list item \[that\] starts another
-/// list and does not contain any text".
 fn continues(item: &Element) -> bool {
     item.child_elems()
         .find(|child| !child.is(ns::TEXT, "soft-page-break"))
@@ -597,9 +552,6 @@ fn continued_item<'l>(
     }
 }
 
-/// A list item's composite marker label (`num-prefix`/`num-suffix`/
-/// `display-levels`); `None` when the default `n.` label is faithful. `chain` holds
-/// the number of each enclosing level, outermost first, then the item's: `depth + 1` of them.
 fn item_label(
     ctx: &Ctx<'_, '_>,
     style_name: Option<&str>,
@@ -615,9 +567,6 @@ fn item_label(
     label(levels, depth, value, |l| chain[l])
 }
 
-/// ODF heading numbering: the `text:outline-style` level formats with the
-/// heading's `restart-numbering`/`start-value`/`is-list-header` controls.
-/// Advances the outline sequence; `None` for unnumbered headings.
 fn heading_label(elem: &Element, outline_level: u8, ctx: &Ctx<'_, '_>) -> Option<String> {
     let levels = ctx.styles.outline_levels()?;
     let idx = LevelCounters::<LIST_LEVELS>::clamp(usize::from(outline_level.max(1)) - 1);
@@ -625,7 +574,6 @@ fn heading_label(elem: &Element, outline_level: u8, ctx: &Ctx<'_, '_>) -> Option
     if !lvl.marker.ordered() {
         return None;
     }
-    // An unnumbered heading displays no number and consumes none.
     if elem.attr(ns::TEXT, "is-list-header") == Some("true") {
         return None;
     }
@@ -657,12 +605,8 @@ fn label(levels: &Levels, idx: usize, value: u64, start: impl Fn(usize) -> u64) 
     composite_label(&lvl.pattern(idx), lvl.marker, value, |l| level(levels, l).marker, start)
 }
 
-/// Inline content of a paragraph plus block attachments (text boxes) that
-/// were anchored in it.
 type ParagraphContent = (Vec<Inline>, Vec<Block>);
 
-/// A paragraph's content; `None` when the paragraph is hidden whole or all
-/// its content drops as hidden.
 fn parse_inline_content(
     elem: &Element,
     ctx: &Ctx<'_, '_>,
@@ -684,17 +628,13 @@ fn parse_inline_content(
     Ok(Some((out, boxes)))
 }
 
-/// Whether the body leaves a paragraph or heading out whole: hidden by its fields or its style.
 pub(super) fn block_hidden(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<bool, ConvertError> {
     Ok(!ctx.parse_ctx.hidden_requested()
         && (hidden_by_fields(elem, ctx.parse_ctx)?
             || paragraph_base(elem, ctx)?.hidden == Some(true)))
 }
 
-/// Whether the `text:hidden-paragraph` fields of a paragraph hide it. ODF 1.3
-/// Part 3 7.7.11: one whose condition holds hides it unless another's fails;
-/// each condition is read from its cached `text:is-hidden` (19.821), never
-/// evaluated, so an absent value shows.
+/// ODF 1.3 Part 3 7.7.11: one whose condition holds hides it unless another's fails; each condition is read from its cached `text:is-hidden` (19.821), never evaluated, so an absent value shows.
 pub(super) fn hidden_by_fields(
     paragraph: &Element,
     parse_ctx: &ParseCtx<'_>,
@@ -726,9 +666,6 @@ impl Fields {
     }
 }
 
-/// Record what the `text:hidden-paragraph` fields under `elem` say, through
-/// the elements ODF 1.3 Part 3 7.7.11 allows them in, charging one unit per
-/// element looked at.
 fn paragraph_fields(
     elem: &Element,
     parse_ctx: &ParseCtx<'_>,
@@ -750,9 +687,6 @@ fn paragraph_fields(
     Ok(())
 }
 
-/// What a paragraph's walk drops as hidden: whether it dropped anything, and
-/// whether the range dropped since the last shown content holds anything
-/// that renders.
 #[derive(Default)]
 struct Hidden {
     any: bool,
@@ -777,8 +711,6 @@ impl Hidden {
     }
 }
 
-/// The style a paragraph's runs cascade from. An unstyled paragraph still sits
-/// on the family's default style.
 fn paragraph_base(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<StyleDelta, ConvertError> {
     element_delta(elem, ctx.parse_ctx, ctx.styles, StyleDelta::default())
 }
@@ -966,9 +898,6 @@ fn walk_link(
     Ok(())
 }
 
-/// The token a header or footer writes for a field only a printed page resolves (ODF 1.3 Part 3,
-/// 7.3 and 7.5).
-/// A field whose `text:fixed` is true keeps the value it stores (19.809).
 fn side_token(local: &str, field: &Element) -> Option<&'static str> {
     let fixed = field.attr(ns::TEXT, "fixed").map(super::styles::token);
     if matches!(fixed, Some("true" | "1")) {
@@ -1074,19 +1003,12 @@ pub(super) fn frame_content(
     Ok((!alt.is_empty()).then(|| image(alt, ImageSource::Unavailable)))
 }
 
-/// What a `draw:object` converts to.
 pub(super) enum Object {
-    /// A formula with LaTeX to show or image glyphs it drops.
     Formula(MathTex),
-    /// A formula with nothing to show.
     Empty,
-    /// The loss to report: the object's content is not converted.
     Unread(DiagnosticCode),
 }
 
-/// Read a `draw:object`: MathML inline in the object, or in the
-/// `content.xml` of the object directory it links to, converts; a chart or
-/// any other object does not.
 pub(super) fn read_object(ctx: &Ctx<'_, '_>, object: &Element) -> Result<Object, ConvertError> {
     if let Some(math) = object.find(ns::MATHML, "math") {
         return Ok(formula(math));
@@ -1122,8 +1044,6 @@ fn formula(math: &Element) -> Object {
     }
 }
 
-/// A picture's bytes into the asset store; `Unread` when the href names no
-/// part the package holds. Fatal errors propagate.
 pub(super) fn load_image(ctx: &Ctx<'_, '_>, href: &str) -> Result<ImageSource, ConvertError> {
     if href.is_empty() {
         return Ok(ImageSource::Unread);

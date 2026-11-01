@@ -1,5 +1,3 @@
-# Hand-written stubs for the compiled module. `tests/test_almiladoc.py` checks
-# they stay in step with what the module actually exports.
 import collections.abc
 import os
 from typing import Any, ClassVar, Literal, final

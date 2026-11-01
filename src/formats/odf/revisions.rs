@@ -1,5 +1,3 @@
-//! Selection of the stored text view in OpenDocument change tracking.
-
 use super::styles::OdfStyles;
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;

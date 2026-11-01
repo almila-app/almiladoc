@@ -1,10 +1,3 @@
-//! A sheet's grid spans its content-bearing cells at default `Limits`: a
-//! whitespace-only cell widens nothing, whether it sits alone at the grid's
-//! last row or fills a blank column down to it, while content in opposite
-//! corners still exceeds `max_grid_slots`. An xlsx worksheet's rows are
-//! read one at a time, so `max_xml_nodes` bounds a row and the structure
-//! around the rows, never the row count.
-
 use crate::build::{ole, relationships};
 use crate::support::{configured, fixture, zip_package};
 use almiladoc::model::{Block, Table, UnitKind};
@@ -56,7 +49,6 @@ fn sheet_table(parsed: &Parsed) -> &Table {
     table
 }
 
-/// A 10 by 5 table, with a single space in column F of every row.
 fn filled_down(row: u32) -> Vec<(u16, String)> {
     let content = (0..5u8)
         .filter(|_| row < 10)
@@ -64,7 +56,6 @@ fn filled_down(row: u32) -> Vec<(u16, String)> {
     content.chain([(5, " ".to_string())]).collect()
 }
 
-/// Content in the first cell and in the grid's far corner.
 fn corners(last_row: u32, last_col: u16) -> impl Fn(u32) -> Vec<(u16, String)> {
     move |row| match row {
         0 => vec![(0, "x".to_string())],
@@ -194,7 +185,6 @@ fn xlsb(rows: u32, cells: impl Fn(u32) -> Vec<(u16, String)>) -> Vec<u8> {
     ])
 }
 
-/// The column letters of a zero-based column.
 fn column(col: u16) -> String {
     let mut n = u32::from(col) + 1;
     let mut letters = Vec::new();
@@ -206,8 +196,6 @@ fn column(col: u16) -> String {
     letters.iter().rev().collect()
 }
 
-/// A `sheetData` of `rows` rows, one per line: a numeric text as a value,
-/// any other as an inline string.
 fn sheet_data(rows: u32, cells: impl Fn(u32) -> Vec<(u16, String)>) -> String {
     let mut out = String::from("<sheetData>");
     for row in 0..rows {
@@ -231,8 +219,6 @@ fn sheet_data(rows: u32, cells: impl Fn(u32) -> Vec<(u16, String)>) -> String {
     out
 }
 
-/// A one-sheet xlsx whose worksheet holds `body`, with a shared string table
-/// of `shared` items where given.
 fn xlsx(body: &str, shared: Option<&str>) -> Vec<u8> {
     const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     let workbook = format!(

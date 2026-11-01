@@ -1,20 +1,6 @@
-//! Symbol-font characters as Unicode: the Symbol encoding (ISO 32000-1 Annex D.5) and the rule
-//! a document reader follows to read a symbol-font code in run text or in a symbol element.
-//!
-//! Each D.5 code maps to the character whose Unicode identity is the glyph's: a Greek letter to
-//! the Greek-block letter, never a letterlike or operator twin; a delimiter, integral or arrow
-//! piece to its piece from U+2320-2321, U+239B-23AF or U+23D0; the serif and sans forms of the
-//! registered, copyright and trademark signs to one sign; never a Private Use, control,
-//! Deprecated or NFC-changed character. A code D.5 leaves undefined, and 0x60 (radical
-//! extension, which Unicode does not encode), has none.
-//!
-//! Compared against Adobe's `symbol.txt`, Apple's `SYMBOL.TXT`, the Adobe Glyph List and lopdf:
-//! this table departs from them only where they give a Private Use value, a
-//! compatibility or Deprecated twin, U+00A0 for the space, or a fact error (lopdf's missing Euro
-//! and white card suits).
-
 use super::dingbats;
 
+// ISO 32000-1 Annex D.5 glyph identities override Adobe/Apple/AGL/lopdf PUA, compatibility, deprecated/NFC twins, NBSP and Euro/card-suit errors; undefined codes and 0x60 stay unmapped.
 #[rustfmt::skip]
 const SYMBOL: [char; 256] = [
     '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0',
@@ -51,16 +37,12 @@ const SYMBOL: [char; 256] = [
     '\u{23a0}', '\u{23a4}', '\u{23a5}', '\u{23a6}', '\u{23ab}', '\u{23ac}', '\u{23ad}', '\0',
 ];
 
-/// The font code a symbol-font character stands for: U+F000-F0FF folded to its low byte, and
-/// U+0000-00FF as itself; `None` for any other character, which no symbol font recodes.
 pub(crate) fn font_code(c: char) -> Option<u8> {
     let value = u32::from(c);
     let folded = if (0xF000..=0xF0FF).contains(&value) { value - 0xF000 } else { value };
     u8::try_from(folded).ok()
 }
 
-/// Whether an East Asian font hint draws `c` in the East Asian font slot: the Latin-1 characters
-/// MS-OI29500 2.1.88 b lists, and the Private Use Area.
 pub(crate) fn east_asian_ambiguous(c: char) -> bool {
     matches!(
         u32::from(c),
@@ -87,7 +69,6 @@ pub(crate) fn parse_char_code(hex: &str) -> Option<char> {
     u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
 }
 
-/// A font that draws its own glyphs at the codes text passes through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SymbolFont {
     Symbol,
@@ -109,15 +90,12 @@ const NAMES: [(&str, SymbolFont); 7] = [
 ];
 
 impl SymbolFont {
-    /// The length in bytes of the longest name [`SymbolFont::from_name`] knows.
     pub(crate) const LONGEST_NAME: usize = "Zapf Dingbats".len();
 
-    /// The symbol font a font name names, matched without regard to ASCII case.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         NAMES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name)).map(|&(_, font)| font)
     }
 
-    /// The checkbox state the ballot-box glyph at `code` draws, if it is one.
     fn checkbox(self, code: u8) -> Option<bool> {
         match (self, code) {
             (Self::Wingdings, 0xFE) | (Self::Wingdings2, 0x52) => Some(true),
@@ -126,7 +104,6 @@ impl SymbolFont {
         }
     }
 
-    /// The character this font draws at `code`, or `None` where it draws none Unicode encodes.
     fn char_at(self, code: u8) -> Option<char> {
         let table = match self {
             Self::Symbol => &SYMBOL,
@@ -139,7 +116,6 @@ impl SymbolFont {
         Some(table[usize::from(code)]).filter(|&c| c != '\0')
     }
 
-    /// What this font draws at `code`.
     pub(crate) fn glyph(self, code: u8) -> Glyph {
         if let Some(checked) = self.checkbox(code) {
             return Glyph::Checkbox(checked);
@@ -148,7 +124,6 @@ impl SymbolFont {
     }
 }
 
-/// What a symbol font draws at one code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Glyph {
     Char(char),
@@ -156,15 +131,12 @@ pub(crate) enum Glyph {
     Unmapped,
 }
 
-/// A run's text with each symbol-font code read, in order: text, and the checkboxes drawn
-/// between it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Token {
     Text(String),
     Checkbox(bool),
 }
 
-/// A run read through its fonts: its tokens and how many codes no table maps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Decoded {
     pub tokens: Vec<Token>,
@@ -181,8 +153,6 @@ impl Decoded {
     }
 }
 
-/// What `font` draws for the character `c` of text set in it: an ASCII control, or a character no
-/// symbol font recodes, stays as it is; any other character is read as its font code.
 pub(crate) fn glyph_of(font: SymbolFont, c: char) -> Glyph {
     match font_code(c) {
         Some(code) if !c.is_ascii_control() => font.glyph(code),
@@ -190,8 +160,6 @@ pub(crate) fn glyph_of(font: SymbolFont, c: char) -> Glyph {
     }
 }
 
-/// Reads `text` one character at a time through `glyph`, before any text cleaning: text, the
-/// checkboxes drawn between it, and how many characters drew nothing.
 pub(crate) fn decode_with(text: &str, glyph: impl Fn(char) -> Glyph) -> Decoded {
     let mut decoded = Decoded::default();
     for c in text.chars() {
@@ -204,7 +172,6 @@ pub(crate) fn decode_with(text: &str, glyph: impl Fn(char) -> Glyph) -> Decoded 
     decoded
 }
 
-/// Reads `text` through the symbol font `font_of` gives each character, by [`glyph_of`].
 pub(crate) fn decode_run(text: &str, font_of: impl Fn(char) -> Option<SymbolFont>) -> Decoded {
     decode_with(text, |c| font_of(c).map_or(Glyph::Char(c), |font| glyph_of(font, c)))
 }

@@ -1,8 +1,3 @@
-//! The grid every Excel container fills: one worksheet's cells, visibility,
-//! merges, hyperlinks and losses, the number formats that render its values,
-//! and the table built from it. The xlsx, xlsb and xls readers each decode
-//! their records into a [`SheetContent`] and share everything after that.
-
 use super::controls::{Checkboxes, cell_inlines};
 use super::numfmt::{DateParts, NumberFormat, Rendered, builtin_code, text_section};
 use super::{format_duration_days, format_float, format_time_of_day};
@@ -23,12 +18,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
 
-/// The grid bounds the format defines; a reference outside them is not a
-/// real cell.
 pub(super) const MAX_ROWS: u32 = 1_048_576;
 pub(super) const MAX_COLS: u32 = 16_384;
 
-/// A zero-based cell position, ordered row first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct CellRef {
     pub(super) row: u32,
@@ -49,8 +41,6 @@ impl CellRef {
     }
 }
 
-/// An inclusive zero-based cell range from its top-left to its bottom-right
-/// cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CellRange {
     pub(super) first: CellRef,
@@ -58,7 +48,6 @@ pub(super) struct CellRange {
 }
 
 impl CellRange {
-    /// The range two opposite corners span, given in either order.
     pub(super) fn spanning(a: CellRef, b: CellRef) -> Self {
         Self { first: a.min_each(b), last: a.max_each(b) }
     }
@@ -90,13 +79,10 @@ impl CellRange {
     }
 }
 
-/// The day a workbook's date serials count from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum DateSystem {
-    /// Serial 1 is 1900-01-01, with the fictitious 1900-02-29 at serial 60.
     #[default]
     Since1900,
-    /// Serial 0 is 1904-01-01.
     Since1904,
 }
 
@@ -106,8 +92,6 @@ impl DateSystem {
     }
 }
 
-/// The rows and columns a container's grid holds; a cell at or past either
-/// count is not a real cell.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GridBounds {
     pub(super) rows: u32,
@@ -124,23 +108,16 @@ impl GridBounds {
 /// Part 1 §18.17.5.1, which lets an implementation extend it; xlsx does not.
 pub(super) const OOXML_GRID: GridBounds = GridBounds { rows: MAX_ROWS, cols: MAX_COLS };
 
-/// One worksheet, parsed but not yet filtered or gridded.
 pub(super) struct SheetContent {
     grid: GridBounds,
-    /// Rendered text by cell; empty results are absent.
     cells: HashMap<CellRef, String>,
-    /// Form control checkboxes by the cell they are anchored in.
     pub(super) checkboxes: Checkboxes,
     pub(super) comments: Vec<super::comments::Comment>,
     pub(super) headers_footers: Vec<(crate::model::HeaderFooterState, Vec<DiagnosticCode>)>,
     hidden_rows: Vec<Range<u64>>,
     hidden_cols: Vec<Range<u64>>,
-    /// Merge ranges of more than one cell.
     merges: Vec<CellRange>,
-    /// External hyperlinks by the cells whose text labels them.
     pub(super) links: Vec<SheetLink>,
-    /// What each cell lost, reported only where the cell survives hidden
-    /// filtering and no merge covers it.
     losses: Vec<(CellRef, DiagnosticCode)>,
     /// Losses no cell's visibility decides, by code and region: only
     /// `build_table` emits them, so a sheet that fails to read reports none.
@@ -151,8 +128,6 @@ pub(super) struct SheetContent {
 }
 
 impl SheetContent {
-    /// A sheet on `grid` whose cells and losses, held as they stream, fail
-    /// past `slots_left` with the parse's `max_slots`.
     pub(super) fn on(grid: GridBounds, slots_left: u64, max_slots: u64) -> Self {
         Self {
             grid,
@@ -209,14 +184,11 @@ impl SheetContent {
         Ok(selected)
     }
 
-    /// Hold one report of `code` in `region` until the table is built.
     pub(super) fn report(&mut self, code: DiagnosticCode, region: Region) {
         let count = self.reports.entry((code, region)).or_default();
         *count = count.saturating_add(1);
     }
 
-    /// Hold the report of a print header or footer the conversion leaves
-    /// out, in `region`.
     pub(super) fn omit_header_footer(&mut self, region: Region) {
         let code = match region {
             Region::Footer => DiagnosticCode::FooterOmitted,
@@ -239,10 +211,7 @@ impl SheetContent {
         Ok(())
     }
 
-    /// Record a cell's text; a text that is empty or only whitespace shows
-    /// nothing and leaves no cell, so it never widens the grid. A cell past
-    /// the grid is unreadable where its text shows something and its row and
-    /// column do, and reports nothing else.
+    /// Record a cell's text; a text that is empty or only whitespace shows nothing and leaves no cell, so it never widens the grid.
     pub(super) fn put(&mut self, at: CellRef, text: String) -> Result<(), ConvertError> {
         if text.trim().is_empty() {
             return Ok(());
@@ -257,8 +226,6 @@ impl SheetContent {
         Ok(())
     }
 
-    /// Record a cell whose reference does not read, near `at`: unreadable
-    /// where its text shows something or its value went `unread`.
     pub(super) fn put_unplaced(
         &mut self,
         at: CellRef,
@@ -271,8 +238,6 @@ impl SheetContent {
         Ok(())
     }
 
-    /// Record what a cell lost, reported once the grid shows the cell; past
-    /// the grid only a value that does not read is kept.
     pub(super) fn lose(&mut self, at: CellRef, code: DiagnosticCode) -> Result<(), ConvertError> {
         if self.grid.holds(at) || code == DiagnosticCode::CellValueUnreadable {
             self.hold_loss(at, code)?;
@@ -319,27 +284,18 @@ impl SheetContent {
     }
 }
 
-/// A hyperlink to a target outside the workbook over a cell range.
 pub(super) struct SheetLink {
     pub(super) range: CellRange,
     pub(super) target: LinkTarget,
 }
 
 pub(super) enum LinkTarget {
-    /// A relationship id not yet looked up in the worksheet's relationships.
     Related(String),
-    /// A target URL, which an OOXML sheet holds once per relationship however many links name it.
     Url(Rc<str>),
-    /// The target is gone and nothing has reported it.
     Unknown,
-    /// The target is gone with a relationships part already reported.
     Reported,
 }
 
-/// A cell's resolved number format: General, a parsed format code, or
-/// General standing in for a format that could not be applied, which a
-/// numeric cell reports as `number` and a text cell as `number_format_unread`
-/// when the format's text section shows more than the text.
 #[derive(Clone)]
 pub(super) enum CellFormat {
     General,
@@ -348,14 +304,11 @@ pub(super) enum CellFormat {
 }
 
 impl CellFormat {
-    /// A format the file names and this reader cannot read, which may show less than General.
     pub(super) const fn unread() -> Self {
         Self::Fallback(Fallback::UNREAD)
     }
 }
 
-/// What General costs against a format: the code a numeric cell reports, and whether a text
-/// cell reports `number_format_unread` for a text section that shows more than the text.
 #[derive(Clone, Copy)]
 pub(super) struct Fallback {
     number: DiagnosticCode,
@@ -395,8 +348,6 @@ impl Fallback {
     }
 }
 
-/// The number-format declarations of a styles part that do not read; one whose id does not read
-/// may have declared any id with no code, built-in or its own, within `declarable` when set.
 #[derive(Default)]
 pub(super) struct UnreadFormats {
     ids: HashSet<u32>,
@@ -429,8 +380,6 @@ impl UnreadFormats {
     }
 }
 
-/// The ordered cell formats of a workbook, which a cell names by index,
-/// each with whether its format code needed a replacement character.
 pub(super) struct CellXfs {
     xfs: Vec<(CellFormat, bool)>,
     /// The styles part did not read and reported that, so a cell naming an
@@ -443,14 +392,10 @@ impl CellXfs {
         Self { xfs, reported: false }
     }
 
-    /// No styles part was read; `reported` when its read reported the loss.
     pub(super) fn unread(reported: bool) -> Self {
         Self { xfs: Vec::new(), reported }
     }
 
-    /// The format at `index`; one outside the table renders General, as the
-    /// application repairs it, and the default index 0 of a workbook with no
-    /// formats is General.
     pub(super) fn get(&self, index: usize) -> CellFormat {
         match self.xfs.get(index) {
             Some((format, _)) => format.clone(),
@@ -459,16 +404,12 @@ impl CellXfs {
         }
     }
 
-    /// Whether the format at `index` put a replacement character into the
-    /// cell text it rendered.
     pub(super) fn replaced_in(&self, index: usize, text: &str) -> bool {
         self.xfs.get(index).is_some_and(|&(_, replaced)| replaced)
             && text.contains(char::REPLACEMENT_CHARACTER)
     }
 }
 
-/// A numFmtId's format: the file's own `code`, then the built-in table; a code that reads wins
-/// over any declaration that does not, and every fallback is General, never a guess.
 pub(super) fn resolve_format(id: u32, code: Option<&str>, unread: &UnreadFormats) -> CellFormat {
     let declared = if code.is_some() { None } else { unread.cost_at(id) };
     let code = code.or_else(|| builtin_code(id));
@@ -484,10 +425,6 @@ pub(super) fn resolve_format(id: u32, code: Option<&str>, unread: &UnreadFormats
     CellFormat::Fallback(declared.map_or(own, |declared| declared.join(own)))
 }
 
-/// Whether a format code shows more than the number General shows: a date
-/// or time token, an elapsed-time bracket, literal text, or a currency or
-/// unit symbol. A `[$-…]` bracket names only a locale, and the `General`
-/// keyword shows the number.
 fn shows_more_than_its_number(code: &str) -> bool {
     const CURRENCY: &[char] = &['$', '¢', '£', '¥', '₩', '₪', '₫', '€', '₱', '₹', '₺', '₽', '฿'];
     let mut rest = code;
@@ -559,14 +496,9 @@ pub(super) fn format_as_text(fmt: &CellFormat, text: &str) -> (String, Option<Di
     }
 }
 
-/// Days from 1970-01-01 to 1904-01-01, where serial 0 falls in the 1904 system.
 const EPOCH_1904: i64 = -24_107;
-/// Days from 1970-01-01 to 1899-12-31, where serial 0 falls in the 1900 system.
 const EPOCH_1900: i64 = -25_568;
 
-/// Render a date/time serial: elapsed formats as a duration, sub-day serials
-/// as a time of day, everything else as an ISO-like date with the midnight
-/// time omitted.
 fn render_serial(serial: f64, parts: DateParts, dates: DateSystem) -> String {
     if !serial.is_finite() {
         return format_float(serial);
@@ -577,20 +509,14 @@ fn render_serial(serial: f64, parts: DateParts, dates: DateSystem) -> String {
     if !parts.date {
         return format_time_of_day(serial.fract());
     }
-    // A serial carrying no whole day has no date for a date format to show;
-    // the clock a combined format also names still renders.
     if serial.abs() < 1.0 {
         return if parts.time { format_time_of_day(serial) } else { format_float(serial) };
     }
-    // Out of the representable date range (through 9999-12-31): the serial
-    // is not a date, show the number.
     if !(0.0..2_958_466.0).contains(&serial) {
         return format_float(serial);
     }
     let mut days = lossy::trunc_i64(serial);
-    // The fictitious 1900-02-29 has no date to render and would otherwise
-    // collapse onto serial 59. Tested before the seconds carry, so a value
-    // late on serial 59 still resolves as the date it belongs to.
+    // The fictitious 1900-02-29 has no date to render and would otherwise collapse onto serial 59.
     if dates == DateSystem::Since1900 && days == 60 {
         return format_float(serial);
     }
@@ -615,7 +541,6 @@ fn render_serial(serial: f64, parts: DateParts, dates: DateSystem) -> String {
     }
 }
 
-/// A proleptic Gregorian calendar date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CivilDate {
     year: i64,
@@ -624,8 +549,6 @@ struct CivilDate {
 }
 
 impl CivilDate {
-    /// The date a count of days since 1970-01-01 falls on (Howard Hinnant's
-    /// algorithm).
     fn from_days(z: i64) -> Self {
         let z = z + 719_468;
         let era = z.div_euclid(146_097);
@@ -640,10 +563,6 @@ impl CivilDate {
     }
 }
 
-/// Report what a sheet lost that no cell's visibility decides, then
-/// materialize its grid: visibility filtering, the extent of the content that
-/// shows, and merges remapped onto the surviving rows and columns of that
-/// extent.
 #[cfg(test)]
 fn build_table(
     parse_ctx: &ParseCtx<'_>,
@@ -716,7 +635,6 @@ impl Hidden {
         !self.row(at.row) && !self.col(at.col)
     }
 
-    /// The first cell of `range` in a shown row and a shown column.
     fn first_shown(&self, range: CellRange) -> Option<CellRef> {
         let row = self.rows.first_shown(inclusive(range.first.row, range.last.row))?;
         let col = self.cols.first_shown(inclusive(range.first.col, range.last.col))?;
@@ -772,8 +690,6 @@ fn inclusive(first: u32, last: u32) -> Range<u64> {
     u64::from(first)..u64::from(last) + 1
 }
 
-/// Cell text and anchored checkboxes as one inline map; the rest of the
-/// assembly no longer cares which was which.
 #[expect(
     clippy::disallowed_methods,
     reason = "both maps drain into a map keyed by cell, which no insertion order changes"
@@ -789,10 +705,6 @@ fn cell_contents(sheet: &mut SheetContent) -> HashMap<CellRef, Vec<Inline>> {
     cells
 }
 
-/// Where each merge whose origin is hidden moved its origin. A merge with
-/// no surviving row or column disappears with its content; one whose origin
-/// is hidden moves its content, or its emptiness, to the first surviving
-/// position it covers, replacing the covered text there.
 fn move_hidden_origins(
     merges: &mut Vec<CellRange>,
     hidden: &Hidden,
@@ -816,11 +728,6 @@ fn move_hidden_origins(
     moved
 }
 
-/// Report the hidden rows and columns that hold content, the losses of
-/// shown cells, and the hyperlinks whose shown label does not carry their
-/// target. An uncovered cell is judged once, by its own label; a link a
-/// single merge hides whole is not shown, and one that leaves the merge is
-/// judged at its covered first cell, with no label.
 fn report_losses_and_links(
     parse_ctx: &ParseCtx<'_>,
     sheet: &SheetContent,
@@ -829,8 +736,6 @@ fn report_losses_and_links(
     cells: &HashMap<CellRef, Vec<Inline>>,
 ) -> Result<(), ConvertError> {
     let place = |at: CellRef| moved.get(&at).copied().unwrap_or(at);
-    // A link shows in the first visible cell of its range, or where its
-    // range's origin moved with a merge.
     let candidates: Vec<(CellRef, bool, &SheetLink)> = sheet
         .links
         .iter()
@@ -928,11 +833,7 @@ fn hidden_lines_held(
     u64::try_from(rows.len().saturating_add(cols.len())).unwrap_or(u64::MAX)
 }
 
-/// The box of the content that shows: a cell in a shown row and column that
-/// no merge covers past its first shown cell. A covered cell's text is
-/// dropped, since the application never shows it. Merges touching the box
-/// are kept and span only its rows and columns, so a merge widens nothing
-/// and a crafted merge list cannot force materialization.
+/// Merges touching the box are kept and span only its rows and columns, so a merge widens nothing and a crafted merge list cannot force materialization.
 #[expect(
     clippy::disallowed_methods,
     reason = "`merge_covered` sorts the shown cells, the covered ones leave a map, and the content box is a union, so no order can escape"
@@ -964,8 +865,6 @@ fn extent(
     Ok(Some(content))
 }
 
-/// Merges remapped onto the shown grid, by grid index: each origin's span
-/// and every merge, by the row it starts in.
 struct MergeLayout {
     origins: HashMap<(usize, usize), Span>,
     spans: Vec<Span>,
@@ -1010,16 +909,12 @@ impl MergeLayout {
     }
 }
 
-/// The columns merges cover in each row, asked for rows in ascending order:
-/// only the merges that reach the row are held, never a position.
 struct Coverage<'a> {
     spans: &'a [Span],
     sweep: Sweep,
 }
 
 impl Coverage<'_> {
-    /// The columns of `row` some merge covers without being its origin, as
-    /// ascending, disjoint ranges.
     fn row(&mut self, row: usize) -> Vec<Range<usize>> {
         let mut disjoint: Vec<Range<usize>> = Vec::new();
         for Cover { cols, .. } in self.sweep.row(self.spans, row) {
@@ -1089,7 +984,6 @@ fn assemble(
             })?;
         }
     }
-    // A spreadsheet marks no header row, so the shape of the data decides.
     let mut table = builder.finish()?;
     if table.grid.is_empty() {
         return Ok(None);
@@ -1098,9 +992,6 @@ fn assemble(
     Ok(Some(table))
 }
 
-/// The positions among `at` that a merge covers without being its `origin`,
-/// which the application does not show, each with a merge that covers it;
-/// every position a merge's range visits is charged.
 fn merge_covered(
     parse_ctx: &ParseCtx<'_>,
     merges: &[CellRange],
@@ -1175,9 +1066,7 @@ mod tests {
         assert_eq!(render_serial(59.0, DATE_ONLY, since1900), "1900-02-28");
         assert_eq!(render_serial(60.0, DATE_ONLY, since1900), "60");
         assert_eq!(render_serial(61.0, DATE_ONLY, since1900), "1900-03-01");
-        // A value late on serial 59 still belongs to its own day.
         assert_eq!(render_serial(59.9999999, DATE_ONLY, since1900), "1900-02-28");
-        // The 1904 system has no such day.
         assert_eq!(render_serial(60.0, DATE_ONLY, DateSystem::Since1904), "1904-03-01");
     }
 
@@ -1186,7 +1075,6 @@ mod tests {
         let both = DateParts { date: true, time: true, elapsed: false };
         assert_eq!(render_serial(0.5, both, DateSystem::Since1900), "12:00:00");
         assert_eq!(render_serial(61.5, both, DateSystem::Since1900), "1900-03-01 12:00:00");
-        // A date-only format still has nothing to show but the number.
         assert_eq!(render_serial(0.5, DATE_ONLY, DateSystem::Since1900), "0.5");
     }
 

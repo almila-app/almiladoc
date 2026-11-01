@@ -1,9 +1,3 @@
-//! Every recursion over input nesting converts at the deepest
-//! `max_nesting_depth` a converter accepts, on the pool's stack, and refuses
-//! one level more as `ResourceLimit`; the legacy binary readers' record
-//! nesting and optional streams stay within their limits; rendering stays
-//! within the output and work limits.
-
 use crate::build::{
     W, docx, docx_document, docx_with, epub, odf, odf_styled, ods, ole, pptx, relationships,
 };
@@ -189,8 +183,6 @@ fn a_chain_of_notes_each_referencing_the_next_numbers_in_reference_order() {
     assert!(markdown.ends_with(&format!("[^{notes}]: n{}\n", notes - 1)));
 }
 
-/// A PowerPoint stream read in stream order whose notes containers nest
-/// `depth` deep, each the only child of the one around it.
 fn ppt_nested_notes(depth: usize) -> Vec<u8> {
     let mut stream = Vec::with_capacity(depth * 8);
     for level in (0..depth).rev() {
@@ -249,8 +241,6 @@ fn a_pdf_stops_at_max_output_bytes() {
     assert_least(&pdf, Format::Pdf, Limit::OutputBytes, len);
 }
 
-/// The least `max_work` under which `passes` holds, which holds for every
-/// larger one.
 pub(crate) fn least_work(passes: impl Fn(Converter) -> bool) -> u64 {
     let (mut low, mut high) = (0, 1 << 20);
     while low < high {
@@ -315,8 +305,6 @@ fn a_cell_holds_only_the_whitespace_its_line_owes_against_max_output_bytes() {
 
 const CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 
-/// A chart of `categories` categories, its first series holding them and a
-/// value, each of its `series` - 1 others one value.
 fn chart(categories: usize, series: usize) -> String {
     let point = |i: usize| format!(r#"<c:pt idx="{i}"><c:v>{i}</c:v></c:pt>"#);
     let cats: String = (0..categories).map(point).collect();
@@ -328,7 +316,6 @@ fn chart(categories: usize, series: usize) -> String {
     )
 }
 
-/// A docx and a pptx that each draw `part` as their one chart.
 fn charted(part: &str) -> [(Vec<u8>, Format); 2] {
     let graphic = format!(
         r#"<a:graphic><a:graphicData><c:chart xmlns:c="{CHART}" r:id="rId1"/></a:graphicData></a:graphic>"#
@@ -421,13 +408,11 @@ fn field_char(kind: &str) -> String {
     format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#)
 }
 
-/// The runs that open a complex field of `instruction` up to its result.
 fn field_begin(instruction: &str) -> String {
     let instr = format!("<w:r><w:instrText>{instruction}</w:instrText></w:r>");
     [field_char("begin"), instr, field_char("separate")].concat()
 }
 
-/// A paragraph of `fields` nested complex fields of `instruction` around `x`.
 fn docx_fields(instruction: &str, fields: usize) -> Vec<u8> {
     let (begin, end) = (field_begin(instruction), field_char("end"));
     docx(&format!("<w:p>{}{DOCX_TEXT}{}</w:p>", begin.repeat(fields), end.repeat(fields)))
@@ -439,9 +424,6 @@ fn docx_link_fields(units: usize) -> Vec<u8> {
 
 const UNREAD_LINK: &str = r#"r:id="rId9""#;
 
-/// A paragraph of `levels` nested levels alternating, outermost first,
-/// between a `w:hyperlink` with attribute `link` and a complex HYPERLINK
-/// field, around `x`.
 fn docx_alternating_links(link: &str, levels: usize) -> Vec<u8> {
     let pairs = [
         (format!("<w:hyperlink {link}>"), "</w:hyperlink>".to_owned()),
@@ -460,8 +442,6 @@ fn docx_unread_links_and_fields(levels: usize) -> Vec<u8> {
     docx_alternating_links(UNREAD_LINK, levels)
 }
 
-/// `links` nested `w:hyperlink` elements with attribute `link`, each
-/// holding `fields` nested complex HYPERLINK fields around the next.
 fn docx_links_around_fields(link: &str, links: usize, fields: usize) -> String {
     let open = format!("<w:hyperlink {link}>{}", field_begin("HYPERLINK x").repeat(fields));
     let close = format!("{}</w:hyperlink>", field_char("end").repeat(fields));
@@ -591,7 +571,6 @@ fn rtf_math(units: usize) -> Vec<u8> {
     rtf(&format!(r"{{\mmath{{\*\moMath {math}}}}}"))
 }
 
-/// A paragraph of `fields` nested Word fields of `instruction` around `x`.
 fn doc_fields(instruction: &str, fields: usize) -> Vec<u8> {
     let begin = format!("\x13{instruction}\x14");
     [begin.repeat(fields).as_bytes(), b"x", "\x15".repeat(fields).as_bytes(), b"\r"].concat()
@@ -659,7 +638,6 @@ fn every_table_counts_its_positions_against_max_grid_slots() {
     }
 }
 
-/// A DOCX of one table of `rows`, and the bytes of its document part.
 fn docx_declared_positions(rows: &str) -> (Vec<u8>, u64) {
     let part = docx_document(&format!("<w:tbl>{rows}</w:tbl>"));
     (zip_package(&[("word/document.xml", &part)]), part.len() as u64)

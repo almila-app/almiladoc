@@ -1,13 +1,3 @@
-//! Container facts come from the ZIP central directory before any entry is
-//! opened: duplicate names, encryption flags and the entry count; an
-//! encrypted OOXML file, which is a compound file, is still `Encrypted`.
-//! XML never converts short: a required part that does not parse fails, a
-//! slide listed or a chart drawn many times parses once, and every drawing
-//! reports the part's loss and damage in its unit.
-//! An EPUB spine item that names no chapter is reported, and a spine that
-//! names none fails. Content its label contradicts fails, naming the format
-//! detected.
-
 use std::assert_matches;
 use std::io::{Cursor, Read, Write};
 
@@ -157,17 +147,12 @@ const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 
-/// A presentation whose list names `listed` slides, each by its own
-/// relationship to the one slide part.
 fn pptx(listed: usize, slide_text: &str) -> Vec<u8> {
     let text =
         format!("<p:sp><p:txBody><a:p><a:r><a:t>{slide_text}</a:t></a:r></a:p></p:txBody></p:sp>");
     presentation(&vec!["slides/slide1.xml"; listed], &text, &[])
 }
 
-/// A presentation listing one slide per entry of `slides`, a target beside
-/// the presentation part; every slide part holds `shapes`, and `parts` sit
-/// beside them.
 fn presentation(slides: &[&str], shapes: &str, parts: &[(&str, &[u8])]) -> Vec<u8> {
     let ids: String = (0..slides.len())
         .map(|i| format!(r#"<p:sldId id="{}" r:id="rId{i}"/>"#, 256 + i))
@@ -397,8 +382,6 @@ fn a_slide_listed_many_times_converts_once() {
     assert!(converted.is_complete());
 }
 
-/// A chart, padded with `padding` extension nodes, whose second value has
-/// no category, so every reading of it loses that value.
 fn lossy_chart(padding: usize) -> String {
     let series = r#"<c:ser><c:cat><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:cat><c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:val></c:ser>"#;
     format!(
@@ -407,8 +390,6 @@ fn lossy_chart(padding: usize) -> String {
     )
 }
 
-/// The `drawn`th chart reference of a drawing, alternating between two
-/// relationships whose targets differ only in ASCII case.
 fn chart_reference(drawn: usize) -> String {
     format!(
         r#"<a:graphic xmlns:a="{A}"><a:graphicData><c:chart xmlns:c="{CHART}" r:id="rId{}"/></a:graphicData></a:graphic>"#,
@@ -416,7 +397,6 @@ fn chart_reference(drawn: usize) -> String {
     )
 }
 
-/// A docx and a pptx that draw `part` as a chart `drawn` times.
 fn charts_drawn(part: &str, drawn: usize) -> [(Vec<u8>, Format); 2] {
     let paragraphs: String = (0..drawn)
         .map(|i| format!("<w:p><w:r><w:drawing>{}</w:drawing></w:r></w:p>", chart_reference(i)))

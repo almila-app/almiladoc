@@ -1,5 +1,3 @@
-//! Packages and records the integration tests assemble by hand.
-
 use std::io::{Cursor, Write};
 
 use crate::support::zip_package;

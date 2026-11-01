@@ -1,10 +1,3 @@
-//! In-house legacy Excel reader (.xls): OLE2 compound file holding a BIFF
-//! record stream ([MS-XLS]). BIFF8 is the target; BIFF5/BIFF7 streams
-//! degrade to their byte-string record layouts instead of erroring. Cell
-//! values resolve their number format through the same engine and shared
-//! grid as the SpreadsheetML reader, so a workbook saved as .xls and as
-//! .xlsx converts identically.
-
 use super::controls::Checkbox;
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, GridBounds, LinkTarget, SheetContent,
@@ -62,10 +55,8 @@ const HLINK: u16 = 0x01B8;
 // [MS-XLS] 2.4.126: the ifmt a FORMAT record can declare.
 const FORMAT_RECORD_IDS: &[RangeInclusive<u32>] = &[5..=8, 23..=26, 41..=44, 63..=66, 164..=392];
 
-/// BOF `dt` value for a worksheet (or dialog sheet) substream.
 const WORKSHEET_SUBSTREAM: u16 = 0x0010;
 
-/// The BIFF8 grid is 256 columns; a larger column index is not a real cell.
 const BIFF8_COLS: u32 = 256;
 
 /// [MS-XLS] Rw: a BIFF8 row index is two bytes, so a sheet has 65,536 rows.
@@ -158,8 +149,6 @@ fn workbook_stream(
 
 type Record<'a> = (u16, &'a [u8], usize);
 
-/// The record at `pos`: type, payload, and the position after it. `None` on
-/// a truncated header or payload.
 fn record_at(data: &[u8], pos: usize) -> Option<Record<'_>> {
     let rec_type = get_u16(data, pos)?;
     let len = get_u16(data, pos.checked_add(2)?)? as usize;
@@ -168,8 +157,6 @@ fn record_at(data: &[u8], pos: usize) -> Option<Record<'_>> {
     Some((rec_type, body, body_at + len))
 }
 
-/// Records read from the workbook stream, against `max_records`, and the
-/// context they report to.
 struct RecordCount<'c> {
     parse_ctx: &'c ParseCtx<'c>,
     seen: u64,
@@ -190,8 +177,6 @@ impl<'c> RecordCount<'c> {
         }
     }
 
-    /// Reports a substream that stopped at `pos` without its EOF, unless
-    /// `next` already reported the cut it stopped at.
     fn report_unended(&self, pos: usize) {
         if self.cut_at != Some(pos) {
             self.parse_ctx.emit(DiagnosticCode::TruncatedRecords, Region::Body);
@@ -224,8 +209,6 @@ impl<'c> RecordCount<'c> {
     }
 }
 
-/// The walk over one substream's own records: nested substreams are skipped,
-/// and it stops at the substream's EOF or where another substream starts.
 struct Substream {
     pos: usize,
     depth: usize,
@@ -261,8 +244,6 @@ impl Substream {
         Ok(None)
     }
 
-    /// `body`, the record `next` just returned, with the bodies of the CONTINUE records after
-    /// it up to where another substream starts; the walk charges each one and moves past it.
     fn continued<'a>(
         &mut self,
         data: &'a [u8],
@@ -288,10 +269,6 @@ impl Substream {
     }
 }
 
-/// Reader over a record's segments (base body plus CONTINUE bodies). Fixed
-/// fields never straddle a segment boundary, but may start exactly on one;
-/// only string character data crosses boundaries, and the string readers
-/// handle the repeated option-flags byte themselves.
 pub(super) struct SegReader<'a> {
     later: std::slice::Iter<'a, &'a [u8]>,
     current: ByteReader<'a>,
@@ -304,7 +281,6 @@ impl<'a> SegReader<'a> {
         Self { later, current }
     }
 
-    /// Bytes left in the current segment.
     fn in_seg(&self) -> usize {
         self.current.rest().len()
     }
@@ -318,13 +294,11 @@ impl<'a> SegReader<'a> {
         }
     }
 
-    /// Move to the start of the next segment; `None` when there is none.
     fn next_seg(&mut self) -> Option<()> {
         self.current = ByteReader::new(self.later.next()?);
         Some(())
     }
 
-    /// `n` bytes from within one segment.
     pub(super) fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
         self.normalize();
         self.current.take(n)
@@ -345,8 +319,6 @@ impl<'a> SegReader<'a> {
         self.current.u32()
     }
 
-    /// Skip `n` bytes across segment boundaries (non-character data carries
-    /// no repeated flags byte).
     fn skip(&mut self, mut n: usize) -> Option<()> {
         while n > 0 {
             self.normalize();
@@ -361,7 +333,6 @@ impl<'a> SegReader<'a> {
     }
 }
 
-/// The width of a string's character count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LengthPrefix {
     U8,
@@ -377,20 +348,13 @@ impl LengthPrefix {
     }
 }
 
-/// Whether a BIFF8 string may carry formatting runs and phonetic data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Runs {
     Plain,
     Rich,
 }
 
-/// A BIFF8 Unicode string: XLUnicodeString, ShortXLUnicodeString (`U8`),
-/// or XLUnicodeRichExtendedString (`Rich`). Character data may continue
-/// into following segments; at every such boundary the option-flags byte is
-/// repeated and the encoding can switch between 8-bit compressed and 16-bit
-/// UTF-16, so it is re-read rather than carried over. Rich runs and
-/// phonetic data are skipped, matching the xlsx reader's handling of `rPh`.
-/// The text comes with whether a unit did not decode.
+/// Character data may continue into following segments; at every such boundary the option-flags byte is repeated and the encoding can switch between 8-bit compressed and 16-bit UTF-16, so it is re-read rather than carried over.
 fn read_biff8_string(
     r: &mut SegReader<'_>,
     length: LengthPrefix,
@@ -450,7 +414,6 @@ fn biff8_chunks<E>(
         let unit = if wide { 2 } else { 1 };
         let take = (r.in_seg() / unit).min(remaining);
         if take == 0 {
-            // A dangling half character: outside the format.
             return None;
         }
         let bytes = r.bytes(take * unit)?;
@@ -459,8 +422,6 @@ fn biff8_chunks<E>(
         }
         remaining -= take;
     }
-    // A truncated trailer loses only the strings after this one; the reader
-    // then runs dry and the caller stops.
     let _: Option<()> = r.skip(runs * 4).and_then(|()| r.skip(ext));
     Some(Ok(()))
 }
@@ -514,8 +475,6 @@ pub(super) fn read_print_string(
     Ok(if accepted { PrintString::Utf16(text) } else { PrintString::InvalidLength })
 }
 
-/// A BIFF5/BIFF7 byte string (no flags byte), decoded per the workbook's
-/// CODEPAGE record, with what the text lost.
 fn read_byte_string(
     r: &mut SegReader<'_>,
     length: LengthPrefix,
@@ -536,8 +495,6 @@ fn read_byte_string(
     Some(codepage.decode(&bytes))
 }
 
-/// The code page a CODEPAGE record names; BIFF5 writes 32768 for Mac Roman
-/// and 32769 for windows-1252.
 fn workbook_codepage(cp: u16) -> Codepage {
     codepage::windows(match cp {
         32768 => 10000,
@@ -546,19 +503,15 @@ fn workbook_codepage(cp: u16) -> Codepage {
     })
 }
 
-/// A sheet the workbook's directory lists, in source order.
 enum Listed {
     Shown(BoundSheet),
     Hidden(Option<BoundSheet>),
-    /// A record too short for its offset, state or name, or whose name does
-    /// not read.
     Unreadable,
 }
 
 struct BoundSheet {
     name: String,
     name_loss: TextLoss,
-    /// Absolute stream offset of the sheet substream's BOF record.
     offset: usize,
 }
 
@@ -567,14 +520,9 @@ struct Globals {
     dates: DateSystem,
     encoding: Codepage,
     sst: Vec<(String, TextLoss)>,
-    /// The XF table in record order; a cell's ixfe indexes it directly.
     xfs: CellXfs,
-    /// Whether each XF's format code was decoded in a guessed code page.
     assumed_xfs: Vec<bool>,
     sheets: Vec<Listed>,
-    /// Where each BOUNDSHEET says its substream starts, hidden sheets and
-    /// VBA modules included: a substream without its EOF ends where another
-    /// starts.
     starts: BTreeSet<usize>,
 }
 
@@ -596,8 +544,6 @@ impl Globals {
         self.xfs.get(usize::from(ixfe))
     }
 
-    /// Whether the format at `ixfe` was decoded in a guessed code page and
-    /// `shows` finds a non-ASCII literal in the section a value selects.
     fn format_assumed(&self, ixfe: u16, shows: impl FnOnce(&NumberFormat) -> bool) -> bool {
         self.assumed_xfs.get(usize::from(ixfe)).is_some_and(|&assumed| assumed)
             && matches!(self.format(ixfe), CellFormat::Fmt(format) if shows(&format))
@@ -625,7 +571,6 @@ impl Globals {
         }
     }
 
-    /// A FORMAT record's id and code, else the id when only the code does not read.
     fn format_code(&self, body: &[u8]) -> Result<(u32, (String, TextLoss)), Option<u32>> {
         let mut body = ByteReader::new(body);
         let id = body.u16().map(u32::from).ok_or(None)?;
@@ -636,9 +581,6 @@ impl Globals {
     }
 }
 
-/// The workbook globals substream: SST, FORMAT/XF tables, sheet directory,
-/// date system, encryption marker. A workbook listing no sheet is
-/// `Malformed`; globals that end without their EOF were cut short.
 fn read_globals(data: &[u8], records: &mut RecordCount<'_>) -> Result<Globals, ConvertError> {
     let Some((rec_type, body, pos)) = record_at(data, 0) else {
         return Err(ConvertError::malformed("empty workbook stream"));
@@ -714,11 +656,6 @@ fn resolve_xfs(
     (CellXfs::new(xfs), assumed_xfs)
 }
 
-/// BOUNDSHEET: substream offset, hidden state, sheet type, name. Chart and
-/// macro sheets stay listed (their substreams fail the worksheet check and
-/// count as unreadable, matching the xlsx reader's treatment of their
-/// parts); VBA modules are not sheets in any container and are dropped
-/// (`None`).
 fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<Listed> {
     if body.get(5) == Some(&0x06) {
         return None;
@@ -741,10 +678,7 @@ fn read_boundsheet(body: &[u8], globals: &Globals) -> Option<Listed> {
     }))
 }
 
-/// The shared string table (trap 1: strings routinely split across
-/// CONTINUE records, mid-character-data). A malformed tail keeps the
-/// entries read so far; LABELSST lookups past them stay empty and report
-/// the cell as unreadable.
+/// A malformed tail keeps the entries read so far; LABELSST lookups past them stay empty and report the cell as unreadable.
 fn read_sst(segs: &[&[u8]]) -> Vec<(String, TextLoss)> {
     let mut r = SegReader::new(segs);
     let (Some(_total), Some(unique)) = (r.u32(), r.u32()) else {
@@ -760,8 +694,6 @@ fn read_sst(segs: &[&[u8]]) -> Vec<(String, TextLoss)> {
     out
 }
 
-/// A cell record's leading cell, which may lie past the grid, its ixfe, and
-/// the reader past that header.
 fn cell_ref(body: &[u8]) -> Option<(CellRef, u16, ByteReader<'_>)> {
     let mut header = ByteReader::new(body);
     let row = u32::from(header.u16()?);
@@ -770,9 +702,6 @@ fn cell_ref(body: &[u8]) -> Option<(CellRef, u16, ByteReader<'_>)> {
     Some((CellRef::new(row, col), ixfe, header))
 }
 
-/// One worksheet substream into the shared `SheetContent` shape. `Ok(None)`
-/// means the substream is missing or not a worksheet (chart or macro
-/// sheets), which the caller counts as unreadable.
 fn read_sheet(
     data: &[u8],
     globals: &Globals,
@@ -839,17 +768,12 @@ struct OldNote {
     broken: bool,
 }
 
-/// The walk state of one worksheet substream, with one method per record family.
 struct SheetReader<'g, 'p> {
     print: Option<PrintRecords>,
     parse_ctx: &'p ParseCtx<'p>,
     globals: &'g Globals,
     out: SheetContent,
-    /// A FORMULA whose cached value is a string: its cell and ixfe waiting
-    /// for the STRING record that carries the text.
     pending: Option<(CellRef, u16)>,
-    /// A drawing object's shape arrives in MSODRAWING ahead of its OBJ, and
-    /// its text in the TXO after it.
     shape: Option<Shape>,
     text_of: Option<TextOf>,
     comments: HashMap<u16, super::comments::Comment>,
@@ -1074,7 +998,6 @@ impl<'g, 'p> SheetReader<'g, 'p> {
             match value[0] {
                 0x00 => self.pending = Some((at, ixfe)),
                 0x01 | 0x02 => self.put_literal(at, bool_or_error(value[0] == 0x02, value[2]))?,
-                // 0x03 is a blank string result.
                 _ => {}
             }
         } else if let Some(n) = rest.f64() {
@@ -1086,7 +1009,6 @@ impl<'g, 'p> SheetReader<'g, 'p> {
     fn label(&mut self, body: &[u8], segs: &[&[u8]]) -> Result<(), ConvertError> {
         if let Some((at, ixfe, _)) = cell_ref(body) {
             let mut r = SegReader::new(segs);
-            // RSTRING's trailing rich runs are formatting, not text.
             let text = r.skip(6).and_then(|()| self.globals.read_string(&mut r, LengthPrefix::U16));
             self.put_string(at, ixfe, text)?;
         }
@@ -1109,7 +1031,6 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         }
     }
 
-    /// An MSODRAWING: the shape the next OBJ draws, and whether a text box stays open.
     fn drawing(&mut self, body: &[u8], segs: &[&[u8]]) {
         self.shape = if segs.len() == 1 { last_shape(body) } else { last_shape(&segs.concat()) };
         if !opens_text_box(body) {
@@ -1117,7 +1038,6 @@ impl<'g, 'p> SheetReader<'g, 'p> {
         }
     }
 
-    /// An OBJ: a checkbox, a form control, a picture, a chart or a shape.
     fn object(&mut self, body: &[u8]) -> Result<(), ConvertError> {
         self.text_of = None;
         let shape = self.shape.take();
@@ -1287,7 +1207,6 @@ impl<'g, 'p> SheetReader<'g, 'p> {
     }
 }
 
-/// The merged ranges a MERGEDCELLS body lists, up to its count or its end.
 fn merged_ranges(body: &[u8]) -> impl Iterator<Item = CellRange> + '_ {
     let count = usize::from(get_u16(body, 0).unwrap_or(0)).min(body.len().saturating_sub(2) / 8);
     (0..count).map_while(move |i| {
@@ -1301,8 +1220,6 @@ fn merged_ranges(body: &[u8]) -> impl Iterator<Item = CellRange> + '_ {
     })
 }
 
-/// The cells of a MULRK body: rw, colFirst, then 6-byte (ixfe, RK) pairs; colLast is
-/// redundant with the record length.
 fn mulrk_cells(body: &[u8]) -> impl Iterator<Item = (CellRef, u16, u32)> + '_ {
     let start = get_u16(body, 0).zip(get_u16(body, 2));
     let pairs = if start.is_some() { body.len().saturating_sub(6) / 6 } else { 0 };
@@ -1313,8 +1230,6 @@ fn mulrk_cells(body: &[u8]) -> impl Iterator<Item = (CellRef, u16, u32)> + '_ {
     })
 }
 
-/// A BOOLERR or cached FORMULA result: `TRUE`, `FALSE` or an error literal; `None` for an
-/// error code without one.
 fn bool_or_error(is_err: bool, value: u8) -> Option<&'static str> {
     match (is_err, value) {
         (true, code) => error_literal(code),
@@ -1323,7 +1238,6 @@ fn bool_or_error(is_err: bool, value: u8) -> Option<&'static str> {
     }
 }
 
-/// The regions a HEADER, FOOTER or `HEADER_FOOTER` body holds a non-empty string for.
 fn header_footer_regions(
     rec_type: u16,
     body: &[u8],
@@ -1332,7 +1246,6 @@ fn header_footer_regions(
     let fields: &[(usize, Region)] = match rec_type {
         HEADER => &[(0, Region::Header)],
         FOOTER => &[(0, Region::Footer)],
-        // cchHeaderEven, cchFooterEven, cchHeaderFirst, cchFooterFirst
         _ => &[
             (30, Region::Header),
             (32, Region::Footer),
@@ -1348,13 +1261,10 @@ fn header_footer_regions(
     })
 }
 
-/// The drawing object a TXO's text belongs to.
 enum TextOf {
-    /// A checkbox's caption, by the cell it is anchored in.
     Checkbox(CellRef),
     Comment(u16),
     HiddenShape,
-    /// A shown shape's text, which the grid does not hold.
     Shape,
 }
 
@@ -1366,18 +1276,14 @@ fn opens_text_box(body: &[u8]) -> bool {
     officeart::record_at(body, 0).is_some_and(|record| record.rec_type == CLIENT_TEXTBOX)
 }
 
-/// What an OBJ needs from its shape: the cell the client anchor starts in,
-/// and whether the shape is hidden.
 struct Shape {
     anchor: CellRef,
     hidden: bool,
 }
 
-/// The last shape in an MSODRAWING body. Containers are entered rather
-/// than skipped, so the scan stays linear whatever the nesting.
+/// Containers are entered rather than skipped, so the scan stays linear whatever the nesting.
 fn last_shape(data: &[u8]) -> Option<Shape> {
     const CLIENT_ANCHOR: u16 = 0xF010;
-    // Group shape boolean properties: fHidden with its use bit.
     const PID_GROUP_SHAPE: u16 = 0x03BF;
     const F_HIDDEN: u32 = 0x0000_0002;
     const F_USE_HIDDEN: u32 = 0x0002_0000;
@@ -1414,27 +1320,16 @@ fn last_shape(data: &[u8]) -> Option<Shape> {
     anchor.map(|anchor| Shape { anchor, hidden })
 }
 
-/// What an OBJ record draws, by its FtCmo object type.
 enum Obj {
-    /// A checkbox and its state, `None` for the mixed state, which has no
-    /// token.
     Checkbox(Option<bool>),
-    /// Another form control: a button, option button, edit box, label,
-    /// spinner, scroll bar, list, group box or drop-down.
     Control,
     Comment(u16),
     Picture,
     Chart,
-    /// A text box or a drawn shape that can hold text: a rectangle, oval,
-    /// polygon or OfficeArt shape.
     Shape,
 }
 
-/// The kind of an OBJ record's object; `None` for one this reader does not
-/// report, a drop-down the application draws for its own interface
-/// included. A subrecord running past the record ends the walk with what it
-/// read: FtLbsData, always last, holds a lower bound there ([MS-XLS]
-/// 2.5.149).
+/// A subrecord running past the record ends the walk with what it read: FtLbsData, always last, holds a lower bound there ([MS-XLS] 2.5.149).
 fn obj_kind(body: &[u8]) -> Option<Obj> {
     const FT_END: u16 = 0x0000;
     const FT_CMO: u16 = 0x0015;
@@ -1483,10 +1378,6 @@ fn obj_kind(body: &[u8]) -> Option<Obj> {
     })
 }
 
-/// Whether FtLbsData after its `ft` and `cbFContinued` names a behaviour
-/// class (`lct`, read when `fUseCB` is set) other than a regular sheet
-/// drop-down: an AutoFilter, PivotTable, AutoComplete, data validation or
-/// table total-row drop-down, which the application draws itself.
 fn interface_dropdown(lbs: &[u8]) -> bool {
     let flags_at = get_u16(lbs, 0).map(|cb_fmla| 2 + usize::from(cb_fmla) + 4);
     flags_at
@@ -1495,10 +1386,7 @@ fn interface_dropdown(lbs: &[u8]) -> bool {
 }
 
 enum HlinkRecord {
-    /// A location within the workbook, which no target carries.
     InWorkbook,
-    /// A moniker's target over the record's range, [`LinkTarget::Unknown`]
-    /// when the moniker does not read.
     External(SheetLink),
 }
 
@@ -1518,7 +1406,6 @@ fn hlink(body: &[u8]) -> Option<HlinkRecord> {
     Some(HlinkRecord::External(SheetLink { range, target }))
 }
 
-/// The moniker's target after the optional display and frame names.
 fn hlink_target(data: &[u8], flags: u32) -> Option<String> {
     const HAS_DISPLAY_NAME: u32 = 0x10;
     const HAS_FRAME_NAME: u32 = 0x80;
@@ -1541,7 +1428,6 @@ fn hlink_target(data: &[u8], flags: u32) -> Option<String> {
     moniker_target(data.get(pos..)?)
 }
 
-/// The target a URL or file moniker names ([MS-OSHARED] 2.3.7.6, 2.3.7.8).
 fn moniker_target(data: &[u8]) -> Option<String> {
     const URL_MONIKER: [u8; 16] = [
         0xE0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9,
@@ -1562,15 +1448,11 @@ fn moniker_target(data: &[u8]) -> Option<String> {
     }
 }
 
-/// UTF-16LE text up to its terminating NUL; `None` when it does not decode.
 fn utf16_until_nul(bytes: &[u8]) -> Option<String> {
     let units: Vec<u16> = utf16le_units(bytes).take_while(|&u| u != 0).collect();
     String::from_utf16(&units).ok()
 }
 
-/// The text of a TXO record: `cchText` characters spread over the CONTINUE
-/// records after it, each opening with its own encoding flag byte; with
-/// whether a unit did not decode.
 fn txo_text(segs: &[&[u8]]) -> Option<(String, bool)> {
     read_txo_text(segs, TxoExtent::Prefix).map(|(text, replaced, _)| (text, replaced))
 }
@@ -1641,12 +1523,10 @@ mod tests {
         rec(BOF, &[le16(&[vers, dt]), vec![0; 12]].concat())
     }
 
-    /// XLUnicodeString, compressed ASCII.
     fn ustr(s: &str) -> Vec<u8> {
         [&le16(&[s.len() as u16])[..], &[0], s.as_bytes()].concat()
     }
 
-    /// ShortXLUnicodeString, compressed ASCII.
     fn short_ustr(s: &str) -> Vec<u8> {
         [&[s.len() as u8, 0][..], s.as_bytes()].concat()
     }
@@ -1708,28 +1588,17 @@ mod tests {
         ole.into_inner().into_inner()
     }
 
-    /// Assemble a BIFF8 workbook: globals plus one substream per sheet,
-    /// with each BOUNDSHEET's lbPlyPos patched to the real offset.
     #[derive(Default)]
     struct Wb {
         date1904: bool,
         filepass: bool,
-        /// FORMAT records: (ifmt, code).
         formats: Vec<(u16, &'static str)>,
-        /// XF records in table order, each carrying its ifmt.
         xfs: Vec<u16>,
-        /// Raw SST records (the SST plus any CONTINUE records).
         sst: Vec<Vec<u8>>,
-        /// (name, hsState, substream records without BOF/EOF).
         sheets: Vec<(&'static str, u8, Vec<u8>)>,
-        /// The sheet whose name is written in UTF-16 with a lone surrogate
-        /// after it.
         broken_name: Option<usize>,
-        /// Further globals records after the sheet directory, verbatim.
         globals: Vec<u8>,
-        /// Bytes cut from the end of the stream.
         cut: usize,
-        /// The globals substream has no EOF of its own.
         globals_unended: bool,
         unended_sheets: Vec<usize>,
         module_sheet: Option<usize>,
@@ -1760,7 +1629,6 @@ mod tests {
             ole_with("Workbook", &self.stream().0)
         }
 
-        /// The BIFF stream and the offset of each sheet substream in it.
         fn stream(&self) -> (Vec<u8>, Vec<usize>) {
             let mut stream = bof(0x0005, 0x0600);
             if self.filepass {
@@ -2545,9 +2413,6 @@ mod tests {
 
     #[test]
     fn sst_string_split_mid_word_re_reads_the_flags_byte() {
-        // Trap 1: the string continues into a CONTINUE record and switches
-        // from 8-bit compressed to 16-bit encoding at the boundary, marked
-        // by the repeated option-flags byte.
         let mut base = 1u32.to_le_bytes().to_vec();
         base.extend(1u32.to_le_bytes());
         base.extend(11u16.to_le_bytes());
@@ -2566,9 +2431,6 @@ mod tests {
 
     #[test]
     fn rich_and_phonetic_headers_do_not_misalign_the_table() {
-        // Trap 2: the optional rich-run count and phonetic size headers and
-        // their trailing data must be consumed, or the next string reads
-        // from the middle of them.
         let mut body = 2u32.to_le_bytes().to_vec();
         body.extend(2u32.to_le_bytes());
         body.extend(2u16.to_le_bytes());
@@ -2587,9 +2449,6 @@ mod tests {
 
     #[test]
     fn rk_and_mulrk_encodings_decode() {
-        // Trap 3: RK packs an integer or a truncated double, with a
-        // divide-by-100 bit; MULRK packs a run of them, each with its own
-        // format index.
         let mut records = rk_cell(0, 0, 0, rk_from_f64(1234.5));
         records.extend(rk_cell(0, 1, 0, rk_from_int(15550) | 1)); // 155.5
         records.extend(mulrk_rec(0, 2, &[(0, rk_from_int(7)), (1, rk_from_f64(0.5))]));
@@ -2604,9 +2463,6 @@ mod tests {
 
     #[test]
     fn number_formats_apply_to_numeric_cells() {
-        // Trap 4: the cell's ixfe indexes the XF table, whose ifmt resolves
-        // against FORMAT records first and the built-in table second (ifmt
-        // 3 has no FORMAT record here).
         let mut records = number(0, 0, 1, 0.155);
         records.extend(number(0, 1, 2, 1234.5));
         records.extend(number(0, 2, 3, 9876543.0));
@@ -2906,8 +2762,6 @@ mod tests {
         assert_matches!(parse(&ParseCtx::default(), &wb.build()), Err(ConvertError::Encrypted));
     }
 
-    /// An MSODRAWING body: one SpContainer holding a client anchor that
-    /// starts at (row, col), plus an OPT hiding the shape when asked.
     fn msodrawing(row: u16, col: u16, hidden: bool) -> Vec<u8> {
         let anchor = le16(&[0, col, 0, row, 0, col + 1, 0, row + 1, 0]);
         let hiding =
@@ -2916,26 +2770,21 @@ mod tests {
         rec(MSODRAWING, &record(0x000F, 0xF004, &children))
     }
 
-    /// An OBJ record for a form control of type `ot` carrying `state`.
     fn obj(ot: u16, state: u16) -> Vec<u8> {
         let header = le16(&[0x0015, 0x0012, ot, 1]);
         rec(OBJ, &[header, vec![0; 14], le16(&[0x0012, 8, state]), vec![0; 10]].concat())
     }
 
-    /// A TXO record with its text and formatting-run CONTINUE records.
     fn txo(text: &str) -> Vec<u8> {
         let body = le16(&[0, 0, 0, 0, 0, text.len() as u16, 16, 0, 0]);
         let chars = [&[0x00][..], text.as_bytes()].concat();
         [rec(TXO, &body), rec(CONTINUE, &chars), rec(CONTINUE, &[0; 16])].concat()
     }
 
-    /// The MSODRAWING that carries an OBJ's text box into the TXO after it.
     fn client_textbox() -> Vec<u8> {
         rec(MSODRAWING, &record(0, 0xF00D, &[]))
     }
 
-    /// Re-frame a record as its first `at` payload bytes plus a CONTINUE
-    /// carrying the rest.
     fn split_at(record: &[u8], at: usize) -> Vec<u8> {
         let rec_type = u16::from_le_bytes([record[0], record[1]]);
         let payload = &record[4..];
@@ -2953,7 +2802,6 @@ mod tests {
         records.extend(txo("Roof"));
         records.extend(msodrawing(20, 4, false));
         records.extend(obj(0x0B, 0));
-        // A text box is a drawing object too, and must not be read as a box.
         records.extend(msodrawing(20, 5, false));
         records.extend(obj(0x06, 1));
         records.extend(txo("note"));
@@ -3329,8 +3177,6 @@ mod tests {
         );
     }
 
-    /// A BIFF5 workbook: its CODEPAGE record when one is given, `globals`
-    /// verbatim, then one shown sheet per (name bytes, records).
     fn biff5(codepage: Option<u16>, globals: &[u8], sheets: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
         let mut stream = bof(0x0005, 0x0500);
         if let Some(cp) = codepage {
@@ -3510,7 +3356,6 @@ mod tests {
         assert_eq!(shown(number(0, 0, 3, 2.0)), (vec![vec![vec!["1900-01-02".into()]]], vec![]));
     }
 
-    /// FORMAT records for `codes` at 164 on, each with an XF after XF 0.
     fn biff5_formats(codes: &[&[u8]]) -> Vec<u8> {
         let formats = (164u16..).zip(codes).map(|(ifmt, code)| {
             let format = [&le16(&[ifmt])[..], &[code.len() as u8], code].concat();
@@ -3577,9 +3422,6 @@ mod tests {
         assert_eq!(reported(parse_ctx), [in_unit(DiagnosticCode::InvalidEncoding, 1, 1)]);
     }
 
-    /// An OBJ record for a drop-down whose FtLbsData claims more bytes than
-    /// the record holds, as Excel and Apache POI write it, of behaviour class
-    /// `lct` (0 for a form control).
     fn dropdown(lct: u8) -> Vec<u8> {
         let cmo = [le16(&[0x0015, 0x0012, 0x0014, 1]), vec![0; 14]].concat();
         let lbs_data = [le16(&[0x0013, 0x1FEE]), vec![0; 6]].concat();
@@ -3671,13 +3513,10 @@ mod tests {
         assert_eq!(placed(&anchored_then_empty), None);
     }
 
-    /// An HLINK record over one cell whose URL moniker names `url`.
     fn hlink_record(row: u16, col: u16, url: &str) -> Vec<u8> {
         hlink_over([row, row], [col, col], None, url)
     }
 
-    /// An HLINK record over `rows` and `cols` as written, whose URL moniker
-    /// names `url`, after a display name when one is given.
     fn hlink_over(rows: [u16; 2], cols: [u16; 2], display: Option<&str>, url: &str) -> Vec<u8> {
         let utf16 = |s: &str| -> Vec<u8> {
             let units: Vec<u8> = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();

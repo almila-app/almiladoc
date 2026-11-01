@@ -1,5 +1,3 @@
-//! Helpers shared by the integration tests.
-
 use std::io::{Cursor, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -22,7 +20,6 @@ pub(crate) fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(fixture_root().join(path)).unwrap()
 }
 
-/// Recursively collect every file under `dir`, sorted for determinism.
 pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
@@ -42,13 +39,10 @@ fn corpus_of(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Every committed fixture bar the resource-abuse shapes under `abuse/`.
 pub(crate) fn corpus() -> Vec<PathBuf> {
     corpus_of(&fixture_root())
 }
 
-/// The fixture's format: detected from its content, else named by its
-/// extension.
 pub(crate) fn format_of(path: &Path, bytes: &[u8]) -> Option<Format> {
     Format::sniff(bytes)
         .or_else(|| path.extension().and_then(|ext| ext.to_str()).and_then(Format::from_extension))
@@ -60,7 +54,6 @@ pub(crate) fn configured(set: impl FnOnce(&mut Config)) -> Converter {
     Converter::new(config).unwrap()
 }
 
-/// A converter on `threads` threads with default limits.
 pub(crate) fn converter(threads: usize) -> Converter {
     configured(|config| config.threads = threads)
 }
@@ -117,7 +110,6 @@ pub(crate) fn count(diagnostics: &Diagnostics, keep: impl Fn(&Diagnostic) -> boo
     diagnostics.iter().filter(keep).map(|d| d.count).sum()
 }
 
-/// Every inline of `blocks` in document order, a link standing for its content.
 pub(crate) fn inlines(blocks: &[Block]) -> Vec<&Inline> {
     fn leaves(inline: &Inline) -> Vec<&Inline> {
         match inline {

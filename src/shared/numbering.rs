@@ -1,36 +1,17 @@
-//! Shared list-number pattern IR.
-//!
-//! A level's number text is a sequence of literal pieces and level
-//! references, rendered against the live counter values. Every frontend
-//! resolves its native syntax onto this one form: WordprocessingML
-//! `w:lvlText` (`%1.%2)`), the DOC `xst` placeholder string, RTF
-//! `\leveltext`/`\levelnumbers`, and ODF prefix/suffix/display-levels.
-//! Rendering returns `None` when the pattern reproduces the default label
-//! the renderer builds from marker + value alone, so native Markdown list
-//! numbering is used whenever it is faithful.
-
 use crate::shared::list::MarkerKind;
 
-/// One piece of a level's number text: literal characters, or the current
-/// number of a (zero-based) level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NumberText {
     Literal(String),
     Level(u8),
 }
 
-/// A level's resolved number pattern.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NumberPattern {
-    /// Empty = no pattern known; the marker kind's default label applies.
     pub text: Vec<NumberText>,
-    /// Legal numbering (`w:isLgl`, LVLF `fLegal`): referenced levels render
-    /// as decimal regardless of their own format.
     pub legal: bool,
 }
 
-/// Parse WordprocessingML-style percent patterns (`%1`–`%9` level
-/// references, everything else literal) into pattern tokens.
 pub(crate) fn parse_percent_pattern(text: &str) -> Vec<NumberText> {
     let mut out: Vec<NumberText> = Vec::new();
     let mut chars = text.chars().peekable();
@@ -53,11 +34,6 @@ pub(crate) fn parse_percent_pattern(text: &str) -> Vec<NumberText> {
     out
 }
 
-/// Render a pattern against the current sequence values. `level_marker` and
-/// `level_value` supply each referenced level's marker kind and current
-/// ordinal (the level's start value when it has not begun counting).
-/// `None` when the result matches the default label produced from the own
-/// level's marker and value.
 pub(crate) fn composite_label(
     pattern: &NumberPattern,
     own_marker: MarkerKind,
@@ -82,7 +58,6 @@ pub(crate) fn composite_label(
     if out == own_marker.label(own_value) { None } else { Some(out) }
 }
 
-/// MS-OSHARED numbering formats -> marker kinds. `None` = no number.
 pub(crate) fn marker_for_nfc(nfc: i32) -> Option<MarkerKind> {
     match nfc {
         1 => Some(MarkerKind::UpperRoman),
@@ -95,11 +70,8 @@ pub(crate) fn marker_for_nfc(nfc: i32) -> Option<MarkerKind> {
     }
 }
 
-/// The list levels Word, PowerPoint and RTF define.
 pub(crate) const OFFICE_LEVELS: usize = 9;
 
-/// One list's counters, a value per level: a level past the last counts as the last, and a
-/// level that has not started takes its start value on first use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LevelCounters<const N: usize> {
     values: [u64; N],
@@ -114,13 +86,10 @@ impl<const N: usize> Default for LevelCounters<N> {
 }
 
 impl<const N: usize> LevelCounters<N> {
-    /// `level` within this list's levels.
     pub(crate) const fn clamp(level: usize) -> usize {
         if level < N { level } else { N - 1 }
     }
 
-    /// Numbers the next item at `level`: `start` if the level has not started, else one more
-    /// than its last; then restarts each deeper level `restarts` names.
     pub(crate) fn next(
         &mut self,
         level: usize,
@@ -133,8 +102,6 @@ impl<const N: usize> LevelCounters<N> {
         value
     }
 
-    /// Numbers the next item at `level` with `value`, as a source that states its number does;
-    /// then restarts each deeper level `restarts` names.
     pub(crate) fn seed(&mut self, level: usize, value: u64, restarts: impl Fn(usize) -> bool) {
         let level = Self::clamp(level);
         self.values[level] = value;
@@ -146,19 +113,16 @@ impl<const N: usize> LevelCounters<N> {
         }
     }
 
-    /// Makes the next item at `level` take its start value.
     pub(crate) fn restart(&mut self, level: usize) {
         self.started[Self::clamp(level)] = false;
     }
 
-    /// The number `level` shows now: its last value, or `start` if it has not started.
     pub(crate) fn value_or(&self, level: usize, start: u64) -> u64 {
         let level = Self::clamp(level);
         if self.started[level] { self.values[level] } else { start }
     }
 }
 
-/// Restarts every deeper level, as a list without per-level restart rules does.
 pub(crate) fn every_deeper(_: usize) -> bool {
     true
 }
@@ -257,7 +221,6 @@ mod tests {
             ]
         );
         assert_eq!(parse_percent_pattern("%9"), vec![NumberText::Level(8)]);
-        // `%0` and a trailing `%` are literal.
         assert_eq!(parse_percent_pattern("%0%"), vec![NumberText::Literal("%0%".into())]);
     }
 

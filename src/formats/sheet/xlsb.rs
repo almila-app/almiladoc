@@ -1,7 +1,3 @@
-//! In-house binary SpreadsheetML reader (.xlsb): MS-XLSB record streams in the xlsx package,
-//! the grid shared with `grid.rs`; the sheet driver and the package parts beside the cells
-//! shared with `xlsx.rs`.
-
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, OOXML_GRID, SheetContent,
     SheetLink, UnreadFormats, format_as_text, render_number, resolve_format,
@@ -24,7 +20,6 @@ use std::collections::HashMap;
 const HF_DIFFERENT_EVEN: u16 = 1;
 const HF_DIFFERENT_FIRST: u16 = 2;
 
-// MS-XLSB record type values (section 2.3, "By Number").
 const BRT_ROW_HDR: u16 = 0;
 const BRT_CELL_RK: u16 = 2;
 const BRT_CELL_ERROR: u16 = 3;
@@ -223,17 +218,13 @@ fn read_optional<T>(
     skip_unreadable(parse_ctx, role, read(parse_ctx, &bytes).map(Some))
 }
 
-/// A sheet the workbook lists, in source order.
 struct Bundle {
     name: String,
-    /// The name needed a replacement character.
     name_replaced: bool,
     rid: Option<String>,
     hidden: bool,
 }
 
-/// `xl/workbook.bin`: the 1904 date flag from BrtWbProp, and each sheet's
-/// name, relationship id and visibility from its BrtBundleSh.
 fn read_workbook(
     parse_ctx: &ParseCtx<'_>,
     data: &[u8],
@@ -252,8 +243,6 @@ fn read_workbook(
                 f.u32()?; // iTabID
                 let rid = f.nullable_wide_string()?.map(|(rid, _)| rid);
                 let (name, name_replaced) = f.wide_string()?;
-                // hsState 1 is hidden, 2 is veryHidden: omitted entirely,
-                // heading included, exactly as in xlsx.
                 let hidden = matches!(state, 1 | 2);
                 sheets.push(Bundle { name: clean_text(&name), name_replaced, rid, hidden });
             }
@@ -263,11 +252,6 @@ fn read_workbook(
     Ok((dates, sheets))
 }
 
-/// `styles.bin` reduced to the ordered cellXfs list, each entry's format id
-/// resolved to a parsed format and whether its code needed a replacement
-/// character. Only BrtXF records between BrtBeginCellXFs
-/// and BrtEndCellXFs are cell XFs; the cell-style XF collection also holds
-/// BrtXF records and must not shift the indices.
 fn read_styles(
     parse_ctx: &ParseCtx<'_>,
     data: &[u8],
@@ -307,9 +291,6 @@ fn read_styles(
         .collect())
 }
 
-/// `sharedStrings.bin`: one cleaned entry per BrtSSTItem in order, with
-/// whether it needed a replacement character. The item is a RichStr;
-/// formatting runs and phonetic data trail the string and are not content.
 fn read_shared_strings(
     parse_ctx: &ParseCtx<'_>,
     data: &[u8],
@@ -403,7 +384,6 @@ fn comment_start(f: &mut Fields<'_>) -> Result<(u32, super::comments::Comment), 
     Ok((author, super::comments::Comment::text(at, String::new())))
 }
 
-/// One cell record, placed at the row of the preceding BrtRowHdr.
 fn read_cell(
     id: u16,
     f: &mut Fields<'_>,
@@ -432,9 +412,6 @@ fn read_cell(
     out.put(at, text)
 }
 
-/// One worksheet part, with the relationship id of the drawing it places.
-/// Rows come from the preceding BrtRowHdr; every cell record carries only
-/// its column and cellXfs index in the common cell header (MS-XLSB 2.5.10).
 fn read_sheet(
     parse_ctx: &ParseCtx<'_>,
     data: &[u8],
@@ -461,7 +438,6 @@ fn read_sheet(
                 row = Some(rw);
                 f.skip(7)?; // ixfe, miyRw, fExtraAsc/fExtraDsc byte
                 if f.u8()? & 0x10 != 0 {
-                    // fDyZero: the row is hidden.
                     out.hide_row(rw);
                 }
             }
@@ -575,23 +551,17 @@ fn binary_print_settings(
     )
 }
 
-/// A BrtHLink's range and relationship id; `None` for a link within the
-/// workbook, which names no relationship.
 fn hyperlink(f: &mut Fields<'_>) -> Result<Option<SheetLink>, ConvertError> {
     let range = range(f)?;
     let rel = f.nullable_wide_string()?.map(|(rel, _)| rel).filter(|rel| !rel.is_empty());
     Ok(rel.map(|rel| SheetLink { range, target: LinkTarget::Related(rel) }))
 }
 
-/// An UncheckedRfX: first and last row, then first and last column.
 fn range(f: &mut Fields<'_>) -> Result<CellRange, ConvertError> {
     let (r1, r2, c1, c2) = (f.u32()?, f.u32()?, f.u32()?, f.u32()?);
     Ok(CellRange::spanning(CellRef::new(r1, c1), CellRef::new(r2, c2)))
 }
 
-/// Hold a report of each non-blank header and footer of a
-/// BrtBeginHeaderFooter, in its order: odd, even and first-page header and
-/// footer pairs.
 fn omit_headers_and_footers(
     out: &mut SheetContent,
     f: &mut Fields<'_>,
@@ -606,10 +576,6 @@ fn omit_headers_and_footers(
     Ok(())
 }
 
-/// A cell's rendered text from the record body after the common header,
-/// what rendering it lost, and whether its string decoded with a
-/// replacement. Formula records carry their cached result first; the parsed
-/// formula trails it and is never read.
 fn cell_text(
     id: u16,
     f: &mut Fields<'_>,
@@ -650,9 +616,6 @@ fn cell_text(
     })
 }
 
-/// Iterator over one part's record stream: a 1-2 byte record type and a 1-4
-/// byte payload size, both 7 bits per byte with the high bit as the
-/// continuation flag (MS-XLSB 2.1.4).
 struct Records<'a> {
     reader: ByteReader<'a>,
     seen: u64,
@@ -701,8 +664,6 @@ impl<'a> Records<'a> {
     }
 }
 
-/// Field reads within one record payload, each failing `Malformed` when the
-/// payload is too short.
 struct Fields<'a>(ByteReader<'a>);
 
 impl<'a> Fields<'a> {
@@ -738,9 +699,6 @@ impl<'a> Fields<'a> {
         Self::need(self.0.f64())
     }
 
-    /// XLWideString (MS-XLSB 2.5.169): a u32 character count, then that many
-    /// UTF-16LE code units. Unpaired surrogates decode to U+FFFD, and the
-    /// text comes with whether one did.
     fn wide_string(&mut self) -> Result<(String, bool), ConvertError> {
         let cch = self.u32()? as usize;
         let len =
@@ -749,8 +707,6 @@ impl<'a> Fields<'a> {
         Ok(decode_utf16(utf16le_units(bytes)))
     }
 
-    /// XLNullableWideString: the reserved count 0xFFFFFFFF is the null
-    /// string.
     fn nullable_wide_string(&mut self) -> Result<Option<(String, bool)>, ConvertError> {
         if self.0.rest().starts_with(&[0xFF; 4]) {
             self.skip(4)?;
@@ -793,13 +749,10 @@ mod tests {
     const WS_REL: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 
-    /// Route through the shared container dispatch, the only entry a caller
-    /// has.
     fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         super::super::parse(&ParseCtx::default(), bytes)
     }
 
-    /// One record in canonical (shortest) framing.
     fn rec(id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         if id < 0x80 {
@@ -868,8 +821,6 @@ mod tests {
         rec(BRT_MERGE_CELL, &p)
     }
 
-    /// styles.bin: custom BrtFmt entries and the cellXfs list by numFmtId. A
-    /// cell-style BrtXF precedes BrtBeginCellXFs to prove it shifts nothing.
     fn styles(fmts: &[(u16, &str)], xf_fmt_ids: &[u16]) -> Vec<u8> {
         let xf = |parent: u16, ifmt: u16| {
             let mut p = parent.to_le_bytes().to_vec();
@@ -897,17 +848,13 @@ mod tests {
         shared_strings_units(&units.iter().map(Vec::as_slice).collect::<Vec<_>>())
     }
 
-    /// Assemble a workbook: (name, hsState, sheet records) per sheet, plus
-    /// optional styles and shared-string parts.
     #[derive(Default)]
     struct Wb<'a> {
         sheets: Vec<(&'a str, u32, Vec<u8>)>,
         styles: Option<Vec<u8>>,
         shared: Option<Vec<u8>>,
         date1904: bool,
-        /// Further parts, verbatim: (name, body).
         extra: Vec<(&'a str, Vec<u8>)>,
-        /// Further workbook records and relationships, verbatim.
         bundles: Vec<u8>,
         workbook_rels: &'a str,
         sheet_type: Option<&'a str>,
@@ -1960,8 +1907,6 @@ mod tests {
         reported(parse_ctx)
     }
 
-    /// A BrtBundleSh naming its relationship (`None` for the null string)
-    /// and its name as UTF-16 code units.
     fn bundle(name: &[u16], rid: Option<&str>) -> Vec<u8> {
         let mut p = 0u32.to_le_bytes().to_vec();
         p.extend_from_slice(&9u32.to_le_bytes());
@@ -1973,7 +1918,6 @@ mod tests {
         rec(BRT_BUNDLE_SH, &p)
     }
 
-    /// A RichStr with no formatting runs and no phonetic data.
     fn rich_str(string: &[u8]) -> Vec<u8> {
         [&[0][..], string].concat()
     }

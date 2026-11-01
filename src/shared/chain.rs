@@ -1,13 +1,10 @@
-//! Style-chain traversal: walk a parent (`basedOn`) chain child-to-root.
-//! A cycle is a resource-safety bound and hard-fails - recovery never
-//! weakens resource safety.
+//! Style cycles hard-fail to preserve the resource bound.
 
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-/// Style id -> (definition, parent style id).
 pub(crate) struct StyleChains<'a, D> {
     raw: HashMap<&'a str, (&'a D, Option<&'a str>)>,
 }

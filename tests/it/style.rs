@@ -1,6 +1,3 @@
-//! Superscript, subscript and symbol-font characters: where each reader takes them from, and the
-//! Markdown it renders.
-
 use crate::build::{W, docx_with, relationships};
 use crate::support::{converter, fixture, reported, reporting};
 use almiladoc::{DiagnosticCode, Format, Input, Region};

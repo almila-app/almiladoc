@@ -1,20 +1,10 @@
-//! Nested-list assembly with numbering identity.
-//!
-//! Frontends resolve each list paragraph to a [`ListEntry`] carrying its
-//! indent level, its list identity ([`ListKey`]), and its computed effective
-//! number. Assembly splits runs whenever the identity or marker kind changes
-//! at a level, or an ordered sequence is non-contiguous (a restart), so the
-//! renderer's `start + index` numbering reproduces the source exactly.
+//! List identity and sequence changes split runs so Markdown numbering reproduces source numbering.
 
 pub(crate) use crate::model::MarkerKind;
 use crate::model::{Block, List, ListItem};
 
-/// Identity of a resolved list at one level: which list instance the entry
-/// belongs to and what marker its level uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ListKey {
-    /// Stable per-instance id (DOCX `numId`, RTF `\lsN`, DOC list identity
-    /// `lsid`, a counter for HTML/ODF lists).
     pub instance: u64,
     pub marker: MarkerKind,
 }
@@ -23,28 +13,18 @@ pub(crate) struct ListKey {
 pub(crate) struct ListMark {
     pub key: ListKey,
     pub level: usize,
-    /// Effective item number at this entry (ignored for bullets).
     pub number: u64,
-    /// Literal marker text when the source number text is not reproducible
-    /// from the marker kind and number alone (composite number text).
     pub label: Option<String>,
 }
 
-/// One flat, fully resolved list paragraph (plus any blocks attached to the
-/// same item, like text-box content anchored in it).
 #[derive(Debug)]
 pub(crate) struct ListEntry {
     pub mark: ListMark,
     pub blocks: Vec<Block>,
 }
 
-/// The deepest list level a run nests to, the last of the nine levels
-/// (0 to 8) WordprocessingML, DrawingML, RTF and Word 97 define (PowerPoint
-/// 97 defines five); a deeper source level is read as this one.
 const MAX_LIST_LEVEL: usize = 8;
 
-/// Pop the accumulated run of list paragraphs into list blocks; one block
-/// per identity segment.
 pub(crate) fn flush_list(blocks: &mut Vec<Block>, run: &mut Vec<ListEntry>) {
     for entry in run.iter_mut() {
         entry.mark.level = entry.mark.level.min(MAX_LIST_LEVEL);
@@ -66,8 +46,6 @@ fn close(open: Option<Open>, out: &mut Vec<Block>) {
     }
 }
 
-/// Fold a flat run into nested lists, splitting at identity/marker changes
-/// and ordered-sequence discontinuities.
 fn build_lists(entries: Vec<ListEntry>) -> Vec<Block> {
     let Some(min_lvl) = entries.iter().map(|e| e.mark.level).min() else {
         return Vec::new();

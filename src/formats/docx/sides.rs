@@ -22,14 +22,12 @@ const SIDES: [(Side, &str, &str); 2] =
 const VARIANTS: [(Variant, &str); 3] =
     [(Variant::Default, "default"), (Variant::First, "first"), (Variant::Even, "even")];
 
-/// What a section's reference names: a part, or a relationship that does not resolve.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Named {
     Part(String),
     Broken,
 }
 
-/// The scopes every header and footer part is read in, apart from the body's.
 pub(super) struct SideScopes {
     counters: RefCell<Counters>,
     references: References,
@@ -45,7 +43,6 @@ impl SideScopes {
     }
 }
 
-/// `blocks` with each section's headers and footers before its content, where they change.
 pub(super) fn interleave<'b>(
     ctx: &Ctx<'_, 'b>,
     scopes: &'b SideScopes,
@@ -105,7 +102,6 @@ pub(super) fn interleave<'b>(
     Ok(out)
 }
 
-/// Record the parts `section` names, replacing what earlier sections named.
 fn name_parts(
     ctx: &Ctx<'_, '_>,
     section: &Element,
@@ -149,7 +145,6 @@ fn even_pages(
         .unwrap_or(false))
 }
 
-/// Each part read once per side and variant it shows as.
 struct Stories<'c, 'a, 'b> {
     ctx: &'c Ctx<'a, 'b>,
     scopes: &'b SideScopes,

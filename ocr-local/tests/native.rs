@@ -1,5 +1,4 @@
-//! Native OCR integration with caller-verified CPU assets.
-
+//! Native OCR integration tests.
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::Path;

@@ -8,7 +8,7 @@ paths:
 
 # Python
 
-`pyproject.toml`'s `[tool.ruff]` owns enforced Python style; `make hygiene` runs it.
+- Style: `[tool.ruff]` in `pyproject.toml`, run by `make hygiene`.
 
 - The binding converts types and errors only, behaviour lives in the crate, and a mirrored type
   changes through the `change-core-api` workflow.

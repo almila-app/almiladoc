@@ -1,12 +1,3 @@
-//! (X)HTML element tree -> model blocks. Used by the EPUB frontend.
-//!
-//! Applies a deliberately small CSS subset - the semantic properties only:
-//! `font-weight`, `font-style`, `text-decoration: line-through`,
-//! `vertical-align: super|sub|baseline` and `display: none` - from inline
-//! `style` attributes and element/class rules.
-//! Tables build the canonical grid (`rowspan`/`colspan`); ordered lists honor
-//! `start`, `reversed`, `type`, and per-item `value`.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -23,8 +14,6 @@ use crate::shared::text::{clean_text, collapse_ws};
 use crate::shared::xml::{DamageScope, attribute_any_unresolved};
 use std::collections::HashMap;
 
-/// Frontend hooks: how hrefs, image sources, and anchor ids resolve in the
-/// containing document (EPUB scopes them per chapter).
 pub(crate) trait HtmlCtx {
     fn exact_tables(&self) -> bool {
         false
@@ -68,12 +57,7 @@ fn walk_blocks(
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct StyleProps {
     pub delta: StyleDelta,
-    /// `display` visibility as a tri-state: a higher-priority
-    /// `display: block` (or any non-none value) can restore content a
-    /// lower-priority `display: none` hid.
     pub hidden: Option<bool>,
-    /// The element's own `vertical-align`, which CSS does not inherit: `baseline` cancels
-    /// only a shift its tag applies, never one an ancestor does.
     pub vertical_align: Option<VerticalPosition>,
 }
 
@@ -95,25 +79,16 @@ impl StyleProps {
     }
 }
 
-/// Cascade priority tiers: rules < inline style < `!important` rules <
-/// `!important` inline style, with selector specificity ordering within a
-/// tier and source order breaking ties.
 const INLINE_PRIORITY: u32 = 100_000;
 const IMPORTANT_PRIORITY: u32 = 1_000_000;
 
 #[derive(Debug)]
 struct Rule {
     tag: Option<String>,
-    /// Cascade priority: the tier base plus selector specificity within the
-    /// supported subset (a class outweighs any number of tags: `.c` = 10,
-    /// `t.c` = 11, `t` = 1). Source order breaks ties (rules are stored in
-    /// document order).
     priority: u32,
     props: StyleProps,
 }
 
-/// Each rule sits in exactly one index: `by_class` when it names a class
-/// (`t.c` too), else `by_tag`.
 #[derive(Debug, Default)]
 pub(crate) struct Stylesheet {
     rules: Vec<Rule>,
@@ -122,10 +97,6 @@ pub(crate) struct Stylesheet {
 }
 
 impl Stylesheet {
-    /// Add the rules of one stylesheet's text that a screen applies under its `media` list. Only
-    /// simple `tag`, `.class`, and `tag.class` selectors participate; `!important` declarations
-    /// enter the higher cascade tier; a rule whose group conditions a screen leaves unsettled
-    /// contributes only a `display` that shows; charges the length of `css`.
     pub(crate) fn add(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -172,9 +143,6 @@ impl Stylesheet {
         Ok(())
     }
 
-    /// Whether, outside comments, a replacement character sits in a declaration name or in a rule
-    /// or a group condition above it that declares `display`, among the rules
-    /// [`Stylesheet::add`] reads from `css` on a screen; charges the length of `css`.
     pub(crate) fn damage_may_hide(
         parse_ctx: &ParseCtx<'_>,
         css: &str,
@@ -192,8 +160,6 @@ impl Stylesheet {
         }))
     }
 
-    /// Matching rules for one element as (priority, props) pairs, in source
-    /// order, each candidate rule its tag or classes name charged.
     fn matching_rules(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -232,7 +198,6 @@ fn strip_css_comments(css: &str) -> String {
     out
 }
 
-/// A declaration block's properties, split by cascade tier.
 #[derive(Debug, Clone, Copy, Default)]
 struct DeclProps {
     normal: StyleProps,
@@ -290,21 +255,13 @@ struct Builder<'e> {
     ctx: &'e dyn HtmlCtx,
     parse_ctx: &'e ParseCtx<'e>,
     damage: &'e DamageScope,
-    /// Whether text appended while `inlines` is empty sits at a whitespace
-    /// boundary (block start: leading whitespace collapses away; inline
-    /// sub-builders inherit the surrounding run's state instead).
     start_boundary: bool,
 }
 
-/// Content worth keeping: visible text, or an anchor node some link may
-/// target (the renderer drops unreferenced anchors itself).
 fn keeps_paragraph(inlines: &[Inline]) -> bool {
     !inlines_are_empty(inlines) || inlines.iter().any(|i| matches!(i, Inline::Anchor(_)))
 }
 
-/// Whether text appended after `inlines` sits at a whitespace boundary
-/// (its leading spaces collapse away): at a block start, after emitted
-/// whitespace or a line break, looking through zero-width anchors.
 fn at_space_boundary(inlines: &[Inline], start: bool) -> bool {
     for inline in inlines.iter().rev() {
         match inline {
@@ -366,9 +323,6 @@ impl Builder<'_> {
         walk_blocks(self.parse_ctx, self.css, self.ctx, self.damage, elem, delta, start_boundary)
     }
 
-    /// Element-level props: matching stylesheet rules and the inline `style`
-    /// attribute merged in one cascade order — normal rules, inline style,
-    /// `!important` rules, `!important` inline style.
     fn element_props(&self, elem: &Element) -> Result<StyleProps, ConvertError> {
         let classes: Vec<&str> =
             elem.attr_any("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
@@ -411,9 +365,6 @@ impl Builder<'_> {
 
     fn push_text(&mut self, text: &str, delta: StyleDelta, damaged: bool) {
         let mut text = collapse_ws(&clean_text(text));
-        // Collapse across node boundaries: leading whitespace vanishes at a
-        // block start and after already-emitted whitespace, no matter how
-        // the source split its text nodes and inline elements.
         if text.starts_with(' ') && at_space_boundary(&self.inlines, self.start_boundary) {
             text.remove(0);
         }
@@ -488,13 +439,9 @@ impl Builder<'_> {
         self.flush_paragraph();
         let level = elem.local.strip_prefix('h').and_then(|n| n.parse::<u8>().ok()).unwrap_or(1);
         let mut content = self.inline_children(elem, delta)?;
-        // The heading element's own styling is how it looks, not
-        // markup applied to the words; a `<b>` inside it still is.
         rebase_emphasis(&mut content, delta.resolve());
         let anchor = elem.attr_any("id").map(|id| self.ctx.anchor_id(id));
         if inlines_are_empty(&content) {
-            // An empty heading still carries link targets: its own
-            // id and any anchors inside.
             let kept = anchor
                 .map(Inline::Anchor)
                 .into_iter()
@@ -546,8 +493,6 @@ impl Builder<'_> {
                     delta,
                     at_space_boundary(&self.inlines, self.start_boundary),
                 )?;
-                // An empty label still keeps a resolved target: the renderer
-                // shows the URL as the link text.
                 match target {
                     Some(target) => {
                         self.damage.report(
@@ -629,9 +574,7 @@ impl Builder<'_> {
         Ok(out)
     }
 
-    /// Ordered/unordered list with `start`, `reversed`, `type`, and per-item
-    /// `value`. Non-contiguous numbering splits into consecutive list blocks
-    /// so the rendered numbers match the source.
+    /// Non-contiguous numbering splits into consecutive list blocks so the rendered numbers match the source.
     fn parse_list(
         &mut self,
         elem: &Element,
@@ -657,9 +600,6 @@ impl Builder<'_> {
             _ => MarkerKind::Decimal,
         };
         let numbers = item_numbers(elem, &lis);
-        // Zero/negative numbers are valid ordered-list values but cannot be
-        // a `start` for the renderer's start+index numbering; such lists
-        // carry every number as an explicit literal marker instead.
         if numbers.iter().any(|&n| n < 1) {
             for (item, n) in items.iter_mut().zip(&numbers) {
                 item.marker_label = Some(format!("{n}."));
@@ -676,9 +616,6 @@ impl Builder<'_> {
             .collect())
     }
 
-    /// Reports each child of a list, table, row group or row that holds
-    /// content outside the children it reads (`read`): reading systems
-    /// render it unless it, or `elem` when `hidden`, is under `display: none`.
     fn report_unread(
         &self,
         elem: &Element,
@@ -702,8 +639,6 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// Rows as (row, in `thead`, row-group index): each `thead`/`tbody`/`tfoot` is
-    /// one group, and consecutive direct `tr` children form an implicit one.
     fn table_rows<'a>(
         &self,
         elem: &'a Element,
@@ -823,13 +758,11 @@ fn item_numbers(list: &Element, items: &[&Element]) -> Vec<i64> {
     numbers
 }
 
-/// Elements whose content no reading system renders in the page.
 fn renders_nothing(name: &str) -> bool {
     matches!(name, "script" | "style" | "head" | "template" | "noscript")
 }
 
 fn holds_content(elem: &Element) -> bool {
-    // The walk fails only through `hides`, which never does here.
     matches!(has_content(elem, |_| Ok(false)), Ok(true))
 }
 
@@ -856,10 +789,7 @@ fn has_content(
     Ok(false)
 }
 
-/// Cascade order: the inherited delta, then the tag's presentational default (`<b>`, `<i>`,
-/// …), then CSS, so `font-weight: normal` can undo a `<b>`. A shift is the element's own, its
-/// CSS else its tag's, and only a raise or a drop overrides the one it inherits; a block
-/// element's `vertical-align` shifts nothing, as CSS applies it to inline-level boxes only.
+/// Cascade order: the inherited delta, then the tag's presentational default (`<b>`, `<i>`, …), then CSS, so `font-weight: normal` can undo a `<b>`.
 fn element_delta(elem: &Element, inherited: StyleDelta, props: StyleProps) -> StyleDelta {
     let mut delta = inherited;
     let mut tag_shift = None;
@@ -881,7 +811,6 @@ fn element_delta(elem: &Element, inherited: StyleDelta, props: StyleProps) -> St
     delta
 }
 
-/// Elements that only group other content, walked through transparently.
 // rustfmt would set each of these long names on its own line.
 #[rustfmt::skip]
 const CONTAINER_TAGS: [&str; 18] = [

@@ -1,9 +1,3 @@
-//! Legacy Word 97-2003 binary (.doc), implementing the published resolution
-//! algorithms: OLE2 container, FIB, piece table with `Prm`s, CHPX/PAPX runs
-//! applied over the STSH style chains in specification order, and the
-//! PlfLst/PlfLfo list tables. Character positions are counted in UTF-16
-//! units, matching the CP-indexed PLC structures.
-
 mod assemble;
 mod comments;
 mod fkp;
@@ -103,10 +97,8 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     Ok(Document { blocks, notes, assets, ..Document::default() })
 }
 
-/// A note's body range, the story that holds it, its id and its kind.
 type NoteRange = (Range<usize>, Range<usize>, String, NoteKind);
 
-/// The id of the note each reference CP names, and each note's body.
 fn note_layout(
     parse_ctx: &ParseCtx<'_>,
     fib: Fib<'_>,
@@ -150,7 +142,6 @@ struct Stories {
 }
 
 impl Stories {
-    /// The story lengths of `fib`; a negative one is `Malformed`.
     fn read(fib: Fib<'_>) -> Result<Self, ConvertError> {
         let ccp = |off| {
             get_u32(fib.0, off)
@@ -206,7 +197,6 @@ impl Stories {
     }
 }
 
-/// A PLC from the table stream: `n + 1` CPs, then `n` data elements.
 #[derive(Clone, Copy)]
 struct Plc<'t> {
     bytes: &'t [u8],
@@ -217,7 +207,6 @@ struct Plc<'t> {
 impl<'t> Plc<'t> {
     const EMPTY: Plc<'static> = Plc { bytes: &[], n: 0, data_size: 0 };
 
-    /// `None` unless `bytes` hold n+1 CPs and n `data_size` records, n >= 1.
     fn new(bytes: &'t [u8], data_size: usize) -> Option<Self> {
         let records = bytes.len().checked_sub(4).filter(|_| bytes.len() >= 8)?;
         let stride = 4 + data_size;
@@ -234,11 +223,8 @@ impl<'t> Plc<'t> {
     }
 }
 
-/// The bytes of a Word 97 FIB through `fibRgFcLcb97`, which holds every
-/// field this reader reads.
 const FIB_MIN: usize = 0x382;
 
-/// The FIB at the start of the WordDocument stream, read whole.
 #[derive(Clone, Copy)]
 struct Fib<'a>(&'a [u8; FIB_MIN]);
 
@@ -280,8 +266,6 @@ impl<'a> Fib<'a> {
     const FC_PLF_LFO: usize = 0x2EA;
     const LCB_PLF_LFO: usize = 0x2EE;
 
-    /// The FIB of `word_doc`; a stream too short for one or without its
-    /// magic is `Malformed`.
     fn read(word_doc: &'a [u8]) -> Result<Self, ConvertError> {
         if get_u16(word_doc, 0) != Some(Self::W_IDENT) {
             return Err(ConvertError::malformed_part("WordDocument", "invalid FIB magic"));
@@ -292,19 +276,14 @@ impl<'a> Fib<'a> {
             .ok_or_else(|| ConvertError::malformed_part("WordDocument", "FIB cut short"))
     }
 
-    /// The field at `off`, which lies inside the FIB.
     fn u16(self, off: usize) -> u16 {
         get_u16(self.0, off).unwrap_or_default()
     }
 
-    /// The 32-bit position, length or count at `off`, which lies inside
-    /// the FIB.
     fn size(self, off: usize) -> usize {
         get_u32(self.0, off).and_then(|v| usize::try_from(v).ok()).unwrap_or_default()
     }
 
-    /// The table-stream bytes the `fc`/`lcb` pair at `off` names: empty when
-    /// `lcb` is 0, `None` when they do not lie in the table stream.
     fn table_range(self, table: &[u8], off: usize) -> Option<&[u8]> {
         let (fc, lcb) = (self.size(off), self.size(off + 4));
         if lcb == 0 {
@@ -314,9 +293,6 @@ impl<'a> Fib<'a> {
     }
 }
 
-/// The PLC whose FIB `fc`/`lcb` pair sits at `fib_off`: empty when `lcb` is
-/// 0, `None` when it does not lie in the table stream or holds no whole
-/// number of records.
 fn read_plc<'t>(
     fib: Fib<'_>,
     table: &'t [u8],
@@ -330,7 +306,6 @@ fn read_plc<'t>(
     Plc::new(bytes, data_size)
 }
 
-/// Count each header and footer story the sections hold.
 fn report_side_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
     if let Some(hdd) = read_plc(fib, table, Fib::FC_PLCF_HDD, 0) {
         let sections = hdd.n.saturating_sub(1).saturating_sub(6) / 6;
@@ -345,9 +320,6 @@ fn report_side_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], sto
     }
 }
 
-/// Count the header and footer stories, which this reader renders only under
-/// `HeaderFooterPolicy::Emit`, the comments omitted by policy, and the body text-box
-/// stories, which it never reads; a story whose table does not read counts once.
 fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], stories: &Stories) {
     if !parse_ctx.headers_footers_requested() {
         report_side_stories(parse_ctx, fib, table, stories);
@@ -366,7 +338,6 @@ fn report_unread_stories(parse_ctx: &ParseCtx<'_>, fib: Fib<'_>, table: &[u8], s
     }
 }
 
-/// What a floating shape the main document anchors shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ShapeKind {
     Picture,
@@ -374,8 +345,6 @@ enum ShapeKind {
     Graphic,
 }
 
-/// The kind of shape each main-document anchor CP names, from `PlcSpaMom`
-/// and the main drawing of the `OfficeArtContent`.
 fn floating_shapes(
     parse_ctx: &ParseCtx<'_>,
     fib: Fib<'_>,
@@ -396,8 +365,6 @@ fn floating_shapes(
         .collect())
 }
 
-/// The main document's `OfficeArtDgContainer` in an `OfficeArtContent`: the
-/// drawing whose `dgglbl` is 0, after the `OfficeArtDggContainer`.
 fn main_drawing(content: &[u8]) -> Option<&[u8]> {
     let dgg = record_at(content, 0)?.body;
     let mut rest = content.get(8 + dgg.len()..)?;
@@ -412,8 +379,6 @@ fn main_drawing(content: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// Each shape's kind by `spid` (0 when it has none), over every shape
-/// container in the OfficeArt records of `run`.
 fn shape_kinds(
     parse_ctx: &ParseCtx<'_>,
     run: &[u8],
@@ -445,8 +410,6 @@ fn shape_kinds(
     Ok(kinds)
 }
 
-/// `kind` updated by an OfficeArt property table of `count` entries: a
-/// `pib` makes a picture, an `lTxid` a text box.
 fn shape_kind(kind: ShapeKind, count: u16, props: &[u8]) -> ShapeKind {
     officeart::properties(count, props).fold(kind, |kind, (id, _)| match (id, kind) {
         (officeart::PIB, _) => ShapeKind::Picture,
@@ -473,7 +436,6 @@ mod tests {
     use crate::HeaderFooterPolicy;
     mod sides;
 
-    /// The Markdown `document` renders to.
     fn markdown_of_document(document: &Document) -> String {
         crate::render::markdown::document_to_markdown(document)
     }
@@ -891,15 +853,12 @@ mod tests {
 
     #[test]
     fn tdef_table_parses_boundaries_and_merge_flags() {
-        // sprmTDefTable operand: cb, 2 columns, 3 boundaries, 2 TC80s where
-        // the second cell continues a vertical merge.
         let mut operand: Vec<u8> = Vec::new();
         operand.extend_from_slice(&0u16.to_le_bytes()); // cb (unused here)
         operand.push(2); // columns
         for b in [0i16, 4000, 8000] {
             operand.extend_from_slice(&b.to_le_bytes());
         }
-        // TC80: tcgrf + wWidth + 4 borders.
         let tc80 = |tcgrf: u16| {
             let mut v = tcgrf.to_le_bytes().to_vec();
             v.extend_from_slice(&[0; 18]);
@@ -942,22 +901,15 @@ mod tests {
 
     const TEXT_FC: usize = 0x800;
 
-    /// Where a piece of no text points: past every stream a case builds.
     const PAST_STREAM: u32 = 0x10000;
 
-    /// A Word 97 DOC whose main text is `text` in one compressed piece, with
-    /// the FIB fields, table-stream structures and Data stream a case adds.
-    /// Its piece table is written last, a piece of zero bytes after the
-    /// pieces covering what the stories declare past them.
     struct DocBuilder {
         word_doc: Vec<u8>,
         table: Vec<u8>,
         data: Option<Vec<u8>>,
         prcs: Vec<Vec<u8>>,
-        /// `(cp_end, fc, prm)` of each piece.
         pieces: Vec<(u32, u32, u16)>,
         cb_mac: Option<u32>,
-        /// Whether the FIB names a piece table.
         clx: bool,
     }
 
@@ -997,27 +949,21 @@ mod tests {
             self.fib16(0x06, lid)
         }
 
-        /// `fFarEast` set beside the other FIB flags, and `lidFE`.
         fn far_east(self, lid_fe: u16) -> Self {
             let flags = get_u16(&self.word_doc, Fib::FLAGS).unwrap() | 0x4000;
             self.fib16(Fib::FLAGS, flags).fib16(0x3C, lid_fe)
         }
 
-        /// `bytes` appended to the table stream, named by the FIB pair at `off`.
         fn table(mut self, off: usize, bytes: &[u8]) -> Self {
             let fc = u32::try_from(self.table.len()).unwrap();
             self.table.extend_from_slice(bytes);
             self.fib(off, fc).fib(off + 4, u32::try_from(bytes.len()).unwrap())
         }
 
-        /// A piece table of `(cp_end, text, unicode, prm)` pieces whose text
-        /// is appended to the WordDocument stream.
         fn pieces(self, pieces: &[(u32, &[u8], bool, u16)]) -> Self {
             self.clx(&[], pieces)
         }
 
-        /// [`Self::pieces`] after the property modifiers `prcs`, which a
-        /// complex `prm` names by index.
         fn clx(mut self, prcs: &[&[u8]], pieces: &[(u32, &[u8], bool, u16)]) -> Self {
             self.prcs = prcs.iter().map(|grpprl| grpprl.to_vec()).collect();
             self.pieces.clear();
@@ -1039,14 +985,12 @@ mod tests {
             Self { cb_mac: Some(2 * PAST_STREAM), ..self }
         }
 
-        /// The last CP the FIB's stories declare.
         fn terminal_cp(&self) -> u32 {
             let ccp = |off| get_u32(&self.word_doc, off).unwrap();
             let others = [0x50, 0x54, 0x5C, 0x60, 0x64, 0x68].map(ccp);
             ccp(0x4C) + others.iter().sum::<u32>() + u32::from(others.iter().any(|&n| n > 0))
         }
 
-        /// The piece table written, its last piece reaching the terminal CP.
         fn covered(mut self) -> Self {
             if !self.clx {
                 return self;
@@ -1067,14 +1011,11 @@ mod tests {
             self.table(0x1A2, &table)
         }
 
-        /// One CHPX FKP page giving the text `grpprl`.
         fn chpx(self, grpprl: &[u8]) -> Self {
             let bytes = u32::try_from(self.word_doc.len() - TEXT_FC).unwrap();
             self.chpx_runs(&[(bytes, grpprl)])
         }
 
-        /// One CHPX FKP page giving each run of `(bytes, grpprl)` the next
-        /// `bytes` of the text and its sprms.
         fn chpx_runs(self, runs: &[(u32, &[u8])]) -> Self {
             let entries: Vec<_> = runs
                 .iter()
@@ -1086,14 +1027,11 @@ mod tests {
             self.fkp(2, 0xFA, 1, &entries)
         }
 
-        /// One PAPX FKP page giving each run of `(bytes, grpprl)` the next
-        /// `bytes` of the main text and its sprms.
         fn papx(self, runs: &[(u32, &[u8])]) -> Self {
             let styled: Vec<_> = runs.iter().map(|&(bytes, grpprl)| (bytes, 0, grpprl)).collect();
             self.styled_papx(&styled)
         }
 
-        /// [`Self::papx`] with each run's paragraph style `istd`.
         fn styled_papx(self, runs: &[(u32, u16, &[u8])]) -> Self {
             let entries: Vec<_> = runs
                 .iter()
@@ -1107,9 +1045,6 @@ mod tests {
             self.fkp(3, 0x102, 13, &entries)
         }
 
-        /// FKP page `pn`, named by the bin table at FIB `fib_off`, giving each
-        /// run of `(bytes, entry)` the next `bytes` of the text and its entry,
-        /// none when empty, through offsets `rgb` bytes apart.
         fn fkp(mut self, pn: usize, fib_off: usize, rgb: usize, runs: &[(u32, Vec<u8>)]) -> Self {
             let fkp = &mut self.word_doc[pn * 512..(pn + 1) * 512];
             let mut fc = TEXT_FC as u32;
@@ -1128,8 +1063,6 @@ mod tests {
             self.table(fib_off, &words(&[TEXT_FC as u32, fc, pn as u32]))
         }
 
-        /// One simple list whose `PlfLst` is `lcb` bytes, its level `lvl`
-        /// after them, and the overrides `plf_lfo`.
         fn lists(self, lcb: usize, lvl: &[u8], plf_lfo: &[u8]) -> Self {
             let mut plf = vec![0u8; lcb];
             plf[0] = 1;
@@ -1138,15 +1071,12 @@ mod tests {
             self.table(0x2E2, &[&plf[..], lvl].concat()).fib(0x2E6, lcb).table(0x2EA, plf_lfo)
         }
 
-        /// A footnote story of `len` CPs after the main text, its reference
-        /// at CP 0.
         fn footnote(self, len: u32) -> Self {
             self.fib(0x50, len)
                 .table(0xAA, &[words(&[0, 1]), vec![0, 0]].concat())
                 .table(0xB2, &words(&[0, len]))
         }
 
-        /// An endnote story of `len` CPs, its reference at CP 0.
         fn endnote(self, len: u32) -> Self {
             self.fib(0x60, len)
                 .table(0x20A, &[words(&[0, 1]), vec![0, 0]].concat())
@@ -1157,8 +1087,6 @@ mod tests {
             Self { data: Some(data), ..self }
         }
 
-        /// The compound file, its FIB's `cbMac` the WordDocument stream's
-        /// length unless a case sets one.
         fn bytes(self) -> Vec<u8> {
             use std::io::Write;
             let doc = self.covered();
@@ -1175,7 +1103,6 @@ mod tests {
         }
     }
 
-    /// An STSH of paragraph styles `(sti, istd_base, chpx)` from istd 0.
     fn stsh(styles: &[(u16, u16, &[u8])]) -> Vec<u8> {
         let rows: Vec<_> = styles
             .iter()
@@ -1192,7 +1119,6 @@ mod tests {
 
     use StyleKind::{Character as Char, Paragraph as Para};
 
-    /// An STSH of styles `(kind, sti, istd_base, chpx)` from istd 0.
     fn style_sheet(styles: &[(StyleKind, u16, u16, &[u8])]) -> Vec<u8> {
         let cstd = u16::try_from(styles.len()).unwrap();
         let mut stsh = [4u16, cstd, 10].map(u16::to_le_bytes).concat();
@@ -1215,7 +1141,6 @@ mod tests {
         stsh
     }
 
-    /// An FFN naming `name`, its alternate name absent.
     pub(super) fn ffn(name: &str) -> Vec<u8> {
         let mut ffn = vec![0u8; fonts::FFN_NAME];
         ffn.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
@@ -1227,14 +1152,12 @@ mod tests {
     /// [MS-DOC] FFN `chs`: the character set a symbol font declares.
     pub(super) const SYMBOL_CHARSET: u8 = 2;
 
-    /// An FFN naming `name` in the character set `chs`.
     pub(super) fn ffn_in(name: &str, chs: u8) -> Vec<u8> {
         let mut ffn = ffn(name);
         ffn[FFN_CHS] = chs;
         ffn
     }
 
-    /// A `SttbfFfn` of the `entries`, each prefixed by its length.
     pub(super) fn sttbf_ffn(entries: &[Vec<u8>]) -> Vec<u8> {
         let count = u16::try_from(entries.len()).unwrap();
         let mut sttb = [count, 0].map(u16::to_le_bytes).concat();
@@ -1253,7 +1176,6 @@ mod tests {
         units.iter().flat_map(|u| u.to_le_bytes()).collect()
     }
 
-    /// A Clx of the `prcs` and a `PlcPcd` over the CPs `cps` whose pieces are `(fc, prm)`.
     pub(super) fn clx(prcs: &[&[u8]], cps: &[u32], pcds: &[(u32, u16)]) -> Vec<u8> {
         let prcs = prcs.iter().flat_map(|grpprl| {
             let cb = u16::try_from(grpprl.len()).unwrap().to_le_bytes();
@@ -1267,7 +1189,6 @@ mod tests {
         prcs.chain([2]).chain(len).chain(plc).collect()
     }
 
-    /// A shape container for `spid` with the property ids `props`.
     fn shape(spid: u32, props: &[u16]) -> Vec<u8> {
         let table: Vec<u8> =
             props.iter().flat_map(|id| [&id.to_le_bytes()[..], &[0; 4]].concat()).collect();
@@ -1276,13 +1197,10 @@ mod tests {
         record(0x000F, 0xF004, &[sp, opt].concat())
     }
 
-    /// A floating shape anchored at CP 0 of `"\x08\r"`, drawn by `drawn`.
     fn floating(spid: u32, drawn: &[u8]) -> Vec<u8> {
         anchoring(DocBuilder::new(b"\x08\r"), 0, spid, &[(0, drawn)]).bytes()
     }
 
-    /// `doc` with a floating shape anchored at CP `cp`, over the drawings
-    /// `(dgglbl, drawn)`.
     fn anchoring(doc: DocBuilder, cp: u32, spid: u32, drawings: &[(u8, &[u8])]) -> DocBuilder {
         let mut dgg = record(0x000F, 0xF000, &[]);
         for &(dgglbl, drawn) in drawings {
@@ -1293,27 +1211,21 @@ mod tests {
         doc.table(0x1DA, &spa).table(0x22A, &dgg)
     }
 
-    /// A document of `text` whose floating shape, drawn by `drawn`, is anchored at CP `cp`.
     fn anchored_at(cp: u32, text: &[u8], drawn: &[u8]) -> Vec<u8> {
         anchoring(DocBuilder::new(text), cp, 7, &[(0, drawn)]).bytes()
     }
 
     const SHAPE_FIELD: &[u8] = b"\x13 SHAPE \x14\x01\x15\r";
 
-    /// Inline picture data whose art is `art`, for every `\x01` of `text`.
     fn inline_art(text: &[u8], art: &[u8]) -> Vec<u8> {
         let data = [&words(&[6 + u32::try_from(art.len()).unwrap()])[..], &[6, 0], art].concat();
         DocBuilder::new(text).chpx(PIC_LOCATION_CHPX).data(data).bytes()
     }
 
-    /// A document whose main text is the UTF-16 of `text`, with `~` an
-    /// unpaired surrogate.
     fn damaged(text: &str) -> Vec<u8> {
         pieced(&[Some(text)]).bytes()
     }
 
-    /// A main document of a UTF-16 piece for each part, with `~` an unpaired
-    /// surrogate, and a piece of one CP outside the stream for each `None`.
     fn pieced(parts: &[Option<&str>]) -> DocBuilder {
         let texts: Vec<Vec<u8>> = parts
             .iter()
@@ -2043,7 +1955,6 @@ mod tests {
         );
     }
 
-    /// `text` whose paragraph properties are `papx`, under one bulleted list of `lsid`.
     fn bulleted_doc(text: &[u8], lsid: u32, papx: &[(u32, &[u8])]) -> Vec<u8> {
         let mut plf = [0u8; 30];
         plf[0] = 1;
@@ -2094,13 +2005,11 @@ mod tests {
         [0x30, 0x4A, istd, 0]
     }
 
-    /// `a` as one paragraph of style `istd` under `styles`, with run properties `chpx`.
     fn run_in(styles: &[u8], istd: u16, chpx: &[u8]) -> (String, Vec<Reported>) {
         let doc = DocBuilder::new(b"a\r").table(0xA2, styles).styled_papx(&[(2, istd, &[])]);
         converted(&doc.chpx(chpx).bytes())
     }
 
-    /// `a` as the one piece of a paragraph in style 0, whose complex modifier is `prc`.
     fn piece_in(styles: &[u8], chpx: &[u8], prc: &[u8]) -> (String, Vec<Reported>) {
         let doc = DocBuilder::new(b"").fib(0x4C, 2).table(0xA2, styles);
         converted(&doc.clx(&[prc], &[(2, b"a\r", false, 1)]).chpx(chpx).bytes())
@@ -2108,7 +2017,6 @@ mod tests {
 
     type TextRuns<'a> = &'a [(&'a str, &'a [u8])];
 
-    /// A document whose main text is the runs' text.
     fn runs_doc(runs: TextRuns<'_>) -> DocBuilder {
         let text: String = runs.iter().map(|&(text, _)| text).collect();
         let chpx: Vec<(u32, &[u8])> = runs
@@ -3294,7 +3202,6 @@ mod tests {
         }
     }
 
-    /// A style sheet whose paragraph style 0 is a code block.
     fn code_styles() -> Vec<u8> {
         let mut record = [0x0FFEu16, 0xFFF1, 2, 0, 0].map(u16::to_le_bytes).concat();
         let name: Vec<u16> = "Source Code".encode_utf16().collect();
@@ -3485,8 +3392,6 @@ mod tests {
         assert_eq!(reported, [(DiagnosticCode::InvalidEncoding, Region::Note, 1)]);
     }
 
-    /// A pair and a paragraph mark under the CHPX `pair`, with a footnote's reference on
-    /// the pair's trailing unit.
     fn a_reference_inside_a_pair(pair: &[u8]) -> (String, Vec<Reported>) {
         let main = utf16(&[0xD83D, 0xDE00, 0x0D]);
         let doc = DocBuilder::new(b"")
@@ -3632,7 +3537,6 @@ mod tests {
         sttbf_ffn(&[&[ffn("Times New Roman")][..], &symbol_set].concat())
     }
 
-    /// `sprmCRgFtc0`, `sprmCRgFtc1` and `sprmCRgFtc2` naming `ftc`.
     fn in_font(ftc: u8) -> [u8; 12] {
         [0x4F, 0x4A, ftc, 0, 0x50, 0x4A, ftc, 0, 0x51, 0x4A, ftc, 0]
     }
@@ -3645,7 +3549,6 @@ mod tests {
         [&[0x09, 0x6A, ftc, 0][..], &xchar.to_le_bytes()].concat()
     }
 
-    /// A document whose main text is the UTF-16 runs' text, without a font table.
     fn unicode_runs(runs: TextRuns<'_>) -> DocBuilder {
         let units = |text: &str| u32::try_from(text.encode_utf16().count()).unwrap();
         let text: Vec<u8> = runs
@@ -3703,11 +3606,8 @@ mod tests {
         assert_eq!((shown.as_str(), reported), ("[^1]a\n\n[^1]: \u{3bd}\n", vec![]));
     }
 
-    /// A case, its style sheet, run and piece modifiers, and what `m` shows.
     type LayerRow = (&'static str, Vec<u8>, Vec<u8>, Vec<u8>, &'static str);
 
-    /// `m` as the one piece of a paragraph in style 0 under `styles`, its run `chpx` and its
-    /// complex modifier `prc`, set in the font table.
     fn styled_m(styles: &[u8], chpx: &[u8], prc: &[u8]) -> String {
         let doc = DocBuilder::new(b"").fib(Fib::CCP_TEXT, 2).table(Fib::FC_STSHF, styles);
         let (shown, reported) = with_fonts(doc.clx(&[prc], &[(2, b"m\r", false, 1)]).chpx(chpx));
@@ -3803,11 +3703,8 @@ mod tests {
         }
     }
 
-    /// A case, its Stshi length and default fonts, its text and run modifiers, and what shows.
     type DefaultRow = (&'static str, u16, [u16; 4], &'static str, &'static [u8], &'static str);
 
-    /// An STSH of no styles whose Stshi is `cb_stshi` bytes of a 20-byte one, followed by
-    /// what remains of it, naming the default fonts `ftcs`.
     fn default_fonts(cb_stshi: u16, ftcs: [u16; 4]) -> Vec<u8> {
         let stshi: Vec<u8> =
             [0, 10, 0, 0, 0, 0].into_iter().chain(ftcs).flat_map(u16::to_le_bytes).collect();

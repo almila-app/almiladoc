@@ -10,31 +10,23 @@ paths:
 
 # Documents
 
-Write compact English only for a concrete next action. Link to a fact's owner instead of copying it.
-Add docs only for essential guidance absent from code or existing docs; update stale docs with code.
-Agent instructions carry no dates, tickets, incident history, reports or status; use issues and git.
+- Link canonical facts; add docs only for an essential action absent from source/existing docs.
+- Instructions exclude dates, tickets, incidents, reports/status; use issues/git.
+- Owners: API/examples → rustdoc; install/overview → README (Rust blocks doctested);
+  contribution terms → CONTRIBUTING; decisions → `docs/adr/`; ordered open work → roadmap;
+  format losses → support; file licences → NOTICE/REUSE; agent invariants → CLAUDE;
+  scoped conventions → rules; recurring procedures/check selection → skills/verify.
 
-| Fact | Owner |
-|---|---|
-| install, usage, API | rustdoc: API reference and examples; README: install and overview, its Rust blocks doctested |
-| contribution terms | CONTRIBUTING.md |
-| decisions | `docs/adr/` |
-| open work, in order; what each reader leaves out, per format | `docs/roadmap.md`; `docs/support.md` |
-| licence of each file | NOTICE, REUSE.toml |
-| invariants, commands and traps for agents | AGENTS.md |
-| a file type's conventions | a rule in `.claude/rules/` scoped to it |
-| a recurring procedure; gate selection | its skill; `.claude/skills/verify/` |
-
-## Budgets of the instruction files, which load into context
+## Context budgets
 
 | File | Ceiling |
 |---|---|
-| `**/AGENTS.md` | 120 lines |
-| `**/CLAUDE.md` | 5 lines |
+| `**/CLAUDE.md` | 100 lines |
 | `.claude/rules/*.md` | 40 lines |
 | `.claude/skills/*/SKILL.md` | 80 lines |
 | `.claude/agents/*.md` | 60 lines |
 | every line of the above | 100 columns; table rows excepted |
 
-A rule's `paths` stay narrow, or it loads every session. `check_setup.py` enforces a tracked setup,
-ignored local files, this table, scoping, no home path, IP, e-mail, host, date, ticket or plan id.
+- Keep `paths` narrow; unscoped rules load every session.
+- `check_setup.py` enforces entry points, tracking, local ignores, budgets/scoping and excludes
+  home paths, IPs, e-mails, hosts, dates, tickets and plan ids from setup.

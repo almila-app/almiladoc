@@ -52,7 +52,6 @@ pub(super) const SPRM_T_TABLE_HEADER: u16 = 0x3404;
 pub(super) const SPRM_T_DEF_TABLE: u16 = 0xD608;
 pub(super) const SPRM_T_VERT_MERGE: u16 = 0xD62B;
 
-/// The `sprmPIlfo` operand of a paragraph whose list numbering is suppressed.
 const ILFO_SUPPRESSED: u16 = 0xF801;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -66,7 +65,6 @@ pub(super) struct Chp {
 }
 
 impl Chp {
-    /// These properties with the ones a style reference or `sprmCPlain` leaves as `run` has them.
     fn keeping(self, run: Self) -> Self {
         Self { deleted: run.deleted, inserted: run.inserted, direct: run.direct, ..self }
     }
@@ -114,7 +112,6 @@ impl Fonts<Option<u16>> {
     }
 }
 
-/// A `sprmCSymbol` operand: the character `xchar` in the font `ftc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Symbol {
     pub ftc: u16,
@@ -125,7 +122,6 @@ pub(super) struct Symbol {
 pub(super) const HINT_EAST_ASIA: u8 = 1;
 pub(super) const HINT_COMPLEX: u8 = 2;
 
-/// The properties only direct formatting sets, which a style reference and `sprmCPlain` keep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Direct {
     pub symbol: Option<Symbol>,
@@ -231,7 +227,6 @@ fn sprm_operand_len(sprm: u16, operand: &[u8]) -> usize {
     }
 }
 
-/// Each sprm of `grpprl` with its operand, up to the first operand that does not fit.
 fn sprms(grpprl: &[u8]) -> impl Iterator<Item = (u16, &[u8])> + '_ {
     let mut reader = ByteReader::new(grpprl);
     std::iter::from_fn(move || {
@@ -249,14 +244,10 @@ fn is_on(operand: &[u8]) -> bool {
     operand.first().is_some_and(|&v| v != 0)
 }
 
-/// Whether a CHPX sets the one-byte flag `flag`: `sprmCFOle2` marks an
-/// embedded object, `sprmCFData` field data.
 pub(super) fn sets_flag(chpx: &[u8], flag: u16) -> bool {
     last_operand(chpx, flag).is_some_and(is_on)
 }
 
-/// The `sprmCPicLocation` Data-stream offset in a CHPX, if any: where an
-/// inline picture's PICF + OfficeArt data begins.
 pub(super) fn chpx_pic_location(grpprl: &[u8]) -> Option<u32> {
     last_operand(grpprl, SPRM_C_PIC_LOCATION).and_then(|operand| get_u32(operand, 0))
 }
@@ -270,11 +261,6 @@ fn vertical_position(operand: &[u8]) -> Option<VerticalPosition> {
     }
 }
 
-/// The character properties of a run: `paragraph`'s, then `grpprls` (CHPX, then the piece's Prm)
-/// applied in order, their bytes charged first. A `sprmCIstd` resets all but a deletion and the
-/// [`Direct`] properties to `paragraph` with its character style over it, `sprmCPlain` to
-/// `paragraph` alone, and later toggles resolve against that. The flag reports a `sprmCIstd` that
-/// names no character style.
 pub(super) fn direct_chp(
     parse_ctx: &ParseCtx<'_>,
     paragraph: Chp,
@@ -329,19 +315,13 @@ fn toggle(operand: &[u8], below: bool, value: &mut bool) {
     }
 }
 
-/// A row's table properties from `sprmTDefTable` and its companion table
-/// sprms in the row-end PAPX (TAPX).
 #[derive(Debug, Clone, Default)]
 pub(super) struct Tap {
-    /// Cell boundary positions in twips (`rgdxaCenter`), one more entry
-    /// than the cell count.
     pub boundaries: Vec<i16>,
     pub cells: Vec<TapCell>,
-    /// `sprmTTableHeader`: the row repeats as a header row.
     pub header: bool,
 }
 
-/// Merge flags of one cell (TC80 `tcgrf` / `sprmTVertMerge`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct TapCell {
     pub horz_first: bool,
@@ -350,7 +330,6 @@ pub(super) struct TapCell {
     pub vert_cont: bool,
 }
 
-/// Paragraph properties a PAPX (or style PAPX) contributes.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PapDelta {
     pub in_table: Option<bool>,
@@ -358,19 +337,13 @@ pub(super) struct PapDelta {
     pub outline: Outline,
     pub ilfo: Option<u16>,
     pub ilvl: Option<u8>,
-    /// `sprmPItap` table depth (1 = a regular table).
     pub itap: Option<i32>,
-    /// `sprmPFInnerTableCell` / `sprmPFInnerTtp`: nested-table cell/row
-    /// terminators.
     pub inner_cell: Option<bool>,
     pub inner_ttp: Option<bool>,
-    /// Row properties, present on TTP marks.
     pub tap: Option<Tap>,
 }
 
 impl PapDelta {
-    /// The list override (`ilfo`) and level a paragraph is numbered by, unless
-    /// it has none or suppresses it.
     pub(super) fn numbering(&self) -> Option<(u16, usize)> {
         let ilfo = self.ilfo.unwrap_or(0);
         (ilfo != 0 && ilfo != ILFO_SUPPRESSED)
@@ -392,7 +365,6 @@ impl PapDelta {
     }
 }
 
-/// The grpprl `sprmPHugePapx` names in the Data stream, when it lies inside.
 fn huge_papx<'d>(operand: &[u8], data: &'d [u8]) -> Option<&'d [u8]> {
     let off = get_u32(operand, 0)? as usize;
     let cb = get_u16(data, off)? as usize;
@@ -459,8 +431,6 @@ pub(super) fn apply_pap_sprms(
     Ok(())
 }
 
-/// Parse a `TDefTableOperand`: cb, NumberOfColumns, `rgdxaCenter`
-/// boundaries, then TC80 records (which may be fewer than the columns).
 fn parse_tdef_table(operand: &[u8]) -> Option<Tap> {
     const TC80_SIZE: usize = 20;
     let columns = *operand.get(2)? as usize;
@@ -476,7 +446,6 @@ fn parse_tdef_table(operand: &[u8]) -> Option<Tap> {
         let Some(tcgrf) = get_u16(operand, tc_base + i * TC80_SIZE) else {
             break; // fewer TC80s than columns: defaults apply
         };
-        // TCGRF: horzMerge (bits 0-1), textFlow (2-4), vertMerge (5-6).
         let horz = tcgrf & 0x3;
         cell.horz_cont = horz == 1;
         cell.horz_first = horz >= 2;
@@ -512,8 +481,6 @@ const FORBIDDEN_IN_STYLE: [u16; 21] = [
     SPRM_CF_COMPLEX_SCRIPTS,
 ];
 
-/// A style's CHPX grpprl as one layer, and whether it held a sprm a style may not. Within the
-/// layer the last valid operand of a property decides; toggles resolve against the layer below.
 pub(super) fn compile_style_chpx(grpprl: &[u8]) -> (CharOps, bool) {
     let mut ops = CharOps::default();
     let mut forbidden = false;

@@ -1,8 +1,3 @@
-//! OOXML PresentationML (.pptx / .pptm / .ppsx): slides in `sldIdLst` order,
-//! with the full text cascade - slide -> layout -> master placeholder /
-//! `txStyles` -> presentation defaults. Speaker notes are included (fixed
-//! policy), rendered as a quote after each slide's content.
-
 mod cascade;
 mod comments;
 
@@ -53,12 +48,8 @@ const P14: &str = "http://schemas.microsoft.com/office/powerpoint/2010/main";
 const TEXT_BODY_LIST: u64 = 0;
 const MEDIA: &[&str] = &["videoFile", "audioFile", "wavAudioFile", "quickTimeFile", "audioCd"];
 const FOOTERS: &[&str] = &["sldNum", "dt", "ftr"];
-/// `hlinkClick` actions that carry their destination themselves; any other
-/// destination is named by relationship.
 const NAVIGATION: &[&str] = &["ppaction://hlinkshowjump", "ppaction://customshow"];
 
-/// Namespaces whose markup this frontend understands; `mc:Choice` branches
-/// requiring anything else fall back to `mc:Fallback`.
 const SUPPORTED_NS: &[&str] = &[ns::P, ns::A, ns::R, ns::MC, ns::A14];
 
 struct LayoutInfo {
@@ -76,18 +67,14 @@ struct MasterInfo {
     backdrop: Backdrop,
     theme: ThemeFills,
     part: TemplatePart,
-    /// The theme's path, tree and relationships, which its picture fills resolve through.
     theme_part: Option<(String, TemplatePart)>,
 }
 
-/// A layout's or master's tree and relationships, which its own shapes and background resolve
-/// through.
 struct TemplatePart {
     tree: Option<Element>,
     rels: Relationships,
 }
 
-/// What a slide, layout or master shows besides its placeholders.
 struct Backdrop {
     shapes: bool,
     shows_master: bool,
@@ -130,8 +117,6 @@ impl Backdrop {
     }
 }
 
-/// Which theme fill styles are pictures, by the index `p:bgRef` gives them:
-/// `1..=999` into the fill styles, `1001..` into the background fills.
 #[derive(Default)]
 struct ThemeFills {
     fills: Vec<bool>,
@@ -149,7 +134,6 @@ impl ThemeFills {
         Self { fills: pictures("fillStyleLst"), backgrounds: pictures("bgFillStyleLst") }
     }
 
-    /// The blip of the picture fill `idx` names.
     fn fill(theme: &Element, idx: u32) -> Option<&Element> {
         let (list, first) =
             if idx >= 1001 { ("bgFillStyleLst", 1001) } else { ("fillStyleLst", 1) };
@@ -369,8 +353,6 @@ fn rel_target_of_type(rels: &Relationships, base: &str, rel_type: &str) -> Optio
         .map(|t| t.path)
 }
 
-/// A related part's tree when it parses and its root is `p:{root}`; one
-/// rooted elsewhere is reported by `role`.
 fn rooted_part(
     parse_ctx: &ParseCtx<'_>,
     pkg: &Package<'_>,
@@ -448,9 +430,6 @@ fn load_master(
     })
 }
 
-/// Report what a slide shows from its layout and master, each part once
-/// (`repeated` holds those reported), and its effective background picture:
-/// its own is lost, a layout's, master's or theme's repeats on every slide.
 fn report_repeated(
     parse_ctx: &ParseCtx<'_>,
     slide: Option<&Element>,
@@ -497,8 +476,6 @@ fn report_repeated(
     }
 }
 
-/// Write a slide: under `HeaderFooterPolicy::Emit` its header and footer, then its shapes and
-/// its notes page.
 fn write_slide(
     ctx: &SlideCtx<'_, '_>,
     (slide, sp_tree): (Option<&Element>, &Element),
@@ -522,7 +499,6 @@ fn write_slide(
     Ok(())
 }
 
-/// The side a slide-number, date, footer or header placeholder shows on.
 fn running_side(ph_type: &str) -> Option<Side> {
     match ph_type {
         kind if FOOTERS.contains(&kind) => Some(Side::Footer),
@@ -531,7 +507,6 @@ fn running_side(ph_type: &str) -> Option<Side> {
     }
 }
 
-/// Read a header or footer placeholder into the page's sides, else report it when it shows text.
 fn side_placeholder(
     sp: &Element,
     ctx: &SlideCtx<'_, '_>,
@@ -570,16 +545,12 @@ struct SlideCtx<'a, 'b> {
     default_text: &'b LevelStyle,
     layout: Option<&'b LayoutInfo>,
     master: Option<&'b MasterInfo>,
-    /// Slide part path -> the slide's unit, for internal slide-to-slide links.
     slide_units: &'b HashMap<&'b str, Unit>,
-    /// Where the page's header and footer placeholders go under `HeaderFooterPolicy::Emit`.
     sides: Option<&'b RefCell<PageSides>>,
     damage: Option<&'b crate::shared::xml::DamageScope>,
 }
 
 impl SlideCtx<'_, '_> {
-    /// Slide-to-slide relationships become links to the target slide's unit;
-    /// everything else classifies as usual.
     fn link_target(&self, rel: &Relationship) -> LinkTarget {
         if rel.mode == TargetMode::Internal
             && let Ok(t) = path::resolve(self.base_part, &rel.target)
@@ -601,7 +572,6 @@ impl SlideCtx<'_, '_> {
         target
     }
 
-    /// Fold the cascade for a paragraph, outermost first.
     fn base_props(&self, ph: Option<Ph<'_>>, shape_styles: &LevelStyle, lvl: usize) -> TextProps {
         let mut props = self.default_text.level(lvl);
         if let Some(master) = self.master {
@@ -639,8 +609,6 @@ impl SlideCtx<'_, '_> {
         (lvl, ppr.map_or(props, |ppr| props.merge(cascade::paragraph_props(ppr))))
     }
 
-    /// The slide's notes page as a quote, its header and footer first where `timeline` keeps
-    /// them.
     fn speaker_notes(
         &self,
         timeline: Option<&mut SideTimeline>,
@@ -705,8 +673,6 @@ impl SlideCtx<'_, '_> {
     }
 }
 
-/// Whether a slide shows `elem`: its slide-number, date and footer
-/// placeholders it does not.
 fn renders(elem: &Element) -> bool {
     !hidden_shape(elem) && renders_hidden(elem)
 }
@@ -720,13 +686,10 @@ fn reads_hidden(elem: &Element) -> bool {
     elem.ns.as_deref() != Some(ns::VML) && renders_hidden(elem)
 }
 
-/// Whether this reader reads `elem` where a slide shows it: never VML.
 fn reads(elem: &Element) -> bool {
     elem.ns.as_deref() != Some(ns::VML) && renders(elem)
 }
 
-/// `parent`'s children in order, each `mc:AlternateContent` replaced by the
-/// children of its selected branch, whose declined choices report in `region`.
 fn selected_children<'e>(
     parse_ctx: &ParseCtx<'_>,
     region: Region,
@@ -755,7 +718,6 @@ fn selected_children<'e>(
     selected
 }
 
-/// The first of `content`, or of their descendants, that is `namespace:local`.
 fn first_in<'e>(content: &[&'e Element], namespace: &str, local: &str) -> Option<&'e Element> {
     content.iter().find_map(|elem| {
         if elem.is(namespace, local) {
@@ -794,7 +756,6 @@ fn parse_shape_element(
         return Ok(());
     }
     match child.local.as_str() {
-        // Connector shapes carry the same `p:txBody` as plain shapes.
         "sp" | "cxnSp" => parse_shape(child, ctx, blocks)?,
         "grpSp" => parse_shapes(child, ctx, blocks)?,
         "graphicFrame" => parse_graphic_frame(child, ctx, blocks)?,
@@ -809,14 +770,10 @@ fn parse_shape_element(
 type Kept<'k> =
     (&'k mut HashMap<(String, Piece), Decoration>, &'k mut (SideTimeline, SideTimeline));
 
-/// A slide's layout and master, each with its part path.
 type Templated<'t> = (Option<(&'t str, &'t LayoutInfo)>, Option<(&'t str, &'t MasterInfo)>);
 
-/// A layout's or master's own content read once: what it holds and what reading it reported.
 type Decoration = (Vec<Block>, crate::diagnostics::Diagnostics);
 
-/// What a slide shows of a template part: its own shapes, its picture background, or the theme
-/// fill a `p:bgRef` names.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Piece {
     Shapes,
@@ -824,10 +781,6 @@ enum Piece {
     Theme(u32),
 }
 
-/// Under `HeaderFooterPolicy::Emit`, add the layout and master content a slide shows to its
-/// header: the picture background it takes from them, then the master's own shapes and the
-/// layout's, where each level shows the one above it. A slide's own picture background is
-/// unplaced; a theme's picture a `p:bgRef` names reads through the theme's relationships.
 fn decorate(
     ctx: &SlideCtx<'_, '_>,
     slide: Option<&Element>,
@@ -897,8 +850,6 @@ fn decorate(
     Ok(())
 }
 
-/// A layout's or master's own shapes, those no placeholder holds, its picture background, or a
-/// theme's picture fill.
 fn part_content(
     part: &TemplatePart,
     ctx: &SlideCtx<'_, '_>,
@@ -939,7 +890,6 @@ fn part_content(
     Ok(blocks)
 }
 
-/// The picture a `a:blip` shows, resolved through `ctx`'s part.
 fn push_blip(
     blocks: &mut Vec<Block>,
     ctx: &SlideCtx<'_, '_>,
@@ -955,9 +905,6 @@ fn push_blip(
     Ok(())
 }
 
-/// A picture: an external-mode target (`r:link`) becomes an external
-/// source, and an embedded one is retained as an asset. The movie or sound
-/// it plays is not read.
 fn parse_picture(
     pic: &Element,
     ctx: &SlideCtx<'_, '_>,
@@ -978,7 +925,6 @@ fn parse_picture(
     Ok(())
 }
 
-/// The source of `pic`'s blip, `Unread` when it names none or its part does not resolve.
 fn blip_source(pic: &Element, ctx: &SlideCtx<'_, '_>) -> Result<ImageSource, ConvertError> {
     let rid = pic
         .first_descendant(ns::A, "blip")
@@ -1018,8 +964,6 @@ fn push_image(blocks: &mut Vec<Block>, ctx: &SlideCtx<'_, '_>, alt: String, sour
     blocks.push(Block::Paragraph(vec![Inline::Image { origin, alt, source }]));
 }
 
-/// An embedded OLE object: its payload is retained as an asset nothing renders, and its
-/// preview picture (`p:pic`) is shown in its place under the frame's description.
 fn embedded_object(
     ole: &Element,
     frame: &Element,
@@ -1091,7 +1035,6 @@ fn parse_shape(
     Ok(())
 }
 
-/// A shape's text, title or body as its placeholder decides, and what it leaves unread.
 fn shape_content(
     sp: &Element,
     ctx: &SlideCtx<'_, '_>,
@@ -1117,8 +1060,6 @@ fn shape_content(
     }
 }
 
-/// Collapse a title placeholder's paragraphs into one slide heading. Runs
-/// resolve through the full cascade like body text.
 fn push_title_heading(
     tx: &Element,
     ctx: &SlideCtx<'_, '_>,
@@ -1329,8 +1270,6 @@ fn parse_graphic_frame(
     Ok(())
 }
 
-/// DrawingML slide table: origins carry `gridSpan`/`rowSpan`; merged
-/// continuation cells (`hMerge`/`vMerge`) consume covered positions.
 fn parse_table(
     tbl: &Element,
     ctx: &SlideCtx<'_, '_>,
@@ -1439,8 +1378,6 @@ mod tests {
         )
     }
 
-    /// A deck of the given slide parts, each listed with its own
-    /// relationship, plus `extra` parts that replace any of the same name.
     fn deck(slides: &[String], extra: &[(&str, String)]) -> Parts {
         let ids: String = (1..=slides.len())
             .map(|i| format!(r#"<p:sldId id="{}" r:id="rId{i}"/>"#, 255 + i))

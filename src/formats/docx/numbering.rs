@@ -1,7 +1,3 @@
-//! WordprocessingML numbering: `numId -> w:num` (with level overrides) `->
-//! abstractNum` (with `numStyleLink` indirection) `-> level`, plus the
-//! document-order counters that produce each paragraph's effective number.
-
 use super::styles::{on_off, val};
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
@@ -18,16 +14,10 @@ pub(super) const LEVELS: usize = crate::shared::numbering::OFFICE_LEVELS;
 
 #[derive(Debug, Clone)]
 pub(super) struct LevelDef {
-    /// `None` = suppressed numbering (`numFmt` of `none`).
     pub marker: Option<MarkerKind>,
     pub start: u64,
-    /// `w:lvlRestart`: `None` = restart when any shallower level appears,
-    /// `Some(0)` = never restart, `Some(n)` = restart when a level with
-    /// `ilvl < n` appears.
     pub restart: Option<u32>,
-    /// `w:lvlText` (with `w:isLgl`) as the shared pattern IR.
     pub pattern: NumberPattern,
-    /// `w:pStyle`: the paragraph style this level binds to.
     pstyle: Option<String>,
 }
 
@@ -43,7 +33,6 @@ impl Default for LevelDef {
     }
 }
 
-/// Identity of one `w:abstractNum`; the instances that resolve to it share one counter sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct AbstractId(usize);
 
@@ -54,8 +43,6 @@ struct AbstractNum {
     num_style_link: Option<String>,
 }
 
-/// One `w:num`: the levels of its abstract, shared with every other `w:num`
-/// of it, and only what its own `w:lvlOverride`s replace or restart.
 #[derive(Debug)]
 pub(super) struct Instance {
     base: Rc<AbstractNum>,
@@ -68,21 +55,17 @@ struct Overrides {
     starts: [Option<u64>; LEVELS],
 }
 
-/// The entry for `ilvl`, the deepest one for a level past the last.
 fn at_level<T>(levels: &[T; LEVELS], ilvl: usize) -> &T {
     &levels[LevelCounters::<LEVELS>::clamp(ilvl)]
 }
 
 impl Instance {
-    /// The level `ilvl` as this instance defines it, before its start override.
     pub(super) fn level(&self, ilvl: usize) -> &LevelDef {
         let replaced =
             self.overrides.as_ref().and_then(|held| at_level(&held.replaced, ilvl).as_deref());
         replaced.unwrap_or_else(|| at_level(&self.base.levels, ilvl))
     }
 
-    /// The number the level `ilvl` starts at: [`LevelDef::start`] alone omits the
-    /// instance's `w:startOverride`.
     fn start(&self, ilvl: usize) -> u64 {
         self.start_override(ilvl).unwrap_or(self.level(ilvl).start)
     }
@@ -91,7 +74,6 @@ impl Instance {
         *at_level(&self.overrides.as_ref()?.starts, ilvl)
     }
 
-    /// The level bound to a paragraph style through its levels' `w:pStyle` references.
     pub(super) fn style_level(&self, style_id: &str) -> Option<usize> {
         (0..LEVELS).find(|&ilvl| self.level(ilvl).pstyle.as_deref() == Some(style_id))
     }
@@ -108,9 +90,6 @@ impl Numbering {
     }
 }
 
-/// `style_num_id` maps a numbering style id to the `numId` its own `numPr`
-/// references (the `numStyleLink`/`styleLink` indirection contract); its
-/// error fails the parse.
 pub(super) fn parse(
     parse_ctx: &ParseCtx<'_>,
     root: &Element,
@@ -182,8 +161,6 @@ fn ilvl(e: &Element) -> usize {
     e.attr(ns::W, "ilvl").and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
-/// The `numStyleLink` indirection: abstract -> numbering style -> that
-/// style's `numId` -> its abstract.
 struct Links<'n, 'e, F> {
     abstracts: &'n HashMap<&'e str, Rc<AbstractNum>>,
     direct: &'n BTreeMap<u64, (&'e str, &'e Element)>,
@@ -193,9 +170,6 @@ struct Links<'n, 'e, F> {
 }
 
 impl<'n, 'e, F: Fn(&str) -> Result<Option<u64>, ConvertError>> Links<'n, 'e, F> {
-    /// The abstract definition `abs_id` resolves to, each id on the way
-    /// resolved once and charged one unit when it is, and each numbering
-    /// style looked up once.
     fn resolve(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -258,8 +232,6 @@ fn parse_level(lvl: &Element) -> LevelDef {
     };
     let start = val(lvl, "start").and_then(parse_start).unwrap_or(1);
     let restart = val(lvl, "lvlRestart").and_then(|v| v.parse().ok());
-    // The number text pattern applies to ordered levels; bullet lvlText is
-    // the glyph itself, not a pattern.
     let text = marker
         .filter(|marker| marker.ordered())
         .and_then(|_| val(lvl, "lvlText"))
@@ -280,9 +252,6 @@ pub(super) struct Counters {
 }
 
 impl Counters {
-    /// Advance the counter for a paragraph at (`num_id`, `ilvl`) and return
-    /// its effective number plus, when the level's number text is not
-    /// reproducible from the marker kind alone, the composite label.
     pub(super) fn next(
         &mut self,
         num_id: u64,

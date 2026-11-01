@@ -1,20 +1,3 @@
-//! ODF tables: canonical grid construction with covered-cell consumption,
-//! repeats honored in every container, a hard expansion budget for
-//! repeat expansion, and typed value-attribute fallback for cells without
-//! display text. A spreadsheet drops its hidden sheets, and a sheet its
-//! hidden rows, columns and groups; a merge they cut keeps the part that
-//! shows.
-//!
-//! A cell holding a `text:p` or `text:h` shows that text, empty or not; one holding neither shows
-//! its typed value, and reports the number style that formats it, which the fallback does not
-//! apply.
-//!
-//! Empty filler runs *inside* the used range materialize fully so every
-//! later cell keeps its source coordinates; only trailing filler (empty rows
-//! at the end, empty cells at a row's end) is elided. All materialization is
-//! charged against the expansion budget, and every position the grid holds
-//! against its slots.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::DiagnosticCode;
 use crate::error::ConvertError;
@@ -68,20 +51,14 @@ struct TableState<'l, 'c, 'e> {
     header_rows: usize,
     header_from: usize,
     rows_emitted: usize,
-    /// The sheet's form checkboxes by control id, as the inlines a
-    /// `draw:control` in a cell expands to.
     checkboxes: HashMap<String, Vec<Inline>>,
     /// What the cells placed so far hold, every copy counted.
     held: Held,
     axes: Axes<'e>,
-    /// Merge origins their hidden row or column displaced, by the first
-    /// shown position the merge covers.
     moved: BTreeMap<(u64, u64), Moved<'e>>,
     omitted: Omitted,
 }
 
-/// A merge origin waiting at the shown position that takes its place,
-/// decoded only once it is placed there.
 struct Moved<'e> {
     origin: (u64, u64),
     cell: &'e Element,
@@ -90,15 +67,12 @@ struct Moved<'e> {
     style: Option<&'e str>,
 }
 
-/// The source rows and columns that hold content no sheet shows.
 #[derive(Default)]
 struct Omitted {
     rows: Vec<Range<u64>>,
     cols: Vec<Range<u64>>,
 }
 
-/// The grid positions and text bytes parsed tables hold, their nested
-/// tables' included.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Held {
     positions: u64,
@@ -121,8 +95,6 @@ impl Held {
     }
 }
 
-/// Checkbox controls declared in the table's `office:forms`. The mixed
-/// ("unknown") state has no token and is left out.
 fn read_checkboxes(table: &Element) -> HashMap<String, Vec<Inline>> {
     let mut out = HashMap::new();
     for cb in table.find_all(ns::OFFICE, "forms").flat_map(|f| f.descendants(ns::FORM, "checkbox"))
@@ -146,9 +118,6 @@ fn read_checkboxes(table: &Element) -> HashMap<String, Vec<Inline>> {
     out
 }
 
-/// Append the checkboxes anchored in a cell after its content, on the same
-/// line, and report every other control anchored there, including one the
-/// table does not declare.
 fn append_cell_controls(
     cell: &Element,
     ctx: &Ctx<'_, '_>,
@@ -202,16 +171,12 @@ impl<'l, 'c, 'e> TableState<'l, 'c, 'e> {
         Ok(())
     }
 
-    /// The first shown position a cell's span covers, where its merge shows
-    /// when the cell itself does not.
     fn anchor(&self, row: u64, span: &CellSpan) -> Option<(u64, u64)> {
         let rows = row..row.saturating_add(u64::from(span.rows));
         let cols = span.cols.start..span.cols.start.saturating_add(u64::from(span.cols_spanned));
         Some((self.axes.rows.first_shown(rows)?, self.axes.cols.first_shown(cols)?))
     }
 
-    /// Count the hidden row and the hidden columns of a left-out cell that
-    /// holds content.
     fn omit(&mut self, cell: &Element, rows: Option<Range<u64>>, cols: &Range<u64>) {
         if holds_value(cell) {
             self.omitted.rows.extend(rows);
@@ -229,8 +194,6 @@ impl<'l, 'c, 'e> TableState<'l, 'c, 'e> {
         }
     }
 
-    /// Report the rows and columns hidden with content, once each, and the
-    /// merge origins no covered position took.
     fn report_omitted(&mut self, ctx: &Ctx<'_, '_>) {
         for moved in std::mem::take(&mut self.moved).into_values() {
             self.omit_moved(&moved);
@@ -248,7 +211,6 @@ struct Line<'e> {
     start: u64,
     repeat: u64,
     hidden: bool,
-    /// The `table:default-cell-style-name` of the row, which its cells that name no style take.
     style: Option<&'e str>,
 }
 
@@ -259,22 +221,17 @@ impl<'e> Line<'e> {
     }
 }
 
-/// Where a cell sits among the defaults its row and columns name for a cell that names no style.
 struct Site<'s> {
     row: Option<&'s str>,
-    /// The runs of columns that name a default and overlap the cell.
     columns: &'s [(Range<u64>, &'s str)],
-    /// The hidden columns and the cell's own, when a hidden copy is left out whole.
     shown: Option<(&'s HiddenRuns, Range<u64>)>,
 }
 
 impl<'s> Site<'s> {
-    /// The defaults of every column in `cols`.
     fn new(row: Option<&'s str>, axes: &'s Axes<'s>, cols: &Range<u64>) -> Self {
         Self { row, columns: axes.column_styles(cols), shown: None }
     }
 
-    /// The defaults of the columns in `cols` that show: a hidden copy is left out whole.
     fn shown(row: Option<&'s str>, axes: &'s Axes<'s>, cols: &Range<u64>) -> Self {
         Self { row, columns: axes.column_styles(cols), shown: Some((&axes.cols, cols.clone())) }
     }
@@ -286,15 +243,12 @@ impl<'s> Site<'s> {
     }
 }
 
-/// A cell of the source: the columns its copies sit in and the extent each
-/// spans.
 struct CellSpan {
     cols: Range<u64>,
     cols_spanned: u32,
     rows: u32,
 }
 
-/// One parsed cell of a row template, reused across row repeats.
 enum RowCell {
     Covered {
         cols: Range<u64>,
@@ -309,7 +263,6 @@ enum RowCell {
     },
 }
 
-/// The text bytes a clone of parsed cell content carries, outside its tables.
 fn block_bytes(blocks: &[Block]) -> u64 {
     blocks
         .iter()
@@ -414,9 +367,7 @@ fn emit_row<'e>(
         state.pending_rows = state.pending_rows.saturating_add(repeat);
         return Ok(());
     }
-    // Materialize any buffered empty gap first, in full: rows after the gap
-    // keep their source coordinates. The rows are charged so a pathological
-    // gap hits the budget instead of memory.
+    // The rows are charged so a pathological gap hits the budget instead of memory.
     if state.pending_rows > 0 {
         state.charge(state.pending_rows)?;
         for _ in 0..state.pending_rows {
@@ -448,9 +399,6 @@ fn emit_row<'e>(
     Ok(())
 }
 
-/// Read one row's cells into the reusable template. A cell none of whose
-/// copies shows is set aside to move its merge to the position that shows
-/// it, else left out unread.
 fn read_row<'e>(
     row: &'e Element,
     line: &Line<'e>,
@@ -504,9 +452,7 @@ fn spanned(cell: &Element, attr: &str) -> u32 {
     cell.attr(ns::TABLE, attr).and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
 }
 
-/// A cell no copy of which shows. One written once that opens a merge with a
-/// shown part moves there; the rest are left out, because the copies of a
-/// repeated merge origin overlap and no producer writes them.
+/// One written once that opens a merge with a shown part moves there; the rest are left out, because the copies of a repeated merge origin overlap and no producer writes them.
 fn hide_cell<'e>(
     cell: &'e Element,
     line: &Line<'e>,
@@ -536,8 +482,6 @@ fn hide_cell<'e>(
     }
 }
 
-/// A cell's blocks with the checkboxes anchored in it, and what its nested
-/// tables and text hold.
 fn decode_cell(
     cell: &Element,
     ctx: &Ctx<'_, '_>,
@@ -551,15 +495,10 @@ fn decode_cell(
     Ok((blocks, held))
 }
 
-/// Whether a cell shows anything: text, a picture, a note or a typed value.
 fn holds_value(cell: &Element) -> bool {
     fallback_text(cell).is_some_and(|text| !text.trim().is_empty()) || holds_content(cell)
 }
 
-/// Place a row's cells, moving each cell's content into its last copy on
-/// the `last_row`; `row` is where the template sits in the source. Only the
-/// positions that show take a slot, and a span counts only the positions it
-/// covers that show.
 fn emit_parsed_cells(
     cells: &mut [RowCell],
     last_row: bool,
@@ -572,9 +511,6 @@ fn emit_parsed_cells(
     for cell in cells {
         match cell {
             RowCell::Covered { cols } => {
-                // One explicitly written covered position each; a stray one
-                // (no span accounts for it) becomes an empty cell inside
-                // covered().
                 state.charge(state.axes.cols.shown_in(cols.clone()))?;
                 let mut next = cols.start;
                 while let Some(col) = state.axes.cols.first_shown(next..cols.end) {
@@ -627,8 +563,6 @@ fn emit_parsed_cells(
     Ok(())
 }
 
-/// The blocks of a merge origin read where it moved to, under the defaults of the column and
-/// row it was written in.
 fn decode_moved(
     moved: &Moved<'_>,
     ctx: &Ctx<'_, '_>,
@@ -639,8 +573,6 @@ fn decode_moved(
     Ok(decode_cell(moved.cell, ctx, &state.checkboxes, &site)?.0)
 }
 
-/// Place a merge origin that moved to the position it covers, or buffer it
-/// as a gap when it is empty and spans nothing.
 fn place_cell(
     blocks: Vec<Block>,
     col_span: u32,
@@ -658,8 +590,7 @@ fn place_cell(
     Ok(())
 }
 
-/// Materialize a buffered empty-cell run in full so the next cell lands on
-/// its source column. Trailing runs are never flushed and stay elided.
+/// Materialize a buffered empty-cell run in full so the next cell lands on its source column.
 fn flush_gap(state: &mut TableState<'_, '_, '_>, pending: &mut u64) -> Result<(), ConvertError> {
     if *pending == 0 {
         return Ok(());
@@ -708,8 +639,6 @@ fn fallback_text(cell: &Element) -> Option<String> {
     if displays { None } else { value_text(cell) }
 }
 
-/// The worst cost of the number styles a fallback cell may have: its own style, else its row's
-/// default, else the defaults of the columns it covers that show, each run walked charged.
 fn unapplied_format(
     cell: &Element,
     ctx: &Ctx<'_, '_>,
@@ -729,7 +658,6 @@ fn unapplied_format(
     Ok(worst)
 }
 
-/// The cost of one style a cell tries, its lookup charged by the name's length.
 fn format_cost(ctx: &Ctx<'_, '_>, style: &str, shown: Shown) -> Result<FormatCost, ConvertError> {
     ctx.parse_ctx.charge(u64::try_from(style.len()).unwrap_or(u64::MAX).max(1))?;
     ctx.styles.format_cost(ctx.parse_ctx, style, shown)
@@ -793,11 +721,7 @@ fn unit_seconds(in_time: bool, c: char) -> Option<f64> {
     }
 }
 
-/// Full ISO 8601 duration -> clock text: `P1DT2H` -> `26:00:00`,
-/// `PT26H30M15S` -> `26:30:15`, weeks are 7 days, and fractional values are
-/// valid on any component (`PT1.5H` -> `1:30:00`). Year/month components
-/// have no fixed length, and unrepresentably large values overflow the
-/// clock format, so both keep their raw ISO text.
+/// Year/month components have no fixed length, and unrepresentably large values overflow the clock format, so both keep their raw ISO text.
 fn duration_text(iso: &str) -> String {
     let mut total = 0.0f64; // seconds
     let mut number = String::new();
@@ -825,8 +749,6 @@ fn duration_text(iso: &str) -> String {
             _ => number.clear(),
         }
     }
-    // Round to milliseconds; a value the clock format cannot represent
-    // exactly keeps its source text instead of silently degrading.
     let total_ms = (total * 1000.0).round();
     if !(0.0..1e18).contains(&total_ms) {
         return iso.to_string();
@@ -857,7 +779,6 @@ fn row_is_empty(row: &Element) -> bool {
     })
 }
 
-/// One sheet of a spreadsheet body.
 pub(super) fn parse_spreadsheet(
     sheet: &Element,
     ctx: &Ctx<'_, '_>,

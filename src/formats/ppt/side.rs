@@ -1,7 +1,3 @@
-//! What a page shows of its headers, footers and comments: `HeadersFooters` containers, drawn
-//! date, slide-number, footer and header placeholders, which `HeaderFooterPolicy::Emit` writes,
-//! and the `Comment10` records of a `___PPT10` binary tag.
-
 use super::records as rt;
 use super::scan;
 use crate::ctx::ParseCtx;
@@ -35,7 +31,6 @@ const PLACEMENT_AT: usize = 4;
 
 const FIELD_MARK: char = '*';
 
-/// A kind of header or footer content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
     Date,
@@ -45,12 +40,10 @@ pub(super) enum Kind {
 }
 
 impl Kind {
-    /// The side the kind shows on.
     pub(super) fn side(self) -> Side {
         if self == Self::Header { Side::Header } else { Side::Footer }
     }
 
-    /// The kind a `PlaceholderAtom` body names, if it is one of the four.
     pub(super) fn placed(placeholder: &[u8]) -> Option<Self> {
         match *placeholder.get(PLACEMENT_AT)? {
             PLACEMENT_DATE => Some(Self::Date),
@@ -62,7 +55,6 @@ impl Kind {
     }
 }
 
-/// Which kinds a page shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Shown {
     date: bool,
@@ -71,8 +63,6 @@ pub(super) struct Shown {
     header: bool,
 }
 
-/// What a `HeadersFooters` container shows, and the strings it shows: the user date, unless
-/// today's date shows, the header and the footer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Settings {
     shown: Shown,
@@ -81,9 +71,6 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    /// Read a `HeadersFooters` container body, each record charged as one unit of work. The date
-    /// shows when `fHasDate` is set and either `fHasTodayDate` is, or `fHasUserDate` is and the
-    /// user date has text; a footer or header shows when its flag is set and its string has text.
     pub(super) fn read(parse_ctx: &ParseCtx<'_>, container: &[u8]) -> Result<Self, ConvertError> {
         let records = scan(parse_ctx, container)?;
         let flags = records
@@ -129,28 +116,21 @@ impl Shown {
     }
 }
 
-/// The deck's default for each kind of page, which a page's own container replaces.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Defaults {
     pub(super) slides: Settings,
     pub(super) notes: Settings,
 }
 
-/// What one page shows of its headers, footers and comments, collected while it is read.
 #[derive(Debug, Default)]
 pub(super) struct PageFacts {
-    /// The page's own `HeadersFooters` container, over the deck's default.
     pub(super) own: Option<Settings>,
     drawn: Shown,
-    /// Under `HeaderFooterPolicy::Emit`, the blocks each drawn kind's first shape shows, with
-    /// what reading them reported.
     drawn_blocks: Vec<(Kind, Vec<Block>, Diagnostics)>,
     pub(super) comments: bool,
 }
 
 impl PageFacts {
-    /// Note a placeholder shape of `kind` drawn on the page, when its `text` is more than the
-    /// field mark; `blocks` is what it shows where headers and footers are written.
     pub(super) fn draw(
         &mut self,
         kind: Kind,
@@ -167,8 +147,6 @@ impl PageFacts {
         }
     }
 
-    /// The header and footer the page shows: each footer kind, in date, footer and slide-number
-    /// order, from its settings, else as drawn; its header on a notes page or where one is drawn.
     pub(super) fn sides(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -201,8 +179,6 @@ impl PageFacts {
         Ok(sides)
     }
 
-    /// Report each footer kind the page shows once, its header once on a notes page or when one
-    /// is drawn, and its comments once. A slide's `fHasHeader` is ignored.
     pub(super) fn report(self, parse_ctx: &ParseCtx<'_>, default: &Settings, notes: bool) {
         let shown = self.own.map_or(default.shown, |own| own.shown);
         let drawn = self.drawn;
@@ -226,8 +202,6 @@ impl PageFacts {
     }
 }
 
-/// Whether a `ProgBinaryTag` container body is a `___PPT10` tag whose blob holds a `Comment10`
-/// record, every record read charged as one unit of work. Any other tag is ignored.
 pub(super) fn tag_has_comment(parse_ctx: &ParseCtx<'_>, tag: &[u8]) -> Result<bool, ConvertError> {
     let Some(blob) = comment_blob(parse_ctx, tag)? else { return Ok(false) };
     for record in officeart::records(blob) {
@@ -256,8 +230,6 @@ pub(super) fn comment_blob<'a>(
 }
 
 impl Settings {
-    /// The text a shown kind writes: a token for a slide number or today's date, else its string,
-    /// reporting a code unit that does not decode.
     fn text(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -295,7 +267,6 @@ fn token(parse_ctx: &ParseCtx<'_>, token: &str, side: Side) -> Inline {
     Inline::plain(token)
 }
 
-/// The token a drawn placeholder's field mark stands for.
 pub(super) fn field_token(kind: Kind) -> Option<&'static str> {
     match kind {
         Kind::Date => Some("{date}"),

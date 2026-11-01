@@ -1,5 +1,3 @@
-//! OOXML WordprocessingML (.docx / .docm).
-
 mod comments;
 mod content;
 mod numbering;
@@ -158,8 +156,6 @@ fn parse_notes(
     Ok(notes)
 }
 
-/// Under `HeaderFooterPolicy::Omit`, the headers and footers the sections name, each part once
-/// (by its id where its relationship is unknown): none is read.
 fn report_side_parts(parse_ctx: &ParseCtx<'_>, body: &Element, rels: &Relationships, base: &str) {
     for (reference, code, region) in [
         ("headerReference", DiagnosticCode::HeaderOmitted, Region::Header),
@@ -181,9 +177,6 @@ struct TypedPart {
 }
 
 impl TypedPart {
-    /// The part's tree when its root element is `w:{root}`, and whether its
-    /// loss was reported: unreadable, absent though related, or rooted
-    /// elsewhere.
     fn read(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -206,8 +199,6 @@ impl TypedPart {
         }
     }
 
-    /// A styles part that does not read costs formatting alone, unless numbering reads styles, its
-    /// entry cannot be inflated, or it does not parse and sets `vanish`: then it costs text.
     fn read_styles(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -281,8 +272,6 @@ fn val_turns_off(attributes: Attributes<'_>) -> bool {
 
 type NoteElements<'e> = Vec<(String, &'e Element)>;
 
-/// The notes of a notes part that are read, each with its id (no separator, and none every
-/// reference to which dropped), and how many repeated ids it skipped.
 fn read_notes<'e>(
     parse_ctx: &ParseCtx<'_>,
     references: &References,
@@ -313,9 +302,6 @@ fn read_notes<'e>(
     Ok((notes, duplicates))
 }
 
-/// Path of a typed related part, resolved against the main part; falls back
-/// to the conventional sibling name when the relationship is absent or its
-/// target does not resolve, the latter reported.
 fn typed_part_path(
     parse_ctx: &ParseCtx<'_>,
     rels: &Relationships,
@@ -805,8 +791,6 @@ mod tests {
 
     #[test]
     fn unmarked_run_edge_whitespace_is_kept() {
-        // Converters that never write xml:space carry inter-word spacing on
-        // run edges; dropping it glues the words together.
         let document = document(
             "<w:p>
             <w:r><w:t>This</w:t></w:r>
@@ -1026,7 +1010,6 @@ mod tests {
         r#"<w:footnote w:type="separator" w:id="0"><w:p/></w:footnote>"#,
     );
 
-    /// An inline equation of math runs, each `(hidden, text)`.
     fn math(runs: &[(bool, &str)]) -> String {
         let runs: String = runs
             .iter()

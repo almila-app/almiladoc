@@ -1,14 +1,9 @@
-//! The coordinates of one spreadsheet axis a sheet hides, kept as runs: a
-//! range of any length is one entry, and a lookup, a scan for the first shown
-//! coordinate and a count of the shown ones cost a binary search.
-
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Run {
     start: u64,
     end: u64,
-    /// The coordinates the runs before this one hide.
     before: u64,
 }
 
@@ -20,7 +15,6 @@ pub(crate) struct HiddenRuns {
 }
 
 impl HiddenRuns {
-    /// The runs that cover exactly the coordinates of `spans`.
     pub(crate) fn of(mut spans: Vec<Range<u64>>) -> Self {
         spans.sort_unstable_by_key(|span| span.start);
         let mut runs: Vec<Run> = Vec::new();
@@ -45,12 +39,10 @@ impl HiddenRuns {
         self.runs.get(self.first_ending_after(at)).is_some_and(|run| run.start <= at)
     }
 
-    /// How many coordinates the runs hide.
     pub(crate) fn count(&self) -> u64 {
         self.runs.last().map_or(0, |run| run.before.saturating_add(run.end - run.start))
     }
 
-    /// How many coordinates of `span` no run hides.
     pub(crate) fn shown_in(&self, span: Range<u64>) -> u64 {
         if span.start >= span.end {
             return 0;
@@ -59,7 +51,6 @@ impl HiddenRuns {
         span.end - span.start - hidden
     }
 
-    /// The first coordinate of `span` no run hides.
     pub(crate) fn first_shown(&self, span: Range<u64>) -> Option<u64> {
         let first = match self.runs.get(self.first_ending_after(span.start)) {
             Some(run) if run.start <= span.start => run.end,
@@ -68,7 +59,6 @@ impl HiddenRuns {
         (first < span.end).then_some(first)
     }
 
-    /// The parts of the runs inside `span`.
     pub(crate) fn hidden_in(&self, span: Range<u64>) -> impl Iterator<Item = Range<u64>> {
         let from = self.first_ending_after(span.start);
         self.runs

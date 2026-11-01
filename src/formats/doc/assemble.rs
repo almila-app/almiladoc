@@ -1,5 +1,3 @@
-//! Assembly: the text of a story and its formatting runs into the model.
-
 use super::fkp::{Run, Runs};
 use super::fonts::FontTable;
 use super::lists::{Counters, ListDef, Lists};
@@ -33,9 +31,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-/// Text whose units or formatting do not reach the output intact: a piece's undecodable
-/// characters, the number text of the list level at a table-stream offset, a piece whose bytes
-/// the stream does not hold, or the font index of an unresolved font.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Damaged {
     Piece(u32),
@@ -44,10 +39,8 @@ pub(super) enum Damaged {
     Font(u16),
 }
 
-/// Pieces, each once, whose undecodable text a part of a paragraph holds.
 type Pieces = BTreeSet<u32>;
 
-/// Add `from` to `into`, charging each piece copied.
 fn lift(parse_ctx: &ParseCtx<'_>, into: &mut Pieces, from: Pieces) -> Result<(), ConvertError> {
     parse_ctx.charge(from.len() as u64)?;
     into.extend(from);
@@ -62,24 +55,17 @@ pub(super) struct Assembler<'c, 'w> {
     stylesheet: Stylesheet,
     fonts: FontTable,
     lists: Lists,
-    /// The id of the note each reference CP names.
     note_refs: HashMap<usize, String>,
     pub(super) dropped_notes: RefCell<HashSet<String>>,
     pub(super) comments: super::comments::References,
-    /// The floating shape each main-document anchor CP names.
     shapes: HashMap<usize, ShapeKind>,
     counters: RefCell<Counters>,
-    /// The damaged text and regions already reported.
     reported: RefCell<HashSet<(Damaged, Region)>>,
-    /// The Data stream, for `sprmCPicLocation` picture payloads.
     data: Vec<u8>,
     pub(super) assets: RefCell<AssetSink>,
-    /// The lock of each header-document field.
     pub(super) field_locks: RefCell<FieldLocks<'w>>,
 }
 
-/// A paragraph's resolved properties: the style chain's contribution merged
-/// with the PAPX and any piece `Prm`.
 struct EffectivePap {
     istd: u16,
     effective: PapDelta,
@@ -92,15 +78,12 @@ enum Holder {
     Row,
 }
 
-/// The scalars before the CP `end` that share one CHPX run, one PAPX run and
-/// one piece, and their character properties.
 #[derive(Default)]
 struct Segment {
     end: usize,
     chp: Chp,
 }
 
-/// Why a character does not render; a deletion wins over hiding.
 #[derive(Clone, Copy, PartialEq)]
 enum Dropped {
     Revision,
@@ -142,8 +125,6 @@ impl DroppedRange {
         report
     }
 
-    /// Extend the range by a character dropped as `kind`, closing it first
-    /// when the kind changes; a shown character has none.
     fn extend(
         &mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -173,8 +154,6 @@ impl DroppedRange {
     }
 }
 
-/// Whether `c`, outside a field instruction, shows something: a picture, a
-/// floating shape's anchor or a character other than whitespace.
 fn renders(c: char) -> bool {
     matches!(c, '\u{1}' | '\u{8}' | '\u{1e}') || !(c.is_control() || c.is_whitespace())
 }
@@ -212,7 +191,6 @@ fn choose_token(
     Ok(())
 }
 
-/// What a character that is no field delimiter adds to the text it stands in.
 fn shown_char(c: char) -> Option<char> {
     match c {
         '\t' => Some(' '),
@@ -222,11 +200,8 @@ fn shown_char(c: char) -> Option<char> {
     }
 }
 
-/// An open field: the CPs of its instruction, and the pieces whose undecodable
-/// text its result shows, as label or as the targets of links completed in it.
 struct OpenField {
     frame: FieldFrame,
-    /// Whether the field's lock, which keeps its result, does not read.
     lock_unread: bool,
     instr: Range<usize>,
     result_damage: Pieces,
@@ -237,15 +212,11 @@ struct ParaBuilder<'c> {
     parse_ctx: &'c ParseCtx<'c>,
     inlines: Vec<Inline>,
     fields: Vec<OpenField>,
-    /// The open fields still in their instruction.
     instructions: usize,
     text: String,
     style: Style,
-    /// The pieces whose undecodable text `text` holds.
     text_damage: Pieces,
-    /// The pieces whose undecodable text `inlines` holds.
     damage: Pieces,
-    /// The region of the header or footer story the paragraph is in.
     side: Option<Region>,
 }
 
@@ -286,8 +257,6 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// Push `c`, which stands in for undecodable bytes of piece `damaged`
-    /// when one is given.
     fn push_char(
         &mut self,
         c: char,
@@ -316,7 +285,6 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// Open a field whose instruction starts at the CP `instr`.
     fn field_begin(&mut self, max_depth: u64, instr: usize) -> Result<(), ConvertError> {
         if self.fields.len() as u64 >= max_depth {
             return Err(ConvertError::limit(Limit::NestingDepth, max_depth));
@@ -333,8 +301,6 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// End the innermost instruction at the separator at CP `cp`. In a header or footer, the
-    /// result of a field only a printed page resolves is read as an instruction is, and dropped.
     fn field_separate(
         &mut self,
         cp: usize,
@@ -355,13 +321,10 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// Whether text here lands in a field instruction, which never renders.
     fn in_instruction(&self) -> bool {
         self.instructions > 0
     }
 
-    /// Whether the innermost open field is in the result of a `SHAPE`
-    /// field, the inline stand-in of the floating shape its `\x08` anchors.
     fn in_shape_result(&self) -> bool {
         self.fields.last().is_some_and(|f| {
             let keyword = f.frame.instr.split_whitespace().next().unwrap_or_default();
@@ -369,8 +332,6 @@ impl<'c> ParaBuilder<'c> {
         })
     }
 
-    /// Close the innermost field at CP `cp`; `targets` gives the pieces whose
-    /// undecodable text the target of the link it makes shows.
     fn field_end(
         &mut self,
         cp: usize,
@@ -440,8 +401,6 @@ impl<'c> ParaBuilder<'c> {
         Ok(())
     }
 
-    /// The paragraph's inlines, every field still open closed at CP `cp`, and
-    /// the pieces whose undecodable text they hold.
     fn finish(
         mut self,
         cp: usize,
@@ -500,8 +459,6 @@ impl<'c, 'w> Assembler<'c, 'w> {
 }
 
 impl Assembler<'_, '_> {
-    /// The blocks of the header or footer text `range` of `story`, numbered by list counters of
-    /// their own.
     pub(super) fn side_blocks(
         &self,
         story: &Range<usize>,
@@ -514,8 +471,6 @@ impl Assembler<'_, '_> {
         blocks
     }
 
-    /// The blocks of the scalars of `range` in `story`, or `None` when it
-    /// holds none.
     pub(super) fn build_blocks(
         &self,
         story: &Range<usize>,
@@ -687,7 +642,6 @@ impl Assembler<'_, '_> {
         Ok(s.c == '\u{5}')
     }
 
-    /// Add the character `s`, which is no paragraph mark, to `para`.
     fn character(
         &self,
         s: &Scalar,
@@ -728,8 +682,6 @@ impl Assembler<'_, '_> {
         Ok(())
     }
 
-    /// The lock of the header field that begins at `cp`, trusted where the text holds a field
-    /// end at the CP its table entry names.
     fn field_lock(&self, cp: usize) -> Result<Lock, ConvertError> {
         self.field_locks.borrow_mut().pair(self.parse_ctx)?;
         let (headers, end, locked) = match &*self.field_locks.borrow() {
@@ -752,7 +704,6 @@ impl Assembler<'_, '_> {
         })
     }
 
-    /// A floating shape reports where its anchor shows: a field instruction never renders.
     fn anchored_shape(&self, cp: usize, region: Region, para: &ParaBuilder<'_>) {
         if para.in_instruction() {
             return;
@@ -789,8 +740,6 @@ impl Assembler<'_, '_> {
         if cell_mark && !inner {
             flow.cell_styled.flush(&mut flow.cell);
             if row_end {
-                // The row-end mark's PAPX carries the TAP: boundaries, merge
-                // flags and the header row.
                 if !flow.row.is_empty() {
                     let cells = std::mem::take(&mut flow.row);
                     flow.rows.push(DocRow { cells, tap: pap.effective.tap });
@@ -802,8 +751,6 @@ impl Assembler<'_, '_> {
         Ok(())
     }
 
-    /// A field instruction never renders, an embedded object's location names its
-    /// `ObjectPool` storage, and field data (a hyperlink's or form field's) holds no picture.
     fn object_char(
         &self,
         fc: u32,
@@ -825,11 +772,7 @@ impl Assembler<'_, '_> {
         Ok(())
     }
 
-    /// The segment from the scalar `s`, with its properties in specification
-    /// order: paragraph style chain -> CHPX -> piece Prm, where a `sprmCIstd`
-    /// resets to the paragraph style and applies its character style at its
-    /// own position. A style reference that resolves to no character style
-    /// is reported in `region`, when one is given.
+    /// The segment from the scalar `s`, with its properties in specification order: paragraph style chain -> CHPX -> piece Prm, where a `sprmCIstd` resets to the paragraph style and applies its character style at its own position.
     fn segment(&self, s: &Scalar, region: Option<Region>) -> Result<Segment, ConvertError> {
         let (para, para_end) = self.papx.span(s.fc);
         let (chpx, chpx_end) = self.chpx.span(s.fc);
@@ -851,10 +794,6 @@ impl Assembler<'_, '_> {
         Ok(Segment { end: pcd.cps.1.min(s.cp.saturating_add(shared)), chp })
     }
 
-    /// Whether the dropped paragraph mark `s`, a plain one that ends no cell
-    /// or row, joins its paragraph to the next one, which must end before the
-    /// end of `cursor`'s range in the same container and with no text the
-    /// stream does not hold between them.
     fn joins_next(&self, cursor: &Cursor<'_, '_>, s: &Scalar) -> Result<bool, ConvertError> {
         let here = self.effective_pap(s.fc, s.piece)?.effective;
         if [here.inner_cell, here.ttp, here.inner_ttp].iter().any(|flag| flag.unwrap_or(false)) {
@@ -891,10 +830,6 @@ impl Assembler<'_, '_> {
         Ok(EffectivePap { istd, effective })
     }
 
-    /// The pieces whose undecodable text shows in the destination of the link
-    /// `field` makes: an external or relative target the renderer keeps,
-    /// replayed from the field's instruction CPs in `story` to find the
-    /// damage inside the spans the target is read from.
     fn target_damage(
         &self,
         story: &Range<usize>,
@@ -915,9 +850,6 @@ impl Assembler<'_, '_> {
         self.instruction_damage(story, &field.instr, &spans)
     }
 
-    /// Replay the instruction text at the CPs `instr` of `story` as the walk
-    /// built it, collecting the pieces of the undecodable characters that
-    /// land inside `spans`.
     fn instruction_damage(
         &self,
         story: &Range<usize>,
@@ -966,8 +898,6 @@ impl Assembler<'_, '_> {
         region: Region,
     ) {
         let style = self.stylesheet.get(pap.istd);
-        // A styled container absorbs its blank paragraphs: they are the
-        // blank lines of a code block.
         if let Some(block) = style.block {
             flush_list(&mut flow.blocks, &mut flow.list);
             flow.styled.push(block, inlines, &mut flow.blocks);
@@ -982,8 +912,6 @@ impl Assembler<'_, '_> {
             flow.flush_runs();
             let mut content = inlines;
             rebase_emphasis(&mut content, style.chp.style);
-            // A numbered heading advances its sequence and keeps its number
-            // visible - headings have no native numbering in the output.
             if let Some(label) = self.heading_label(pap, region) {
                 content.insert(0, Inline::Text { text: label, style: Style::PLAIN });
             }
@@ -1018,10 +946,6 @@ impl Assembler<'_, '_> {
         flow.blocks.push(Block::Paragraph(inlines));
     }
 
-    /// Report in `region` once each damaged text whose units do not reach the
-    /// output intact: `invalid_encoding` for undecodable units,
-    /// `truncated_records` for a piece the stream does not hold, and
-    /// `formatting_unreadable` for a font that does not resolve.
     fn report(&self, damaged: impl IntoIterator<Item = Damaged>, region: Region) {
         let mut reported = self.reported.borrow_mut();
         for damaged in damaged {
@@ -1073,9 +997,6 @@ impl Assembler<'_, '_> {
         Ok(image(ImageSource::Asset(id)))
     }
 
-    /// Whether a `SHAPE` field's stand-in that yields no picture stood for
-    /// one: data that does not read, or a shape with a `pib`, or no shape at
-    /// all. Any other shape is reported at the field's floating anchor.
     #[expect(
         clippy::disallowed_methods,
         reason = "`any` over the shape kinds answers the same in every order"
@@ -1088,8 +1009,6 @@ impl Assembler<'_, '_> {
         Ok(kinds.is_empty() || kinds.values().any(|&kind| kind == ShapeKind::Picture))
     }
 
-    /// Advance the sequence of an ordered level whose label a paragraph in
-    /// `region` shows, reporting the level's damaged number text there.
     fn number(
         &self,
         ilfo: u16,
@@ -1101,8 +1020,6 @@ impl Assembler<'_, '_> {
         self.counters.borrow_mut().next(ilfo, list, ilvl)
     }
 
-    /// The visible number label of a numbered heading paragraph, with its
-    /// trailing separator; advances the list sequence.
     fn heading_label(&self, pap: &EffectivePap, region: Region) -> Option<String> {
         let (ilfo, ilvl) = pap.effective.numbering()?;
         let list = self.lists.get(&ilfo)?;
@@ -1112,7 +1029,6 @@ impl Assembler<'_, '_> {
     }
 }
 
-/// The container of the paragraph the mark `c` with properties `pap` ends.
 fn holder(c: char, pap: &PapDelta) -> Holder {
     if pap.ttp.unwrap_or(false) {
         Holder::Row
@@ -1151,7 +1067,6 @@ impl Flow {
         }
     }
 
-    /// The blocks once the last paragraph, `inlines`, ends the story.
     fn finish(
         mut self,
         parse_ctx: &ParseCtx<'_>,
@@ -1184,8 +1099,6 @@ impl Flow {
     }
 }
 
-/// One accumulated table row: cell contents plus the TAP from the row-end
-/// mark (absent for rows without `sprmTDefTable`).
 struct DocRow {
     cells: Vec<Vec<Block>>,
     tap: Option<Tap>,
@@ -1201,8 +1114,6 @@ impl DocRow {
             .enumerate()
             .map(|(k, blocks)| {
                 let tc = tap.cells.get(k).copied().unwrap_or_default();
-                // Without a TAP boundary, a synthetic index-based edge keeps
-                // the flat column behavior.
                 let right = tap.boundaries.get(k + 1).map_or_else(
                     || i64::try_from(k + 1).unwrap_or(i64::MAX).saturating_mul(1000),
                     |&b| i64::from(b),

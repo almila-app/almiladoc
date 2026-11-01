@@ -3,12 +3,7 @@
 use almiladoc::Format;
 use almiladoc_fuzz::{convert, fuzz_target, stored};
 
-// The worksheet, styles and shared-string parts, wrapped in a package whose
-// workbook part and relationships are already valid. Fuzzing the workbook
-// part instead would strand the input there: without a resolvable worksheet
-// relationship every sheet is skipped, and the cell, format and string
-// readers never run. The workbook part is parsed by the same record reader
-// this does reach.
+// Valid workbook relationships reach the cell, format and string readers while exercising the same record reader.
 fuzz_target!(|data: &[u8]| {
     let parts: [(&str, &[u8]); 8] = [
         ("[Content_Types].xml", CONTENT_TYPES.as_bytes()),

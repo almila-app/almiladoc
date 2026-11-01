@@ -55,7 +55,6 @@ fn blank_block_comment(c: &[char], mut i: usize, out: &mut String) -> usize {
     i
 }
 
-/// Blanks comments and string, byte and char literals, keeping every newline.
 fn strip(text: &str) -> String {
     let c: Vec<char> = text.chars().collect();
     let at = |i: usize| c.get(i).copied().unwrap_or('\0');
@@ -112,8 +111,6 @@ fn strip(text: &str) -> String {
     out
 }
 
-/// The code a non-test build compiles: each item under a column-0
-/// `#[cfg(test)]` is blanked, and the modules it declares out of line are named.
 fn non_test(text: &str) -> NonTest {
     const MARK: &str = "#[cfg(test)]";
     let mut code: Vec<char> = strip(text).chars().collect();
@@ -226,9 +223,6 @@ fn skip_path(toks: &[Token<'_>], mut at: usize) -> usize {
     }
 }
 
-/// Steps over the leading `crate`, `self` and `super` segments of the path at `at`, entered
-/// `below` levels under its root: its first other segment, and the levels under the root
-/// that segment is looked up in.
 fn climb(toks: &[Token<'_>], mut at: usize, mut below: usize) -> (usize, usize) {
     while toks.get(at + 1).is_some_and(|t| t.text == "::") {
         below = match toks[at].text {
@@ -242,8 +236,6 @@ fn climb(toks: &[Token<'_>], mut at: usize, mut below: usize) -> (usize, usize) 
     (at, below)
 }
 
-/// Collects the first segment of every path in the use tree at `at`, entered `below`
-/// levels under its root, that names an item of the root itself.
 fn heads<'t>(
     toks: &'t [Token<'t>],
     at: usize,
@@ -280,7 +272,6 @@ fn module_path(path: &str) -> Vec<&str> {
     segments
 }
 
-/// The first segment of every path that reaches the crate root through `crate`, `self` or `super`.
 fn root_heads<'t>(path: &str, toks: &'t [Token<'t>]) -> Vec<&'t Token<'t>> {
     let depth = module_path(path).len();
     let mut out = Vec::new();
@@ -295,7 +286,6 @@ fn root_heads<'t>(path: &str, toks: &'t [Token<'t>]) -> Vec<&'t Token<'t>> {
     out
 }
 
-/// Maps each name the crate root re-exports to the module it comes from.
 fn reexports(lib: &str) -> BTreeMap<String, String> {
     let code = non_test(lib).code;
     let toks = tokens(&code);

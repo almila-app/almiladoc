@@ -1,5 +1,4 @@
-//! Peak live heap of whole conversions, measured by a counting allocator: the
-//! input-controlled work a reader admits does not grow memory it never needs.
+//! Peak-allocation regression tests.
 #![expect(clippy::unwrap_used, reason = "test helpers fail by panicking")]
 
 use almiladoc::{Config, Converter, Format, ImageOcr, Input, OnLoss};
@@ -12,8 +11,7 @@ use word97::word97;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-/// Held by each test for its whole body: a running profiler counts every thread's
-/// allocations, so no test allocates while another test's profiler runs.
+// Profiling counts allocations on every thread, so tests hold this lock for their whole body.
 static PROFILER: Mutex<()> = Mutex::new(());
 
 fn exclusive() -> MutexGuard<'static, ()> {
@@ -31,7 +29,6 @@ fn converter_with(image_ocr: ImageOcr) -> Converter {
     Converter::new(config).unwrap()
 }
 
-/// The most heap live at once while `converter` converts `bytes`, and the Markdown it returns.
 fn converted(converter: &Converter, bytes: &[u8], format: Format) -> (usize, String) {
     let _profiler = dhat::Profiler::builder().testing().build();
     let conversion = converter.convert(Input::new(bytes, format)).unwrap();
@@ -42,7 +39,6 @@ fn peak(converter: &Converter, bytes: &[u8]) -> usize {
     converted(converter, bytes, Format::Doc).0
 }
 
-/// The heap `converter` leaves live while it holds the parsed `bytes`.
 fn parsed_heap(converter: &Converter, bytes: &[u8], format: Format) -> usize {
     let _profiler = dhat::Profiler::builder().testing().build();
     let parsed = converter.parse(Input::new(bytes, format)).unwrap();
@@ -51,7 +47,6 @@ fn parsed_heap(converter: &Converter, bytes: &[u8], format: Format) -> usize {
     live
 }
 
-/// Peak heap at `aliases` and four times as many, after a warm-up outside any profiler.
 fn peaks(doc: impl Fn(u32) -> Vec<u8>, aliases: u32) -> (usize, usize) {
     let (few, many) = (doc(aliases), doc(4 * aliases));
     let converter = converter();
@@ -59,7 +54,6 @@ fn peaks(doc: impl Fn(u32) -> Vec<u8>, aliases: u32) -> (usize, usize) {
     (peak(&converter, &few), peak(&converter, &many))
 }
 
-/// Compressed bytes every aliasing piece reads.
 const STRETCH: u32 = 1 << 14;
 const TEXT_FC: u32 = 0x800;
 
@@ -76,8 +70,6 @@ fn doc(ccps: &[(usize, u32)], text: &[u8], pieces: &[(u32, u32, u16)]) -> Vec<u8
     ole.into_inner().into_inner()
 }
 
-/// `a` as the main document, then a header story of `aliases` pieces that
-/// all read one stretch of the stream.
 fn aliased_headers(aliases: u32) -> Vec<u8> {
     let mut pieces = vec![(2, TEXT_FC, 0)];
     pieces.extend((1..=aliases).map(|i| (2 + i * STRETCH, TEXT_FC + 2, 0)));
@@ -85,8 +77,6 @@ fn aliased_headers(aliases: u32) -> Vec<u8> {
     doc(&[(0x4C, 2), (0x54, aliases * STRETCH)], &stretch_text(), &pieces)
 }
 
-/// A main document of `aliases` deleted pieces that all read one stretch of
-/// the stream, then `a`.
 fn aliased_deletions(aliases: u32) -> Vec<u8> {
     let deleted = (0x41 << 1) | (1 << 8);
     let mut pieces: Vec<_> = (1..=aliases).map(|i| (i * STRETCH, TEXT_FC + 2, deleted)).collect();
@@ -94,8 +84,7 @@ fn aliased_deletions(aliases: u32) -> Vec<u8> {
     doc(&[(0x4C, aliases * STRETCH + 2)], &stretch_text(), &pieces)
 }
 
-/// Heap the four-fold document may hold beyond the first: its longer piece table and
-/// what reading it costs, not its expanded text.
+// Allow for the longer piece table and its reading cost, not expanded text.
 const SLACK: usize = 64 << 10;
 
 fn assert_flat_heap(aliased: fn(u32) -> Vec<u8>) {
@@ -120,7 +109,6 @@ const SML: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PKG_RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 
-/// Columns and rows between a sheet's two cells, so its table holds `SIDE * SIDE` positions.
 const SIDE: usize = 1 << 10;
 /// The letters of column `SIDE`, counted from one.
 const LAST_COLUMN: &str = "AMJ";
@@ -131,8 +119,6 @@ fn relationship(kind: &str, target: &str) -> String {
     )
 }
 
-/// A one-sheet xlsx holding `x` in `A1` and in the far corner of a table of `SIDE * SIDE`
-/// positions, with `merges` after its cells.
 fn corner_cells_xlsx(merges: &str) -> Vec<u8> {
     use std::io::Write;
     let workbook = format!(
@@ -158,7 +144,6 @@ fn corner_cells_xlsx(merges: &str) -> Vec<u8> {
     writer.finish().unwrap().into_inner()
 }
 
-/// Two-row merges across the full width, stacked over every row between the two cells.
 fn stacked_merges() -> String {
     use std::fmt::Write;
     let mut merges = String::from("<mergeCells>");
@@ -168,13 +153,11 @@ fn stacked_merges() -> String {
     merges + "</mergeCells>"
 }
 
-/// One merge over every position between the two cells.
 fn inner_merge() -> String {
     format!(r#"<mergeCells><mergeCell ref="B2:AMI{}"/></mergeCells>"#, SIDE - 1)
 }
 
-/// Heap the conversion may hold beyond the document it parses and the Markdown buffer it
-/// grows: the bookkeeping of each of the table's rows.
+// Allow for table row bookkeeping beyond the parsed document and Markdown buffer.
 const TABLE_SLACK: usize = 64 << 10;
 
 #[test]

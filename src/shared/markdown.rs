@@ -9,7 +9,6 @@ use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Cell, Inline, List, ListItem, MarkerKind, Style, Table};
 
-/// The blocks `markdown` holds, read for a container `depth` deep, each event charged to `ctx`.
 pub(crate) fn blocks(
     ctx: &ParseCtx<'_>,
     markdown: &str,
@@ -109,9 +108,6 @@ fn table_event(
     Ok(())
 }
 
-/// The most cells the tables of `markdown` can hold, short rows padded: the parser builds every
-/// padding cell before its first event. A delimiter row of `n` pipes heads at most `n + 1`
-/// columns over its header and every line up to the next blank one.
 fn table_cells(markdown: &str) -> u64 {
     let (mut cells, mut below) = (0_u64, 0_u64);
     for line in lines(markdown) {
@@ -131,13 +127,10 @@ fn table_cells(markdown: &str) -> u64 {
     cells
 }
 
-/// The lines of `markdown`, last first.
 fn lines(markdown: &str) -> impl Iterator<Item = &str> {
     markdown.rsplit('\n').flat_map(|line| line.strip_suffix('\r').unwrap_or(line).rsplit('\r'))
 }
 
-/// The most containers `line`'s leading quote and list markers and indentation can open, which
-/// bounds the parser's work per line before its first event.
 fn line_nesting(line: &str) -> u64 {
     let (mut levels, mut columns) = (0_u64, 0_u64);
     let mut rest = line.as_bytes();
@@ -322,7 +315,6 @@ impl Builder {
         Ok(())
     }
 
-    /// Text a tight list item holds outside any paragraph, as one.
     fn flush(&mut self) {
         if self.leaf.is_none() && !self.inlines.is_empty() {
             let inlines = self.take_inlines();

@@ -1,5 +1,3 @@
-//! Formatting runs: CHPX and PAPX out of FKP pages.
-
 use super::sprm::{PapDelta, apply_pap_sprms};
 use super::{Fib, read_plc};
 use crate::ctx::ParseCtx;
@@ -15,7 +13,6 @@ pub(super) enum FkpKind {
 
 #[derive(Default)]
 pub(super) struct RunProps {
-    /// Raw CHPX grpprl (application depends on the style base).
     pub(super) chpx: Vec<u8>,
     pub(super) istd: u16,
     pub(super) pap: PapDelta,
@@ -41,8 +38,6 @@ impl Runs {
         self.span(fc).0
     }
 
-    /// The properties at `fc`, and the first FC past it where they can
-    /// change: the end of its run or the start of the next.
     pub(super) fn span(&self, fc: u32) -> (Option<&RunProps>, u32) {
         let idx = self.runs.partition_point(|r| r.fc_start <= fc);
         let next = self.runs.get(idx).map_or(u32::MAX, |r| r.fc_start);
@@ -150,8 +145,6 @@ fn parse_fkp_page(
 mod tests {
     use super::*;
 
-    /// The runs and fuel of a CHPX bin table naming `pns`, over two FKP pages
-    /// of three runs each.
     fn fkp_runs(pns: &[u32]) -> (usize, u64) {
         let mut word_doc = vec![0u8; 1536];
         word_doc[..2].copy_from_slice(&0xA5ECu16.to_le_bytes());

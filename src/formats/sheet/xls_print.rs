@@ -124,9 +124,6 @@ impl PrintRecords {
         Ok(())
     }
 
-    /// Read a BIFF5/7 `HEADER` or `FOOTER` record, through its `CONTINUE` segments: a one-byte
-    /// character count and that many bytes in the workbook's code page, with the span of each
-    /// character its decoding damaged.
     pub(super) fn read_bytes(
         &mut self,
         ctx: &ParseCtx<'_>,
@@ -253,8 +250,6 @@ impl PrintRecords {
     }
 }
 
-/// The spans of `text` its decoding damaged: those of bytes that did not decode, and, where the
-/// code page was assumed, each other non-ASCII character.
 fn damage_spans(text: &str, invalid: &[std::ops::Range<usize>], assumed: bool) -> Vec<Damage> {
     let mut damage: Vec<Damage> =
         invalid.iter().map(|span| (span.clone(), DiagnosticCode::InvalidEncoding)).collect();

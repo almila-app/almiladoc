@@ -1,6 +1,3 @@
-//! A PDF through the model: each page's verdict, the gaps it leaves and the units it spans, and
-//! what the renderer makes of a page's text.
-
 use std::assert_matches;
 use std::fmt::Write as _;
 use std::num::NonZeroU32;
@@ -14,7 +11,6 @@ use almiladoc::{
     OnLoss, PageSelection, PageVerdict, UnsupportedKind,
 };
 
-/// Each page's verdict and reasons, as `inspect` reports them.
 const VERDICTS: &[(&str, &[&str])] = &[
     ("handmade-blank", &["no_text"]),
     ("handmade-blank-state", &["no_text"]),
@@ -445,16 +441,12 @@ fn pdf_output_is_identical_across_runs_and_threads() {
     }
 }
 
-/// A page for each content stream, its /F1 Helvetica, its /F2 a font whose codes give no
-/// characters and its /F3 Courier.
 pub(crate) fn pdf_pages(pages: &[&str]) -> Vec<u8> {
     let pages: Vec<Vec<(&str, &str)>> = pages.iter().map(|content| vec![("", *content)]).collect();
     let pages: Vec<&[(&str, &str)]> = pages.iter().map(Vec::as_slice).collect();
     pdf_tree(&pages, &|kids, count| format!("<< /Type /Pages /Kids [{kids}] /Count {count} >>"))
 }
 
-/// A page for each list of content streams, each with the extra entries of its dictionary,
-/// under the page tree `tree` writes from its kids and their count.
 fn pdf_tree(pages: &[&[(&str, &str)]], tree: &dyn Fn(&str, usize) -> String) -> Vec<u8> {
     let mut next = 5;
     let mut kids = Vec::new();

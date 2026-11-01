@@ -1,17 +1,14 @@
 /target
 /ocr-local/target
 /samples
-# Digests of the local `samples/` corpus: they quote converted content, so they
-# stay local like the corpus itself. Regenerate with `cargo test -- --ignored`.
+# Sample digests contain private corpus text; regenerate locally with `cargo test -- --ignored`.
 /tests/snapshots/snapshots__sample__*
 *.snap.new
 __pycache__/
 .venv/
-# cargo-fuzz working dirs: seeds live in fuzz/seeds/ and are checked in
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
-# Local only: personal agent settings, memory, worktrees and editor state.
 CLAUDE.local.md
 .worktreeinclude
 .claude/settings.local.json

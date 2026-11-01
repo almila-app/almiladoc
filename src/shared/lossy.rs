@@ -1,27 +1,15 @@
-//! Numeric conversions std offers only as `as` casts, each named for what it
-//! loses: a float rounded or truncated to an integer, and a `u64` widened to
-//! the nearest `f64`.
-
-/// `x` rounded to the nearest integer, halves away from zero; negative
-/// values and NaN give 0, values past `u64::MAX` give `u64::MAX`.
 pub(crate) fn round_u64(x: f64) -> u64 {
     x.round() as u64
 }
 
-/// `x` rounded to the nearest integer, halves away from zero; NaN gives 0,
-/// values past either end saturate at `i64::MIN` or `i64::MAX`.
 pub(crate) fn round_i64(x: f64) -> i64 {
     x.round() as i64
 }
 
-/// `x` truncated toward zero; NaN gives 0, values past either end saturate
-/// at `i64::MIN` or `i64::MAX`.
 pub(crate) fn trunc_i64(x: f64) -> i64 {
     x as i64
 }
 
-/// The `f64` nearest `n`, ties to even: exact through 2^53, and above it the
-/// nearest multiple of 2^(e-52) for the value's exponent e.
 pub(crate) fn to_f64(n: u64) -> f64 {
     n as f64
 }

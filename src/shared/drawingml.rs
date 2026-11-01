@@ -1,7 +1,3 @@
-//! Textual extraction of DrawingML rich objects shared by DOCX and PPTX:
-//! charts (title, axis titles, cached series data) and SmartArt diagram
-//! data (text points).
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -14,7 +10,6 @@ use crate::shared::text::clean_text;
 
 const AXES: [&str; 4] = ["catAx", "valAx", "dateAx", "serAx"];
 
-/// The part a graphic sits in.
 pub(crate) struct GraphicPart<'a, 'p> {
     pub pkg: &'a Package<'p>,
     pub rels: &'a Relationships,
@@ -22,8 +17,6 @@ pub(crate) struct GraphicPart<'a, 'p> {
     pub region: Region,
 }
 
-/// The blocks `extract` makes of a chart or diagram part rooted at `namespace:root`; one that
-/// is unnamed, absent, does not parse or is rooted elsewhere is reported.
 pub(crate) fn graphic_blocks(
     parse_ctx: &ParseCtx<'_>,
     part: &GraphicPart<'_, '_>,
@@ -47,10 +40,6 @@ pub(crate) fn graphic_blocks(
     }
 }
 
-/// A chart part as blocks: bold title paragraph plus a categories x series
-/// table built from the cached display strings, its positions admitted to
-/// the parse's grid slots before it is built. A chart whose data or axis
-/// titles these blocks cannot carry is reported in `region`.
 pub(crate) fn chart_blocks(
     parse_ctx: &ParseCtx<'_>,
     root: &Element,
@@ -75,7 +64,6 @@ pub(crate) fn chart_blocks(
     let mut relabelled = false;
     for ser in root.outermost(ns::CHART, "ser") {
         nested |= ser.outermost(ns::CHART, "ser").next().is_some();
-        // Cached display strings only; `c:f` formula references are not text.
         let name = series_name(ser);
         let cats = ser.find(ns::CHART, "cat").map(cached).unwrap_or_default();
         if categories.is_empty() {
@@ -127,9 +115,7 @@ fn cached(data: &Element) -> Vec<String> {
     data.outermost(ns::CHART, "v").map(|v| clean_text(&v.text())).collect()
 }
 
-/// Whether an axis title other than the `rendered` ones shows text. A title
-/// inside such a title shows only text the outer one holds, so it is never
-/// walked again.
+/// Nested axis titles are not walked again because their text belongs to the outer title.
 fn axis_title_unshown(root: &Element, rendered: [Option<&Element>; 2]) -> bool {
     let mut stack = vec![root];
     while let Some(elem) = stack.pop() {
@@ -163,8 +149,6 @@ fn chart_drops_data(root: &Element) -> bool {
     })
 }
 
-/// A SmartArt data part as a bullet list of its text points in order; a
-/// point inside another's text shows there, not again as an item.
 pub(crate) fn diagram_blocks(root: &Element) -> Vec<Block> {
     let mut items: Vec<ListItem> = Vec::new();
     let mut stack: Vec<&Element> = root.child_elems().rev().collect();
@@ -186,8 +170,6 @@ pub(crate) fn diagram_blocks(root: &Element) -> Vec<Block> {
     vec![Block::List(List { marker: MarkerKind::Bullet, start: 1, items })]
 }
 
-/// Text runs inside DrawingML rich text (`a:p`/`a:r`/`a:t`), joined; a
-/// paragraph inside another shows with it.
 pub(crate) fn drawing_text(elem: &Element) -> String {
     let parts: Vec<String> =
         elem.outermost(ns::A, "p").map(Element::text).filter(|t| !t.trim().is_empty()).collect();

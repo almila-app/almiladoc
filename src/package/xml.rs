@@ -1,6 +1,3 @@
-//! Namespace-aware DOM over quick-xml, its names resolved to interned namespace URIs.
-//! [`parse`] lists what fails.
-
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
@@ -15,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 
-/// Well-known namespace URIs.
 pub(crate) mod ns {
     pub(crate) const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     pub(crate) const R: &str =
@@ -103,13 +99,11 @@ pub(crate) enum ContentSelection {
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Element {
-    /// Resolved namespace URI (interned); `None` for unqualified names.
     pub ns: Option<Rc<str>>,
     pub local: String,
     pub attrs: Vec<Attr>,
     pub children: Vec<Node>,
     pub unresolved_text: bool,
-    /// Ordered `children` indices and node-local UTF-8 byte ranges of unresolved references.
     pub text_damage: Option<Box<TextDamage>>,
     pub selection: Option<Box<ContentSelection>>,
 }
@@ -129,17 +123,11 @@ impl Element {
         self.local == local && self.ns.as_deref() == Some(ns)
     }
 
-    /// Same-vocabulary attribute lookup: the qualified attribute wins, and
-    /// an explicitly unqualified one with the same local name is accepted
-    /// as a deliberate leniency - schemas often leave their own attributes
-    /// unqualified (DrawingML `gridSpan`) and producers vary. Lookups in a
-    /// *different* vocabulary than the element's (`r:id`, `xml:id`) must use
-    /// [`Element::attr_qualified`], where that fallback would misattribute.
+    /// Lookups in a *different* vocabulary than the element's (`r:id`, `xml:id`) must use [`Element::attr_qualified`], where that fallback would misattribute.
     pub(crate) fn attr(&self, ns: &str, local: &str) -> Option<&str> {
         self.attr_qualified(ns, local).or_else(|| self.attr_unqualified(local))
     }
 
-    /// Strictly namespace-qualified attribute lookup, no fallback.
     pub(crate) fn attr_qualified(&self, ns: &str, local: &str) -> Option<&str> {
         self.attrs
             .iter()
@@ -147,13 +135,10 @@ impl Element {
             .map(|a| a.value.as_str())
     }
 
-    /// Explicitly unqualified attribute lookup (no namespace), no fallback.
     pub(crate) fn attr_unqualified(&self, local: &str) -> Option<&str> {
         self.attrs.iter().find(|a| a.local == local && a.ns.is_none()).map(|a| a.value.as_str())
     }
 
-    /// Attribute by local name regardless of namespace. For elements whose
-    /// vocabulary is unambiguous in context (relationships, container files).
     pub(crate) fn attr_any(&self, local: &str) -> Option<&str> {
         self.attrs.iter().find(|a| a.local == local).map(|a| a.value.as_str())
     }
@@ -187,17 +172,14 @@ impl Element {
         })
     }
 
-    /// All descendant elements, depth-first in document order, lazily.
     pub(crate) fn descendant_elems(&self) -> impl Iterator<Item = &Self> {
         self.descendant_nodes().filter_map(Node::elem)
     }
 
-    /// First descendant with the given name, depth-first.
     pub(crate) fn first_descendant(&self, ns: &str, local: &str) -> Option<&Self> {
         self.descendant_elems().find(|e| e.is(ns, local))
     }
 
-    /// All descendants with the given name, in document order, lazily.
     pub(crate) fn descendants<'a>(
         &'a self,
         ns: &'a str,
@@ -206,8 +188,6 @@ impl Element {
         self.descendant_elems().filter(move |e| e.is(ns, local))
     }
 
-    /// The descendants with the given name that no other such descendant
-    /// holds, in document order: a match's own subtree is never walked.
     pub(crate) fn outermost<'a>(
         &'a self,
         ns: &'a str,
@@ -225,9 +205,6 @@ impl Element {
         })
     }
 
-    /// All descendants matching a local name regardless of namespace, in
-    /// document order. For vocabularies where the namespace varies across
-    /// producers (EPUB container/OPF metadata).
     pub(crate) fn descendants_any<'a>(&'a self, local: &'a str) -> impl Iterator<Item = &'a Self> {
         self.descendant_elems().filter(move |e| e.local == local)
     }
@@ -304,7 +281,6 @@ impl Element {
         Ok(())
     }
 
-    /// Direct text concatenated beside one UTF-8 byte range per unresolved reference.
     pub(crate) fn direct_text(
         &self,
         ctx: &ParseCtx<'_>,
@@ -334,7 +310,6 @@ impl Element {
         self.text_damage.as_deref().map_or(&[], Vec::as_slice)
     }
 
-    /// Concatenated text of all descendant text nodes.
     pub(crate) fn text(&self) -> String {
         self.descendant_nodes()
             .filter_map(|node| match node {
@@ -345,13 +320,9 @@ impl Element {
     }
 }
 
-/// Which named references a part's markup may use: declared (DTD) entities
-/// never expand in either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dialect {
-    /// XML's five predefined entities alone: OOXML and OpenDocument parts.
     Xml,
-    /// HTML5's named references as well: EPUB's XHTML and package documents.
     Xhtml,
 }
 
@@ -359,9 +330,6 @@ impl Dialect {
     fn named(self, name: &str) -> Option<&'static str> {
         match self {
             Self::Xml => quick_xml::escape::resolve_xml_entity(name),
-            // quick-xml 0.42's table cuts each five-digit `*fr`, `*scr` and `*opf`
-            // code point to its first four digits, all in U+1D00..=U+1DFF, a
-            // block no HTML5 reference names.
             Self::Xhtml => quick_xml::escape::resolve_html5_entity(name).filter(|value| {
                 let mut chars = value.chars();
                 !matches!((chars.next(), chars.next()), (Some('\u{1D00}'..='\u{1DFF}'), None))
@@ -380,9 +348,6 @@ impl Dialect {
     }
 }
 
-/// A reference's reading: a character, a named replacement, a name the
-/// dialect does not know (kept literally, a loss), or an ampersand that
-/// begins no reference (kept literally, as written).
 enum Reference {
     Char(char),
     Named(&'static str),
@@ -390,8 +355,6 @@ enum Reference {
     Literal,
 }
 
-/// A character reference's number as XML reads it: decimal, or hexadecimal
-/// after a lowercase `x`, unsigned, naming a scalar value other than NUL.
 fn char_reference(number: &str) -> Option<char> {
     let (digits, radix) = number.strip_prefix('x').map_or((number, 10), |hex| (hex, 16));
     if digits.starts_with(['+', '-']) {
@@ -408,7 +371,6 @@ pub(crate) fn is_name(name: &str) -> bool {
     chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
 }
 
-/// XML 1.0 (fifth edition) `NameStartChar`.
 fn is_name_start_char(c: char) -> bool {
     matches!(c,
         ':' | 'A'..='Z' | '_' | 'a'..='z'
@@ -418,15 +380,12 @@ fn is_name_start_char(c: char) -> bool {
         | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}')
 }
 
-/// XML 1.0 (fifth edition) `NameChar`.
 fn is_name_char(c: char) -> bool {
     is_name_start_char(c)
         || matches!(c,
             '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
-/// A parsed part, what building it saw that the tree cannot show, and the
-/// nodes it holds.
 pub(crate) struct Parsed {
     pub root: Element,
     pub marks: Marks,
@@ -437,23 +396,15 @@ pub(crate) struct Parsed {
 /// streams a part's repeated records through it, so the parse holds one
 /// record's nodes at a time.
 pub(crate) trait NodeSink {
-    /// Whether a node completing under `ancestors`, outermost first, leaves
-    /// the tree for the sink.
     fn takes(&self, ancestors: &[Element]) -> bool;
 
-    /// Whether this reference sets the part mark. `current` adds an attribute-owning
-    /// start tag; `None` selects ancestor text.
-    /// Suppression leaves `Element::unresolved_text` intact.
     fn reports_unresolved(&self, _ancestors: &[Element], _current: Option<&Element>) -> bool {
         true
     }
 
-    /// Receive a closed element the sink takes under `ancestors`; text it
-    /// takes is dropped, and an error ends the parse.
     fn take(&mut self, ancestors: &[Element], elem: Element) -> Result<(), ConvertError>;
 }
 
-/// The sink that takes nothing: the whole part stays in the tree.
 pub(crate) struct WholeTree;
 
 impl NodeSink for WholeTree {
@@ -466,7 +417,6 @@ impl NodeSink for WholeTree {
     }
 }
 
-/// [`parse`] in the XML dialect, with its marks reported by `role`.
 #[cfg(test)]
 pub(crate) fn parse_xml(
     parse_ctx: &ParseCtx<'_>,
@@ -478,21 +428,7 @@ pub(crate) fn parse_xml(
     Ok(parsed.root)
 }
 
-/// Parse an XML part into a synthetic root element containing the top-level
-/// nodes, and return what the tree cannot show as [`Marks`] for each
-/// reading call to report by its role. Encoding comes from the BOM or XML
-/// declaration; the part is transcoded to UTF-8 before parsing so namespace
-/// resolution sees one consistent encoding. `Malformed`: bytes that do not
-/// decode or an encoding label no decoder names, a mismatched or unclosed
-/// element, an ill-formed or repeated (qualified or expanded) attribute, an
-/// unbound prefix, a `<` that opens no well-formed tag, a processing
-/// instruction without a target, a declaration or document type inside the
-/// content, and in [`Dialect::Xml`] a document type with an internal subset.
-/// `ResourceLimit`: `max_work` spent, nesting past `max_nesting_depth`, or
-/// more than `max_xml_nodes` nodes held; an error `sink` returns passes
-/// through. Every node `sink` takes goes to
-/// it as it completes and is released, so `max_xml_nodes` bounds the nodes
-/// held at once.
+/// Encoding comes from the BOM or XML declaration; the part is transcoded to UTF-8 before parsing so namespace resolution sees one consistent encoding.
 pub(crate) fn parse(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
@@ -662,10 +598,8 @@ fn reject_misplaced(event: &Event<'_>, dialect: Dialect, tree: &Tree) -> Result<
     Err(ConvertError::malformed(reason))
 }
 
-/// What a parse saw that its tree cannot show.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Marks {
-    /// A reference the dialect does not resolve stayed literal.
     pub unresolved: bool,
 }
 
@@ -696,10 +630,6 @@ pub(crate) fn root_namespace(head: &[u8]) -> Option<String> {
     }
 }
 
-/// A start tag whose name is empty or that holds a `<`: quick-xml reads a
-/// bare `<` in text, and the markup after it up to the next `>`, as one tag;
-/// an end tag it reads that way names no open element, which quick-xml
-/// refuses.
 fn check_start_tag(e: &BytesStart<'_>) -> Result<(), ConvertError> {
     if e.name().as_ref().is_empty() || e.contains('<') {
         return Err(ConvertError::malformed("bare `<` in markup"));
@@ -716,8 +646,6 @@ fn unparseable(error: &quick_xml::Error) -> &'static str {
     }
 }
 
-/// Whether a document type declaration holds an internal subset, a `[`
-/// outside its quoted identifiers.
 fn has_internal_subset(doctype: &str) -> bool {
     let mut quote = None;
     for c in doctype.chars() {
@@ -731,9 +659,6 @@ fn has_internal_subset(doctype: &str) -> bool {
     false
 }
 
-/// Transcode an XML part to UTF-8 based on its BOM or encoding declaration,
-/// beside why it cannot be read faithfully: bytes that did not decode, or a
-/// declared label no decoder names, which leaves the bytes as they are.
 pub(crate) fn to_utf8(bytes: &[u8]) -> (Cow<'_, [u8]>, Option<&'static str>) {
     let decoded = |encoding: &'static encoding_rs::Encoding| {
         let (s, _, had_errors) = encoding.decode(bytes);
@@ -770,27 +695,19 @@ fn declared_encoding(head: &[u8]) -> Option<&str> {
     rest.strip_prefix(quote)?.split_once(quote).map(|(label, _)| label)
 }
 
-/// ISO/IEC 29500 *Strict* namespace and relationship-type URIs are the
-/// Transitional ones re-rooted under `http://purl.oclc.org/ooxml/` with the
-/// `2006` version segment dropped. Normalizing to the Transitional family at
-/// parse time lets the rest of the crate match a single set of constants.
+/// ISO/IEC 29500 *Strict* namespace and relationship-type URIs are the Transitional ones re-rooted under `http://purl.oclc.org/ooxml/` with the `2006` version segment dropped.
 pub(crate) fn normalize_ooxml_uri(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("http://purl.oclc.org/ooxml/")?;
     let (family, tail) = rest.split_once('/')?;
     Some(format!("http://schemas.openxmlformats.org/{family}/2006/{tail}"))
 }
 
-/// A bound namespace: `name`, the declared value with its references read
-/// as an attribute's are, identifies it, and `dom` is that name rewritten
-/// from Strict to Transitional, as the tree holds it.
 #[derive(Clone)]
 struct Namespace {
     name: Rc<str>,
     dom: Rc<str>,
 }
 
-/// quick-xml resolves a prefix to its declaration's raw value, references
-/// unread.
 fn intern(
     interner: &mut HashMap<String, Namespace>,
     raw: &str,
@@ -847,8 +764,6 @@ fn start_to_element(
         });
     }
     check_expanded_names(&names, &attrs)?;
-    // `mc:Choice/@Requires` holds prefixes in the element's lexical scope; resolve
-    // them here to URIs. Unresolvable prefixes stay literal and match no requirement.
     if local == "Choice"
         && ns.as_deref() == Some(ns::MC)
         && let Some(requires) = attrs.iter_mut().find(|a| a.local == "Requires")
@@ -879,8 +794,6 @@ fn start_to_element(
     })
 }
 
-/// A name's interned namespace, `None` for an unprefixed name outside any
-/// default namespace; a prefix no declaration binds is `Malformed`.
 fn bound(
     interner: &mut HashMap<String, Namespace>,
     resolved: &ResolveResult<'_>,
@@ -896,9 +809,6 @@ fn bound(
     }
 }
 
-/// Two attributes of one start tag with one namespace and local name are
-/// `Malformed`: quick-xml compares qualified names alone. `names` holds the
-/// namespace name of each attribute in `attrs` that has one, in order.
 fn check_expanded_names(names: &[Rc<str>], attrs: &[Attr]) -> Result<(), ConvertError> {
     if names.len() < 2 {
         return Ok(());
@@ -912,9 +822,6 @@ fn check_expanded_names(names: &[Rc<str>], attrs: &[Attr]) -> Result<(), Convert
     }
 }
 
-/// An attribute's value normalized as XML 1.0 does, its references read as
-/// text reads them: one the dialect does not know stays literal and marks
-/// the part, and an ampersand that begins no reference stays as written.
 fn attribute_value(
     attr: Attribute<'_>,
     dialect: Dialect,
@@ -1016,8 +923,6 @@ mod tests {
     use crate::shared::test_support::diagnostic_rows;
     use std::assert_matches;
 
-    /// Takes every node directly under a top-level `list`, keeping the text
-    /// of each element it takes.
     #[derive(Default)]
     struct Items(Vec<String>);
 

@@ -243,23 +243,17 @@ fn chapter_body(tree: &Element) -> Option<&Element> {
     html.child_elems().find(|e| e.local == "body")
 }
 
-/// Linked stylesheets across chapters: each part is read, and each
-/// unresolvable href reported, once.
 #[derive(Default)]
 struct Sheets {
     parts: HashMap<String, Sheet>,
     unresolvable: HashSet<String>,
 }
 
-/// A linked stylesheet's text, absent when its part is missing or will not read, and its id
-/// when what it lost may hide text.
 struct Sheet {
     text: Option<String>,
     lost: Option<usize>,
 }
 
-/// A chapter's CSS cascade: its linked stylesheets and inline `<style>`
-/// blocks, in document order, and the lost sheets it links.
 struct Cascade {
     css: Stylesheet,
     lost: HashSet<usize>,
@@ -331,9 +325,6 @@ fn linked_sheet<'s>(
     }))
 }
 
-/// Missing, a stylesheet costs formatting alone; unreadable, or undecoded where a replacement
-/// character may have hidden a `display`, it may hide text. A UTF-16 byte order mark picks
-/// UTF-16, else UTF-8.
 fn read_sheet(
     parse_ctx: &ParseCtx<'_>,
     pkg: &Package<'_>,
@@ -413,8 +404,6 @@ impl HtmlCtx for ChapterCtx<'_, '_> {
     }
 }
 
-/// Chapter-scoped anchor id: the chapter path itself targets the chapter
-/// start; `path#fragment` targets an element inside it.
 fn scoped(path: &str, fragment: &str) -> AnchorId {
     if fragment.is_empty() { path.to_string() } else { format!("{path}#{fragment}") }
 }

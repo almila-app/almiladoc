@@ -1,8 +1,3 @@
-//! `StyleTextPropAtom` and `TxMasterStyleAtom` parsing: paragraph and
-//! character formatting runs keyed by text range, per MS-PPT's
-//! TextPFException / TextCFException layouts. Parsing is defensive - a
-//! malformed exception aborts styling for that atom, never the text.
-
 use crate::model::VerticalPosition;
 use crate::shared::binary::{get_u16, get_u32};
 use crate::shared::delta::StyleDelta;
@@ -59,8 +54,6 @@ const CF_OLD_EA_TYPEFACE: u32 = 0x0020_0000;
 const CF_ANSI_TYPEFACE: u32 = 0x0040_0000;
 const CF_SYMBOL_TYPEFACE: u32 = 0x0080_0000;
 
-/// A `TextTypeEnum` value, kept raw: a text type this reader does not name
-/// still finds the master defaults of the same instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct TextType(pub(super) u16);
 
@@ -79,18 +72,13 @@ impl TextType {
 pub(super) struct ParaProps {
     pub count: usize,
     pub depth: u16,
-    /// From bulletFlags' fHasBullet, when present.
     pub bullet: Option<bool>,
 }
 
-/// Character formatting of a `TextCFException`: each property is tri-state, and `None`
-/// inherits the master's per-level default.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct CharStyle {
     pub delta: StyleDelta,
-    /// `fontRef`, an index into the font collection.
     pub font: Option<u16>,
-    /// `symbolFontRef`, an index into the font collection.
     pub symbol_font: Option<u16>,
 }
 
@@ -110,7 +98,6 @@ pub(super) struct CharProps {
     pub style: CharStyle,
 }
 
-/// One indent level's defaults from a `TxMasterStyleAtom`, tri-state.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct MasterLevel {
     pub bullet: Option<bool>,
@@ -164,8 +151,6 @@ impl<'a> StyleCursor<'a> {
     }
 }
 
-/// Parse a `StyleTextPropAtom` body for text of `text_len` UTF-16 units, and
-/// whether its runs cover the text and every one parsed.
 pub(super) fn parse_style_text(body: &[u8], text_len: usize) -> (StyleRuns, bool) {
     let mut runs = StyleRuns::default();
     let mut pos = 0usize;
@@ -180,8 +165,6 @@ pub(super) fn parse_style_text(body: &[u8], text_len: usize) -> (StyleRuns, bool
     (runs, complete)
 }
 
-/// Push the runs `read` takes from the counts at `pos` until they cover `text_len` units
-/// and the implicit final paragraph mark; false when one is unreadable or empty.
 fn read_runs<T>(
     body: &[u8],
     pos: &mut usize,
@@ -207,13 +190,10 @@ fn read_runs<T>(
     true
 }
 
-/// TextPFException: mask + fields in mask-bit order. Returns the bullet
-/// state (if the mask carried bulletFlags) and the next offset.
 fn parse_pf_exception(body: &[u8], pos: usize) -> Option<(Option<bool>, usize)> {
     let mask = get_u32(body, pos)?;
     let mut pos = pos + 4;
     let mut bullet = None;
-    // The fHasBullet value is specified only when masks.hasBullet itself is set.
     if mask & PF_BULLET_FLAGS != 0 {
         let flags = get_u16(body, pos)?;
         bullet = (mask & PF_HAS_BULLET != 0).then_some(flags & 0x0001 != 0);
@@ -231,7 +211,6 @@ fn parse_pf_exception(body: &[u8], pos: usize) -> Option<(Option<bool>, usize)> 
     (pos <= body.len()).then_some((bullet, pos))
 }
 
-/// The shift a `position` percentage of the line height names, by its sign.
 fn shift(percent: i16) -> VerticalPosition {
     match percent {
         1.. => VerticalPosition::Superscript,
@@ -240,10 +219,7 @@ fn shift(percent: i16) -> VerticalPosition {
     }
 }
 
-/// TextCFException: mask (+ optional style bitfield) + sized fields. Each
-/// style bit is specified only when its own mask bit is set (per-bit
-/// tri-state); strike-through is not in the 97-2003 style bits. [MS-PPT] 2.9.43 ends the
-/// structure at `position`: the pp10ext, newEA, cs and pp11ext masks must be zero here.
+/// Each style bit is specified only when its own mask bit is set (per-bit tri-state); strike-through is not in the 97-2003 style bits. [MS-PPT] 2.9.43 ends the structure at `position`: the pp10ext, newEA, cs and pp11ext masks must be zero here.
 fn parse_cf_exception(body: &[u8], pos: usize) -> Option<(CharStyle, usize)> {
     let mask = get_u32(body, pos)?;
     let mut pos = pos + 4;
@@ -270,8 +246,6 @@ fn parse_cf_exception(body: &[u8], pos: usize) -> Option<(CharStyle, usize)> {
     (pos <= body.len()).then_some((CharStyle { delta, font, symbol_font }, pos))
 }
 
-/// A `TxMasterStyleAtom`'s per-indent-level tri-state defaults (index =
-/// depth), and whether every level it declares parsed.
 pub(super) fn parse_master_style(body: &[u8], text_type: TextType) -> (Vec<MasterLevel>, bool) {
     let Some(levels) = get_u16(body, 0).map(|v| v as usize) else {
         return (Vec::new(), false);
@@ -279,8 +253,6 @@ pub(super) fn parse_master_style(body: &[u8], text_type: TextType) -> (Vec<Maste
     let mut pos = 2usize;
     let mut out = Vec::new();
     for _ in 0..levels.min(10) {
-        // Levels for body-family text types carry a leading depth field in
-        // format version >= 9 atoms; instances >= 5 always do.
         if text_type >= TextType::CENTER_BODY {
             pos += 2;
         }

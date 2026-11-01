@@ -1,5 +1,3 @@
-//! OPC relationship parts, typed.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
@@ -9,8 +7,6 @@ use crate::package::xml::{Element, normalize_ooxml_uri, ns};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-/// Well-known OPC relationship types (Transitional form; Strict types are
-/// normalized onto these when the rels part is read).
 pub(crate) mod rel_type {
     pub(crate) const OFFICE_DOCUMENT: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
@@ -74,12 +70,10 @@ impl Relationships {
         self.map.get(id)
     }
 
-    /// Internal-mode target for an id, the common case for parts.
     pub(crate) fn internal_target(&self, id: &str) -> Option<&str> {
         self.map.get(id).filter(|r| r.mode == TargetMode::Internal).map(|r| r.target.as_str())
     }
 
-    /// The relationships in id order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &Relationship)> {
         self.map.iter().map(|(k, v)| (k.as_str(), v))
     }
@@ -97,10 +91,6 @@ impl Relationships {
     }
 }
 
-/// Read a relationships part. An absent, unreadable, or corrupt part yields
-/// an empty map (absent is valid - many parts simply have no relationships;
-/// an unreadable one whose `role` reports it is marked
-/// [`reported`](Relationships::reported)). Fatal errors always propagate.
 pub(crate) fn read_rels(
     pkg: &Package<'_>,
     part: &str,
@@ -115,13 +105,8 @@ pub(crate) fn read_rels(
     Ok(Relationships::from_root(&root))
 }
 
-/// A loaded internal relationship target: its resolved part path and bytes.
 pub(crate) type RelTarget = (String, Rc<[u8]>);
 
-/// Load an internal relationship target's bytes, resolved against the part
-/// the relationship appears in. Unknown ids, external targets, and
-/// unresolvable or unreadable targets read as `None`, whose loss the caller
-/// reports; fatal errors always propagate.
 pub(crate) fn rel_target_bytes(
     pkg: &Package<'_>,
     rels: &Relationships,
@@ -135,9 +120,6 @@ pub(crate) fn rel_target_bytes(
     Ok(bytes.map(|bytes| (path, bytes)))
 }
 
-/// An internal relationship target's part path, resolved against the part
-/// the relationship appears in: `None` for an unknown id, an external target
-/// or one that does not resolve.
 pub(crate) fn rel_target_path(
     rels: &Relationships,
     base_part: &str,
@@ -154,10 +136,7 @@ pub(crate) struct MainPart {
     pub(crate) by_convention: bool,
 }
 
-/// The part the officeDocument relationship names once it resolves to a part
-/// path, else the first of `conventional` the package holds. A resolving
-/// target decides even when the part is absent, so a leftover conventional
-/// part never replaces it.
+/// A resolving target decides even when the part is absent, so a leftover conventional part never replaces it.
 pub(crate) fn main_part(
     pkg: &Package<'_>,
     root: &Relationships,
@@ -177,9 +156,6 @@ pub(crate) fn main_part(
         .map(|part| MainPart { path: (*part).to_string(), by_convention: true })
 }
 
-/// The main part's path, reporting [`DiagnosticCode::ConventionalPartUsed`]
-/// when a conventional location supplied it although the package has a root
-/// relationships part; `None` when the package holds no main part.
 pub(crate) fn read_main_part(
     parse_ctx: &ParseCtx<'_>,
     pkg: &Package<'_>,
@@ -195,8 +171,6 @@ pub(crate) fn read_main_part(
     Ok(Some(main.path))
 }
 
-/// Conventional rels part name for a part (`word/document.xml` ->
-/// `word/_rels/document.xml.rels`).
 pub(crate) fn rels_part_for(part: &str) -> String {
     match part.rsplit_once('/') {
         Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),

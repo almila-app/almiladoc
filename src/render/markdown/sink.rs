@@ -61,7 +61,6 @@ impl<'l> Meter<'l> {
         self.held.set(self.held.get().saturating_sub(bytes as u64));
     }
 
-    /// Charge `units` of work that writes nothing.
     pub(crate) fn charge(&self, units: u64) -> Result<(), ConvertError> {
         self.ledger.charge(units)
     }
@@ -76,26 +75,15 @@ impl<'l> Meter<'l> {
     }
 }
 
-/// Rendered text held before it is written: a paragraph to trim, a table
-/// cell, a list marker. Inside the table cells opened on it, it is a cell
-/// line: each line pushed is trimmed, blank lines are dropped and the rest
-/// joined by `<br>` as the bytes arrive, and a nested cell trims its own
-/// lines inside its parent's.
 pub(crate) struct Text<'m> {
     buf: String,
     meter: &'m Meter<'m>,
     line: Line,
-    /// Whitespace a cell line held after what it showed and has not shown:
-    /// the owed tail, moved into `buf` if the line goes on, and the tails it
-    /// dropped below `floor`, kept for a take-back.
     space: String,
-    /// The `space` an open [`Text::attempt`] may take back to.
     floor: usize,
     note: Option<NoteEnd>,
 }
 
-/// Where the last note reference pushed ends, and whether only whitespace
-/// precedes it on its line.
 #[derive(Clone, Copy)]
 struct NoteEnd {
     at: usize,
@@ -104,15 +92,11 @@ struct NoteEnd {
 
 #[derive(Clone, Copy, Default)]
 struct Line {
-    /// How many cells are open.
     depth: usize,
-    /// How many of the outermost open cells show something on their current
-    /// line.
     shown: usize,
     owed: Option<Owed>,
 }
 
-/// What the cell at depth `by` owes before the next character shown.
 #[derive(Clone, Copy)]
 struct Owed {
     by: usize,
@@ -121,9 +105,7 @@ struct Owed {
 
 #[derive(Clone, Copy)]
 enum Debt {
-    /// A `<br>`: a line that showed something ended.
     Break,
-    /// The held whitespace from this offset on.
     Space(usize),
 }
 
@@ -198,13 +180,10 @@ impl<'m> Text<'m> {
         self.buf.len()
     }
 
-    /// What was pushed since `mark`, a length this text had.
     pub(crate) fn since(&self, mark: usize) -> &str {
         self.buf.get(mark..).unwrap_or_default()
     }
 
-    /// Push what `render` pushes, and take it back when `render` returns
-    /// `Ok(false)`.
     pub(crate) fn attempt(
         &mut self,
         render: impl FnOnce(&mut Self) -> Result<bool, ConvertError>,
@@ -221,9 +200,7 @@ impl<'m> Text<'m> {
         kept
     }
 
-    /// Take back everything pushed since `mark`. Whitespace owed at `mark`
-    /// and shown since is the first thing pushed after it, so it moves back
-    /// from there; owed whitespace dropped since stays where it was held.
+    /// Whitespace owed at `mark` and shown since is the first thing pushed after it, so it moves back from there; owed whitespace dropped since stays where it was held.
     fn truncate(&mut self, mark: Mark) {
         let held = self.buf.len().saturating_add(self.space.len());
         if let Some(Owed { debt: Debt::Space(from), .. }) = mark.line.owed
@@ -239,12 +216,10 @@ impl<'m> Text<'m> {
         self.line = mark.line;
     }
 
-    /// Open a table cell: what is pushed until it closes forms one line.
     pub(crate) fn open_cell(&mut self) {
         self.line.depth = self.line.depth.saturating_add(1);
     }
 
-    /// Close the innermost cell, dropping its trailing whitespace and breaks.
     pub(crate) fn close_cell(&mut self) {
         let line = &mut self.line;
         if line.owed.is_some_and(|owed| owed.by == line.depth) {
@@ -267,8 +242,6 @@ impl<'m> Text<'m> {
         Ok(())
     }
 
-    /// One line's worth of a push into the innermost cell: its edge
-    /// whitespace held or dropped, what lies between shown.
     fn push_line(&mut self, line: &str) -> Result<(), ConvertError> {
         let rest = line.trim_start();
         self.push_space(line.strip_suffix(rest).unwrap_or_default())?;
@@ -279,8 +252,6 @@ impl<'m> Text<'m> {
         self.push_space(rest.strip_prefix(core).unwrap_or_default())
     }
 
-    /// Whitespace after what the innermost cell's line shows is held, and
-    /// dropped before it.
     fn push_space(&mut self, ws: &str) -> Result<(), ConvertError> {
         let line = &mut self.line;
         if ws.is_empty() || line.shown < line.depth {
@@ -309,8 +280,6 @@ impl<'m> Text<'m> {
         Ok(())
     }
 
-    /// A line break in the innermost cell: a line that showed something
-    /// owes a `<br>` in place of the whitespace it held.
     fn end_line(&mut self) {
         let line = &mut self.line;
         if line.shown == line.depth {
@@ -320,8 +289,6 @@ impl<'m> Text<'m> {
         self.drop_tails();
     }
 
-    /// Release the dropped whitespace past what an open attempt may take
-    /// back: everything held but the owed tail.
     fn drop_tails(&mut self) {
         let end = match self.line.owed {
             Some(Owed { debt: Debt::Space(from), .. }) => from,
@@ -345,24 +312,16 @@ impl Drop for Text<'_> {
     }
 }
 
-/// What opens the lines of a block quote or a list item.
 enum Prefix<'m> {
-    /// `> ` on every line, `>` alone on an empty one.
     Quote,
-    /// The marker on the first line that shows anything, spaces as wide as
-    /// `indent` on the lines after it, nothing on an empty one.
     Marker { first: Option<Text<'m>>, indent: usize },
 }
 
-/// Line breaks owed before the next byte written, the empty lines among them
-/// prefixed as at `depth` prefixes.
 struct Gap {
     breaks: u8,
     depth: usize,
 }
 
-/// The Markdown being written: each line opens with the prefixes of the
-/// containers it sits in, written as the line's first byte arrives.
 pub(crate) struct Sink<'m> {
     out: String,
     meter: &'m Meter<'m>,
@@ -395,13 +354,10 @@ impl<'m> Sink<'m> {
         self.out.len()
     }
 
-    /// Owe `breaks` line breaks before the next byte, as between blocks or
-    /// list items; owing them again replaces them.
     pub(crate) fn gap(&mut self, breaks: u8) {
         self.gap = Some(Gap { breaks, depth: self.prefixes.len() });
     }
 
-    /// Forget the line breaks owed, as after the last block of a container.
     pub(crate) fn drop_gap(&mut self) {
         self.gap = None;
     }
@@ -410,20 +366,15 @@ impl<'m> Sink<'m> {
         self.prefixes.push(Prefix::Quote);
     }
 
-    /// Open the lines that follow with `marker`, then with spaces as wide as
-    /// `indent`.
     pub(crate) fn push_marker(&mut self, marker: Text<'m>, indent: usize) {
         self.prefixes.push(Prefix::Marker { first: Some(marker), indent });
     }
 
-    /// Close the innermost prefix; a marker no line showed is dropped.
     pub(crate) fn pop(&mut self) {
         self.prefixes.pop();
         self.shown = self.shown.min(self.prefixes.len());
     }
 
-    /// Close the innermost prefix, writing its marker on a line of its own
-    /// when no line showed it: a list item keeps its marker when empty.
     pub(crate) fn pop_shown(&mut self) -> Result<(), ConvertError> {
         if matches!(self.prefixes.last(), Some(Prefix::Marker { first: Some(_), .. })) {
             self.flush_gap()?;
@@ -453,7 +404,6 @@ impl<'m> Sink<'m> {
         self.write(&text.into_string())
     }
 
-    /// The Markdown, ending in a line break unless it is empty.
     pub(crate) fn finish(mut self) -> Result<String, ConvertError> {
         if std::mem::take(&mut self.cr) {
             self.emit("\r")?;
@@ -473,9 +423,6 @@ impl<'m> Sink<'m> {
         Ok(())
     }
 
-    /// Write one line's worth of `seg`; inside a container a carriage return
-    /// before a line break is dropped, as a CRLF line ending, and kept
-    /// everywhere else.
     fn segment(&mut self, seg: &str) -> Result<(), ConvertError> {
         if seg.is_empty() {
             return Ok(());
@@ -496,7 +443,6 @@ impl<'m> Sink<'m> {
         Ok(())
     }
 
-    /// Show the prefixes this line has not shown yet.
     fn open(&mut self) -> Result<(), ConvertError> {
         let Self { out, meter, prefixes, shown, .. } = self;
         for prefix in prefixes.iter_mut().skip(*shown) {
@@ -513,8 +459,6 @@ impl<'m> Sink<'m> {
         Ok(())
     }
 
-    /// End the line; an empty one shows the prefixes up to the innermost
-    /// quote among the first `depth`, that quote as `>` alone.
     fn end_line(&mut self, depth: usize) -> Result<(), ConvertError> {
         if std::mem::take(&mut self.cr) && depth == 0 {
             self.emit("\r")?;

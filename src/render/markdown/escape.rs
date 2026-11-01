@@ -1,6 +1,3 @@
-//! Context-sensitive minimal escaping: document text is escaped only where a
-//! character could actually parse as Markdown syntax in its context.
-
 use std::borrow::Cow;
 
 use crate::error::ConvertError;
@@ -15,21 +12,15 @@ pub(crate) enum InlineContext {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct EscapeOpts {
-    /// The run begins at the start of an output line, where block syntax
-    /// (headings, list markers, setext underlines) could form.
     pub at_line_start: bool,
     /// The run is wrapped in emphasis delimiters, so delimiter characters
     /// inside it always need escaping.
     pub styled: bool,
-    /// The character following the run is unknown or active markup; pairable
-    /// delimiters must assume the worst.
     pub trailing_active: bool,
     /// The rest of the line starts with a non-whitespace character that is
     /// not active markup (a hard break's backslash, an anchor tag), so a
     /// run-final delimiter can still be left-flanking.
     pub trailing_nonspace: bool,
-    /// Delimiters that later runs on the same rendered line will emit; a
-    /// delimiter in this run can pair with one of them across the run seam.
     pub trailing_delims: Delims,
     /// Inside a link label / image alt, where an unmatched `]` (or `[`)
     /// would terminate the label early.
@@ -39,7 +30,6 @@ pub(crate) struct EscapeOpts {
     pub joining: Option<char>,
 }
 
-/// Set of pairable delimiter characters (`*` `_` `~` `` ` `` `]` `$`).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Delims([bool; 6]);
 
@@ -64,9 +54,6 @@ impl Delims {
         }
     }
 
-    /// Record the partners `text` contributes when emitted as document
-    /// text: every backtick and `]`, plus the emphasis delimiters that
-    /// can close.
     pub(crate) fn insert_closers(&mut self, text: &str) {
         for (start, end, c) in runs(text) {
             if let Some(set) = partner_slot(text, start, end, c).and_then(|s| self.0.get_mut(s)) {
@@ -86,8 +73,6 @@ impl Delims {
     }
 }
 
-/// The runs of one repeated character in `text`: the byte offsets each
-/// starts and ends at, and its character.
 fn runs(text: &str) -> impl Iterator<Item = (usize, usize, char)> + '_ {
     let mut chars = text.char_indices().peekable();
     std::iter::from_fn(move || {
@@ -103,12 +88,7 @@ fn runs(text: &str) -> impl Iterator<Item = (usize, usize, char)> + '_ {
     })
 }
 
-/// Slot for the run of `c` at `start..end` of `text` when it can act as a
-/// pairing partner. Backticks and `]` always can: code spans pair by
-/// backtick-string length (even a backslash-escaped backtick still closes
-/// one) and brackets pair as link structure. `*`, `_` and `~` pair by
-/// flanking, and `$` closes math only after a non-space and before a
-/// non-digit, so those count only where they can close.
+/// `*`, `_` and `~` pair by flanking, and `$` closes math only after a non-space and before a non-digit, so those count only where they can close.
 fn partner_slot(text: &str, start: usize, end: usize, c: char) -> Option<usize> {
     let slot = Delims::slot(c)?;
     let prev = char_before(text, start);
@@ -121,19 +101,11 @@ fn partner_slot(text: &str, start: usize, end: usize, c: char) -> Option<usize> 
     closes.then_some(slot)
 }
 
-/// Whether a `$` run between `prev` and `next` could close a math span: not
-/// preceded by whitespace, not followed by a digit. Unknown neighbours at the
-/// edges assume the worst.
 fn can_close_math(prev: Option<char>, next: Option<char>) -> bool {
     !prev.is_some_and(char::is_whitespace) && !next.is_some_and(|n| n.is_ascii_digit())
 }
 
-/// Whether a run of the emphasis or strikethrough character `c` between
-/// `prev` and `next` could close a pair: approximate right-flanking (not
-/// preceded by whitespace, nor preceded by punctuation with a word character
-/// after), plus the intraword exclusion for `_`. Unknown neighbours at the
-/// edges assume the worst; the punctuation test stays ASCII so an
-/// unclassified character never suppresses a genuine closer.
+/// Unknown neighbours at the edges assume the worst; the punctuation test stays ASCII so an unclassified character never suppresses a genuine closer.
 fn can_close(c: char, prev: Option<char>, next: Option<char>) -> bool {
     if prev.is_some_and(char::is_whitespace) {
         return false;
@@ -145,8 +117,6 @@ fn can_close(c: char, prev: Option<char>, next: Option<char>) -> bool {
         || !(prev.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric))
 }
 
-/// Whether a `$` in `text` could close a math span once every other
-/// non-space character is masked: one not preceded by whitespace.
 pub(crate) fn masked_dollar_closes(text: &str) -> bool {
     runs(text)
         .any(|(start, _, c)| c == '$' && !char_before(text, start).is_some_and(char::is_whitespace))
@@ -170,8 +140,6 @@ struct Scan {
 }
 
 impl Scan {
-    /// Whether `c`, the first character of `rest` and at byte `at` of the text, is written
-    /// escaped.
     fn escapes(
         &self,
         c: char,
@@ -190,7 +158,6 @@ impl Scan {
             ..
         } = self.opts;
         let next = rest.chars().nth(1);
-        // At the run's end the next character is unknown; trailing_active assumes the worst.
         let next_nonspace =
             next.map_or(trailing_active || trailing_nonspace, |n| !n.is_whitespace());
         let paired = |slot: usize| {
@@ -201,8 +168,6 @@ impl Scan {
         match c {
             '\\' => true,
             '(' | ':' if at == 0 => note_syntax(c, self.ctx, out.after_note()),
-            // Opens a math span only directly before non-space, and only
-            // when a `$` that can close follows.
             '$' => next_nonspace && paired(5),
             ']' if in_label => true,
             '~' if start_of_line && rest.starts_with("~~~") => true,
@@ -320,7 +285,6 @@ fn line_is_only(rest: &str, c: char, minimum: usize) -> bool {
         && line.chars().filter(|&ch| ch == c).count() >= minimum
 }
 
-/// Whether the `&` that starts `rest` opens a character reference.
 fn entity_ahead(rest: &str) -> bool {
     let after = rest.get(1..).unwrap_or_default();
     if after.starts_with('#') {
@@ -345,7 +309,6 @@ pub(crate) fn format_url(url: &str, out: &mut Text<'_>) -> Result<(), ConvertErr
         let encoded = match c {
             '<' => "%3C",
             '>' => "%3E",
-            // Raw pipes split GFM table cells.
             '|' => "%7C",
             '\\' => "\\\\",
             '&' if entity_ahead(url.get(i..).unwrap_or_default()) => "\\&",
@@ -385,7 +348,6 @@ pub(super) fn escape_marker_label(
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let opts = EscapeOpts {
-        // List-item content re-opens block syntax after the `- ` marker.
         at_line_start: ctx == InlineContext::Block,
         trailing_active: true,
         ..Default::default()
@@ -401,7 +363,6 @@ pub(super) fn controls_to_spaces(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Shortest backtick fence longer than any backtick run in `text`.
 pub(crate) fn backtick_fence(text: &str, min: usize) -> String {
     let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     "`".repeat((longest_run + 1).max(min))

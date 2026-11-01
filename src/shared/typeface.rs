@@ -1,24 +1,16 @@
-//! The typefaces a presentation run names and the symbol font each of its characters reads
-//! through: DrawingML's `a:latin` and `a:sym` faces and PPT's `fontRef` and `symbolFontRef`.
-
 use super::symbol::{self, SymbolFont, Token};
 use super::text::clean_text;
 use crate::model::{Inline, Style};
 
-/// One typeface slot at one layer of a cascade.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Slot {
-    /// Not specified at this layer; the next layer out decides.
     #[default]
     Inherit,
-    /// A face that draws its characters as written, or a reference that names no face.
     Plain,
     Symbol(SymbolFont),
 }
 
 impl Slot {
-    /// The slot a face name sets; a theme font reference such as `+mn-lt` is not
-    /// resolved and counts as a plain face.
     pub(crate) fn named(face: &str) -> Self {
         SymbolFont::from_name(face).map_or(Self::Plain, Self::Symbol)
     }
@@ -28,7 +20,6 @@ impl Slot {
     }
 }
 
-/// The slots of a run: the face of its Latin characters and the face of its symbol-range ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Slots {
     pub latin: Slot,
@@ -36,7 +27,6 @@ pub(crate) struct Slots {
 }
 
 impl Slots {
-    /// Overlay `over` on `self`: a slot it specifies wins, the others inherit.
     pub(crate) fn merge(self, over: Self) -> Self {
         Self { latin: over.latin.over(self.latin), symbol: over.symbol.over(self.symbol) }
     }
@@ -55,7 +45,6 @@ impl Slots {
     }
 }
 
-/// The symbol font that reads a run's characters, equal for runs that read alike.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Route {
     latin: Option<SymbolFont>,
@@ -63,15 +52,11 @@ pub(crate) struct Route {
 }
 
 impl Route {
-    /// The font that reads `c`: U+F000-F0FF through the symbol slot, every other character
-    /// through the Latin slot.
     pub(crate) fn font_of(self, c: char) -> Option<SymbolFont> {
         if ('\u{f000}'..='\u{f0ff}').contains(&c) { self.symbol } else { self.latin }
     }
 }
 
-/// A run's text read through `route`, as inlines of `style`, and how many of its codes no
-/// symbol table maps.
 pub(crate) fn run_inlines(text: &str, route: Route, style: Style) -> (Vec<Inline>, u64) {
     let decoded = symbol::decode_run(text, |c| route.font_of(c));
     let inlines = decoded

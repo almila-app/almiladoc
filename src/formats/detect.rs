@@ -1,35 +1,3 @@
-//! Content-based format detection.
-//!
-//! Identifies the format from what each specification designates as the
-//! container's identity, never from heuristics over document content:
-//!
-//! - PDF: the `%PDF-` header (ISO 32000; implementations accept leading
-//!   junk, bounded here at 1024 bytes).
-//! - RTF: the `{\rtf` group that must open every RTF file.
-//! - OLE compound files: the [MS-CFB] signature, then the stream name each
-//!   binary Office format mandates ([MS-DOC] `WordDocument`, [MS-PPT]
-//!   `PowerPoint Document`, [MS-XLS] `Workbook`/`Book`).
-//! - ZIP packages: the local-file-header signature, then the package's own
-//!   identity: the `mimetype` part (ODF/EPUB OCF), or for OPC the content
-//!   type of the part the package-level officeDocument relationship
-//!   designates as the main document (with the namespace of the main part's
-//!   mandated root element as the authority when content types are stale
-//!   or generic). A relationship that resolves to a part decides alone;
-//!   otherwise the conventional main-part locations are typed.
-//!
-//! A package is read only as far as its identity: at most
-//! [`MIMETYPE_BYTES`] of `mimetype`, [`METADATA_BYTES`] of each metadata
-//! part and the first [`ROOT_TAG_BYTES`] of the main part, within the entry
-//! and total byte budgets, which count these reads with the parse's own.
-//! `mimetype` or a metadata part past its cap or a budget reads as absent,
-//! whatever size it declares; the main part is read only as far as they
-//! allow.
-//!
-//! Plain-text formats (CSV) carry no signature and are never detected.
-//! Detection never fails a sniff: any unreadable or ambiguous container
-//! yields `None`. The label check runs it on the parse's own context, so
-//! a limit or cancellation there fails the parse.
-
 use crate::Format;
 use crate::ctx::ParseCtx;
 use crate::error::{ConvertError, UnsupportedKind};
@@ -45,12 +13,6 @@ const CT_NS: &str = "http://schemas.openxmlformats.org/package/2006/content-type
 const MANIFEST_NS: &str = "urn:oasis:names:tc:opendocument:xmlns:manifest:1.0";
 const SPREADSHEET_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
-/// The OOXML families in match order: main-part directory, content-type
-/// segments, root-element namespace and format. A content type names its
-/// family by a segment that covers every variant (document, template,
-/// slideshow); the `ms-*` segments are the macro-enabled ones, and `ms-excel`
-/// also the binary `.xlsb` main part. The namespace is normalized from Strict
-/// to Transitional.
 const FAMILIES: [(&str, [&str; 2], &str, Format); 3] = [
     ("word/", ["wordprocessingml", "ms-word"], ns::W, Format::Docx),
     ("ppt/", ["presentationml", "ms-powerpoint"], ns::P, Format::Pptx),
@@ -68,9 +30,6 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Format> {
     detect(&ParseCtx::new(&Limits::DEFAULT), bytes).ok().flatten()
 }
 
-/// Fails [`UnsupportedKind::FormatMismatch`] when the content is recognized
-/// as a format other than `label`. A PDF header past the first byte does
-/// not contradict a CSV label: delimited text may quote one.
 pub(crate) fn check_label(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
@@ -85,8 +44,6 @@ pub(crate) fn check_label(
     }
 }
 
-/// The format the content is, `None` when it names none; only a fatal error
-/// fails it.
 pub(crate) fn detect(
     parse_ctx: &ParseCtx<'_>,
     bytes: &[u8],
@@ -106,9 +63,6 @@ pub(crate) fn detect(
     Ok(head.windows(PDF_MAGIC.len()).any(|w| w == PDF_MAGIC).then_some(Format::Pdf))
 }
 
-/// Classify an OLE compound file by its mandated content stream. Encrypted
-/// OOXML packages (`EncryptedPackage`) stay `None`: the inner format is
-/// unknowable, and the frontend reports `Encrypted` precisely.
 fn detect_ole(bytes: &[u8]) -> Option<Format> {
     const STREAMS: [(&str, Format); 4] = [
         ("WordDocument", Format::Doc),
@@ -117,8 +71,6 @@ fn detect_ole(bytes: &[u8]) -> Option<Format> {
         ("Book", Format::Excel),
     ];
     let ole = cfb::CompoundFile::open(Cursor::new(bytes)).ok()?;
-    // Stream-name comparison is case-insensitive, matching CFB's own
-    // uppercase name comparisons; producers vary (`WORKBOOK`, `BOOK`).
     ole.read_root_storage().find_map(|entry| {
         STREAMS.iter().find_map(|&(stream, format)| {
             entry.name().eq_ignore_ascii_case(stream).then_some(format)
@@ -143,8 +95,6 @@ fn detect_zip(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Option<Format>, 
         return Ok(Some(format));
     }
 
-    // ODF without its mandatory `mimetype`: the manifest's root file entry
-    // carries the same media type.
     if let Some(manifest) = pkg.probe_xml_part("META-INF/manifest.xml", METADATA_BYTES)?
         && let Some(root) = manifest
             .descendants(MANIFEST_NS, "file-entry")
@@ -154,7 +104,6 @@ fn detect_zip(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Option<Format>, 
         return Ok(mimetype_format(mime.trim()));
     }
 
-    // EPUB without its mandatory `mimetype`: the OCF container descriptor.
     Ok(pkg.has_part("META-INF/container.xml").then_some(Format::Epub))
 }
 
@@ -181,21 +130,15 @@ fn main_part_format(pkg: &Package<'_>, part: &str) -> Result<Option<Format>, Con
     {
         return Ok(Some(format));
     }
-    // Content types can be stale or generic; the main part's mandated root
-    // element (`w:document`, `p:presentation`, `workbook`) is the next
-    // authority.
     if let Some(head) = pkg.probe_head(part, ROOT_TAG_BYTES)?
         && let Some(format) = root_namespace(&head).as_deref().and_then(namespace_format)
     {
         return Ok(Some(format));
     }
-    // Binary main parts (`xl/workbook.bin`) and unreadable ones: the family
-    // directory names the format.
     Ok(opc_format_by_path(part))
 }
 
 fn mimetype_format(mime: &str) -> Option<Format> {
-    // `-template` variants share the base format's parser.
     let mime = mime.strip_suffix("-template").unwrap_or(mime);
     Some(match mime {
         "application/epub+zip" => Format::Epub,
@@ -206,8 +149,6 @@ fn mimetype_format(mime: &str) -> Option<Format> {
     })
 }
 
-/// Resolve a part's content type per OPC: an `Override` for the exact part
-/// name wins, else the `Default` for its extension.
 fn content_type_of<'a>(types: &'a Element, part: &str) -> Option<&'a str> {
     let find = |tag, key, value: &str| {
         types
@@ -266,7 +207,6 @@ mod tests {
     #[test]
     fn signatures() {
         assert_eq!(from_bytes(b"%PDF-1.7\n"), Some(Format::Pdf));
-        // Leading junk before the header is accepted, bounded.
         let mut junk = vec![b' '; 500];
         junk.extend_from_slice(b"%PDF-1.4");
         assert_eq!(from_bytes(&junk), Some(Format::Pdf));
@@ -288,7 +228,6 @@ mod tests {
         assert_eq!(from_bytes(&ole_of(&["PowerPoint Document"])), Some(Format::Ppt));
         assert_eq!(from_bytes(&ole_of(&["Workbook"])), Some(Format::Excel));
         assert_eq!(from_bytes(&ole_of(&["BOOK"])), Some(Format::Excel));
-        // Encrypted OOXML: inner format unknowable, extension decides.
         assert_eq!(from_bytes(&ole_of(&["EncryptedPackage", "EncryptionInfo"])), None);
     }
 
@@ -308,8 +247,6 @@ mod tests {
 
     #[test]
     fn opc_main_part_content_type_wins_over_its_path() {
-        // Main part at a nonconventional path; only the content type says
-        // this is a presentation.
         let rels = rels_naming("/custom/main.xml");
         let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
             <Override PartName="/custom/main.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
@@ -324,8 +261,6 @@ mod tests {
 
     #[test]
     fn opc_stale_content_types_defer_to_the_root_element() {
-        // The Override names a part that does not exist; the real main part
-        // only gets the generic Default. Its w:document root decides.
         let rels = rels_naming("content/main.xml");
         let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
             <Default Extension="xml" ContentType="application/xml"/>
@@ -342,12 +277,10 @@ mod tests {
 
     #[test]
     fn opc_falls_back_to_conventional_paths() {
-        // No content types: the main-part path decides.
         let rels = rels_naming("word/document.xml");
         let pkg = zip_package(&[("_rels/.rels", rels.as_str()), ("word/document.xml", "<d/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Docx));
 
-        // No rels at all: conventional part existence decides.
         let pkg = zip_package(&[("xl/workbook.bin", "\0")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Excel));
     }
@@ -469,7 +402,6 @@ mod tests {
         let pkg = zip_package(&[("META-INF/container.xml", "<container/>")]);
         assert_eq!(from_bytes(&pkg), Some(Format::Epub));
 
-        // A plain zip is not a document.
         assert_eq!(from_bytes(&zip_package(&[("readme.txt", "hi")])), None);
     }
 

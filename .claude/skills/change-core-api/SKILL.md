@@ -10,12 +10,9 @@ description: Change the public surface the Python binding mirrors - `Format`, a 
 
 # Change the core API
 
-The model reaches Python only as the JSON `Parsed::to_json` writes, which serde derives from the
-core types. A format name reaches the binding through `Format`'s `FromStr`. The rest of the
-binding is hand-mirrored, and the compiler catches none of its drift: a new `ConvertError` variant
-(`#[non_exhaustive]`) reaches the binding's wildcard arm and raises `InternalError`, a new
-`Limits` field is unreachable from Python until the binding lists it, and nothing compiles the
-stub against the core.
+- Models reach Python only through serde JSON from `Parsed::to_json`; format names use `FromStr`.
+- Hand-mirrored drift does not compile-fail: new non-exhaustive errors become `InternalError`,
+  omitted Limits fields remain unreachable, and the compiler never checks the stub.
 
 1. Change the core and its tests. A new public entry point lands with its compiled rustdoc
    example, run by `cargo test --doc`. A new error variant gets its `code()` arm and an assertion in

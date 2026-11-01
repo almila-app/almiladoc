@@ -1,6 +1,3 @@
-//! URI classification shared across frontends (EPUB hrefs, ODF hrefs and
-//! image references, Word field targets).
-
 use std::borrow::Cow;
 
 /// True when `s` is an RFC 3986 scheme (`scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`).
@@ -14,24 +11,16 @@ fn has_scheme(s: &str) -> bool {
     s.split_once(':').is_some_and(|(scheme, _)| is_scheme(scheme))
 }
 
-/// True for Windows drive-letter paths (`C:\...`, `C:/...`). They parse as
-/// a one-letter scheme under RFC 3986, but in documents they are local file
-/// paths (legacy Word HYPERLINK fields), never URIs.
+/// Drive paths parse as one-letter schemes under RFC 3986 but denote local files in documents.
 fn is_drive_path(s: &str) -> bool {
     matches!(s.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
-/// True when `s` should be treated as an absolute URI with a scheme rather
-/// than a relative/package reference.
 pub(crate) fn is_absolute_uri(s: &str) -> bool {
     has_scheme(s) && !is_drive_path(s)
 }
 
-/// Whether a link destination may reach the Markdown: judged on the destination a browser would
-/// follow after WHATWG URL preprocessing (leading and trailing C0 controls and spaces stripped,
-/// tab, CR and LF removed), its scheme ASCII-lowercased. A scheme must be `http`, `https` or
-/// `mailto`, which also refuses a drive path (`C:`); a destination without one passes unless it
-/// is a UNC path.
+/// Whether a link destination may reach the Markdown: judged on the destination a browser would follow after WHATWG URL preprocessing (leading and trailing C0 controls and spaces stripped, tab, CR and LF removed), its scheme ASCII-lowercased.
 pub(crate) fn is_safe_link(dest: &str) -> bool {
     const INNER_STRIPPED: [char; 3] = ['\t', '\r', '\n'];
     let trimmed = dest.trim_matches(|c: char| c <= ' ');

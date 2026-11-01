@@ -4,13 +4,10 @@
 use crate::diagnostics::DiagnosticCode;
 use crate::package::xml::{Element, ns};
 
-/// The loss of showing a value without its number style, from none to the worst.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum FormatCost {
     None,
-    /// The same number shows, as in General.
     Fallback,
-    /// The style may show less or more than the value.
     Unread,
 }
 
@@ -24,16 +21,11 @@ impl FormatCost {
     }
 }
 
-/// What the fallback shows of a cell, by its `office:value-type`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Shown {
-    /// A `float`, as a plain number.
     Float,
-    /// A `percentage`, times 100 and a percent sign.
     Percentage,
-    /// A `string`.
     Text,
-    /// A currency, date, time or boolean, which no data style shows as the fallback does.
     Other,
 }
 
@@ -48,7 +40,6 @@ impl Shown {
     }
 }
 
-/// The cost of a data style under each kind of value the fallback shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Costs {
     float: FormatCost,
@@ -87,8 +78,6 @@ impl Costs {
     }
 }
 
-/// A style that is one plain number, and with `sign` a percent sign after it: the fallback shows
-/// the same number for a float under a number style and a percentage under a percentage style.
 fn reproduced(style: &Element, sign: bool) -> bool {
     let mut parts = style.child_elems();
     parts.next().is_some_and(is_plain_number)

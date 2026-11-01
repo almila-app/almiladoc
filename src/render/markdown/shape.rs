@@ -1,7 +1,3 @@
-//! What a block's rendering holds, read from the model before anything is
-//! written: whether it shows anything, and whether it holds an empty line,
-//! which makes the list item it sits alone in loose.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -49,15 +45,12 @@ impl Lines {
         self.line_shown = false;
     }
 
-    /// Whether any line shows, and whether an empty line sits between two
-    /// that do.
     fn finish(mut self) -> (bool, bool) {
         self.line_break();
         (self.shown, self.blank)
     }
 }
 
-/// Read the lines rendering `items` in a paragraph writes into `lines`.
 fn trace(items: &[Norm<'_>], lines: &mut Lines) {
     for item in items {
         match item {
@@ -80,9 +73,6 @@ fn trace(items: &[Norm<'_>], lines: &mut Lines) {
     }
 }
 
-/// Whether rendering `inlines` in `ctx` writes anything but whitespace;
-/// remembered for each link's content, which every enclosing link asks
-/// about again, and charged one unit per inline the first time it is read.
 pub(super) fn nonspace(
     inlines: &[Inline],
     ctx: InlineContext,
@@ -109,8 +99,6 @@ pub(super) fn nonspace(
     })
 }
 
-/// Whether a paragraph of `inlines` shows anything, and whether it holds an
-/// empty line.
 fn paragraph(
     inlines: &[Inline],
     rc: &Ctx<'_>,
@@ -122,7 +110,6 @@ fn paragraph(
     Ok(lines.finish())
 }
 
-/// Whether `block` renders anything.
 pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     Ok(match block {
         Block::Paragraph(inlines) => paragraph(inlines, rc, meter)?.0,
@@ -145,7 +132,6 @@ pub(super) fn shows(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bo
     })
 }
 
-/// Whether `test` holds for any of `items`, stopping at the first that does or fails.
 pub(super) fn any<T>(
     items: impl IntoIterator<Item = T>,
     mut test: impl FnMut(T) -> Result<bool, ConvertError>,
@@ -158,7 +144,6 @@ pub(super) fn any<T>(
     Ok(false)
 }
 
-/// Whether `block` adds anything to the table cell it is flattened into.
 fn shows_in_cell(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     match block {
         Block::Heading { content: inlines, .. } | Block::Paragraph(inlines) => {
@@ -192,8 +177,6 @@ pub(super) struct Shapes {
     nonspace: RefCell<HashMap<(*const Inline, InlineContext), bool>>,
 }
 
-/// Whether an empty line separates the items of `list`: an item holds more
-/// than one block, or its one block renders an empty line.
 pub(super) fn loose(list: &List, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     remembered(&rc.shapes.loose, ptr::from_ref(list), || {
         any(&list.items, |item| {
@@ -207,7 +190,6 @@ pub(super) fn loose(list: &List, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool
     })
 }
 
-/// What `block` writes in its place: a filled gap its fill, an image gap not filled nothing.
 fn placed<'d>(block: &'d Block, rc: &Ctx<'d>) -> &'d [Block] {
     match block {
         Block::Gap(gap) => match rc.fills.filled(gap) {
@@ -241,7 +223,6 @@ fn remembered<K: Eq + Hash>(
     Ok(value)
 }
 
-/// Whether `blocks`, joined by empty lines, render an empty line.
 fn blank_body(blocks: &[Block], rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     let mut showing = 0;
     for block in blocks {
@@ -258,8 +239,6 @@ fn blank_body(blocks: &[Block], rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool,
     Ok(false)
 }
 
-/// Whether `block` renders an empty line. A heading's is read from its
-/// rendering, held and dropped.
 fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, ConvertError> {
     Ok(match block {
         Block::Paragraph(inlines) => paragraph(inlines, rc, meter)?.1,
@@ -289,8 +268,6 @@ fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, Convert
     })
 }
 
-/// Whether `pieces`, joined, hold a line break after an empty line or after
-/// a line of one carriage return, which a line split reads as empty.
 fn has_empty_line<'a>(pieces: impl IntoIterator<Item = &'a str>) -> bool {
     let (mut len, mut cr) = (0usize, false);
     for c in pieces.into_iter().flat_map(str::chars) {
@@ -331,8 +308,6 @@ mod tests {
         sink.finish().ok().filter(|markdown| !markdown.is_empty())
     }
 
-    /// Hold every fact read from the model against the rendering of each
-    /// block and table cell of `doc`, nested ones included.
     fn agrees_with_rendering(doc: &Document, name: &str) {
         let ledger = Ledger::new(u64::MAX, None);
         let meter = Meter::new(&ledger, u64::MAX);

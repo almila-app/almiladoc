@@ -1,14 +1,10 @@
-//! The style rules of a CSS sheet that an on-screen reading system applies, read out of its group
-//! rules in one pass over the text, without recursion.
-
 use std::iter::Enumerate;
 use std::slice;
 
 const REPLACEMENT: char = char::REPLACEMENT_CHARACTER;
 const REPLACEMENT_BYTES: &[u8] = "\u{fffd}".as_bytes();
 
-/// Whether a condition holds on screen. Ordered so that `max` conjoins conditions and `min`
-/// disjoins them.
+/// Ordered so that `max` conjoins conditions and `min` disjoins them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Applies {
     Always,
@@ -26,10 +22,6 @@ impl Applies {
     }
 }
 
-/// A style rule: its selectors, the text of each declaration it holds itself that names a value
-/// (not those of rules nested in it), the condition its groups put on it, and whether a
-/// replacement character sits in its selectors, any of its segments or the conditions of its
-/// groups.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SheetRule<'a> {
     pub(crate) selectors: &'a str,
@@ -47,7 +39,6 @@ impl<'a> SheetRule<'a> {
     }
 }
 
-/// Whether a media query list holds on screen; an empty list holds.
 pub(crate) fn media_applies(list: &str) -> Applies {
     if list.trim().is_empty() {
         return Applies::Always;
@@ -73,8 +64,6 @@ fn query_applies(query: &str) -> Applies {
     if negated { applies.inverted() } else { applies }
 }
 
-/// Whether the text after a query's type joins features to it; absent when something other than
-/// `and` and a feature follows the type, which holds nowhere.
 fn features(kind: &str, tail: &str) -> Option<bool> {
     if kind.is_empty() {
         return Some(tail.starts_with('('));
@@ -93,10 +82,6 @@ fn strip_keyword<'a>(text: &'a str, keyword: &str) -> (bool, &'a str) {
     }
 }
 
-/// The rules of `css` that apply on a screen under `base`, in source order. A statement at-rule
-/// ends at its `;`, and any other `;` outside a block joins the prelude after it; a block left
-/// open closes at the end of the text; braces and semicolons escaped, in a quoted string or in an
-/// unquoted `url(` move nothing.
 pub(crate) fn scan(css: &str, base: Applies) -> impl Iterator<Item = SheetRule<'_>> {
     let root = if base == Applies::Never {
         Frame::Skip { nested: 0 }
@@ -161,15 +146,11 @@ enum Escape {
 impl Lex {
     const PLAIN: Self = Self { within: Within::Plain, escape: Escape::None };
 
-    /// Whether the next byte can be a brace or semicolon of the sheet's structure. A backslash
-    /// before a line break outside a string escapes nothing, so a carriage return it meets leaves
-    /// the byte after it structural.
+    /// A backslash before a line break outside a string escapes nothing, so a carriage return it meets leaves the byte after it structural.
     fn structural(self) -> bool {
         self.within == Within::Plain && self.escape != Escape::Backslash
     }
 
-    /// The state after `css[at]`. A backslash right after a replacement character is the trail
-    /// byte of a legacy double-byte character, not an escape.
     fn next(self, css: &[u8], at: usize) -> Self {
         let byte = css[at];
         let within = self.within;
@@ -198,7 +179,6 @@ impl Lex {
     }
 }
 
-/// Whether the `(` at `at` opens an unquoted `url(` token.
 fn opens_url(css: &[u8], at: usize) -> bool {
     let name = at.saturating_sub(3);
     let named = css[name..at].eq_ignore_ascii_case(b"url")
@@ -298,8 +278,6 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// The condition an at-rule block puts on the rules in it, absent when it holds none a screen
-/// reads; a replacement character in its prelude leaves it unsettled.
 fn group_condition(prelude: &str) -> Option<Applies> {
     let at_rule = prelude.strip_prefix('@')?;
     let name_end =

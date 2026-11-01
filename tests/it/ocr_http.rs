@@ -1,4 +1,3 @@
-//! `OcrHttp` against a loopback server that answers each connection from a script.
 #![expect(
     clippy::disallowed_types,
     reason = "a loopback server stands in for the vision server, and a child test process carries a proxy environment"
@@ -19,8 +18,6 @@ use almiladoc::{
 };
 use serde_json::{Value, json};
 
-/// A scripted answer: a status with extra header lines and a body once the request is read, the
-/// connection closed unanswered, or a status sent on the request's head, its body left unread.
 enum Answer {
     Reply(u16, &'static str, Vec<u8>),
     Close,
@@ -37,8 +34,6 @@ fn status(code: u16, headers: &'static str) -> Answer {
     Answer::Reply(code, headers, Vec::new())
 }
 
-/// A request as the server read it: its head, and its body unless it was left unread; a
-/// connection past the script is seen with an empty head.
 struct Seen {
     head: String,
     body: Option<Value>,
@@ -78,7 +73,6 @@ impl Server {
         Self { base_url, seen, stop, serving }
     }
 
-    /// Every connection served, its last given a moment to arrive.
     fn finish(self) -> Vec<Seen> {
         thread::sleep(Duration::from_millis(50));
         self.stop.store(true, Ordering::Relaxed);
@@ -151,7 +145,6 @@ fn serve_on(stream: &mut (impl Read + Write), answer: Answer) -> Seen {
     Seen { head, body: Some(serde_json::from_slice(&body).unwrap()) }
 }
 
-/// A document showing one PNG of `size` bytes that do not compress.
 fn noisy_picture(size: usize) -> Vec<u8> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let noise = std::iter::repeat_with(|| {
@@ -175,7 +168,6 @@ fn engine(base_url: &str, set: impl FnOnce(&mut OcrHttpConfig)) -> OcrHttp {
     OcrHttp::new(config).unwrap()
 }
 
-/// The rich DOCX fixture with its image a gap, and that image's request six times over.
 fn images(max_ocr_text_bytes: u64) -> (Parsed, Vec<OcrRequest>) {
     let converter = configured(|config| {
         config.image_ocr = ImageOcr::All;
@@ -390,8 +382,6 @@ fn a_cancel_ends_a_wait_before_a_retry() {
     assert_eq!(server.finish().len(), 1);
 }
 
-/// A server that answers every connection with `reply("x")` after `stall`, on a thread each,
-/// counting connections and the most open at once.
 struct Stalling {
     base_url: String,
     counts: Arc<Mutex<(usize, usize, usize)>>,
@@ -399,7 +389,6 @@ struct Stalling {
     serving: JoinHandle<()>,
 }
 
-/// Count `stream` in, wait `stall`, count it out and answer it.
 fn stall_and_serve(stream: &TcpStream, counts: &Mutex<(usize, usize, usize)>, stall: Duration) {
     {
         let mut counts = counts.lock().unwrap();
@@ -433,7 +422,6 @@ impl Stalling {
         Self { base_url, counts, stop, serving }
     }
 
-    /// Connections served and the most open at once.
     fn finish(self) -> (usize, usize) {
         thread::sleep(Duration::from_millis(50));
         self.stop.store(true, Ordering::Relaxed);
@@ -473,8 +461,6 @@ fn a_cancel_during_a_stalled_response_attempts_no_later_request() {
     assert_eq!(server.finish(), (1, 1));
 }
 
-/// A self-signed leaf certificate for `localhost` and 127.0.0.1, and its P-256 key, made for
-/// this test alone.
 const TEST_CERTIFICATE: &str = "MIIBlzCCAT6gAwIBAgIUFtBbo2vzkNbNURHK5cD7G4OGBN8wCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAyNjE0MjQwNFoYDzIxMjYxMDAyMTQyNDA0WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAScHAB6OhX7qzE599KAWwj3OnEVtz+PJ8DJgtPPhxDcg4UOsP5zw3WcJrejnazkScXCZUheHTwCEvgZ3fTQk1yso2wwajAdBgNVHQ4EFgQU0wGBjld5606LRkEE6PRwRox8c60wHwYDVR0jBBgwFoAU0wGBjld5606LRkEE6PRwRox8c60wDAYDVR0TAQH/BAIwADAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDRwAwRAIgNRqqjhzfSrkcXkmvBs683jN66QW4PbSf+xfCk89TANYCIB2OjlMrLj3RGkm6W4nM+FRjMosWkK55/GO9iln4EBmn";
 const TEST_KEY: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgSTj+2rUJ2sipq927rIi6rz3ALuxB+/8pe2JmNGCgYKKhRANCAAScHAB6OhX7qzE599KAWwj3OnEVtz+PJ8DJgtPPhxDcg4UOsP5zw3WcJrejnazkScXCZUheHTwCEvgZ3fTQk1ys";
 
@@ -527,8 +513,6 @@ fn a_server_whose_certificate_no_root_signs_leaves_its_gap_after_one_connection(
     assert_eq!(serving.join().unwrap(), [true, false]);
 }
 
-/// Set by the parent of the child run of
-/// `a_proxy_in_the_environment_changes_no_outcome`.
 const PROXIED_CHILD: &str = "ALMILADOC_PROXIED_CHILD";
 
 #[test]

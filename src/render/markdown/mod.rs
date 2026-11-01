@@ -1,5 +1,3 @@
-//! GitHub-Flavored Markdown serializer for the document model.
-
 mod anchors;
 mod escape;
 mod image;
@@ -34,7 +32,6 @@ use std::cell::Cell as StateCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-/// Footnote id -> rendered number, shared by all render functions.
 type NoteNumbers = HashMap<String, usize>;
 
 pub(crate) struct Ctx<'d> {
@@ -162,8 +159,6 @@ impl<'d> Ctx<'d> {
         Ok(())
     }
 
-    /// The scope of one side story: its own anchors under `prefix`, and no ordinary notes, its owned
-    /// keys charged to `meter` before they are resolved.
     fn side(
         &self,
         value: &HeaderFooter,
@@ -284,8 +279,6 @@ impl<'d> Ctx<'d> {
         Ok(())
     }
 
-    /// Whether a link to `target` renders its content alone: an anchor that exists nowhere, or a
-    /// destination the scheme gate refuses.
     fn degrades(&self, target: &LinkTarget) -> bool {
         match target {
             LinkTarget::Anchor { id, .. } => self.anchors.fragment(id).is_none(),
@@ -301,8 +294,6 @@ pub(crate) struct Rendered {
     pub(crate) units: Vec<UnitSpan>,
 }
 
-/// Render `doc` with its gaps as `fills` holds them as GitHub-Flavored Markdown, every byte
-/// charged to `meter`.
 pub(crate) fn render(
     doc: &Document,
     fills: &GapFills,
@@ -338,8 +329,6 @@ pub(crate) fn document_to_markdown(doc: &Document) -> String {
         .markdown
 }
 
-/// Which causes the parse already counted, silencing the render losses they
-/// cover.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Unread<'a> {
     /// A notes part did not read, so references to its notes dangle.
@@ -349,7 +338,6 @@ pub(crate) struct Unread<'a> {
 }
 
 impl<'a> Unread<'a> {
-    /// Whether `diagnostics` already counts an unreadable notes part.
     pub(crate) fn of(diagnostics: &Diagnostics) -> Self {
         Self {
             notes: diagnostics
@@ -370,13 +358,8 @@ impl<'a> Unread<'a> {
     }
 }
 
-/// One loss rendering reports: its code, region and count.
 pub(crate) type RenderLoss = (DiagnosticCode, Region, Option<Unit>, u64);
 
-/// What rendering `doc` loses, by code, region and count: note bodies under
-/// an id already defined, and links to anchors and note references whose
-/// target exists nowhere, unless `unread` names their cause. Read from the
-/// model alone: nothing is rendered, and what is read is charged to `meter`.
 pub(crate) fn render_losses(
     doc: &Document,
     unread: Unread<'_>,
@@ -473,7 +456,6 @@ fn comment_losses(
     Ok(losses)
 }
 
-/// What each side story loses where it renders, in its own scope, with its region and unit.
 fn side_losses(
     doc: &Document,
     rc: &Ctx<'_>,
@@ -493,8 +475,6 @@ fn side_losses(
     Ok(sides)
 }
 
-/// Every side story with content that rendering `rc`'s document writes, with the unit whose
-/// body holds it: one a table cell holds writes nothing.
 fn side_stories<'d>(doc: &'d Document, rc: &Ctx<'d>) -> Vec<(&'d HeaderFooter, Option<Unit>)> {
     let mut stories = Vec::new();
     let mut unit = None;
@@ -650,9 +630,6 @@ fn block_is_blank(block: &Block) -> bool {
     }
 }
 
-/// Push every note `blocks` reference in first-reference order, each note's
-/// own references right after it, with an explicit stack: a chain of notes
-/// referencing the next is as long as the document's note count.
 fn collect_note_refs<'d>(
     blocks: &'d [Block],
     valid: &HashMap<&str, &'d Note>,
@@ -789,10 +766,6 @@ impl ListMark {
     }
 }
 
-/// Write `blocks` separated by empty lines, skipping those that write
-/// nothing. `last` marks the sibling list written right before them, and
-/// the mark of the list that ends them, else `last` when none wrote, is
-/// returned.
 fn write_blocks(
     blocks: &[Block],
     rc: &Ctx<'_>,
@@ -816,8 +789,6 @@ fn write_blocks(
     Ok(last)
 }
 
-/// Take off every frame around `table`: a single cell that holds one table
-/// and, beside it, only paragraphs that show nothing gives way to that table.
 fn unwrap<'t>(
     mut table: &'t Table,
     rc: &Ctx<'_>,
@@ -846,8 +817,6 @@ fn framed<'t>(
     Ok(inner)
 }
 
-/// Write `block` after the sibling list marked `last`, returning the mark
-/// of the list that ends what it wrote at this level.
 fn write_block(
     block: &Block,
     rc: &Ctx<'_>,
@@ -916,7 +885,6 @@ fn write_block(
     Ok(None)
 }
 
-/// Write a side story's heading as a paragraph, which claims no slug, its anchor before it.
 fn write_side_heading(
     anchor: Option<&str>,
     content: &[Inline],
@@ -964,8 +932,6 @@ fn write_header_footer(
     Ok(())
 }
 
-/// Write a filled gap's fill in its place after the sibling list marked `last`, else a page's
-/// marker.
 fn write_gap(
     gap: &Gap,
     rc: &Ctx<'_>,
@@ -1052,8 +1018,6 @@ fn ordered_mark(list: &List) -> Option<ListMark> {
     Some(mark)
 }
 
-/// Write a paragraph's rendered `text` with its lines trimmed, keeping
-/// hard-break backslashes intact.
 fn write_paragraph(text: &str, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
     let lines: Vec<&str> = text
         .lines()

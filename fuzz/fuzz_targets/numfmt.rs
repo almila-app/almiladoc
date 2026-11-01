@@ -4,11 +4,7 @@ use almiladoc::Format;
 use almiladoc_fuzz::{archive, convert, fuzz_target};
 use zip::write::SimpleFileOptions;
 
-// A number format code, carried into the engine on a minimal workbook. The
-// grammar is where the parsing complexity lives, and reaching it through a
-// discovered styles part would cost the fuzzer most of its budget. Only the
-// control characters XML forbids are dropped, so whitespace a code may carry
-// still reaches the parser.
+// A minimal workbook reaches the complex format grammar efficiently while preserving XML-permitted whitespace.
 fuzz_target!(|data: &[u8]| {
     let code = String::from_utf8_lossy(data);
     let mut escaped = String::new();

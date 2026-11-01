@@ -1,12 +1,4 @@
-//! CSV and friends (semicolon, tab, pipe delimited).
-//!
-//! Field content is preserved as written (RFC 4180: spaces are part of the
-//! field); only control characters are cleaned. Encoding is detected from
-//! the BOM (UTF-8, UTF-16LE/BE), then UTF-8, then Windows-1252. The
-//! delimiter is chosen by trial-parsing candidates and scoring record
-//! consistency, so delimiters inside quoted fields don't skew the choice. The
-//! format marks no header row, so the shape of the data decides whether the
-//! first record is one.
+//! RFC 4180 treats spaces as field content, so the reader preserves them.
 
 use crate::ctx::ParseCtx;
 use crate::diagnostics::{DiagnosticCode, Region};
@@ -27,7 +19,6 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
 
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for record in reader(&text, delimiter).records() {
-        // Unreachable on a flexibly read `str`: no I/O, UTF-8 or record-length error.
         let Ok(record) = record else {
             parse_ctx.emit(DiagnosticCode::CellValueUnreadable, Region::Body);
             continue;
@@ -48,9 +39,6 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     Ok(doc)
 }
 
-/// The text and what decoding it cost: `invalid_encoding` when a UTF-16
-/// file holds bytes that do not decode as UTF-16, `encoding_assumed` when
-/// bytes that are not UTF-8 are read as windows-1252.
 fn decode(bytes: &[u8]) -> (Cow<'_, str>, Option<DiagnosticCode>) {
     let utf16 = match bytes {
         [0xFF, 0xFE, ..] => Some(encoding_rs::UTF_16LE),
@@ -81,8 +69,6 @@ fn reader(text: &str, delimiter: u8) -> csv::Reader<&[u8]> {
         .from_reader(text.as_bytes())
 }
 
-/// Trial-parse each candidate over the leading records and score by field
-/// consistency; comma wins ties.
 fn sniff_delimiter(text: &str) -> u8 {
     const CANDIDATES: [u8; 4] = *b",;\t|";
     let mut best = (b',', 0usize);
@@ -100,7 +86,6 @@ fn sniff_delimiter(text: &str) -> u8 {
         if modal < 2 {
             continue; // a delimiter that never splits carries no signal
         }
-        // Consistency first, then wider records break the tie.
         let score = freq * 1000 + modal.min(500);
         if score > best.1 {
             best = (d, score);
@@ -128,7 +113,6 @@ mod tests {
 
     #[test]
     fn quoted_delimiters_do_not_skew_sniffing() {
-        // Semicolon-delimited with commas inside quoted fields.
         assert_eq!(sniff_delimiter("a;b;c\n\"1,5\";\"2,5\";x\n\"3,0\";y;z\n"), b';');
         assert_eq!(sniff_delimiter("a,b,c\n1,2,3\n"), b',');
         assert_eq!(sniff_delimiter("a\tb\n1\t2\n"), b'\t');

@@ -1,7 +1,3 @@
-//! Side stories, the headers and footers a source reader resolves: each is read once with its
-//! losses held back, then published where it takes effect, every change reporting those losses
-//! in the unit that shows it.
-
 use crate::ctx::ParseCtx;
 use crate::diagnostics::Diagnostics;
 use crate::error::ConvertError;
@@ -11,14 +7,12 @@ use crate::model::{
 };
 use std::collections::HashMap;
 
-/// One region and variant's value, with the losses reading it reported.
 pub(crate) struct SideStory {
     state: HeaderFooterState,
     losses: Diagnostics,
 }
 
 impl SideStory {
-    /// A value that uses the default variant, or shows nothing when `content` is empty.
     pub(crate) fn known(
         region: HeaderFooterRegion,
         variant: HeaderFooterVariant,
@@ -31,8 +25,6 @@ impl SideStory {
         }
     }
 
-    /// The story `read` returns, its reports held back; `None`, or content that lost what it
-    /// declares, is shown, empty for `None`, and never taken for an equal value.
     pub(crate) fn read(
         ctx: &ParseCtx<'_>,
         region: HeaderFooterRegion,
@@ -63,7 +55,6 @@ impl SideStory {
         Self { state: HeaderFooterState { value, certainty }, losses }
     }
 
-    /// The story as the value of the page style `name`, kept apart from other page styles'.
     pub(crate) fn of_page_style(
         mut self,
         ctx: &ParseCtx<'_>,
@@ -77,16 +68,12 @@ impl SideStory {
 
 type InForce = HashMap<(HeaderFooterRegion, HeaderFooterVariant), HeaderFooterState>;
 
-/// The values in force for each page style, region and variant as stories publish in reading
-/// order.
 #[derive(Default)]
 pub(crate) struct SideTimeline {
     previous: HashMap<Option<String>, InForce>,
 }
 
 impl SideTimeline {
-    /// Push `story` onto `blocks` where it changes the value in force, its images placed and its
-    /// losses reported in the current unit; a first value that shows nothing still reports them.
     pub(crate) fn publish(
         &mut self,
         ctx: &ParseCtx<'_>,
@@ -123,8 +110,6 @@ impl SideTimeline {
     }
 }
 
-/// What one slide or notes page shows of its running header and footer, with what reading each
-/// lost, published as its default values.
 #[derive(Default)]
 pub(crate) struct PageSides {
     header: (Vec<Block>, Diagnostics),
@@ -132,7 +117,6 @@ pub(crate) struct PageSides {
 }
 
 impl PageSides {
-    /// Add what `read` returns to the side it shows on, its reports held back for that side.
     pub(crate) fn read(
         &mut self,
         ctx: &ParseCtx<'_>,
@@ -153,7 +137,6 @@ impl PageSides {
         Ok(())
     }
 
-    /// Push the page's header and footer onto `blocks` where they change.
     pub(crate) fn publish(
         self,
         ctx: &ParseCtx<'_>,

@@ -1,6 +1,3 @@
-//! An OCR engine filling a parsed document's image gaps in batches, in-process or from
-//! requests exported to another.
-
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 
@@ -72,7 +69,6 @@ impl OcrEngine for Scripted {
     }
 }
 
-/// A document of `count` paragraphs, each showing a PNG of `size` bytes.
 fn pictures(count: usize, size: usize) -> Vec<u8> {
     let png = [PNG, &vec![0; size.saturating_sub(PNG.len())]].concat();
     let body: String = (1..=count)
@@ -100,7 +96,6 @@ fn parsed(converter: &Converter, bytes: &[u8]) -> Parsed {
     converter.parse(Input::new(bytes, Format::Docx)).unwrap()
 }
 
-/// The least `max_work` under which `bytes` parse with image OCR and `passes` holds of the parse.
 fn least_work(bytes: &[u8], passes: &dyn Fn(&mut Parsed) -> bool) -> u64 {
     let (mut low, mut high) = (0, 1 << 20);
     while low < high {

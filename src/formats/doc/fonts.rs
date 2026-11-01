@@ -1,5 +1,3 @@
-//! The font table (`SttbfFfn`) and the rule that picks the font each character is drawn in.
-
 use super::Fib;
 use super::sprm::{Chp, Direct, HINT_COMPLEX, HINT_EAST_ASIA, Symbol};
 use crate::ctx::ParseCtx;
@@ -12,16 +10,13 @@ const F_EXTEND: u16 = 0xFFFF;
 /// [MS-DOC] FFN: the offset of `xszFfn`, past `prq` through `fs`.
 pub(super) const FFN_NAME: usize = 39;
 
-/// How a font draws the characters set in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Face {
     Text,
     Glyphs(SymbolFont),
-    /// A font the file names but whose entry does not read.
     Unresolved,
 }
 
-/// Each font table entry's face, and the face of an index past them.
 #[derive(Debug)]
 pub(super) struct FontTable {
     faces: Vec<Face>,
@@ -43,8 +38,6 @@ impl FontTable {
         self.faces.get(usize::from(ftc)).copied().unwrap_or(self.past)
     }
 
-    /// What `c`, set with the properties `chp`, draws, and the index of its font when that is
-    /// unresolved: a `sprmCSymbol` draws its own character in its own font in place of `c`.
     pub(super) fn draw(&self, chp: &Chp, c: char) -> (Glyph, Option<u16>) {
         let (ftc, c) = match chp.direct.symbol {
             Some(Symbol { ftc, xchar }) => match char::from_u32(u32::from(xchar)) {
@@ -61,7 +54,6 @@ impl FontTable {
     }
 }
 
-/// A text font draws a character as itself, and a symbol-font code as nothing.
 fn text_glyph(c: char) -> Glyph {
     if ('\u{f000}'..='\u{f0ff}').contains(&c) { Glyph::Unmapped } else { Glyph::Char(c) }
 }
@@ -81,9 +73,6 @@ fn slot(chp: &Chp, c: char) -> u16 {
     }
 }
 
-/// The font table the FIB names, each entry charged and read once: an absent or empty table makes
-/// every font a text font, and an entry that does not read, or an index past the table, is
-/// unresolved.
 pub(super) fn parse(
     parse_ctx: &ParseCtx<'_>,
     fib: Fib<'_>,
@@ -119,8 +108,6 @@ pub(super) fn parse(
     Ok(FontTable { faces, past: Face::Unresolved })
 }
 
-/// The face of the font an FFN names: a symbol font its name names, else a text font; an entry
-/// too short to hold one UTF-16 unit of name is unresolved.
 fn face_of(ffn: &[u8]) -> Face {
     let Some(name) = ffn.get(FFN_NAME..).filter(|name| name.len() >= size_of::<u16>()) else {
         return Face::Unresolved;

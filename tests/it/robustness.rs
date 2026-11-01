@@ -1,8 +1,3 @@
-//! Deterministic mutation smoke test: every corpus fixture is converted
-//! after byte mutations at pseudo-random positions. Conversions may fail
-//! with typed errors; they must never panic, hang, or exhaust memory.
-//! (The cargo-fuzz targets under `fuzz/` run the same surfaces much harder.)
-
 use crate::support::{converter, corpus, fixture_root, format_of};
 use almiladoc::{ConvertError, Input};
 

@@ -1,6 +1,3 @@
-/// The `(WordDocument, 0Table)` streams of a Word 97 DOC: the FIB, its story lengths `ccps`
-/// at their offsets and the language id `lid` when given, then `text` at `text_fc`, which the
-/// Clx in the table stream names as `pieces` of `(cp_end, compressed fc, prm)`.
 pub(crate) fn word97(
     text_fc: u32,
     ccps: &[(usize, u32)],

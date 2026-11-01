@@ -1,7 +1,3 @@
-//! The ZIP central directory: every end record the zip reader could use is
-//! held to the entry limit before it parses one, and the directory it parsed
-//! is judged before any entry is opened.
-
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
 use crate::shared::binary::{get_u16, get_u32, get_u64};
@@ -18,8 +14,6 @@ const ENCRYPTED: u16 = 1;
 const STRONG_ENCRYPTION: u16 = 1 << 6;
 const RATIO_FLOOR: u64 = 1024 * 1024;
 
-/// Holds the entry count of every end record `zip::ZipArchive::new` could
-/// read, including those it falls back to, to `max_entry_count`.
 pub(crate) fn admit(bytes: &[u8], limits: &Limits) -> Result<(), ConvertError> {
     let max = limits.max_entry_count;
     for at in 0..bytes.len().saturating_sub(3) {
@@ -35,8 +29,6 @@ pub(crate) fn admit(bytes: &[u8], limits: &Limits) -> Result<(), ConvertError> {
     Ok(())
 }
 
-/// The counts of a classic end record whose comment fits the input and which
-/// zip reads without a ZIP64 record.
 fn classic_count(bytes: &[u8], at: usize) -> Option<u64> {
     if classic_end(bytes, at)? {
         return None;
@@ -44,8 +36,6 @@ fn classic_count(bytes: &[u8], at: usize) -> Option<u64> {
     Some(get_u16(bytes, at + 8)?.max(get_u16(bytes, at + 10)?).into())
 }
 
-/// Whether the classic end record at `at` is one zip reads through a ZIP64
-/// record, or `None` when its comment overruns the input.
 fn classic_end(bytes: &[u8], at: usize) -> Option<bool> {
     let comment = usize::from(get_u16(bytes, at + 20)?);
     if at.checked_add(END_LEN)?.checked_add(comment)? > bytes.len() {
@@ -58,8 +48,6 @@ fn classic_end(bytes: &[u8], at: usize) -> Option<bool> {
     Some(may_be_zip64 && locator.is_some_and(|l| bytes.get(l..l + 4) == Some(ZIP64_LOCATOR)))
 }
 
-/// The counts of a ZIP64 end record that ends at a locator followed by a
-/// classic end record zip reads through it.
 fn zip64_count(bytes: &[u8], at: usize) -> Option<u64> {
     let size = usize::try_from(get_u64(bytes, at + 4)?).ok()?;
     let locator = at.checked_add(ZIP64_END_OVERHEAD)?.checked_add(size)?;
@@ -73,9 +61,6 @@ fn zip64_count(bytes: &[u8], at: usize) -> Option<u64> {
     Some(get_u64(bytes, at + 24)?.max(get_u64(bytes, at + 32)?))
 }
 
-/// Judges the central directory zip parsed, by its own reading of each
-/// entry: no duplicate names, no encrypted entry, declared compressed sizes
-/// that fit the bytes before the directory, and `max_compression_ratio`.
 pub(crate) fn inspect(
     zip: &zip::ZipArchive<Cursor<&[u8]>>,
     bytes: &[u8],

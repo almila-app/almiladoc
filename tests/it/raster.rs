@@ -1,5 +1,3 @@
-//! A PDF page gap's request carries its page painted as a PNG under the engine's raster spec.
-
 use crate::pdf::write_pdf;
 use crate::support::{configured, converter, fixture, limited, reported, trips};
 use almiladoc::model::OcrOrigin;
@@ -14,7 +12,6 @@ fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
     spec
 }
 
-/// The width and height a PNG's IHDR chunk declares.
 fn png_size(png: &[u8]) -> (u32, u32) {
     let word = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
     assert_eq!(&png[12..16], b"IHDR");
@@ -60,7 +57,6 @@ fn a_page_gap_exports_its_page_at_the_spec_s_dpi() {
     assert_eq!(once, pngs(4));
 }
 
-/// A one-page PDF of a page dictionary with `entries` and a line of text.
 fn page_pdf(entries: &str) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 400 Td (Painted) Tj ET";
     write_pdf(&[
@@ -117,7 +113,6 @@ fn a_spec_out_of_range_is_refused_and_changes_nothing() {
     assert_eq!(parsed.gaps().count(), 2);
 }
 
-/// Reads each page as its number, and cancels `cancels` on its first call.
 struct Pages {
     cancels: Option<CancelToken>,
     calls: std::sync::Mutex<Vec<u32>>,
@@ -243,7 +238,6 @@ fn pages_on_any_thread_count_share_one_paint_budget() {
     }
 }
 
-/// What filling every page of `bytes` reports beside its gaps, run by an engine and by hand.
 fn painting_losses(bytes: &[u8]) -> Vec<(DiagnosticCode, Region, Option<u32>, u64)> {
     let input = || Input::new(bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
     let engine = Pages { cancels: None, calls: std::sync::Mutex::default() };
@@ -261,8 +255,6 @@ fn painting_losses(bytes: &[u8]) -> Vec<(DiagnosticCode, Region, Option<u32>, u6
     lost
 }
 
-/// A one-page PDF whose content stream is `contents`, over `resources`, with `extra` as objects
-/// 5 on.
 fn painted(resources: &str, contents: &str, extra: &[&str]) -> Vec<u8> {
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),

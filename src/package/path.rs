@@ -1,22 +1,13 @@
-//! Package target resolution per OPC/EPUB URI semantics, applied before any
-//! archive lookup.
-//!
-//! The reference is treated as a URI: fragment and query split off first,
-//! then each path segment is percent-decoded *after* segmentation. A segment
-//! whose decoded form would introduce structure (`/`, `\`, `.`, `..`) is
-//! rejected — encoded traversal never becomes path structure.
+//! Segments decode after splitting and encoded traversal is rejected so URI escapes cannot introduce path structure.
 
 use crate::error::ConvertError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Target {
-    /// Normalized archive path (no leading slash).
     pub(crate) path: String,
     pub(crate) fragment: Option<String>,
 }
 
-/// Resolve a relative or package-absolute reference against the part it
-/// appears in.
 pub(crate) fn resolve(base_part: &str, reference: &str) -> Result<Target, ConvertError> {
     let (reference, fragment) = reference
         .split_once('#')
@@ -58,11 +49,6 @@ pub(crate) fn resolve(base_part: &str, reference: &str) -> Result<Target, Conver
     Ok(Target { path: segments.join("/"), fragment })
 }
 
-/// Percent-decode one URI component. Infallible by design: a `%` not
-/// followed by two hex digits passes through literally (producers emit such
-/// names), and non-UTF-8 decoded bytes degrade lossily - the result is only
-/// ever matched against archive entry names, where a near-miss simply fails
-/// the lookup.
 fn decode_component(component: &str) -> String {
     let bytes = component.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -70,8 +56,6 @@ fn decode_component(component: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && let Some(hex) = component.get(i..).and_then(|rest| rest.get(1..3))
-            // from_str_radix alone also accepts `+5`; only true hex digit
-            // pairs decode.
             && hex.bytes().all(|b| b.is_ascii_hexdigit())
             && let Ok(b) = u8::from_str_radix(hex, 16)
         {

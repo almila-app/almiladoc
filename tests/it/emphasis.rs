@@ -1,6 +1,3 @@
-//! Emphasis read from Word runs, and Markdown that a parser reads back with the same text and
-//! marks.
-
 use crate::style::{docx, markdown, para, run};
 use almiladoc::Format;
 

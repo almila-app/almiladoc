@@ -1,7 +1,4 @@
-//! Excel spreadsheets (xlsx, xlsm, xlsb, xls). Every container is read
-//! in-house: SpreadsheetML as XML (xlsx, xlsm) or binary (xlsb), and
-//! OLE-based BIFF (xls). All three share the number format engine and grid
-//! assembly, so one workbook saved in any of them converts identically.
+//! All three share the number format engine and grid assembly, so one workbook saved in any of them converts identically.
 
 mod comments;
 mod controls;
@@ -64,7 +61,6 @@ fn text_damaged(text: &crate::package::xml::Element) -> bool {
 const MAIN_PARTS: [&str; 2] = ["xl/workbook.xml", "xl/workbook.bin"];
 
 pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, ConvertError> {
-    // An encrypted OOXML package is an OLE file without a BIFF stream.
     if let Some(probe) = probe_ole(bytes) {
         return match probe {
             ConvertError::Encrypted => Err(probe),
@@ -94,14 +90,11 @@ enum Container {
     Bin,
 }
 
-/// The container a main part belongs to, from its own bytes rather than its
-/// name: a SpreadsheetML workbook is XML, an xlsb one is a record stream.
 fn classify(pkg: &mut Package<'_>, part: &str) -> Result<Option<Container>, ConvertError> {
     let Some(bytes) = pkg.part(part)? else {
         return Ok(None);
     };
     let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
-    // A UTF-16 part opens on its byte order mark rather than the tag.
     Ok(if matches!(body.iter().find(|b| !b.is_ascii_whitespace()), Some(b'<' | 0xFF | 0xFE)) {
         Some(Container::Xml)
     } else {
@@ -109,10 +102,6 @@ fn classify(pkg: &mut Package<'_>, part: &str) -> Result<Option<Container>, Conv
     })
 }
 
-/// Float formatting at the 15 significant decimal digits a spreadsheet
-/// stores and displays. Shortest round-trip formatting past that surfaces the
-/// binary representation (`3554.7000000000003`); 15 digits still keeps small
-/// values like 0.0000004 exact.
 pub(super) fn format_float(f: f64) -> String {
     match format!("{f:.14e}").parse::<f64>() {
         Ok(rounded) => format!("{rounded}"),
@@ -120,19 +109,16 @@ pub(super) fn format_float(f: f64) -> String {
     }
 }
 
-/// Whole seconds in a span of days, saturating.
 fn whole_seconds(days: f64) -> u64 {
     lossy::round_u64(days.abs() * 86_400.0)
 }
 
-/// Render a time-of-day serial (a fraction of a day) as `hh:mm:ss`.
 fn format_time_of_day(days: f64) -> String {
     let total_secs = whole_seconds(days) % 86_400;
     let (h, m, s) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Render an Excel duration (stored in days) as `[h]:mm:ss`.
 fn format_duration_days(days: f64) -> String {
     let sign = if days < 0.0 { "-" } else { "" };
     let total_secs = whole_seconds(days);
@@ -140,9 +126,6 @@ fn format_duration_days(days: f64) -> String {
     format!("{sign}{h}:{m:02}:{s:02}")
 }
 
-/// Decode an RK value, the packed number both binary containers use. Bit 0
-/// asks for a hundredth of the result; bit 1 selects an integer over the
-/// high 30 bits of a double.
 pub(super) fn rk_number(rk: u32) -> f64 {
     let value = if rk & 0x02 != 0 {
         f64::from(rk.cast_signed() >> 2)
@@ -152,7 +135,6 @@ pub(super) fn rk_number(rk: u32) -> f64 {
     if rk & 0x01 != 0 { value / 100.0 } else { value }
 }
 
-/// The literal an error code displays as, shared by both binary containers.
 pub(super) fn error_literal(code: u8) -> Option<&'static str> {
     Some(match code {
         0x00 => "#NULL!",

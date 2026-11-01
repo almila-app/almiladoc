@@ -573,7 +573,6 @@ mod tests {
 
     #[test]
     fn explicit_covered_consumes_exactly_one() {
-        // ODF shape: spanning cell followed by its explicit covered marker.
         let mut b = builder();
         b.place(Cell::spanning(vec![], 2, 1)).unwrap();
         assert!(b.covered().unwrap());
@@ -584,7 +583,6 @@ mod tests {
 
     #[test]
     fn omitted_covered_positions_materialize() {
-        // HTML/OOXML shape: no explicit covered cells at all.
         let mut b = builder();
         b.place(Cell::spanning(vec![], 2, 1)).unwrap();
         b.place(text_cell("end")).unwrap();

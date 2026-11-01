@@ -32,7 +32,6 @@ enum Stk {
 }
 
 impl Stk {
-    /// The type the low nibble of the STD word at record offset 2 (`sgc`) names.
     fn of(word: u16) -> Self {
         match word & 0x000F {
             1 => Self::Paragraph,
@@ -45,15 +44,10 @@ impl Stk {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct ResolvedStyle {
-    /// The chain's character formatting as changes to the properties it sits on.
     chars: CharOps,
-    /// Effective character formatting of the chain over plain text.
     pub chp: Chp,
-    /// Effective paragraph properties of the chain.
     pub pap: PapDelta,
-    /// Heading level for built-in `heading N` styles.
     pub heading: Option<u8>,
-    /// The block container the style's name designates.
     pub block: Option<BlockStyle>,
     kind: Stk,
 }
@@ -72,8 +66,6 @@ impl Stylesheet {
         self.resolved.get(&istd).unwrap_or(&self.default)
     }
 
-    /// What the character style `istd` changes about the paragraph's formatting, or `None` when
-    /// `istd` names no character style.
     pub(super) fn character(&self, istd: u16) -> Option<CharOps> {
         let style = self.resolved.get(&istd)?;
         (style.kind == Stk::Character).then_some(style.chars)
@@ -91,28 +83,20 @@ impl Stylesheet {
 struct Std<'a> {
     sti: u16,
     istd_base: u16,
-    /// The block container this style's name designates.
     block: Option<BlockStyle>,
-    /// The PAPX grpprl with its leading istd, empty unless a paragraph style.
     upx_papx: &'a [u8],
     upx_chpx: &'a [u8],
     kind: Stk,
 }
 
-/// What a style sheet leaves unread, by what the unread part may hold.
 #[derive(Debug, PartialEq)]
 enum Unread {
     Nothing,
-    /// Records of types that hold no character formatting, none of them a base of a read style
-    /// nor inheriting from one.
     Inert,
-    /// Records that may hold character formatting, or an extent no bound can be put on.
     Formatting,
 }
 
-/// The style sheet. One that does not read in full is `part_unreadable` when the unread part may
-/// hold formatting that hides text, or the document has list tables, whose labels styles can
-/// carry, and `style_part_unreadable` otherwise.
+/// Unread styles count as content loss when they may hide text or carry list labels.
 pub(super) fn parse(
     parse_ctx: &ParseCtx<'_>,
     fib: Fib<'_>,
@@ -135,7 +119,6 @@ pub(super) fn parse(
     resolve_all(parse_ctx, &stds, stsh.map(default_fonts).unwrap_or_default())
 }
 
-/// The document's default fonts, each 0 where the Stshi ends before it.
 fn default_fonts(stsh: &[u8]) -> Fonts {
     let cb_stshi = get_u16(stsh, 0).map_or(0, usize::from);
     let field = |at: usize| {
@@ -149,7 +132,6 @@ fn default_fonts(stsh: &[u8]) -> Fonts {
     }
 }
 
-/// Style records, charging each slot and complete record before parsing, and what stays unread.
 fn parse_stds<'a>(
     parse_ctx: &ParseCtx<'_>,
     stsh: &'a [u8],
@@ -200,7 +182,6 @@ fn parse_stds<'a>(
     Ok((stds, unread))
 }
 
-/// The base the high 12 bits of the STD word at record offset 2 (`istdBase`) name.
 fn istd_base(word: u16) -> u16 {
     (word >> 4) & 0x0FFF
 }
@@ -232,11 +213,8 @@ fn parse_std<'a>(
     let istd_base = istd_base(second);
     let cupx = get_u16(record, 4).map_or(0, |v| v & 0x000F);
 
-    // The name (Xstz) follows the fixed STDF area; UPX payloads follow the
-    // name, each 2-byte aligned relative to the record start.
     let name_off = cb_std_base.max(10);
     let name_len = get_u16(record, name_off)? as usize;
-    // Unicode name: length prefix + UTF-16 chars + terminator.
     let name_bytes = name_len.checked_mul(2)?;
     let name_units = record.get(name_off + 2..).and_then(|rest| rest.get(..name_bytes));
     let (name, replaced) = decode_utf16(utf16le_units(name_units.unwrap_or_default()));
@@ -272,10 +250,7 @@ fn parse_std<'a>(
     Some(Std { sti, istd_base, block, upx_papx, upx_chpx, kind })
 }
 
-/// Every style resolved over its `istdBase` chain from plain text in the fonts `defaults`, which an
-/// istd no style holds also has. Each cycle is cut once,
-/// at its lowest istd, which then resolves with no base, so a cyclic sheet
-/// resolves one way whatever order its styles are visited in.
+/// Each cycle is cut once, at its lowest istd, which then resolves with no base, so a cyclic sheet resolves one way whatever order its styles are visited in.
 fn resolve_all(
     parse_ctx: &ParseCtx<'_>,
     stds: &BTreeMap<u16, Std<'_>>,

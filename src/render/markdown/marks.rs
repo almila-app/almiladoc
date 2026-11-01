@@ -1,7 +1,4 @@
-//! The mark stack inline text streams through, outermost first: a shift tag, then `~~`, `**`
-//! and `_`. Where marks change between two characters with no whitespace between, the delimiter
-//! runs must still flank under `CommonMark`'s rules, and the source character on a side whose raw
-//! value would stop them is written as a numeric character reference instead.
+//! Numeric references preserve `CommonMark` delimiter flanking when adjacent source characters would prevent it.
 
 use crate::error::ConvertError;
 use crate::model::{Style, VerticalPosition};
@@ -45,7 +42,6 @@ impl Mark {
     }
 }
 
-/// The marks one style keeps open, outermost first.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Stack([Option<Mark>; 4]);
 
@@ -83,7 +79,6 @@ impl Stack {
         self.iter().count()
     }
 
-    /// How many marks, from the outermost, `self` and `other` share.
     pub(crate) fn common(self, other: Self) -> usize {
         self.iter().zip(other.iter()).take_while(|(a, b)| a == b).count()
     }
@@ -100,14 +95,10 @@ impl Stack {
     }
 }
 
-/// What a delimiter run at a seam sees on one side.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Side {
-    /// Whitespace, a line end, or the edge of the text.
     Space,
-    /// Markup ending or starting in ASCII punctuation: a tag, a fence, a bracket.
     Fixed,
-    /// A source character, which can be written as a numeric reference.
     Char(char),
 }
 
@@ -132,10 +123,7 @@ enum Class {
     Other,
 }
 
-/// The classes a side may have: the library carries no Unicode punctuation table, so a non-ASCII
-/// character that is neither alphanumeric nor whitespace may be either. The circled and squared
-/// Latin letters are alphabetic yet of category So, which `CommonMark` 0.31.2 counts as
-/// punctuation and GitHub's older tables do not.
+/// The circled and squared Latin letters are alphabetic yet of category So, which `CommonMark` 0.31.2 counts as punctuation and GitHub's older tables do not.
 fn classes(side: Side) -> &'static [Class] {
     match side {
         Side::Space => &[Class::Space],
@@ -166,7 +154,6 @@ fn can_close(c: char, prev: Class, next: Class) -> bool {
     right_flanking(prev, next) && (c != '_' || !left_flanking(prev, next) || next == Class::Punct)
 }
 
-/// The marks closed and then opened at one seam.
 #[derive(Clone, Copy)]
 pub(crate) struct Cluster {
     pub(crate) closing: Stack,
@@ -174,8 +161,6 @@ pub(crate) struct Cluster {
 }
 
 impl Cluster {
-    /// The marks that close between `open` and `next`, and those that open after them when
-    /// `next` follows directly.
     pub(crate) fn between(open: Stack, next: Stack, adjacent: bool) -> Self {
         let keep = open.common(next);
         Self {
@@ -223,7 +208,6 @@ impl Cluster {
     }
 }
 
-/// The open marks of one text scope.
 #[derive(Default)]
 pub(crate) struct Writer {
     open: Stack,
@@ -233,7 +217,6 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    /// Close what `next` does not share.
     pub(crate) fn close_to(&mut self, next: Stack, out: &mut Text<'_>) -> Result<(), ConvertError> {
         let keep = self.open.common(next);
         for mark in Stack::collect(self.open.iter().skip(keep)).iter().rev() {
@@ -244,7 +227,6 @@ impl Writer {
         Ok(())
     }
 
-    /// Close what `marks` does not share, then open the rest of `marks`.
     pub(crate) fn open_to(&mut self, marks: Stack, out: &mut Text<'_>) -> Result<(), ConvertError> {
         self.close_to(marks, out)?;
         for mark in marks.iter().skip(self.open.len()) {

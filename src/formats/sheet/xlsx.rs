@@ -1,6 +1,3 @@
-//! SpreadsheetML cells, merges, links, comments and print text. Sheets,
-//! axes and drawing objects follow the hidden-content policy.
-
 use super::controls::read_vml_checkboxes;
 use super::grid::{
     CellFormat, CellRange, CellRef, CellXfs, DateSystem, LinkTarget, OOXML_GRID, SheetContent,
@@ -103,7 +100,6 @@ pub(super) struct Listed<T> {
     part: String,
 }
 
-/// `listed` yields each sheet as `(hidden, relationship id, sheet)` in workbook order.
 pub(super) fn list_sheets<'r, T>(
     parse_ctx: &ParseCtx<'_>,
     wb_rels: &Relationships,
@@ -126,8 +122,6 @@ pub(super) fn list_sheets<'r, T>(
     Ok(sheets)
 }
 
-/// `read` yields a sheet's content and drawing relationship id, or `None` when the sheet is
-/// unreadable; the conversion fails when every listed sheet is unreadable.
 pub(super) fn convert_sheets<T>(
     parse_ctx: &ParseCtx<'_>,
     pkg: &mut Package<'_>,
@@ -224,18 +218,12 @@ fn read_sheet_parts(
     Ok(())
 }
 
-/// Where a drawing walk is: inside an alternate content Choice, or not.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Branch {
     Choice,
     Other,
 }
 
-/// The pictures, charts and text-bearing shapes a sheet drawing places,
-/// none of which the grid holds. Alternate content counts its Choice,
-/// there leaving
-/// out the form controls a legacy drawing also carries, or its Fallback
-/// when the Choice holds nothing counted.
 fn drawing_losses(
     parse_ctx: &ParseCtx<'_>,
     parent: &Element,
@@ -315,8 +303,6 @@ fn drawing_object_losses(
     Ok(())
 }
 
-/// A workbook-level sibling part: the relationship of the given type when
-/// present, else the conventional name next to the workbook part.
 pub(super) struct Sibling {
     pub(super) path: String,
     related: bool,
@@ -347,8 +333,6 @@ impl Sibling {
         }
     }
 
-    /// Whether a read that came back empty reported its loss: the part is
-    /// related, or present but unreadable.
     pub(super) fn reported_when_unread(&self, pkg: &Package<'_>) -> bool {
         self.related || pkg.has_part(&self.path)
     }
@@ -362,7 +346,6 @@ impl Sibling {
     }
 }
 
-/// The shared string table, one cleaned entry per `si` in order.
 fn shared_strings(root: &Element) -> Vec<String> {
     let Some(sst) = root.find(ns::SML, "sst") else {
         return Vec::new();
@@ -370,8 +353,6 @@ fn shared_strings(root: &Element) -> Vec<String> {
     sst.find_all(ns::SML, "si").map(|si| clean_text(&rich_text(si))).collect()
 }
 
-/// Text of an `si` or `is`: a single `t`, or rich-text `r` runs
-/// concatenated. Phonetic guides (`rPh`) are not content.
 fn rich_text(item: &Element) -> String {
     rich_runs(item).map(Element::text).collect()
 }
@@ -388,8 +369,6 @@ pub(super) fn rich_runs(item: &Element) -> impl Iterator<Item = &Element> {
     })
 }
 
-/// `xl/styles.xml` reduced to what rendering needs: the ordered `cellXfs`
-/// list, each entry's numFmtId resolved to a parsed format.
 fn read_styles(root: &Element) -> CellXfs {
     let mut custom: HashMap<u32, &str> = HashMap::new();
     let mut unread = UnreadFormats::default();
@@ -431,9 +410,6 @@ fn read_styles(root: &Element) -> CellXfs {
     CellXfs::new(xfs)
 }
 
-/// An integer attribute read as LibreOffice reads one within `i32`'s range: the digits after
-/// leading XML white space and an optional sign; `None` when none follow or their magnitude
-/// passes `u32`.
 fn leading_int(value: &str) -> Option<i64> {
     let rest = value.trim_start_matches([' ', '\t', '\r', '\n']);
     let (negative, rest) = match rest.strip_prefix('-') {
@@ -445,8 +421,6 @@ fn leading_int(value: &str) -> Option<i64> {
     Some(if negative { -magnitude } else { magnitude })
 }
 
-/// The format for a cell's `s` attribute, an index into `cellXfs`: 0 when absent or unread, and
-/// outside the table when negative.
 fn xf_for(xfs: &CellXfs, s: Option<&str>) -> CellFormat {
     xfs.get(s.and_then(leading_int).map_or(0, |v| usize::try_from(v).unwrap_or(usize::MAX)))
 }
@@ -597,8 +571,6 @@ pub(super) fn omit_headers(
     Ok(())
 }
 
-/// A cell's rendered text, per its `t` type and resolved number format, and
-/// what rendering it lost.
 fn cell_text(
     c: &Element,
     shared: &[String],
@@ -608,9 +580,7 @@ fn cell_text(
     let fmt = xf_for(xfs, c.attr_unqualified("s"));
     let v = c.find(ns::SML, "v").map(Element::text);
     let value = v.as_deref().map(str::trim).unwrap_or_default();
-    // A formula whose result the writer never cached: the application
-    // recalculates and shows it. Excel caches an empty string result as an
-    // empty `v`, so only an absent one is lost there.
+    // Excel caches an empty string result as an empty `v`, so only an absent one is lost there.
     let formula = c.find(ns::SML, "f").is_some();
     let unread = || (String::new(), Some(DiagnosticCode::CellValueUnreadable));
     match c.attr_unqualified("t").unwrap_or("n") {
@@ -640,13 +610,10 @@ fn cell_text(
     }
 }
 
-/// A cell reference (`C3`) as a zero-based cell inside the grid.
 pub(super) fn parse_ref(r: &str) -> Option<CellRef> {
     parse_coords(r).filter(|&at| OOXML_GRID.holds(at))
 }
 
-/// A cell reference as zero-based coordinates, which may lie past the grid
-/// and saturate past `u32`; the column letters are bijective base-26.
 fn parse_coords(r: &str) -> Option<CellRef> {
     let digits_at = r.find(|c: char| c.is_ascii_digit())?;
     let (letters, digits) = r.split_at(digits_at);
@@ -663,14 +630,11 @@ fn parse_coords(r: &str) -> Option<CellRef> {
     Some(CellRef::new(row.checked_sub(1)?, col - 1))
 }
 
-/// A reference (`F1:O3`, or a single cell) as a cell range, each corner read
-/// by `cell`.
 fn parse_region(r: &str, cell: fn(&str) -> Option<CellRef>) -> Option<CellRange> {
     let (a, b) = r.split_once(':').unwrap_or((r, r));
     Some(CellRange::spanning(cell(a.trim())?, cell(b.trim())?))
 }
 
-/// XML schema boolean attribute.
 pub(super) fn bool_attr(v: &str) -> bool {
     matches!(v.trim(), "1" | "true")
 }
@@ -695,27 +659,19 @@ mod tests {
     const WS_REL: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 
-    /// Route through the shared container dispatch, the only entry a caller
-    /// has.
     fn parse(bytes: &[u8]) -> Result<Document, ConvertError> {
         super::super::parse(&ParseCtx::default(), bytes)
     }
 
-    /// Assemble a workbook: (name, state, worksheet body) per sheet, plus
-    /// optional styleSheet and sst parts.
     #[derive(Default)]
     struct Wb<'a> {
         sheets: Vec<(&'a str, &'a str, &'a str)>,
         styles: Option<&'a str>,
         shared: Option<&'a str>,
         date1904: bool,
-        /// Further parts, verbatim: (name, body).
         extra: Vec<(&'a str, &'a str)>,
-        /// The workbook's `sheet` list in place of one entry per sheet.
         listed: Option<&'a str>,
-        /// The first sheet's relationships part.
         sheet_rels: Option<&'a str>,
-        /// Further workbook relationships, verbatim.
         workbook_rels: &'a str,
     }
 
@@ -1136,7 +1092,6 @@ mod tests {
         assert_eq!(diagnose(&wb), []);
     }
 
-    /// Minimal sheet with a used range at D11:E12 and the given merge.
     fn sheet_with_merge(merge_ref: &str) -> Vec<u8> {
         one_sheet(&format!(
             r#"<sheetData><row r="11"><c r="D11" t="inlineStr"><is><t>x</t></is></c><c r="E11" t="inlineStr"><is><t>y</t></is></c></row><row r="12"><c r="D12" t="inlineStr"><is><t>z</t></is></c><c r="E12" t="inlineStr"><is><t>w</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="{merge_ref}"/></mergeCells>"#
@@ -1403,8 +1358,6 @@ mod tests {
     const VML_REL: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing";
 
-    /// A legacy drawing with a checked captioned box over B1, an unchecked
-    /// bare one over C1, a hidden one over D1, and a cell note.
     const VML: &str = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
         <v:shape id="_x0000_s1025" type="#_x0000_t201" style="position:absolute;margin-left:1pt">
           <v:textbox>

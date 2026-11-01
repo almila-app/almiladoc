@@ -24,13 +24,8 @@ const CELL_FAMILY: &str = "table-cell";
 pub(super) struct ListLevel {
     pub marker: MarkerKind,
     pub start: u64,
-    /// `style:num-prefix` literal text before the number.
     pub prefix: String,
-    /// `style:num-suffix` literal text after the number; absent means the
-    /// bare number is displayed.
     pub suffix: Option<String>,
-    /// `text:display-levels`: how many levels (ending at this one) display,
-    /// joined by `.`.
     pub display_levels: usize,
 }
 
@@ -47,8 +42,6 @@ impl Default for ListLevel {
 }
 
 impl ListLevel {
-    /// The level's number text as the shared pattern IR, referencing the
-    /// trailing `display_levels` levels.
     pub(super) fn pattern(&self, depth: usize) -> crate::shared::numbering::NumberPattern {
         use crate::shared::numbering::{NumberPattern, NumberText};
         let mut text = Vec::new();
@@ -73,29 +66,18 @@ impl ListLevel {
 
 #[derive(Default)]
 pub(super) struct OdfStyles<'a> {
-    /// The `style:style` chains of each `style:family`.
     families: HashMap<&'a str, Family<'a>>,
     list_styles: HashMap<&'a str, [ListLevel; LIST_LEVELS]>,
-    /// `text:outline-style`: heading numbering per outline level.
     outline: Option<[ListLevel; LIST_LEVELS]>,
-    /// `style:default-style` per family: the base beneath every named chain
-    /// (and the delta for unstyled content of that family).
     defaults: HashMap<&'a str, StyleDelta>,
-    /// `table:display` of the `table` family's `style:default-style`.
     default_table_display: Option<bool>,
-    /// `style:master-page` by name, and the document's first, which a page
-    /// naming none uses.
     masters: HashMap<&'a str, &'a Element>,
     first_master: Option<&'a Element>,
-    /// The `number:*-style` data styles by name, from either part, as indices into `data`.
     data_names: HashMap<&'a str, usize>,
     data: Vec<DataStyle<'a>>,
-    /// Whether the styles part did not read where it held formatting alone: a cell style or
-    /// data style that no collected part holds may have been in it.
     styles_unread: bool,
 }
 
-/// A data style and its cost, worked out the first time a cell needs it.
 struct DataStyle<'a> {
     style: &'a Element,
     costs: Cell<Option<Costs>>,
@@ -111,8 +93,6 @@ struct Family<'a> {
     data_styles: Memo<'a, Option<DataRef>>,
 }
 
-/// The nearest data style a cell style's chain names, or the first parent before one that no
-/// collected part holds.
 #[derive(Clone, Copy)]
 enum DataRef {
     Collected(usize),
@@ -125,7 +105,6 @@ impl<'a> OdfStyles<'a> {
         self.styles_unread = true;
     }
 
-    /// Collect styles from one document tree (`styles.xml` or `content.xml`).
     /// Call for styles.xml first so content.xml definitions chain onto it.
     pub(super) fn collect(&mut self, tree: &'a Element) {
         for section in tree.child_elems().flat_map(Element::child_elems) {
@@ -178,9 +157,6 @@ impl<'a> OdfStyles<'a> {
         }
     }
 
-    /// Cumulative delta of a style through its `parent-style-name` chain,
-    /// over the family's `style:default-style` base; each style is resolved
-    /// once and charged one unit when it is.
     pub(super) fn delta(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -217,9 +193,6 @@ impl<'a> OdfStyles<'a> {
         styles.chains.nearest(parse_ctx, memo(styles), name, own)
     }
 
-    /// The block container a paragraph style names, walking
-    /// `parent-style-name`: an automatic style carries the name on the
-    /// named style it derives from.
     pub(super) fn block_style(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -253,8 +226,6 @@ impl<'a> OdfStyles<'a> {
         self.families.get(family)?.chains.definition(name)
     }
 
-    /// The master page a style starts, by name, through its
-    /// `parent-style-name` chain; an empty name starts none.
     pub(super) fn style_master_page(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -271,8 +242,6 @@ impl<'a> OdfStyles<'a> {
         Ok(master.filter(|name| !name.is_empty()))
     }
 
-    /// Whether a sheet shows: the `table:display` of its table style or of the
-    /// nearest parent that sets one, else the family default, else shown.
     pub(super) fn table_shown(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -295,10 +264,6 @@ impl<'a> OdfStyles<'a> {
         self.masters.get(name).copied()
     }
 
-    /// What showing a value without the number style `style` names costs: the nearest
-    /// `style:data-style-name` up its chain, each style and data style resolved and charged once,
-    /// and each data style name looked up once per style that names it. A style, parent or data
-    /// style that no collected part holds costs `Unread` once the styles part did not read.
     pub(super) fn format_cost(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -354,8 +319,6 @@ impl<'a> OdfStyles<'a> {
         self.first_master
     }
 
-    /// The named master page, else the document's first for an absent or
-    /// empty name.
     pub(super) fn master_or_first(&self, name: Option<&str>) -> Option<&'a Element> {
         match name {
             Some(name) if !name.is_empty() => self.master_page(name),
@@ -364,18 +327,14 @@ impl<'a> OdfStyles<'a> {
     }
 }
 
-/// A token of an enumerated or boolean attribute: its value without the XML
-/// white space around it.
 pub(super) fn token(value: &str) -> &str {
     value.trim_matches([' ', '\t', '\r', '\n'])
 }
 
-/// A style name that names one: `styleNameRef` allows the empty string for none.
 pub(super) fn named(name: Option<&str>) -> Option<&str> {
     name.filter(|name| !name.is_empty())
 }
 
-/// An ODF boolean: `true` or `false` and nothing else.
 pub(super) fn odf_boolean(value: &str) -> Option<bool> {
     token(value).parse().ok()
 }
@@ -389,8 +348,6 @@ pub(super) fn parse_start(v: &str) -> Option<u64> {
     v.parse::<u64>().ok().map(|n| n.min(u64::from(u32::MAX)))
 }
 
-/// Levels of a `text:list-style` or `text:outline-style` (the level
-/// elements differ in name, not in shape).
 fn parse_list_style(style: &Element) -> [ListLevel; LIST_LEVELS] {
     let mut levels: [ListLevel; LIST_LEVELS] = std::array::from_fn(|_| ListLevel::default());
     for lvl in style.child_elems() {
@@ -420,7 +377,6 @@ fn parse_list_style(style: &Element) -> [ListLevel; LIST_LEVELS] {
     levels
 }
 
-/// Delta carried by a style's `style:text-properties`.
 pub(super) fn text_properties_delta(elem: &Element) -> StyleDelta {
     let Some(props) = elem.find(ns::STYLE, "text-properties") else {
         return StyleDelta::default();
@@ -440,15 +396,11 @@ pub(super) fn text_properties_delta(elem: &Element) -> StyleDelta {
 fn text_hidden(display: &str) -> Option<bool> {
     match display {
         "none" => Some(true),
-        // ODF 1.3 Part 3 20.427: `condition` defers to `text:condition`,
-        // which is never evaluated.
         "true" | "condition" => Some(false),
         _ => None,
     }
 }
 
-/// Whether styles text that does not parse sets a `display` that hides a sheet or text, or one
-/// the scan cannot judge: an entity, an attribute list that stops reading.
 pub(super) fn sets_hiding(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<bool, ConvertError> {
     tag_scan::any_tag(parse_ctx, bytes, enables_hiding)
 }
@@ -469,8 +421,6 @@ fn display_hides(value: &[u8], hides: fn(&str) -> bool) -> bool {
     value.contains(&b'&') || hides(display)
 }
 
-/// The shift a `style:text-position` names by its first token: `super`, `sub`, or a
-/// percentage of the font height whose sign raises or lowers.
 fn text_position(value: &str) -> Option<VerticalPosition> {
     match value.split_whitespace().next()? {
         "super" => Some(VerticalPosition::Superscript),

@@ -1,9 +1,3 @@
-//! OfficeArt (MS-ODRAW) blip extraction shared by the legacy binary
-//! formats: DOC picture data (`PICF` + OfficeArt records in the Data
-//! stream) and the PPT `Pictures` stream (a sequence of BStore file
-//! blocks), and the record walk their drawing readers share. Drawing
-//! geometry is out of scope.
-
 use crate::limits::{Limit, LimitExceeded};
 use crate::shared::binary::{ByteReader, get_u16, get_u32};
 use std::borrow::Cow;
@@ -30,7 +24,6 @@ pub(crate) const FILL_TYPE: u16 = 0x0180;
 pub(crate) const FILL_BLIP: u16 = 0x0186;
 pub(crate) const FILL_STYLE_BOOLEAN_PROPERTIES: u16 = 0x01BF;
 
-/// The `recVer` of a container record.
 pub(crate) const CONTAINER_VERSION: u16 = 0xF;
 
 const JPEG_RGB_TWO_UIDS: u16 = 0x46B;
@@ -45,8 +38,6 @@ const PROPERTY_LEN: usize = 6;
 const FBSE_NAME_LEN_AT: usize = 33;
 const FBSE_HEADER_LEN: usize = 36;
 
-/// An OfficeArt record: the same 8-byte header the PPT record stream uses,
-/// then its body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Record<'a> {
     pub(crate) ver_inst: u16,
@@ -64,7 +55,6 @@ impl Record<'_> {
     }
 }
 
-/// The OfficeArt record at `off`.
 pub(crate) fn record_at(data: &[u8], off: usize) -> Option<Record<'_>> {
     let mut record = ByteReader::new(data.get(off..)?);
     let ver_inst = record.u16()?;
@@ -73,8 +63,6 @@ pub(crate) fn record_at(data: &[u8], off: usize) -> Option<Record<'_>> {
     Some(Record { ver_inst, rec_type, body: record.take(len)? })
 }
 
-/// The records laid out back to back in `data`, up to the first that does
-/// not fit.
 pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = Record<'_>> {
     let mut pos = 0;
     std::iter::from_fn(move || {
@@ -84,8 +72,6 @@ pub(crate) fn records(data: &[u8]) -> impl Iterator<Item = Record<'_>> {
     })
 }
 
-/// The `(property id, value)` pairs of an `OfficeArt` property table (`OPT` or
-/// tertiary `OPT`) of `count` entries, up to the first that does not fit.
 pub(crate) fn properties(count: u16, table: &[u8]) -> impl Iterator<Item = (u16, u32)> + '_ {
     let (entries, _) = table.as_chunks::<PROPERTY_LEN>();
     entries
@@ -94,24 +80,19 @@ pub(crate) fn properties(count: u16, table: &[u8]) -> impl Iterator<Item = (u16,
         .map_while(|entry| Some((get_u16(entry, 0)? & 0x3FFF, get_u32(entry, 2)?)))
 }
 
-/// An extracted picture payload.
 pub(crate) struct Blip<'a> {
     pub(crate) media_type: &'static str,
     pub(crate) extension: &'static str,
     pub(crate) bytes: Cow<'a, [u8]>,
 }
 
-/// Decode one blip record (`recType` 0xF01A–0xF01F). Metafile blips may be
-/// deflate-compressed; the output is bounded by the declared uncompressed
-/// size, and inflating past `max_bytes` is [`Limit::EntryBytes`].
+/// Metafile blips may be deflate-compressed; the output is bounded by the declared uncompressed size, and inflating past `max_bytes` is [`Limit::EntryBytes`].
 pub(crate) fn decode_blip(
     record: Record<'_>,
     max_bytes: u64,
 ) -> Result<Option<Blip<'_>>, LimitExceeded> {
     let Record { rec_type, body, .. } = record;
     match rec_type {
-        // Bitmap blips: rgbUid1 (16), + rgbUid2 (16) for the doubled
-        // instance, then the picture bytes, with one tag byte first.
         BLIP_JPEG | BLIP_PNG => {
             let doubled =
                 matches!(record.instance(), JPEG_RGB_TWO_UIDS | JPEG_CMYK_TWO_UIDS | PNG_TWO_UIDS);
@@ -121,8 +102,6 @@ pub(crate) fn decode_blip(
                 if rec_type == BLIP_JPEG { ("image/jpeg", "jpg") } else { ("image/png", "png") };
             Ok(Some(Blip { media_type, extension, bytes: Cow::Borrowed(bytes) }))
         }
-        // Metafile blips: rgbUid (16/32), then a 34-byte metafile header
-        // (cbSize, bounds, ptSize, cbSave, compression, filter).
         BLIP_EMF | BLIP_WMF => {
             let doubled = matches!(record.instance(), EMF_TWO_UIDS | WMF_TWO_UIDS);
             let header = if doubled { 32 } else { 16 };
@@ -145,7 +124,6 @@ pub(crate) fn decode_blip(
     }
 }
 
-/// A metafile blip's header fields this reader reads, and the data after it.
 #[derive(Debug, PartialEq, Eq)]
 struct Metafile<'a> {
     cb_size: u64,
@@ -175,12 +153,8 @@ fn inflate(data: &[u8], cb_size: u64, max_bytes: u64) -> Result<Option<Vec<u8>>,
     Ok(Some(out))
 }
 
-/// Find and decode the first blip in a run of OfficeArt records (a
-/// `Pictures` stream block sequence, or an inline shape container),
-/// descending into containers. Bounded traversal: record counts and
-/// nesting beyond any real drawing abort the search.
+/// Bounded traversal: record counts and nesting beyond any real drawing abort the search.
 pub(crate) fn first_blip(data: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>, LimitExceeded> {
-    // (cursor, end) ranges into `data`.
     let mut stack: Vec<(usize, usize)> = vec![(0, data.len())];
     let mut visited = 0u32;
     loop {
@@ -222,13 +196,10 @@ pub(crate) fn first_blip(data: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>
     }
 }
 
-/// Offset of the embedded blip record inside an FBSE (0xF007) body: the
-/// 36-byte header plus the entry's name.
 fn fbse_blip_offset(body: &[u8]) -> Option<usize> {
     body.get(FBSE_NAME_LEN_AT).map(|&name_len| FBSE_HEADER_LEN + usize::from(name_len))
 }
 
-/// Decode the blip embedded in an FBSE (0xF007) record body, if present.
 pub(crate) fn fbse_blip(body: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>, LimitExceeded> {
     let Some(blip) = fbse_blip_offset(body).and_then(|offset| record_at(body, offset)) else {
         return Ok(None);
@@ -242,7 +213,6 @@ pub(crate) fn record(ver_inst: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
     [&ver_inst.to_le_bytes()[..], &rec_type.to_le_bytes(), &len.to_le_bytes(), body].concat()
 }
 
-/// A metafile blip record (0xF01A) whose deflated payload inflates to `inflated` zero bytes.
 #[cfg(test)]
 pub(crate) fn deflated_metafile_blip(inflated: usize) -> Vec<u8> {
     use std::io::Write;

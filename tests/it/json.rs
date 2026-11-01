@@ -1,6 +1,3 @@
-//! The JSON a parse serialises to: its shape on a fixture, its output and
-//! work limits, its losses and its determinism across threads.
-
 use crate::bounds::{csv_records, least_work};
 use crate::support::{converter, corpus, fixture, format_of, limited, trips};
 use almiladoc::{ConvertError, Format, Input, Limit};

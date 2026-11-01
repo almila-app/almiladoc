@@ -3,10 +3,6 @@
 
 use crate::shared::uri::is_scheme;
 
-/// True when `label` shows `target`: equal after normalising both (scheme
-/// and host case-folded, an empty path read as `/`, percent-decoded), equal
-/// to the target without its `http`, `https` or `mailto` scheme, or, for a
-/// `doi.org` target, equal to its DOI with or without a `doi:` prefix.
 pub(crate) fn label_shows_target(label: &str, target: &str) -> bool {
     let label = label.trim();
     if label.is_empty() {
@@ -48,9 +44,6 @@ fn shows_doi(label: &str, target: &Url) -> bool {
     label.eq_ignore_ascii_case(doi)
 }
 
-/// A URL reduced to what a label comparison needs: its lowercase scheme and
-/// the rest, with a hierarchical host or a mail domain lowercased and
-/// an empty path read as `/`, all percent-decoded.
 #[derive(PartialEq, Eq)]
 struct Url {
     scheme: Option<String>,

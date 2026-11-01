@@ -46,7 +46,6 @@ pub(super) enum BinaryPrintText<'a> {
     Inherit,
     Unread,
     Utf16(Option<&'a [u8]>),
-    /// BIFF5/7 text decoded from its code page, with the spans its decoding damaged.
     Decoded(String, Vec<Damage>),
 }
 

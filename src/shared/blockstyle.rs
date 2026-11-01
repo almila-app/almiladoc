@@ -1,20 +1,11 @@
-//! Paragraph styles that name a block container. Word, Pandoc and
-//! LibreOffice all mark quotations and preformatted text with a built-in
-//! paragraph style name rather than dedicated markup, so the name is the
-//! only signal a frontend has. [`Outline`] is the paragraph outline level
-//! that marks a heading.
-
 use crate::model::{Block, Inline, Style, inlines_are_empty, inlines_to_plain_text};
 
-/// The block container a paragraph style designates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BlockStyle {
     Quote,
     Code,
 }
 
-/// A paragraph's outline level. `Body` is the explicit off value, which
-/// stops inheritance; `Inherit` leaves the decision to the style chain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Outline {
     #[default]
@@ -24,8 +15,6 @@ pub(crate) enum Outline {
 }
 
 impl Outline {
-    /// An `outlineLvl` operand: 0 to 8 are heading levels 1 to 9, and 9 is
-    /// body text.
     pub(crate) fn from_operand(operand: u8) -> Self {
         if operand < 9 { Self::Level(operand + 1) } else { Self::Body }
     }
@@ -42,21 +31,15 @@ impl Outline {
     }
 }
 
-/// The container a paragraph style name designates. ODF encodes spaces in
-/// internal style names as `_20_`.
 pub(crate) fn from_style_name(name: &str) -> Option<BlockStyle> {
     let name = name.replace("_20_", " ");
     match name.trim().to_ascii_lowercase().as_str() {
-        // Word, Pandoc, LibreOffice.
         "quote" | "intense quote" | "block text" | "quotations" => Some(BlockStyle::Quote),
         "html preformatted" | "source code" | "preformatted text" => Some(BlockStyle::Code),
         _ => None,
     }
 }
 
-/// Consecutive paragraphs sharing one styled container, folded into a single
-/// block: producers write a multi-paragraph quote, and a code block one line
-/// per paragraph, as a run of separately styled paragraphs.
 #[derive(Default)]
 pub(crate) enum StyledRun {
     #[default]
@@ -66,7 +49,6 @@ pub(crate) enum StyledRun {
 }
 
 impl StyledRun {
-    /// The container currently open.
     fn style(&self) -> Option<BlockStyle> {
         match self {
             Self::Empty => None,
@@ -75,8 +57,6 @@ impl StyledRun {
         }
     }
 
-    /// Add one styled paragraph, closing the open container first when the
-    /// style changes.
     pub(crate) fn push(
         &mut self,
         style: BlockStyle,
@@ -101,8 +81,6 @@ impl StyledRun {
             };
         }
         match self {
-            // Code is literal text; character styling is presentation the
-            // source applied to its syntax, never content.
             Self::Code(lines) => lines.push(inlines_to_plain_text(&inlines)),
             Self::Quote(blocks) => {
                 if !inlines_are_empty(&inlines) {
@@ -113,7 +91,6 @@ impl StyledRun {
         }
     }
 
-    /// Close the open container, if any.
     pub(crate) fn flush(&mut self, out: &mut Vec<Block>) {
         match std::mem::take(self) {
             Self::Quote(inner) => {

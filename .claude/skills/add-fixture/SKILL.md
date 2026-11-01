@@ -7,9 +7,8 @@ description: Add or change a test fixture and its snapshot. Use for every behavi
 
 # Add a fixture
 
-Fixtures are committed bytes under `tests/fixtures/<format>/`, built by the driver
-`tests/gen_fixtures.py` from one module per format, `tests/fixturegen/<format>.py`, and
-published with the repository: never a confidential document.
+- Fixtures: published bytes in `tests/fixtures/<format>/`; never confidential documents.
+- Driver: `tests/gen_fixtures.py`; per-format generators: `tests/fixturegen/<format>.py`.
 
 1. Write a generator function in the format's `tests/fixturegen/<format>.py` and call it from
    that module's `generate(out)`, or extend the one that already builds that kind of document;
@@ -32,7 +31,8 @@ published with the repository: never a confidential document.
    A failed run restores the pre-run fixtures and accepted snapshots while keeping raw proposals.
 4. Read every new snapshot: it is the expected output, so a wrong one bakes in a bug.
 5. Declare each new fixture and snapshot, and each fixture and snapshot you changed, in REUSE.toml
-   (AGENTS.md, Traps), then stage only those files, the generator and REUSE.toml. Never rename
+   (CLAUDE.md, Checks and commits), then stage only those files, the generator and REUSE.toml. Never
+  rename
    a fixture `python/tests/` opens by name; `verify` runs `make python` when one of them or its
    snapshot changes.
 

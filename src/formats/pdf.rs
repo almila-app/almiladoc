@@ -1,9 +1,3 @@
-//! PDF through unpdf, one page at a time, each page a unit. A page's verdict is ruled from the
-//! facts unpdf reports of it: one whose text does not stand for what it shows becomes a gap
-//! awaiting OCR, and every other page is mapped into the model with the running heads and
-//! folios that recur across its pages left out, or, under `HeaderFooterPolicy::Emit`, written as
-//! its header and footer.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
@@ -29,13 +23,9 @@ use crate::model::{
 use crate::shared::fields::classify_rel_target;
 use crate::shared::sides::{PageSides, SideTimeline};
 
-/// The share of a page an image covers from which furniture or margin text over it is a scan's.
 const SCAN_COVERAGE: f32 = 0.9;
-/// The most non-space characters a running head or folio holds.
 const RUNNING_HEAD_CHARS: usize = 80;
 
-/// A parsed PDF: its document, each page's verdict in page order, and what its pages are
-/// painted from.
 pub(crate) struct Read {
     pub(crate) document: Document,
     pub(crate) verdicts: Vec<PageVerdict>,
@@ -43,15 +33,12 @@ pub(crate) struct Read {
     pub(crate) source: PdfSource,
 }
 
-/// unpdf's parser of a PDF, and each page's box as parsed, `None` for a page that did not
-/// parse.
 #[cfg(feature = "raster")]
 pub(crate) struct PdfSource {
     pub(crate) parser: PdfParser,
     pub(crate) boxes: Vec<Option<PageBox>>,
 }
 
-/// A page's media box in points.
 #[cfg(feature = "raster")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PageBox {
@@ -61,7 +48,6 @@ pub(crate) struct PageBox {
 
 #[cfg(feature = "raster")]
 impl PdfSource {
-    /// The media box of 1-based `page`; `None` for a page the parse could not read.
     pub(crate) fn page_box(&self, page: NonZeroU32) -> Option<PageBox> {
         *self.boxes.get(usize::try_from(page.get() - 1).ok()?)?
     }
@@ -74,7 +60,6 @@ impl PageBox {
     }
 }
 
-/// The document, each page's verdict and what its pages are painted from.
 pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, ConvertError> {
     let Extracted { pages, missing, parser } = extract(parse_ctx, bytes)?;
     let furniture = Furniture::of(&pages);
@@ -210,7 +195,6 @@ fn sequential() -> PageStreamOptions {
     }
 }
 
-/// A block's text, and whether it is plain text a running head could be: no heading, table or code block.
 fn text_of(block: &PdfBlock) -> Option<(String, bool)> {
     match block {
         PdfBlock::Paragraph(paragraph) => {
@@ -223,8 +207,6 @@ fn text_of(block: &PdfBlock) -> Option<(String, bool)> {
     }
 }
 
-/// What a running head or folio keeps from page to page: its words, lowercased, without
-/// digits.
 fn furniture_key(text: &str) -> String {
     let kept: String =
         text.chars().filter(|c| !c.is_ascii_digit()).flat_map(char::to_lowercase).collect();
@@ -238,13 +220,11 @@ fn numbers(text: &str) -> Vec<u64> {
         .collect()
 }
 
-/// The pages each furniture key is found on, and the keys that are running heads or folios.
 struct Furniture {
     pages_with: BTreeMap<String, usize>,
     running: BTreeSet<String>,
 }
 
-/// A furniture key's first text on one page.
 struct Sighting<'a> {
     page: u64,
     numbers: &'a [u64],
@@ -278,7 +258,6 @@ impl Furniture {
         Self { pages_with, running }
     }
 
-    /// The candidate keys found on some page that also holds a text no candidate strips.
     fn beside_body(pages: &[Option<ReadPage>], candidates: &BTreeSet<&str>) -> BTreeSet<String> {
         let strippable = |text: &Text| text.running_head && candidates.contains(text.key.as_str());
         pages
@@ -300,9 +279,6 @@ impl Furniture {
     }
 }
 
-/// Whether a key seen `on` these of `text_pages` pages with text may be a running head or folio:
-/// on half of them, beside other text on two, its numbers fixed, or a bare folio's in step with
-/// the page.
 fn runs_through(key: &str, on: &[Sighting<'_>], text_pages: usize) -> bool {
     on.len() * 2 >= text_pages
         && on.iter().filter(|sighting| sighting.beside_other_text).count() >= 2
@@ -393,9 +369,6 @@ fn garbled(parse_ctx: &ParseCtx<'_>, page: &Page) {
     parse_ctx.emit_count(DiagnosticCode::GarbledFontEncoding, Region::Body, count);
 }
 
-/// Map a page's blocks, its running heads and folios left out where they lead or trail its
-/// text: reported, or under `HeaderFooterPolicy::Emit` written as the page's header and footer
-/// before its body.
 fn map_page(
     parse_ctx: &ParseCtx<'_>,
     read: &ReadPage,

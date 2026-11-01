@@ -1,5 +1,3 @@
-//! Block and inline walking for WordprocessingML parts.
-
 use super::numbering::{Counters, Numbering};
 use super::styles::{
     FontRoute, RunFonts, Styles, Toggles, on_off, on_off_attr, outline, rpr_delta, val,
@@ -35,8 +33,6 @@ use std::iter::Peekable;
 use std::ops::Bound;
 use std::rc::Rc;
 
-/// Namespaces whose markup this frontend understands; `mc:Choice` branches
-/// requiring anything else fall back to `mc:Fallback`.
 const SUPPORTED_NS: &[&str] = &[
     ns::W,
     ns::A,
@@ -69,8 +65,6 @@ pub(super) struct Ctx<'a, 'b> {
     pub damage: crate::shared::xml::DamageScope,
 }
 
-/// What the walk of every part saw rendered: comment references, and the notes references
-/// name, each by whether one of its references renders.
 #[derive(Default)]
 pub(super) struct References {
     notes: RefCell<BTreeMap<String, bool>>,
@@ -79,7 +73,6 @@ pub(super) struct References {
 }
 
 impl References {
-    /// Whether the note `id` names is read: unless every reference to it dropped.
     pub(super) fn reads_note(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -89,8 +82,6 @@ impl References {
         Ok(self.notes.borrow().get(id) != Some(&false))
     }
 
-    /// Whether a reference to a note whose id starts with `prefix` dropped, and whether one
-    /// rendered.
     pub(super) fn note_references(
         &self,
         parse_ctx: &ParseCtx<'_>,
@@ -123,8 +114,6 @@ impl References {
     }
 }
 
-/// A part's tracked moves: the move-source ranges open where the walk is, the destination
-/// names it walked where they render, and the names of the source ranges that held content.
 #[derive(Default)]
 pub(super) struct Moves {
     open: Vec<(String, Rc<str>)>,
@@ -132,12 +121,9 @@ pub(super) struct Moves {
     sources: Vec<Rc<str>>,
 }
 
-/// What this reader shows and reads of a branch: everything.
 const READ_ALL: mc::Shown = (|_| true, |_| true);
 
 impl<'b> Ctx<'_, 'b> {
-    /// The same document-wide dependencies scoped to another package part
-    /// (notes parts): only the relationships, base path and region change.
     pub(super) fn for_part(&self, rels: Relationships, base_part: String, region: Region) -> Self {
         Self {
             rels,
@@ -202,7 +188,6 @@ impl<'b> Ctx<'_, 'b> {
         Ok(())
     }
 
-    /// Tracks a move range's start or end; a destination counts only where it renders.
     fn move_range(&self, marker: &Element, renders: bool) -> Result<(), ConvertError> {
         let mut moves = self.moves.borrow_mut();
         let id = marker.attr(ns::W, "id").unwrap_or_default();
@@ -237,8 +222,6 @@ impl<'b> Ctx<'_, 'b> {
         Ok(())
     }
 
-    /// What a `w:moveFrom` here drops as: a move inside the innermost open named range,
-    /// else a deletion.
     fn move_source(&self) -> Dropped {
         self.moves
             .borrow()
@@ -271,8 +254,6 @@ impl<'b> Ctx<'_, 'b> {
         self.parse_ctx.emit(code, self.region);
     }
 
-    /// Report a loss whose cause is a relationship, unless the relationships
-    /// part itself was reported.
     fn emit_related(&self, code: DiagnosticCode) {
         if !self.rels.reported() {
             self.emit(code);
@@ -347,8 +328,6 @@ enum BranchHolder {
     Math,
 }
 
-/// `alt` with each branch holding only what renders from a field's instruction: its text
-/// boxes, charts and diagrams.
 fn instruction_rendered(
     parse_ctx: &ParseCtx<'_>,
     mut alt: Element,
@@ -373,15 +352,10 @@ fn is_math_text(elem: &Element) -> bool {
     elem.is(ns::M, "t") && !elem.text().trim().is_empty()
 }
 
-/// The branch of alternate content that drops whole, chosen as where it renders but reporting
-/// nothing it declines.
 fn omitted_branch(alt: &Element) -> Option<&Element> {
     mc::selected_branch(alt, SUPPORTED_NS)
 }
 
-/// `elem` without the runs hidden where they stand and without its deletions and moves away:
-/// each paragraph judges its runs by its own style, and a style that cannot resolve leaves
-/// them to what is around it.
 fn without_hidden_text(
     ctx: &Ctx<'_, '_>,
     elem: &Element,
@@ -411,8 +385,6 @@ fn without_hidden_text(
     Ok(copied)
 }
 
-/// `elem` copied under the charges of its text, attributes and name, its element children each
-/// replaced by what `child` makes of it or dropped.
 fn copy_with(
     parse_ctx: &ParseCtx<'_>,
     elem: &Element,
@@ -468,7 +440,6 @@ fn copied(parse_ctx: &ParseCtx<'_>, text: &str) -> Result<String, ConvertError> 
     Ok(text.to_string())
 }
 
-/// A style that cannot resolve leaves the value to what is around it.
 fn or_when_malformed<T>(
     result: Result<T, ConvertError>,
     fallback: impl FnOnce() -> T,
@@ -480,23 +451,12 @@ fn or_when_malformed<T>(
 }
 
 enum ParaKind {
-    Heading {
-        level: u8,
-        /// The visible number of a numbered heading (with its trailing
-        /// separator), prepended to the content: headings have no native
-        /// numbering in the output.
-        label: Option<String>,
-        /// The heading style's own emphasis, subtracted from its runs.
-        base: Style,
-    },
+    Heading { level: u8, label: Option<String>, base: Style },
     ListItem(ListMark),
-    /// A paragraph whose style names a block container.
     Styled(BlockStyle),
     Plain,
 }
 
-/// A paragraph's kind with its numbering not yet resolved: a paragraph whose mark drops
-/// takes a number only if it is emitted as it stands, never when it joins the next one.
 struct Pending<'e> {
     ppr: Option<&'e Element>,
     pstyle_id: Option<&'e str>,
@@ -507,8 +467,6 @@ struct Pending<'e> {
 
 impl Pending<'_> {
     fn kind(self, ctx: &Ctx<'_, '_>) -> Result<ParaKind, ConvertError> {
-        // Numbering resolves independently of heading semantics: a numbered
-        // heading advances its sequence and keeps its number visible.
         let numbering = resolve_numbering(self.ppr, self.pstyle_id, ctx)?;
         Ok(match self.heading {
             Some(level) => {
@@ -530,9 +488,7 @@ enum Mark<'e> {
     Dropped(Pending<'e>),
 }
 
-/// Block runs a following paragraph may extend: a list being built, and a
-/// styled container. Only one is ever open, so starting either closes the
-/// other. A paragraph whose mark drops waits to join the next one.
+/// Only one list or styled run is open, so starting either closes the other.
 #[derive(Default)]
 struct Runs<'e> {
     list: Vec<ListEntry>,
@@ -546,8 +502,6 @@ impl Runs<'_> {
         flush_list(blocks, &mut self.list);
     }
 
-    /// Emits a paragraph waiting to join as it stands, then closes the open runs: one that
-    /// shows nothing renders nothing and takes no number.
     fn release(&mut self, ctx: &Ctx<'_, '_>, blocks: &mut Vec<Block>) -> Result<(), ConvertError> {
         if let Some((pending, pieces)) = self.joining.take()
             && !shows_nothing(&pieces)
@@ -559,8 +513,6 @@ impl Runs<'_> {
     }
 }
 
-/// A paragraph's content in source order: inline runs interleaved with
-/// block attachments (text boxes, charts) at their anchor positions.
 enum Piece {
     Inlines(Vec<Inline>),
     Blocks(Vec<Block>),
@@ -577,8 +529,6 @@ pub(super) fn parse_blocks(
     Ok(blocks)
 }
 
-/// For each section a paragraph mark ends, where the next one starts among the body's blocks
-/// and the properties of the one it ends; a mark a revision deletes ends none.
 pub(super) type SectionBreaks<'e> = Vec<(usize, &'e Element)>;
 
 pub(super) fn parse_body<'e>(
@@ -659,8 +609,6 @@ fn collect_blocks<'e>(
     Ok(())
 }
 
-/// Record where the next section starts when `paragraph`'s mark ends one that accepting
-/// revisions keeps.
 fn note_section_break<'e>(
     paragraph: &'e Element,
     ctx: &Ctx<'_, '_>,
@@ -678,10 +626,6 @@ fn note_section_break<'e>(
     Ok(())
 }
 
-/// Whether a paragraph's mark drops once revisions are accepted and hidden text omitted:
-/// a deleted, moved-out, hidden or specially hidden mark, which joins its paragraph to the
-/// next. A mark carrying its section's properties is a section break, which hiding never joins;
-/// accepting its deletion removes the break with it.
 fn mark_drops(
     ppr: Option<&Element>,
     ctx: &Ctx<'_, '_>,
@@ -703,13 +647,10 @@ fn mark_drops(
     hidden_beside_runs(ctx, rpr, base, hides)
 }
 
-/// Whether accepting revisions removes a paragraph mark: deleted or moved out.
 fn mark_removed(rpr: Option<&Element>, ctx: &Ctx<'_, '_>) -> bool {
     rpr.is_some_and(|rpr| rpr.child_elems().any(|revision| ctx.drops_revision(revision)))
 }
 
-/// Whether a mark, a math run or a run in a declined choice is hidden: a character style that
-/// cannot resolve leaves them to their direct properties rather than failing the conversion.
 fn hidden_beside_runs(
     ctx: &Ctx<'_, '_>,
     rpr: Option<&Element>,
@@ -733,9 +674,6 @@ fn shows_nothing(pieces: &[Piece]) -> bool {
     })
 }
 
-/// A run's style and whether it is hidden: its character style's toggles flip the
-/// paragraph's values and its shift replaces the paragraph's, and its direct formatting is
-/// absolute.
 fn run_properties(
     ctx: &Ctx<'_, '_>,
     rpr: Option<&Element>,
@@ -759,8 +697,6 @@ fn run_properties(
     Ok((delta.apply(styled), hidden))
 }
 
-/// A paragraph whose mark drops followed by the next, which keeps its
-/// own properties: the inline runs where they meet become one.
 fn joined(mut first: Vec<Piece>, second: Vec<Piece>) -> Vec<Piece> {
     for piece in second {
         match (piece, first.last_mut()) {
@@ -847,8 +783,6 @@ fn parse_paragraph<'e>(
         ),
         None => (Outline::Inherit, None, Toggles::default()),
     };
-    // Direct paragraph properties overlay the style chain: an explicit
-    // outlineLvl of 9 ("no outline level") turns a style heading off.
     let heading = outline(ppr).or(style_heading).level();
     let paragraph_level = Style {
         position: ctx.styles.paragraph_position(ctx.parse_ctx, pstyle_id)?,
@@ -899,15 +833,12 @@ fn resolve_numbering(
     };
     let ilvl = match (direct_ilvl, pstyle_id) {
         (Some(l), _) => l,
-        // Style-referenced numbering carries no usable ilvl (§17.3.1.19);
-        // the level comes from the abstract levels' pStyle bindings.
         (None, Some(id)) => {
             ctx.styles.style_numbering_level(ctx.parse_ctx, id, instance)?.unwrap_or(0)
         }
         (None, None) => 0,
     };
     let def = instance.level(ilvl);
-    // A numFmt of "none" is explicitly suppressed numbering.
     let Some(marker) = def.marker else {
         return Ok(None);
     };
@@ -919,8 +850,6 @@ fn resolve_numbering(
     Ok(Some(ListMark { key: ListKey { instance: num_id, marker }, level: ilvl, number, label }))
 }
 
-/// Content that never renders, by how it counts: deleted text, hidden text, or text moved
-/// out of the named range, which counts as deleted only when no destination names it.
 #[derive(Clone, PartialEq)]
 enum Dropped {
     Revision,
@@ -971,17 +900,10 @@ struct InlineWalker<'a, 'b, 'e> {
     pieces: Vec<Piece>,
     current: Vec<Inline>,
     fields: Vec<FieldFrame>,
-    /// Hyperlinks, simple fields and complex fields enclosing this walker's
-    /// output, which nest against `max_nesting_depth` with its own fields.
     enclosing: u64,
-    /// Whether an enclosing walker discards this one's output (a field's instruction).
     discarded: bool,
-    /// Whether this output stands in a side field's result its token replaces, where nothing,
-    /// a text box or chart included, is read.
     tokenized: bool,
     revision: Option<Dropped>,
-    /// The kind of the dropped range still open in the paragraph, which holds rendered content;
-    /// an inner walker takes it and hands it back.
     range: Option<Dropped>,
     dropped: bool,
 }
@@ -1005,7 +927,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// A walker for content outside any paragraph, which the default paragraph style formats.
     fn outside_paragraphs(ctx: &'e Ctx<'a, 'b>) -> Result<Self, ConvertError> {
         let styles = ctx.styles;
         let hides = styles.paragraph_hidden(ctx.parse_ctx, None)?;
@@ -1036,8 +957,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         })
     }
 
-    /// An inner walker's content and attachments, and whether it dropped any run, taking back
-    /// the range it holds open.
     fn rejoin(&mut self, mut inner: Self) -> (Vec<Inline>, Vec<Block>, bool) {
         self.range = inner.range.take();
         self.dropped |= inner.dropped;
@@ -1062,13 +981,10 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// Whether what is pushed now reaches the output: inside no field's instruction, here or in
-    /// an enclosing walker.
     fn shown(&self) -> bool {
         !self.discarded && self.fields.iter().all(|f| f.in_result)
     }
 
-    /// A simple field: its result, read and placed, or the token that stands in for it.
     fn walk_simple_field(&mut self, field: &Element) -> Result<(), ConvertError> {
         let instr = field.attr(ns::W, "instr").unwrap_or("");
         let token = self.side_token(instr, on_off_attr(field, "fldLock"))?;
@@ -1085,12 +1001,10 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
-    /// Whether what is walked now lies in a side field's result its token replaces.
     fn replaced(&self) -> bool {
         self.tokenized || self.fields.iter().any(|f| f.token.is_some())
     }
 
-    /// The token a header or footer writes in place of the field `instr` names.
     fn side_token(&self, instr: &str, locked: bool) -> Result<Option<&'static str>, ConvertError> {
         if !self.ctx.in_side() {
             return Ok(None);
@@ -1118,7 +1032,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// Content a run or math shows here, which ends the dropped range open before it.
     fn push(&mut self, inline: Inline) {
         if self.range.is_some() && self.shown() {
             self.close_range();
@@ -1134,9 +1047,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// Attach block content a run or math shows at the current position in run order. Blocks
-    /// render even from a field's instruction, so they always end the dropped range open
-    /// before them.
+    /// Blocks render even from a field's instruction, so they always end the dropped range open before them.
     fn push_blocks(&mut self, blocks: Vec<Block>) {
         if blocks.is_empty() {
             return;
@@ -1243,8 +1154,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 self.ctx.emit_related(DiagnosticCode::LinkTargetUnread);
             }
             match target {
-                // An empty label still keeps a resolved target: the
-                // renderer shows the URL as the link text.
                 Some(target) if content.is_empty() => self.push(Inline::Link { content, target }),
                 Some(target) => self.place(Inline::Link { content, target }),
                 None => self.place_all(content),
@@ -1254,11 +1163,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
-    /// An equation without the runs that drop, through the selected branch of its alternate
-    /// content. A hidden, deleted or moved-away run holding text joins the dropped range open
-    /// where it sits and a shown run holding text ends it, so a range still open at the
-    /// equation's end runs on past it unless the equation renders something. Math with no run
-    /// drops whole where the paragraph hides it or a revision drops it.
+    /// A hidden, deleted or moved-away run holding text joins the dropped range open where it sits and a shown run holding text ends it, so a range still open at the equation's end runs on past it unless the equation renders something.
     fn walk_math(&mut self, math: &Element, display: bool) -> Result<(), ConvertError> {
         if self.replaced() {
             return Ok(());
@@ -1382,21 +1287,16 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(())
     }
 
-    /// Math that shows, which ends the dropped range open before it where the equation renders.
     fn math_shows(&mut self, display: bool) {
         if self.range.is_some() && self.math_rendered(display) {
             self.close_range();
         }
     }
 
-    /// Whether an equation here reaches the output: display math renders even from a field's
-    /// instruction.
     fn math_rendered(&self, display: bool) -> bool {
         display || self.shown()
     }
 
-    /// The equation as it renders: without its hidden runs, and alternate content replaced by
-    /// its selected branch.
     fn without_hidden_runs(&self, elem: &Element) -> Result<Element, ConvertError> {
         let mut copied = copy_with(self.ctx.parse_ctx, elem, |child| {
             if child.is(ns::MC, "AlternateContent") {
@@ -1426,9 +1326,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(copied)
     }
 
-    /// The content of a deleted row or cell: each paragraph under its own style's fonts, the
-    /// selected branch of alternate content, display math, and the move ranges it opens or
-    /// closes, where no destination renders.
     fn walk_paragraphs(&mut self, elem: &Element) -> Result<(), ConvertError> {
         for child in elem.child_elems() {
             if child.is(ns::W, "p") {
@@ -1509,10 +1406,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(rpr.map_or(char_fonts, |rpr| RunFonts::of(rpr).over(char_fonts)))
     }
 
-    /// A run that never renders: its field delimiters still open and close their fields, and
-    /// what it would have shown joins the dropped range, unwalked so nothing in it reports. Its
-    /// text is judged by the glyphs its symbol fonts draw; a character style that cannot
-    /// resolve leaves that to its direct fonts.
+    /// A run that never renders: its field delimiters still open and close their fields, and what it would have shown joins the dropped range, unwalked so nothing in it reports.
     fn drop_run(&mut self, run: &Element, kind: &Dropped) -> Result<(), ConvertError> {
         self.dropped = true;
         let rpr = run.find(ns::W, "rPr");
@@ -1603,8 +1497,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(blocks)
     }
 
-    /// Reports a ruby, which is never walked: where it shows, and in a field's instruction, which
-    /// drops its note references, only when it holds a text box, chart or diagram.
     fn report_ruby(&self, ruby: &Element) -> Result<(), ConvertError> {
         if self.shown() || self.drop_note_references(ruby)? {
             self.ctx.emit(DiagnosticCode::RubyUnread);
@@ -1657,10 +1549,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
                 }
                 "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
                 | "yearLong" => self.report_shown(DiagnosticCode::FieldValueUnread),
-                // Markdown has no pages or columns, but every w:br still
-                // separates the runs around it: dropping a page break
-                // outright would join the words on either side. One left at
-                // the end of a paragraph is trimmed when the block renders.
+                // Markdown has no pages or columns, but every w:br still separates the runs around it: dropping a page break outright would join the words on either side.
                 "br" | "cr" => self.push(Inline::LineBreak),
                 "footnoteReference" | "endnoteReference" => {
                     if let Some(id) = note_id(child) {
@@ -1700,8 +1589,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// Opens, separates or closes a complex field at its delimiter; true where it begins a
-    /// checkbox or drop-down form field.
     fn field_char(&mut self, delimiter: &Element) -> Result<bool, ConvertError> {
         match delimiter.attr(ns::W, "fldCharType") {
             Some("begin") => {
@@ -1740,7 +1627,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         Ok(false)
     }
 
-    /// Place a field's result, or the token that stands in for it.
     fn place_field(&mut self, instr: &str, token: Option<&'static str>, result: Vec<Inline>) {
         match token {
             Some(token) => {
@@ -1785,8 +1671,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         self.ctx.damage.report(self.ctx.parse_ctx, self.ctx.region, damaged);
     }
 
-    /// Inside a field's instruction only text boxes, charts and diagrams are read or
-    /// reported, since nothing else there reaches the output.
     fn walk_drawing(&mut self, elem: &Element) -> Result<(), ConvertError> {
         if self.replaced() {
             return Ok(());
@@ -1918,16 +1802,12 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// An embedded OLE object's payload, retained as an asset nothing renders; its content is
-    /// not converted.
     fn embedded_object(&self, rel_id: Option<&str>) -> Result<(), ConvertError> {
         self.ctx.emit(DiagnosticCode::EmbeddedObject);
         let ctx = self.ctx;
         retain_ole_payload(ctx.pkg, &ctx.rels, &ctx.base_part, ctx.assets, rel_id)
     }
 
-    /// A picture: an external-mode target (`r:link`) becomes an external
-    /// source, and an embedded one is retained as an asset.
     fn picture(&mut self, rel_id: Option<&str>, descr: ImageLabel) -> Result<(), ConvertError> {
         let ctx = self.ctx;
         let source = rel_id
@@ -1976,8 +1856,6 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    /// A `w:sym`: the character its font draws at its code, which is read even where it is a
-    /// control or a space, since the element names a glyph and never text.
     fn push_sym(&mut self, sym: &Element, style: Style) {
         let font = sym.attr(ns::W, "font").and_then(SymbolFont::from_name);
         let code =
@@ -2023,8 +1901,6 @@ fn pieces_into_blocks(pieces: Vec<Piece>) -> Vec<Block> {
     let mut blocks = Vec::new();
     for piece in pieces {
         match piece {
-            // Visually empty inlines still become a paragraph: a
-            // bookmark-only one carries the anchor link resolution binds to.
             Piece::Inlines(inlines) => blocks.push(Block::Paragraph(inlines)),
             Piece::Blocks(attachments) => blocks.extend(attachments),
         }
@@ -2032,33 +1908,17 @@ fn pieces_into_blocks(pieces: Vec<Piece>) -> Vec<Block> {
     blocks
 }
 
-/// A graphic a drawing shows outside its text boxes.
 enum Graphic<'e> {
     Chart(Option<&'e str>),
     Diagram(Option<&'e str>),
-    /// An OLE object, with the relationship of its payload and the id of the VML shape it names
-    /// as its preview.
-    Object {
-        rel_id: Option<&'e str>,
-        shape: Option<&'e str>,
-    },
-    /// A form control, with the id of the VML shape it names as its preview.
-    Control {
-        shape: Option<&'e str>,
-    },
-    /// A picture, with the VML shape that holds it; a VML picture fill is read after every other
-    /// picture.
-    Picture {
-        rel_id: Option<&'e str>,
-        shape: Option<&'e Element>,
-        fill: bool,
-    },
+    Object { rel_id: Option<&'e str>, shape: Option<&'e str> },
+    Control { shape: Option<&'e str> },
+    Picture { rel_id: Option<&'e str>, shape: Option<&'e Element>, fill: bool },
     Movie,
     WordArt,
 }
 
 impl Graphic<'_> {
-    /// Which graphic a drawing reads: the lowest rank, the first of equals; `None` is never read.
     fn rank(&self) -> Option<u8> {
         match self {
             Self::Chart(Some(_)) => Some(0),
@@ -2073,14 +1933,10 @@ impl Graphic<'_> {
 
 #[derive(Clone, Copy, Default)]
 struct Preview<'e> {
-    /// An index into the drawing's graphics.
     picture: Option<usize>,
     shape: Option<&'e Element>,
 }
 
-/// Each object's or control's preview: the first picture and shape holding the id it names, else
-/// the first picture no shape holds, a picture fill counting only where no other picture does;
-/// every id is charged by its length.
 fn pair_previews<'e>(
     parse_ctx: &ParseCtx<'_>,
     graphics: &[Graphic<'e>],
@@ -2155,10 +2011,6 @@ fn labelled(shape: Option<&Element>, descr: ImageLabel) -> ImageLabel {
     shape.and_then(shape_alt).unwrap_or(descr)
 }
 
-/// What a drawing or VML pict holds, in document order: text-box content
-/// (`w:txbxContent`), whose own drawings its blocks walk, and the graphics,
-/// VML shapes and shape text outside it, through the branch each
-/// `mc:AlternateContent` takes.
 #[derive(Default)]
 struct Contents<'e> {
     boxes: Vec<&'e Element>,
@@ -2234,22 +2086,16 @@ fn graphic<'e>(elem: &'e Element, shape: Option<&'e Element>) -> Option<Graphic<
 
 struct TcInfo<'e> {
     elem: &'e Element,
-    /// Legacy `hMerge` continuation cells folded into this origin.
     merged: Vec<&'e Element>,
     col_span: usize,
     row_span: usize,
-    /// vMerge continuation: this position belongs to the origin above.
     covered: bool,
 }
 
-/// A table row: its cells between the empty positions `gridBefore` and
-/// `gridAfter` declare.
 struct RowInfo<'e> {
     before: usize,
     cells: Vec<TcInfo<'e>>,
     after: usize,
-    /// Its deleted cells and move markers, each by the number of its cells before it and of
-    /// the continuations the last of those folded in before it.
     deleted: Vec<((usize, usize), &'e Element)>,
 }
 
@@ -2257,9 +2103,7 @@ fn grid_filler(trpr: Option<&Element>, name: &str) -> usize {
     trpr.and_then(|p| val(p, name)).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
-/// Clamp a row's fillers and spans to the `w:tblGrid` width, so no
-/// position a row declares lies past the grid, and return how many values
-/// it clamped. A cell keeps at least its own position.
+/// Clamp a row's fillers and spans to the `w:tblGrid` width, so no position a row declares lies past the grid, and return how many values it clamped.
 fn clamp_to_grid(row: &mut RowInfo<'_>, width: usize) -> u64 {
     let mut clamped = 0u64;
     let mut clamp = |value: &mut usize, room: usize| {
@@ -2287,8 +2131,6 @@ fn tc_at<'m, 'e>(
 }
 
 fn merge_vertically(matrix: &mut [RowInfo<'_>]) {
-    // Active vertical-merge chains: the column range each covers, by its
-    // first column, and the origin it extends.
     let mut active: BTreeMap<usize, (usize, (usize, usize))> = BTreeMap::new();
     for r in 0..matrix.len() {
         let Some(row) = matrix.get(r) else { break };
@@ -2352,14 +2194,11 @@ fn parse_table(tbl: &Element, ctx: &Ctx<'_, '_>) -> Result<Vec<Block>, ConvertEr
     }
     merge_vertically(&mut matrix);
 
-    // tblHeader is ST_OnOff: an explicit false value is not a header row.
     let header_rows = rows
         .iter()
         .take_while(|tr| tr.find(ns::W, "trPr").and_then(|p| on_off(p, "tblHeader")) == Some(true))
         .count();
 
-    // Deleted rows and cells and the move markers between rows and cells are walked in
-    // document order between the retained ones, which the move ranges they open or close reach.
     let mut deleted_rows = deleted_rows.into_iter().peekable();
     let mut builder = GridBuilder::new(ctx.parse_ctx);
     for (r, row) in matrix.iter().enumerate() {
@@ -2409,9 +2248,6 @@ fn place_row(
     Ok(())
 }
 
-/// A table's rows, and its deleted rows and the move markers between rows, each by the number
-/// of rows before it: accepting the revisions removes a deleted row. Rows behind a content
-/// control, custom XML or alternate content are reported unread.
 fn collect_rows<'e>(
     tbl: &'e Element,
     ctx: &Ctx<'_, '_>,
@@ -2457,8 +2293,6 @@ fn drop_deleted(elem: &Element, ctx: &Ctx<'_, '_>) -> Result<(), ConvertError> {
     Ok(())
 }
 
-/// A row's cells, and its deleted cells and the move markers between cells by where each sits
-/// among them.
 fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx<'_, '_>, row: &mut RowInfo<'e>) {
     for child in parent.child_elems() {
         if child.is(ns::MC, "AlternateContent") {
@@ -2491,8 +2325,6 @@ fn collect_row_cells<'e>(parent: &'e Element, ctx: &Ctx<'_, '_>, row: &mut RowIn
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1)
                     .max(1);
-                // Legacy hMerge: a non-restart hMerge cell folds into the
-                // preceding origin, widening its span.
                 if continues(tcpr, "hMerge")
                     && let Some(prev) = row.cells.last_mut()
                     && !prev.covered

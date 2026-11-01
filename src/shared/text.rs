@@ -1,9 +1,4 @@
-//! Shared text normalization.
-
-/// Drop control characters and layout-only invisibles, convert NBSP to a
-/// regular space, strip soft hyphens. Line breaks become single spaces; a
-/// CRLF pair is one break. U+200C (ZWNJ) and U+200D (ZWJ) are **preserved**:
-/// they carry meaning in Arabic/Indic shaping and emoji sequences.
+// ZWNJ/ZWJ preserve Arabic/Indic shaping and emoji sequences.
 pub(crate) fn clean_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -22,13 +17,10 @@ pub(crate) fn clean_text(text: &str) -> String {
     out
 }
 
-/// Whether `clean_text` strips `c` as a layout-only invisible: a soft hyphen, a zero-width
-/// space or a byte-order mark.
 pub(crate) fn is_layout_invisible(c: char) -> bool {
     matches!(c, '\u{ad}' | '\u{200b}' | '\u{feff}')
 }
 
-/// Collapse whitespace runs to single spaces.
 pub(crate) fn collapse_ws(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
