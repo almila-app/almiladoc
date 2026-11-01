@@ -640,6 +640,32 @@ mod tests {
     }
 
     #[test]
+    fn hidden_emit_and_rejected_deletions_keep_comment_references() {
+        for (properties, hidden, revisions) in [
+            (HIDDEN, crate::HiddenPolicy::Emit, crate::RevisionPolicy::Accept),
+            (DELETED, crate::HiddenPolicy::Omit, crate::RevisionPolicy::Reject),
+        ] {
+            let bytes = comment_doc(b"a\x05\r", &[b"\x05kept\r"], &[1])
+                .chpx_runs(&[(1, &[]), (1, properties), (10, &[])])
+                .bytes();
+            let ctx = ParseCtx::default()
+                .with_comments(crate::CommentPolicy::Emit)
+                .with_hidden(hidden)
+                .with_revisions(revisions);
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(doc.notes[0].blocks, vec![comment_paragraph("kept")]);
+            assert_eq!(diagnostic_rows::<Reported>(&ctx.into_diagnostics()), vec![]);
+            let ctx = ParseCtx::default().with_hidden(hidden).with_revisions(revisions);
+            let doc = parse(&ctx, &bytes).unwrap();
+            assert_eq!(doc.notes, []);
+            assert_eq!(
+                diagnostic_rows::<Reported>(&ctx.into_diagnostics()),
+                [(DiagnosticCode::CommentOmitted, Region::Comment, 1)]
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_notes_and_comments_can_share_a_raw_id() {
         use crate::model::Inline;
         let bytes = comment_doc(b"\x02\x05\rnote\r", &[b"\x05comment\r"], &[1])
@@ -2105,8 +2131,12 @@ mod tests {
         (crate::render::markdown::document_to_markdown(&doc), reported)
     }
 
-    fn policy_converted(bytes: &[u8], revisions: crate::RevisionPolicy) -> (String, Vec<Reported>) {
-        let ctx = ParseCtx::default().with_revisions(revisions);
+    fn policy_converted(
+        bytes: &[u8],
+        hidden: crate::HiddenPolicy,
+        revisions: crate::RevisionPolicy,
+    ) -> (String, Vec<Reported>) {
+        let ctx = ParseCtx::default().with_hidden(hidden).with_revisions(revisions);
         let doc = parse(&ctx, bytes).unwrap();
         (
             crate::render::markdown::document_to_markdown(&doc),
@@ -2115,18 +2145,50 @@ mod tests {
     }
 
     #[test]
+    fn source_policies_restore_hidden_and_deleted_text_and_remove_insertions() {
+        let inserted = &[0x01, 0x08, 1];
+        let doc =
+            runs_doc(&[("old", DELETED), ("new", inserted), ("hidden", HIDDEN), ("end\r", &[])]);
+        assert_eq!(
+            policy_converted(
+                &doc.bytes(),
+                crate::HiddenPolicy::Emit,
+                crate::RevisionPolicy::Reject
+            ),
+            ("oldhiddenend\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
+        );
+        let doc = runs_doc(&[("one", &[]), ("\r", inserted), ("two\r", &[])]);
+        assert_eq!(
+            policy_converted(
+                &doc.bytes(),
+                crate::HiddenPolicy::Omit,
+                crate::RevisionPolicy::Reject
+            ),
+            ("onetwo\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
+        );
+    }
+
+    #[test]
     fn source_policies_retain_insertion_state_across_style_resets_and_piece_modifiers() {
         let resetting = &[0x01, 0x08, 1, 0x33, 0x2A, 0];
         let doc = runs_doc(&[("new", resetting), ("old\r", DELETED)]);
         assert_eq!(
-            policy_converted(&doc.bytes(), crate::RevisionPolicy::Reject),
+            policy_converted(
+                &doc.bytes(),
+                crate::HiddenPolicy::Omit,
+                crate::RevisionPolicy::Reject
+            ),
             ("old\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
         );
         let doc = DocBuilder::new(b"")
             .fib(0x4C, 6)
             .pieces(&[(3, b"new", false, (0x42 << 1) | (1 << 8)), (6, b"ok\r", false, 0)]);
         assert_eq!(
-            policy_converted(&doc.bytes(), crate::RevisionPolicy::Reject),
+            policy_converted(
+                &doc.bytes(),
+                crate::HiddenPolicy::Omit,
+                crate::RevisionPolicy::Reject
+            ),
             ("ok\n".into(), omitted(DiagnosticCode::RevisionOmitted, 1))
         );
     }

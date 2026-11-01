@@ -110,7 +110,9 @@ enum Dropped {
 impl Dropped {
     fn of(ctx: &ParseCtx<'_>, chp: Chp) -> Option<Self> {
         let revision = if ctx.reject_revisions() { chp.inserted } else { chp.deleted };
-        revision.then_some(Self::Revision).or_else(|| (chp.hidden).then_some(Self::Hidden))
+        revision
+            .then_some(Self::Revision)
+            .or_else(|| (chp.hidden && !ctx.hidden_requested()).then_some(Self::Hidden))
     }
 }
 
