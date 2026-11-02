@@ -5,7 +5,7 @@
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
-use crate::package::archive::read_capped;
+use crate::shared::inflate::read_capped;
 use std::io::Read;
 
 pub(crate) fn get_u16(b: &[u8], off: usize) -> Option<u16> {

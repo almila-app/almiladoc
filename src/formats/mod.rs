@@ -113,9 +113,9 @@ mod tests {
         let checked = ParseCtx::default();
         detect::check_label(&checked, &bytes, Format::Docx).unwrap();
         parse(&checked, &bytes, Format::Docx).unwrap();
-        assert!(checked.archive_bytes() > alone.archive_bytes());
+        assert!(checked.inflated_bytes() > alone.inflated_bytes());
 
-        let limits = Limits { max_total_bytes: alone.archive_bytes(), ..Limits::DEFAULT };
+        let limits = Limits { max_total_bytes: alone.inflated_bytes(), ..Limits::DEFAULT };
         docx::parse(&ParseCtx::new(&limits), &bytes).unwrap();
         assert_matches!(
             {

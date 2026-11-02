@@ -1769,12 +1769,12 @@ mod tests {
                     &Meter::new(ctx.ledger(), u64::MAX),
                     crate::ImagePolicy::Placeholder,
                 )?;
-                Ok((ctx.archive_bytes(), ctx.fuel(), rendered.markdown.len() as u64))
+                Ok((ctx.inflated_bytes(), ctx.fuel(), rendered.markdown.len() as u64))
             })
             .unwrap();
         assert_eq!(converter.detections.load(Relaxed), 1);
-        assert!(detecting.archive_bytes() > 0 && frontend.archive_bytes() > 0);
-        assert_eq!(total, detecting.archive_bytes() + frontend.archive_bytes());
+        assert!(detecting.inflated_bytes() > 0 && frontend.inflated_bytes() > 0);
+        assert_eq!(total, detecting.inflated_bytes() + frontend.inflated_bytes());
         let run = 3;
         assert_eq!(work, detecting.fuel() + frontend.fuel() + run + length / 64);
         for (limit, max) in [

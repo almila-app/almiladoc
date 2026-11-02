@@ -1,6 +1,7 @@
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
 use crate::shared::binary::{get_u16, get_u32, get_u64};
+use crate::shared::inflate::admit_ratio;
 use std::io::Cursor;
 
 const END: &[u8; 4] = b"PK\x05\x06";
@@ -12,7 +13,6 @@ const ZIP64_END_OVERHEAD: usize = 12;
 const HEADER_LEN: u64 = 46;
 const ENCRYPTED: u16 = 1;
 const STRONG_ENCRYPTION: u16 = 1 << 6;
-const RATIO_FLOOR: u64 = 1024 * 1024;
 
 pub(crate) fn admit(bytes: &[u8], limits: &Limits) -> Result<(), ConvertError> {
     let max = limits.max_entry_count;
@@ -67,7 +67,6 @@ pub(crate) fn inspect(
     limits: &Limits,
 ) -> Result<(), ConvertError> {
     let corrupt = || ConvertError::malformed("corrupt central directory");
-    let ratio = limits.max_compression_ratio;
     let room = zip.central_directory_start().saturating_sub(zip.offset());
     let mut total = 0u64;
     let mut next = zip.central_directory_start();
@@ -85,9 +84,7 @@ pub(crate) fn inspect(
         if total > room {
             return Err(ConvertError::malformed("compressed sizes exceed the archive"));
         }
-        if uncompressed >= RATIO_FLOOR && uncompressed > compressed.saturating_mul(ratio) {
-            return Err(ConvertError::limit(Limit::CompressionRatio, ratio));
-        }
+        admit_ratio(limits, compressed, uncompressed)?;
     }
     Ok(())
 }
@@ -102,6 +99,7 @@ fn header_end(bytes: &[u8], at: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::inflate::RATIO_FLOOR;
     use crate::shared::test_support::{positions, stored, zip_package, zip_package_with};
     use std::assert_matches;
     use std::io::Write;

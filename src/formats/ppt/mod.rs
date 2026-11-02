@@ -97,7 +97,6 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
     };
     let mut sink = crate::shared::assets::AssetSink::new(parse_ctx);
     let mut undecodable = HashSet::new();
-    let cap = parse_ctx.limits().max_entry_bytes;
     let mut pos = 0usize;
     let mut index = 0u64;
     while let Some(record) = record_at(&pictures, pos) {
@@ -105,8 +104,8 @@ fn collect_pictures<R: std::io::Read + std::io::Seek>(
         pos += 8 + record.body.len();
         count_record(parse_ctx, &mut index)?;
         let blip = match record.rec_type {
-            officeart::FBSE => officeart::fbse_blip(record.body, cap),
-            _ => officeart::decode_blip(record, cap),
+            officeart::FBSE => officeart::fbse_blip(parse_ctx, record.body),
+            _ => officeart::decode_blip(parse_ctx, record),
         }?;
         match blip {
             Some(blip) => {
@@ -1528,6 +1527,7 @@ mod tests {
     use crate::converter::UnitSpan;
     use crate::limits::Limits;
     use crate::model::UnitKind::{self, Slide};
+    use crate::shared::inflate::RATIO_FLOOR;
     use crate::shared::officeart::record;
     use crate::shared::test_support::{diagnostic_rows, unit_ordinals};
     use page_side::{
@@ -1549,11 +1549,89 @@ mod tests {
     mod page_side_emit;
     mod page_side_reads;
 
-    fn deflated_metafile_picture(inflated: usize) -> Vec<u8> {
-        let record = officeart::deflated_metafile_blip(inflated);
+    fn pictures_stream(records: &[Vec<u8>]) -> Vec<u8> {
         let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
-        ole.create_stream("Pictures").unwrap().write_all(&record).unwrap();
+        ole.create_stream("Pictures").unwrap().write_all(&records.concat()).unwrap();
         ole.into_inner().into_inner()
+    }
+
+    fn deflated_metafile_picture(inflated: usize) -> Vec<u8> {
+        pictures_stream(&[officeart::deflated_metafile_blip(inflated)])
+    }
+
+    struct Collected {
+        pictures: Result<Pictures, ConvertError>,
+        inflated: u64,
+        fuel: u64,
+    }
+
+    fn collected(limits: &Limits, records: &[Vec<u8>]) -> Collected {
+        let mut ole = cfb::CompoundFile::open(Cursor::new(pictures_stream(records))).unwrap();
+        let parse_ctx = ParseCtx::new(limits);
+        let pictures = collect_pictures(&parse_ctx, &mut ole);
+        Collected { pictures, inflated: parse_ctx.inflated_bytes(), fuel: parse_ctx.fuel() }
+    }
+
+    #[test]
+    fn pictures_count_what_they_inflate_against_the_total() {
+        let records = [4000, 4000].map(officeart::deflated_metafile_blip);
+        let fits = Limits { max_total_bytes: 8000, ..Limits::default() };
+        let Collected { pictures, inflated, .. } = collected(&fits, &records);
+        assert_eq!((pictures.unwrap().assets.len(), inflated), (2, 8000));
+        let spent = Limits { max_total_bytes: 7999, ..Limits::default() };
+        assert_matches!(
+            collected(&spent, &records).pictures,
+            Err(ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 7999 })
+        );
+    }
+
+    #[test]
+    fn a_picture_whose_deflate_stream_breaks_counts_what_it_inflated_and_is_undecodable() {
+        let records = [officeart::broken_metafile_blip(4000, 5000)];
+        let Collected { pictures, inflated, fuel } = collected(&Limits::default(), &records);
+        let pictures = pictures.unwrap();
+        assert_eq!((pictures.assets.len(), pictures.undecodable.len()), (0, 1));
+        assert_eq!((inflated, fuel), (4000, 1 + 4));
+        let again = collected(&Limits::default(), &records);
+        assert_eq!((again.inflated, again.fuel), (inflated, fuel));
+    }
+
+    #[test]
+    fn pictures_that_break_count_against_the_total_until_it_is_spent() {
+        let records = vec![officeart::broken_metafile_blip(4000, 5000); 4];
+        let limits = Limits { max_total_bytes: 10_000, ..Limits::default() };
+        let Collected { pictures, inflated, .. } = collected(&limits, &records);
+        assert_matches!(
+            pictures,
+            Err(ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 10_000 })
+        );
+        assert_eq!(inflated, 2 * 4000 + 2001);
+    }
+
+    #[test]
+    fn a_picture_declaring_a_ratio_past_the_limit_is_refused_before_it_inflates() {
+        let floor = usize::try_from(RATIO_FLOOR).unwrap();
+        for (declared, max_compression_ratio, refused) in
+            [(floor, 100, true), (floor - 1, 100, false), (floor, 2000, false)]
+        {
+            let records = [officeart::deflated_metafile_blip(declared)];
+            let limits = Limits { max_compression_ratio, ..Limits::default() };
+            let Collected { pictures, inflated, .. } = collected(&limits, &records);
+            if refused {
+                assert_matches!(
+                    pictures,
+                    Err(ConvertError::ResourceLimit { limit: Limit::CompressionRatio, max: 100 })
+                );
+                assert_eq!(inflated, 0);
+            } else {
+                assert_eq!(
+                    pictures.unwrap().assets.len(),
+                    1,
+                    "{declared} at {max_compression_ratio}"
+                );
+                assert_eq!(inflated, u64::try_from(declared).unwrap());
+            }
+        }
     }
 
     #[test]

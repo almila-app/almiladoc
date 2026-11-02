@@ -892,9 +892,12 @@ mod tests {
     }
 
     pub(super) fn picture_data(inflated: usize) -> Vec<u8> {
-        let blip = officeart::deflated_metafile_blip(inflated);
+        picture_data_of(&officeart::deflated_metafile_blip(inflated))
+    }
+
+    pub(super) fn picture_data_of(blip: &[u8]) -> Vec<u8> {
         let lcb = u32::try_from(blip.len() + 6).unwrap();
-        [&lcb.to_le_bytes()[..], &6u16.to_le_bytes(), &blip].concat()
+        [&lcb.to_le_bytes()[..], &6u16.to_le_bytes(), blip].concat()
     }
 
     pub(super) const PIC_LOCATION_CHPX: &[u8] = &[0x03, 0x6A, 0, 0, 0, 0];

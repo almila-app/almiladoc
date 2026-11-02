@@ -32,7 +32,7 @@ pub(crate) struct ParseCtx<'a> {
     diagnostics: Cell<Diagnostics>,
     unit: Cell<Option<Unit>>,
     unread_units: Cell<BTreeSet<Unit>>,
-    archive_bytes: Cell<u64>,
+    inflated_bytes: Cell<u64>,
     grid_slots: Cell<u64>,
     expansion_text_bytes: Cell<u64>,
     #[cfg(test)]
@@ -97,7 +97,7 @@ impl<'a> ParseCtx<'a> {
             diagnostics: Cell::default(),
             unit: Cell::default(),
             unread_units: Cell::default(),
-            archive_bytes: Cell::default(),
+            inflated_bytes: Cell::default(),
             grid_slots: Cell::default(),
             expansion_text_bytes: Cell::default(),
             #[cfg(test)]
@@ -236,14 +236,14 @@ impl<'a> ParseCtx<'a> {
         self.ledger.charge(units)
     }
 
-    /// Decompressed bytes this parse has read from its archive, by every
-    /// package opened over it, against [`Limits::max_total_bytes`].
-    pub(crate) fn archive_bytes(&self) -> u64 {
-        self.archive_bytes.get()
+    /// Decompressed bytes this parse has inflated, archive entries and
+    /// OfficeArt pictures alike, against [`Limits::max_total_bytes`].
+    pub(crate) fn inflated_bytes(&self) -> u64 {
+        self.inflated_bytes.get()
     }
 
-    pub(crate) fn count_archive_bytes(&self, bytes: u64) {
-        self.archive_bytes.set(self.archive_bytes.get().saturating_add(bytes));
+    pub(crate) fn count_inflated_bytes(&self, bytes: u64) {
+        self.inflated_bytes.set(self.inflated_bytes.get().saturating_add(bytes));
     }
 
     /// Work this parse may still charge, of [`Limits::max_work`].

@@ -421,7 +421,7 @@ mod tests {
         );
         let absent = ParseCtx::default();
         parse(&absent, &zip_package(&[("word/document.xml", document(&body))])).unwrap();
-        assert_eq!(omitted.archive_bytes(), absent.archive_bytes());
+        assert_eq!(omitted.inflated_bytes(), absent.inflated_bytes());
     }
 
     #[test]

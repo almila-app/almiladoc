@@ -4,11 +4,11 @@ use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::package::directory;
 use crate::package::xml::{Dialect, Element, Marks, NodeSink, Parsed, WholeTree, parse};
+use crate::shared::inflate::{Counted, admitted, deflated, inflate_capped, room};
 use flate2::Crc;
-use flate2::bufread::DeflateDecoder;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::{BufReader, Cursor, ErrorKind, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::rc::Rc;
 use zip::CompressionMethod;
 
@@ -166,15 +166,9 @@ impl<'a> Package<'a> {
         if file.size() > limits.max_entry_bytes {
             return Err(ConvertError::limit(Limit::EntryBytes, limits.max_entry_bytes));
         }
-        // A read past the declared size is malformed, so only the
-        // whole-archive total can still run out mid-entry.
-        let remaining_total = limits.max_total_bytes.saturating_sub(self.parse_ctx.archive_bytes());
-        let cap = limits.max_entry_bytes.min(remaining_total);
-        let bytes = read_entry(self.parse_ctx, &mut file, cap, name)?;
-        if bytes.len() as u64 > cap {
-            return Err(ConvertError::limit(Limit::TotalBytes, limits.max_total_bytes));
-        }
-        Ok(bytes)
+        admitted(self.parse_ctx, || {
+            read_entry(self.parse_ctx, &mut file, room(self.parse_ctx), name)
+        })
     }
 
     pub(crate) fn probe_head(&self, name: &str, cap: u64) -> Result<Option<Vec<u8>>, ConvertError> {
@@ -195,9 +189,7 @@ impl<'a> Package<'a> {
         let Some(index) = self.index_of(name) else {
             return Ok(None);
         };
-        let limits = self.parse_ctx.limits();
-        let remaining_total = limits.max_total_bytes.saturating_sub(self.parse_ctx.archive_bytes());
-        let cap = cap.min(limits.max_entry_bytes).min(remaining_total);
+        let cap = cap.min(room(self.parse_ctx));
         let mut zip = self.zip.clone();
         let read = zip
             .by_index_raw(index)
@@ -400,20 +392,16 @@ fn read_entry<R: Read>(
     let declared = file.size();
     let bound = cap.min(declared);
     let checksum = file.crc32();
-    let (bytes, inflated) = match file.compression() {
+    let bytes = match file.compression() {
         CompressionMethod::Stored => {
-            let mut counted = Counted { inner: file, read: 0 };
-            (read_capped(&mut counted, declared, bound, name, CORRUPT_ENTRY), counted.read)
+            inflate_capped(parse_ctx, Counted::new(file), declared, bound, name, CORRUPT_ENTRY)
         }
         CompressionMethod::Deflated => {
-            let mut inflater = DeflateDecoder::new(BufReader::new(file));
-            (read_capped(&mut inflater, declared, bound, name, CORRUPT_ENTRY), inflater.total_out())
+            let inflater = deflated(BufReader::new(file));
+            inflate_capped(parse_ctx, inflater, declared, bound, name, CORRUPT_ENTRY)
         }
         _ => return Err(ConvertError::malformed_part(name, "unreadable archive entry")),
-    };
-    parse_ctx.count_archive_bytes(inflated);
-    parse_ctx.charge(inflated.div_ceil(1024))?;
-    let bytes = bytes?;
+    }?;
     let len = bytes.len() as u64;
     let corrupt = if len > bound { bound == declared } else { crc32(&bytes) != checksum };
     if corrupt {
@@ -430,19 +418,6 @@ fn crc32(bytes: &[u8]) -> u32 {
     crc.sum()
 }
 
-struct Counted<R> {
-    inner: R,
-    read: u64,
-}
-
-impl<R: Read> Read for Counted<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.read += n as u64;
-        Ok(n)
-    }
-}
-
 pub(crate) fn skip_unreadable<T>(
     parse_ctx: &ParseCtx<'_>,
     role: Role,
@@ -456,30 +431,6 @@ pub(crate) fn skip_unreadable<T>(
         }
         read => read,
     }
-}
-
-/// Reads at most `cap + 1` bytes of `part` after reserving
-/// `min(declared, cap)`, so an overrun shows as a length above `cap` and a
-/// refused allocation is never mistaken for a corrupt input.
-pub(crate) fn read_capped(
-    reader: impl Read,
-    declared: u64,
-    cap: u64,
-    part: &str,
-    reason: &'static str,
-) -> Result<Vec<u8>, ConvertError> {
-    let reserve = declared.min(cap);
-    let mut bytes = Vec::new();
-    usize::try_from(reserve)
-        .ok()
-        .and_then(|n| bytes.try_reserve_exact(n).ok())
-        .ok_or_else(|| ConvertError::limit(Limit::Allocation, reserve))?;
-    let bound = cap.saturating_add(1);
-    reader.take(bound).read_to_end(&mut bytes).map_err(|e| match e.kind() {
-        ErrorKind::OutOfMemory => ConvertError::limit(Limit::Allocation, bound),
-        _ => ConvertError::malformed_part(part, reason),
-    })?;
-    Ok(bytes)
 }
 
 pub(crate) fn open_ooxml<'a>(
@@ -510,55 +461,13 @@ pub(crate) fn probe_ole(bytes: &[u8]) -> Option<ConvertError> {
 #[expect(clippy::disallowed_methods, reason = "an assertion holds for every map value")]
 mod tests {
     use super::*;
+    use crate::ledger::CancelToken;
     use crate::limits::Limits;
     use crate::shared::test_support::{
-        corrupt_entry, diagnostic_rows, positions, stored, zip_package, zip_package_with,
+        broken_deflate_stream, corrupt_entry, diagnostic_rows, empty_deflate_blocks, positions,
+        stored, zip_package, zip_package_with,
     };
     use std::assert_matches;
-
-    struct FailingReader(ErrorKind);
-
-    impl Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(self.0.into())
-        }
-    }
-
-    fn failing_after(prefix: &'static [u8], kind: ErrorKind) -> impl Read {
-        Cursor::new(prefix).chain(FailingReader(kind))
-    }
-
-    #[test]
-    fn an_allocation_failure_mid_read_is_a_resource_limit() {
-        for prefix in [b"".as_slice(), b"partial content".as_slice()] {
-            let reader = failing_after(prefix, ErrorKind::OutOfMemory);
-            let err = read_capped(reader, 4, 64, "word/document.xml", "corrupt").unwrap_err();
-            assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Allocation, max: 65 });
-        }
-    }
-
-    #[test]
-    fn a_refused_reservation_is_a_resource_limit() {
-        let huge = u64::try_from(isize::MAX).unwrap() + 1;
-        let err = read_capped(Cursor::new(b"x"), huge, huge, "a.bin", "corrupt").unwrap_err();
-        assert_matches!(
-            err,
-            ConvertError::ResourceLimit { limit: Limit::Allocation, max } if max == huge
-        );
-    }
-
-    #[test]
-    fn other_read_failures_stay_malformed() {
-        for prefix in [b"".as_slice(), b"partial content".as_slice()] {
-            let reader = failing_after(prefix, ErrorKind::InvalidData);
-            let err = read_capped(reader, 4, 64, "word/document.xml", "corrupt").unwrap_err();
-            assert_matches!(
-                &err,
-                ConvertError::Malformed { part: Some(part), reason: "corrupt" }
-                    if part.as_str() == "word/document.xml"
-            );
-        }
-    }
 
     #[test]
     fn an_entry_read_reserves_its_declared_size() {
@@ -567,14 +476,6 @@ mod tests {
         let mut file = zip.by_index_raw(0).unwrap();
         let read = read_entry(&ParseCtx::default(), &mut file, 4096, "a.bin").unwrap();
         assert_eq!(read.capacity(), 1000);
-    }
-
-    #[test]
-    fn a_capped_read_stops_one_byte_past_the_cap() {
-        let bytes = read_capped(Cursor::new([7u8; 100]), 10, 64, "a.bin", "corrupt").unwrap();
-        assert_eq!(bytes.len(), 65);
-        let bytes = read_capped(Cursor::new([7u8; 10]), 100, 64, "a.bin", "corrupt").unwrap();
-        assert_eq!(bytes.len(), 10);
     }
 
     fn reported(parse_ctx: &ParseCtx<'_>) -> Vec<(DiagnosticCode, Region, u64)> {
@@ -714,7 +615,7 @@ mod tests {
         }
         assert!(pkg.optional_xml_part("word/document.xml", Role::Probe).unwrap().is_none());
         assert_eq!(reported(&parse_ctx), [(DiagnosticCode::PartUnreadable, Region::Note, 3)]);
-        assert_eq!((parse_ctx.archive_bytes(), parse_ctx.fuel()), (11, 1));
+        assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (11, 1));
     }
 
     #[test]
@@ -737,7 +638,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!((parse_ctx.archive_bytes(), parse_ctx.fuel()), (6 + 4 + 5, 3));
+        assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (6 + 4 + 5, 3));
     }
 
     #[test]
@@ -746,16 +647,13 @@ mod tests {
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.probe_part("word/document.xml", 64).unwrap().is_none());
-        assert_eq!(parse_ctx.archive_bytes(), 11);
+        assert_eq!(parse_ctx.inflated_bytes(), 11);
         assert!(pkg.probe_head("word/document.xml", 64).unwrap().is_none());
-        assert_eq!(parse_ctx.archive_bytes(), 22);
+        assert_eq!(parse_ctx.inflated_bytes(), 22);
     }
 
     fn broken_deflate(broken: &[(&str, &[u8])], sound: &[(&str, &[u8])]) -> Vec<u8> {
-        let streams = broken.iter().map(|(name, prefix)| {
-            let len = u16::try_from(prefix.len()).unwrap().to_le_bytes();
-            (*name, [&[0], &len[..], &[!len[0], !len[1]], prefix, &[0b111]].concat())
-        });
+        let streams = broken.iter().map(|(name, prefix)| (*name, broken_deflate_stream(prefix)));
         let sound = sound.iter().map(|(name, body)| (*name, body.to_vec()));
         let parts: Vec<_> = streams.chain(sound).collect();
         let mut data = zip_package_with(&parts, stored());
@@ -765,12 +663,49 @@ mod tests {
         data
     }
 
-    fn set_method(data: &mut [u8], name: &str, method: u8) {
+    fn set_headers(data: &mut [u8], name: &str, (local, central): (u64, u64), value: &[u8]) {
         let mut zip = zip::ZipArchive::new(Cursor::new(data.to_vec())).unwrap();
         let file = zip.by_name(name).unwrap();
-        for at in [file.header_start() + 8, file.central_header_start() + 10] {
-            data[usize::try_from(at).unwrap()] = method;
+        for at in [file.header_start() + local, file.central_header_start() + central] {
+            let at = usize::try_from(at).unwrap();
+            data[at..at + value.len()].copy_from_slice(value);
         }
+    }
+
+    fn set_method(data: &mut [u8], name: &str, method: u8) {
+        set_headers(data, name, (8, 10), &[method]);
+    }
+
+    fn set_size(data: &mut [u8], name: &str, size: u32) {
+        set_headers(data, name, (22, 24), &size.to_le_bytes());
+    }
+
+    #[test]
+    fn a_deflate_stream_breaking_at_its_first_byte_past_a_limit_is_that_limit() {
+        let mut data = broken_deflate(&[("a.bin", &[7u8; 4000])], &[]);
+        set_size(&mut data, "a.bin", 3999);
+        let entry = Limits { max_entry_bytes: 3999, ..Limits::default() };
+        let total = Limits { max_total_bytes: 3999, ..Limits::default() };
+        let both = Limits { max_total_bytes: 3999, ..entry };
+        let rows =
+            [(entry, Limit::EntryBytes), (total, Limit::TotalBytes), (both, Limit::EntryBytes)];
+        for (limits, limit) in rows {
+            let parse_ctx = ParseCtx::new(&limits);
+            let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+            let err = pkg.part("a.bin").unwrap_err();
+            assert_matches!(err, ConvertError::ResourceLimit { limit: l, max: 3999 } if l == limit);
+        }
+    }
+
+    #[test]
+    fn an_entry_of_empty_deflate_blocks_charges_its_compressed_input() {
+        let mut data = zip_package_with(&[("a.bin", empty_deflate_blocks(256 * 1024))], stored());
+        set_method(&mut data, "a.bin", 8);
+        let limits = Limits { max_work: 10, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let err = pkg.part("a.bin").unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 10 });
     }
 
     #[test]
@@ -783,7 +718,7 @@ mod tests {
             assert_matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. });
         }
         assert_eq!(&*pkg.probe_head("a.bin", 64).unwrap().unwrap(), [7u8; 64]);
-        assert_eq!((parse_ctx.archive_bytes(), parse_ctx.fuel()), (4000 + 65, 4 + 1));
+        assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (4000 + 65, 4 + 1));
     }
 
     #[test]
@@ -796,7 +731,7 @@ mod tests {
         for (name, _) in broken {
             assert_matches!(pkg.part(name), Err(ConvertError::Malformed { .. }), "{name}");
         }
-        assert_eq!(parse_ctx.archive_bytes(), 2 * 4000);
+        assert_eq!(parse_ctx.inflated_bytes(), 2 * 4000);
         let err = pkg.part("c.bin").unwrap_err();
         assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, .. });
     }
@@ -809,7 +744,7 @@ mod tests {
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let err = pkg.part("a.bin").unwrap_err();
         assert_matches!(err, ConvertError::Malformed { reason: "unreadable archive entry", .. });
-        assert_eq!(parse_ctx.archive_bytes(), 0);
+        assert_eq!(parse_ctx.inflated_bytes(), 0);
     }
 
     #[test]
@@ -828,7 +763,7 @@ mod tests {
             let err = pkg.part(name).unwrap_err();
             assert_matches!(err, ConvertError::Malformed { reason: "corrupt archive entry", .. });
         }
-        assert_eq!(parse_ctx.archive_bytes(), 2 * 4096);
+        assert_eq!(parse_ctx.inflated_bytes(), 2 * 4096);
         for _ in 0..2 {
             let err = pkg.part("c.bin").unwrap_err();
             assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, .. });
@@ -843,7 +778,11 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(pkg.part("media/a.bin").unwrap().unwrap().len(), 4096);
         }
-        assert_eq!(parse_ctx.archive_bytes(), 4096, "repeated reads must not re-charge the budget");
+        assert_eq!(
+            parse_ctx.inflated_bytes(),
+            4096,
+            "repeated reads must not re-charge the budget"
+        );
     }
 
     #[test]
@@ -905,15 +844,42 @@ mod tests {
             ("a.bin", vec![7u8; 1024]),
             ("b.bin", vec![7u8; 1025]),
             ("c.bin", vec![]),
+            ("d.bin", vec![7u8; 3 * 64 * 1024 + 1]),
         ]);
         let parse_ctx = ParseCtx::default();
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         let mut spent = Vec::new();
-        for name in ["a.bin", "b.bin", "c.bin", "a.bin"] {
+        for name in ["a.bin", "b.bin", "c.bin", "a.bin", "d.bin"] {
             pkg.part(name).unwrap();
             spent.push(parse_ctx.fuel());
         }
-        assert_eq!(spent, [1, 3, 3, 3]);
+        assert_eq!(spent, [1, 3, 3, 3, 3 + 3 * 64 + 1]);
+    }
+
+    fn large_entry() -> Vec<u8> {
+        zip_package(&[("a.bin", vec![7u8; 512 * 1024])])
+    }
+
+    #[test]
+    fn a_parse_cancelled_inside_one_large_entry_inflates_one_chunk_of_it() {
+        let data = large_entry();
+        let token = CancelToken::new();
+        let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        token.cancel();
+        assert_matches!(pkg.part("a.bin"), Err(ConvertError::Cancelled));
+        assert_eq!(parse_ctx.inflated_bytes(), 64 * 1024);
+    }
+
+    #[test]
+    fn a_parse_out_of_work_inside_one_large_entry_inflates_one_chunk_of_it() {
+        let data = large_entry();
+        let limits = Limits { max_work: 10, ..Limits::default() };
+        let parse_ctx = ParseCtx::new(&limits);
+        let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
+        let err = pkg.part("a.bin").unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, max: 10 });
+        assert_eq!(parse_ctx.inflated_bytes(), 64 * 1024);
     }
 
     #[test]
@@ -934,7 +900,7 @@ mod tests {
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
         assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
         assert!(pkg.optional_part("word/comments.xml", Role::Probe).unwrap().is_none());
-        assert_eq!((parse_ctx.archive_bytes(), parse_ctx.fuel()), (4096, 4));
+        assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (4096, 4));
         let limits = Limits { max_work: 3, ..Limits::default() };
         let parse_ctx = ParseCtx::new(&limits);
         let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
@@ -946,7 +912,7 @@ mod tests {
     fn optional_reads_propagate_a_cancellation_of_a_sound_or_damaged_part() {
         for body in ["<comments/>", "<comments><c>"] {
             let data = zip_package(&[("word/comments.xml", body)]);
-            let token = crate::ledger::CancelToken::new();
+            let token = CancelToken::new();
             let parse_ctx = ParseCtx::default().with_cancel(Some(&token));
             let pkg = Package::open(&parse_ctx, &data, PackageKind::Opc).unwrap();
             assert!(pkg.part("word/comments.xml").unwrap().is_some());
@@ -1018,7 +984,7 @@ mod tests {
             assert_eq!(pkg.part(name).unwrap().unwrap().len(), 2048, "{name}");
         }
         assert_eq!(
-            (parse_ctx.archive_bytes(), pkg.cache.borrow().len(), parse_ctx.fuel()),
+            (parse_ctx.inflated_bytes(), pkg.cache.borrow().len(), parse_ctx.fuel()),
             (2048, 1, 2)
         );
         assert!(pkg.part("word/document.xm").unwrap().is_none());

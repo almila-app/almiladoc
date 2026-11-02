@@ -17,6 +17,7 @@ pub(crate) mod grid;
 pub(crate) mod header;
 pub(crate) mod hidden_runs;
 pub(crate) mod html;
+pub(crate) mod inflate;
 pub(crate) mod link_label;
 pub(crate) mod list;
 #[expect(

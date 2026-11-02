@@ -639,7 +639,10 @@ SPDX-FileCopyrightText = [
 SPDX-License-Identifier = "BUSL-1.1 AND MIT"
 
 [[annotations]]
-path = "src/package/archive.rs"
+path = [
+    "src/package/archive.rs",
+    "src/shared/inflate.rs",
+]
 precedence = "override"
 SPDX-FileCopyrightText = [
     "2026 Sideguide Technologies Inc.",

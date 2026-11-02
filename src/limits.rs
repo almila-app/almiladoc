@@ -25,13 +25,13 @@ const MIB: u64 = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
-    /// Decompressed bytes of one archive entry or compound-file stream: a
-    /// decompression bomb hides in one entry.
+    /// Decompressed bytes of one archive entry, OfficeArt picture or
+    /// compound-file stream: a decompression bomb hides in one entry.
     pub max_entry_bytes: u64,
-    /// Decompressed bytes read from one archive in total: a bomb spreads over
-    /// many entries, a corrupt one too, which counts what it inflated before
-    /// failing its checksum or deflate stream, once however many references
-    /// name it.
+    /// Decompressed bytes one parse inflates (archive entries and OfficeArt
+    /// pictures): a bomb spreads over many, a corrupt one too, which counts
+    /// what it inflated before failing its checksum or deflate stream, once
+    /// however many references name it.
     pub max_total_bytes: u64,
     /// Entries in one archive: each costs memory before any is read.
     pub max_entry_count: u64,
@@ -74,8 +74,9 @@ pub struct Limits {
     /// Bytes of one input, checked before any parse: everything else a
     /// conversion holds grows from it.
     pub max_input_bytes: u64,
-    /// Ratio of an archive entry's decompressed to compressed size, checked on
-    /// entries declaring at least 1 MiB: ordinary content compresses far less.
+    /// Ratio of an archive entry's or OfficeArt picture's decompressed to
+    /// compressed size, checked on those declaring at least 1 MiB: ordinary
+    /// content compresses far less.
     pub max_compression_ratio: u64,
     /// Markdown bytes one conversion writes, counting what rendering holds
     /// before writing it (a paragraph to trim, a table's cells), and JSON
@@ -84,28 +85,27 @@ pub struct Limits {
     /// it several times over, as each styled run of text spells out its
     /// style.
     pub max_output_bytes: u64,
-    /// Work units one conversion charges, bounding its time
-    /// deterministically: XML events, RTF tokens, CSS rules an element's tag
-    /// or classes name, KiB decompressed from an archive, records and cells
-    /// (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text bytes,
-    /// style and numbering resolution, omitted print text bytes, BIFF8 XLS
-    /// records under header/footer Emit, emitted spreadsheet print text copies,
-    /// asset references and reindexing, grid positions counted against
-    /// [`Limits::max_grid_slots`], inlines the Markdown renderer reads, looks
-    /// ahead at and writes, metadata text bytes serialized to JSON (each
-    /// empty value costing one), 64 bytes of Markdown or JSON written, the
-    /// Markdown events, opted-in table-fragment bytes or located-line input,
-    /// ordering and text copies of each gap's fill, 16 bytes of each image
-    /// an OCR request copies, and of a page it paints 128 pixels before
-    /// painting, 128 pixels of each
-    /// step's work as unpdf prices it, rounded up, and 16 bytes of its PNG
-    /// after. Detection shares these counters with parsing,
-    /// and rendering continues the same ledger. The default, two units per
-    /// byte of [`Limits::max_input_bytes`], admits ordinary large inputs,
-    /// including a 256 MiB RTF containing one hex picture. Work
-    /// that grows faster than the input crosses it: a PPT of 65 hyperlinks
-    /// each over one text of 4 Mi UTF-16 units (8 MiB), each link charging its
-    /// range read and its label compared, asks 545 259 782.
+    /// Work units one conversion charges, bounding its time deterministically:
+    /// XML events, RTF tokens, CSS rules an element's tag or classes name, KiB
+    /// inflated or 2 KiB of compressed input read, whichever is more, records
+    /// and cells (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text
+    /// bytes, style and numbering resolution, omitted print
+    /// text bytes, BIFF8 XLS records under header/footer Emit, emitted
+    /// spreadsheet print text copies, asset references and reindexing, grid
+    /// positions counted against [`Limits::max_grid_slots`], inlines the Markdown
+    /// renderer reads, looks ahead at and writes, metadata text bytes serialized
+    /// to JSON (each empty value costing one), 64 bytes of Markdown or JSON
+    /// written, the Markdown events, opted-in table-fragment bytes or
+    /// located-line input, ordering and text copies of each gap's fill, 16 bytes
+    /// of each image an OCR request copies, and of a page it paints 128 pixels
+    /// before painting, 128 pixels of each step's work as unpdf prices it,
+    /// rounded up, and 16 bytes of its PNG after. Detection shares these counters
+    /// with parsing, and rendering continues the same ledger. The default, two
+    /// units per byte of [`Limits::max_input_bytes`], admits ordinary large
+    /// inputs, including a 256 MiB RTF containing one hex picture. Work that
+    /// grows faster than the input crosses it: a PPT of 65 hyperlinks each over
+    /// one text of 4 Mi UTF-16 units (8 MiB), each link charging its range read
+    /// and its label compared, asks 545 259 782.
     pub max_work: u64,
     /// Units one document holds: slides, sheets, EPUB spine items and PDF
     /// pages, a CSV being one sheet. Each unit costs fixed work that its
@@ -188,9 +188,9 @@ impl Default for Limits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Limit {
-    /// Decompressed size of one archive entry or compound-file stream.
+    /// Decompressed size of one archive entry, OfficeArt picture or compound-file stream.
     EntryBytes,
-    /// Decompressed bytes read from one archive in total.
+    /// Decompressed bytes one parse inflates (archive entries and OfficeArt pictures).
     TotalBytes,
     /// Entries in one archive.
     EntryCount,
@@ -212,7 +212,7 @@ pub enum Limit {
     Records,
     /// Bytes of one input.
     InputBytes,
-    /// Ratio of an archive entry's decompressed to compressed size.
+    /// Ratio of an archive entry's or OfficeArt picture's decompressed to compressed size.
     CompressionRatio,
     /// Markdown bytes one conversion writes.
     OutputBytes,
@@ -386,7 +386,7 @@ mod tests {
                     ("tests/it/ocr.rs", "a_fill_past_a_limit_is_refused_and_the_gap_then_fills")
                 }
                 Limit::Allocation => {
-                    ("src/package/archive.rs", "an_allocation_failure_mid_read_is_a_resource_limit")
+                    ("src/shared/inflate.rs", "an_allocation_failure_mid_read_is_a_resource_limit")
                 }
             };
             let source = std::fs::read_to_string(root.join(source)).unwrap();

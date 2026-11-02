@@ -1,5 +1,7 @@
-use crate::limits::{Limit, LimitExceeded};
+use crate::ctx::ParseCtx;
+use crate::error::ConvertError;
 use crate::shared::binary::{ByteReader, get_u16, get_u32};
+use crate::shared::inflate::{admit_ratio, admitted, deflated, inflate_capped, room};
 use std::borrow::Cow;
 use std::io::Read;
 
@@ -33,6 +35,10 @@ const EMF_TWO_UIDS: u16 = 0x3D5;
 const WMF_TWO_UIDS: u16 = 0x217;
 
 const COMPRESSION_DEFLATE: u8 = 0x00;
+#[cfg(test)]
+const COMPRESSION_NONE: u8 = 0xFE;
+const PICTURE: &str = "OfficeArt picture";
+const CORRUPT_PICTURE: &str = "corrupt picture";
 
 const PROPERTY_LEN: usize = 6;
 const FBSE_NAME_LEN_AT: usize = 33;
@@ -86,11 +92,11 @@ pub(crate) struct Blip<'a> {
     pub(crate) bytes: Cow<'a, [u8]>,
 }
 
-/// Metafile blips may be deflate-compressed; the output is bounded by the declared uncompressed size, and inflating past `max_bytes` is [`Limit::EntryBytes`].
-pub(crate) fn decode_blip(
-    record: Record<'_>,
-    max_bytes: u64,
-) -> Result<Option<Blip<'_>>, LimitExceeded> {
+/// A deflated metafile counts and charges as it inflates, and a broken stream reads as no blip.
+pub(crate) fn decode_blip<'a>(
+    parse_ctx: &ParseCtx<'_>,
+    record: Record<'a>,
+) -> Result<Option<Blip<'a>>, ConvertError> {
     let Record { rec_type, body, .. } = record;
     match rec_type {
         BLIP_JPEG | BLIP_PNG => {
@@ -112,7 +118,7 @@ pub(crate) fn decode_blip(
             let (media_type, extension) =
                 if rec_type == BLIP_EMF { ("image/emf", "emf") } else { ("image/wmf", "wmf") };
             let bytes = match compression {
-                COMPRESSION_DEFLATE => match inflate(data, cb_size, max_bytes)? {
+                COMPRESSION_DEFLATE => match inflate(parse_ctx, data, cb_size)? {
                     Some(out) => Cow::Owned(out),
                     None => return Ok(None),
                 },
@@ -140,21 +146,28 @@ fn metafile_parts(header_and_data: Option<&[u8]>) -> Option<Metafile<'_>> {
     Some(Metafile { cb_size: u64::from(cb_size), compression, data: header.rest() })
 }
 
-fn inflate(data: &[u8], cb_size: u64, max_bytes: u64) -> Result<Option<Vec<u8>>, LimitExceeded> {
-    let mut out = Vec::new();
-    let mut decoder =
-        flate2::read::DeflateDecoder::new(data).take(cb_size.min(max_bytes.saturating_add(1)));
-    if decoder.read_to_end(&mut out).is_err() {
-        return Ok(None);
+fn inflate(
+    parse_ctx: &ParseCtx<'_>,
+    data: &[u8],
+    cb_size: u64,
+) -> Result<Option<Vec<u8>>, ConvertError> {
+    admit_ratio(parse_ctx.limits(), data.len() as u64, cb_size)?;
+    let source = deflated(data).take(cb_size);
+    let read = admitted(parse_ctx, || {
+        inflate_capped(parse_ctx, source, cb_size, room(parse_ctx), PICTURE, CORRUPT_PICTURE)
+    });
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.is_fatal() => Err(e),
+        Err(_) => Ok(None),
     }
-    if out.len() as u64 > max_bytes {
-        return Err(LimitExceeded { limit: Limit::EntryBytes, max: max_bytes });
-    }
-    Ok(Some(out))
 }
 
 /// Bounded traversal: record counts and nesting beyond any real drawing abort the search.
-pub(crate) fn first_blip(data: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>, LimitExceeded> {
+pub(crate) fn first_blip<'a>(
+    parse_ctx: &ParseCtx<'_>,
+    data: &'a [u8],
+) -> Result<Option<Blip<'a>>, ConvertError> {
     let mut stack: Vec<(usize, usize)> = vec![(0, data.len())];
     let mut visited = 0u32;
     loop {
@@ -176,7 +189,7 @@ pub(crate) fn first_blip(data: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>
         if visited > 10_000 || stack.len() > 16 {
             return Ok(None);
         }
-        if let Some(blip) = decode_blip(record, max_bytes)? {
+        if let Some(blip) = decode_blip(parse_ctx, record)? {
             return Ok(Some(blip));
         }
         if record.rec_type == FBSE {
@@ -200,11 +213,14 @@ fn fbse_blip_offset(body: &[u8]) -> Option<usize> {
     body.get(FBSE_NAME_LEN_AT).map(|&name_len| FBSE_HEADER_LEN + usize::from(name_len))
 }
 
-pub(crate) fn fbse_blip(body: &[u8], max_bytes: u64) -> Result<Option<Blip<'_>>, LimitExceeded> {
+pub(crate) fn fbse_blip<'a>(
+    parse_ctx: &ParseCtx<'_>,
+    body: &'a [u8],
+) -> Result<Option<Blip<'a>>, ConvertError> {
     let Some(blip) = fbse_blip_offset(body).and_then(|offset| record_at(body, offset)) else {
         return Ok(None);
     };
-    decode_blip(blip, max_bytes)
+    decode_blip(parse_ctx, blip)
 }
 
 #[cfg(test)]
@@ -214,22 +230,55 @@ pub(crate) fn record(ver_inst: u16, rec_type: u16, body: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+pub(crate) fn metafile_blip(cb_size: usize, compression: u8, data: &[u8]) -> Vec<u8> {
+    let mut body = vec![0u8; 16];
+    body.extend_from_slice(&u32::try_from(cb_size).unwrap().to_le_bytes());
+    body.extend_from_slice(&[0u8; 28]);
+    body.extend_from_slice(&[compression, 0]);
+    body.extend_from_slice(data);
+    record(0x3D40, 0xF01A, &body)
+}
+
+#[cfg(test)]
 pub(crate) fn deflated_metafile_blip(inflated: usize) -> Vec<u8> {
     use std::io::Write;
     let mut encoder =
         flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&vec![0u8; inflated]).unwrap();
-    let data = encoder.finish().unwrap();
-    let mut body = vec![0u8; 16];
-    body.extend_from_slice(&u32::try_from(inflated).unwrap().to_le_bytes());
-    body.extend_from_slice(&[0u8; 30]);
-    body.extend_from_slice(&data);
-    record(0x3D40, 0xF01A, &body)
+    metafile_blip(inflated, COMPRESSION_DEFLATE, &encoder.finish().unwrap())
+}
+
+#[cfg(test)]
+pub(crate) fn stored_metafile_blip(len: usize) -> Vec<u8> {
+    metafile_blip(len, COMPRESSION_NONE, &vec![0u8; len])
+}
+
+#[cfg(test)]
+pub(crate) fn broken_metafile_blip(produced: usize, declared: usize) -> Vec<u8> {
+    let stream = crate::shared::test_support::broken_deflate_stream(&vec![0u8; produced]);
+    metafile_blip(declared, COMPRESSION_DEFLATE, &stream)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::{Limit, Limits};
+    use std::assert_matches;
+
+    #[test]
+    fn a_picture_breaking_at_its_first_byte_past_a_limit_is_that_limit() {
+        let blip = broken_metafile_blip(4000, 5000);
+        let record = record_at(&blip, 0).unwrap();
+        let entry = Limits { max_entry_bytes: 3999, ..Limits::default() };
+        let total = Limits { max_total_bytes: 3999, ..Limits::default() };
+        for (limits, limit) in [(entry, Limit::EntryBytes), (total, Limit::TotalBytes)] {
+            let err = decode_blip(&ParseCtx::new(&limits), record).err();
+            assert_matches!(
+                err,
+                Some(ConvertError::ResourceLimit { limit: l, max: 3999 }) if l == limit
+            );
+        }
+    }
 
     #[test]
     fn the_first_blip_is_found_after_a_sibling_and_inside_a_container() {
@@ -238,7 +287,7 @@ mod tests {
         let flat = [leaf.clone(), png.clone()].concat();
         let container = record(0x000F, 0xF004, &[leaf, png].concat());
         for data in [flat, container] {
-            let blip = first_blip(&data, 1 << 20).unwrap().unwrap();
+            let blip = first_blip(&ParseCtx::default(), &data).unwrap().unwrap();
             assert_eq!(&*blip.bytes, b"PNG");
         }
     }
@@ -249,7 +298,7 @@ mod tests {
         let child = record(0x06E0, 0xF01E, &png);
         let container = record(0x000F, 0xF004, &child[..8]);
         let data = [container, png].concat();
-        assert!(first_blip(&data, 1 << 20).unwrap().is_none());
+        assert!(first_blip(&ParseCtx::default(), &data).unwrap().is_none());
     }
 
     #[test]
@@ -314,7 +363,7 @@ mod tests {
         ];
         for (instance, rec_type, body, media_type, extension) in cases {
             let record = Record { ver_inst: instance << 4, rec_type, body: &body };
-            let blip = decode_blip(record, 1 << 20).unwrap().unwrap();
+            let blip = decode_blip(&ParseCtx::default(), record).unwrap().unwrap();
             assert_eq!(
                 (blip.media_type, blip.extension, &*blip.bytes),
                 (media_type, extension, &b"pic"[..]),
@@ -322,7 +371,7 @@ mod tests {
             );
         }
         let dib = Record { ver_inst: 0x7A80, rec_type: 0xF01F, body: &bitmap(1) };
-        assert!(decode_blip(dib, 1 << 20).unwrap().is_none());
+        assert!(decode_blip(&ParseCtx::default(), dib).unwrap().is_none());
     }
 
     #[test]

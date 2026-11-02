@@ -12,7 +12,7 @@ use crate::ctx::{ImageLoss, ParseCtx};
 use crate::diagnostics::{DiagnosticCode, Region};
 use crate::error::ConvertError;
 use crate::limits::Limit;
-use crate::model::{Block, ImageSource, Inline, LinkTarget, Style, inlines_are_empty};
+use crate::model::{AssetId, Block, ImageSource, Inline, LinkTarget, Style, inlines_are_empty};
 use crate::shared::assets::AssetSink;
 use crate::shared::binary::ByteReader;
 use crate::shared::blockstyle::{BlockStyle, StyledRun};
@@ -63,6 +63,7 @@ pub(super) struct Assembler<'c, 'w> {
     reported: RefCell<HashSet<(Damaged, Region)>>,
     data: Vec<u8>,
     pub(super) assets: RefCell<AssetSink>,
+    pictures: RefCell<HashMap<usize, Option<AssetId>>>,
     pub(super) field_locks: RefCell<FieldLocks<'w>>,
 }
 
@@ -448,6 +449,7 @@ impl<'c, 'w> Assembler<'c, 'w> {
             reported: RefCell::default(),
             data,
             assets: RefCell::new(AssetSink::new(parse_ctx)),
+            pictures: RefCell::default(),
             field_locks: RefCell::default(),
         }
     }
@@ -984,17 +986,36 @@ impl Assembler<'_, '_> {
             let cb_header = usize::from(header.u16()?);
             Some(from.get(..lcb)?.get(cb_header..).unwrap_or_default())
         });
-        let max_bytes = self.parse_ctx.limits().max_entry_bytes;
-        let blip = picf.map(|art| officeart::first_blip(art, max_bytes)).transpose()?.flatten();
-        let Some(blip) = blip else {
+        let Some(id) = self.picture_asset(offset, picf)? else {
             if stand_in && !self.names_a_picture(picf)? {
                 return Ok(None);
             }
             return Ok(image(ImageSource::Unread));
         };
-        let part = format!("data/pic{offset}.{}", blip.extension);
-        let id = self.assets.borrow_mut().add(blip.media_type.to_string(), part, &blip.bytes)?;
         Ok(image(ImageSource::Asset(id)))
+    }
+
+    /// A picture inflates once per offset, an undecodable one too; each reuse charges one unit.
+    fn picture_asset(
+        &self,
+        offset: usize,
+        picf: Option<&[u8]>,
+    ) -> Result<Option<AssetId>, ConvertError> {
+        let remembered = self.pictures.borrow().get(&offset).copied();
+        if let Some(id) = remembered {
+            self.parse_ctx.charge(1)?;
+            return Ok(id);
+        }
+        let blip =
+            picf.map(|art| officeart::first_blip(self.parse_ctx, art)).transpose()?.flatten();
+        let id = blip
+            .map(|blip| {
+                let part = format!("data/pic{offset}.{}", blip.extension);
+                self.assets.borrow_mut().add(blip.media_type.to_string(), part, &blip.bytes)
+            })
+            .transpose()?;
+        self.pictures.borrow_mut().insert(offset, id);
+        Ok(id)
     }
 
     #[expect(
@@ -1137,7 +1158,7 @@ mod tests {
     use super::*;
     use crate::formats::doc::fkp::RunProps;
     use crate::formats::doc::pieces::{Coverage, PieceTable};
-    use crate::formats::doc::tests::{PIC_LOCATION_CHPX, picture_data};
+    use crate::formats::doc::tests::{PIC_LOCATION_CHPX, picture_data, picture_data_of};
     use crate::ledger::CancelToken;
     use crate::limits::Limits;
     use crate::shared::test_support::cancelled;
@@ -1207,6 +1228,66 @@ mod tests {
         let limits = Limits { max_entry_bytes: 4095, ..Default::default() };
         let err = inline_picture_bytes(&limits, 4096).unwrap_err();
         assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 4095 });
+    }
+
+    type Pictures = Vec<Result<Option<Inline>, ConvertError>>;
+
+    fn references(parse_ctx: &ParseCtx<'_>, blip: &[u8], count: usize) -> Pictures {
+        let runs = vec![run(0, 2, PIC_LOCATION_CHPX)];
+        let table = clx(&[], ONE_PIECE);
+        let assembler = assembler(parse_ctx, view(b"x", &table, 1), runs, picture_data_of(blip));
+        (0..count).map(|_| assembler.picture_at(0, Region::Body, false)).collect()
+    }
+
+    fn sources(pictures: Pictures) -> Vec<ImageSource> {
+        let source = |picture: Result<Option<Inline>, ConvertError>| match picture.unwrap() {
+            Some(Inline::Image { source, .. }) => source,
+            other => panic!("{other:?}"),
+        };
+        pictures.into_iter().map(source).collect()
+    }
+
+    #[test]
+    fn references_to_one_picture_inflate_it_once_and_charge_each_reuse() {
+        let deflated = ParseCtx::default();
+        let pictures = references(&deflated, &officeart::deflated_metafile_blip(4096), 3);
+        assert_eq!(sources(pictures), vec![ImageSource::Asset(AssetId(0)); 3]);
+        assert_eq!(deflated.inflated_bytes(), 4096);
+        let stored = ParseCtx::default();
+        references(&stored, &officeart::stored_metafile_blip(4096), 3);
+        assert_eq!((stored.inflated_bytes(), stored.fuel()), (0, 2));
+        assert_eq!(deflated.fuel() - stored.fuel(), 4);
+    }
+
+    #[test]
+    fn references_to_one_picture_that_breaks_count_it_once_and_fail_alike() {
+        let limits = Limits { max_total_bytes: 5000, ..Default::default() };
+        let blip = officeart::broken_metafile_blip(4000, 5000);
+        for _ in 0..2 {
+            let parse_ctx = ParseCtx::new(&limits);
+            assert_eq!(sources(references(&parse_ctx, &blip, 5)), vec![ImageSource::Unread; 5]);
+            assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (4000, 4 + 4));
+        }
+    }
+
+    #[test]
+    fn an_inline_picture_inflating_past_the_contexts_total_bytes_is_a_limit() {
+        let blip = officeart::deflated_metafile_blip(4096);
+        let fits = Limits { max_total_bytes: 4096, ..Default::default() };
+        sources(references(&ParseCtx::new(&fits), &blip, 1));
+        let limits = Limits { max_total_bytes: 4095, ..Default::default() };
+        let err = references(&ParseCtx::new(&limits), &blip, 1).remove(0).unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::TotalBytes, max: 4095 });
+    }
+
+    #[test]
+    fn a_cancelled_parse_stops_inside_an_inline_picture() {
+        let token = CancelToken::new();
+        let parse_ctx = cancelled(&token);
+        let blip = officeart::deflated_metafile_blip(200 * 1024);
+        let err = references(&parse_ctx, &blip, 1).remove(0).unwrap_err();
+        assert_matches!(err, ConvertError::Cancelled);
+        assert_eq!(parse_ctx.inflated_bytes(), 64 * 1024);
     }
 
     fn flush_spanning_table(max_expansion: u64) -> Result<Vec<Block>, ConvertError> {

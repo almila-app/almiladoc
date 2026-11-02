@@ -84,6 +84,25 @@ pub(crate) fn corrupt_entry(data: &mut [u8], name: &str) {
     data[usize::try_from(start).unwrap()] ^= 1;
 }
 
+fn stored_block(block: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(block.len()).unwrap().to_le_bytes();
+    [&[0][..], &len, &[!len[0], !len[1]], block].concat()
+}
+
+pub(crate) fn broken_deflate_stream(produced: &[u8]) -> Vec<u8> {
+    let blocks = produced.chunks(usize::from(u16::MAX)).flat_map(stored_block);
+    blocks.chain([0b111]).collect()
+}
+
+pub(crate) fn stored_deflate_stream<'a>(blocks: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
+    let blocks = blocks.into_iter().flat_map(stored_block);
+    blocks.chain([1, 0, 0, 0xFF, 0xFF]).collect()
+}
+
+pub(crate) fn empty_deflate_blocks(len: usize) -> Vec<u8> {
+    stored_deflate_stream(std::iter::repeat_n([].as_slice(), len / 5))
+}
+
 pub(crate) fn positions(data: &[u8], needle: &[u8]) -> Vec<usize> {
     data.windows(needle.len()).enumerate().filter(|(_, w)| *w == needle).map(|(i, _)| i).collect()
 }
