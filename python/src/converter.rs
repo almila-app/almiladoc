@@ -165,6 +165,49 @@ impl Inspection {
     }
 }
 
+/// `None` past `max` UTF-8 bytes, refused by code-point count before any UTF-8 copy is made.
+fn ocr_text<'a>(markdown: &'a Bound<'_, PyString>, max: u64) -> PyResult<Option<&'a str>> {
+    if markdown.code_point_len()? as u64 > max {
+        return Ok(None);
+    }
+    let text = markdown.to_str()?;
+    Ok((text.len() as u64 <= max).then_some(text))
+}
+
+fn admitted_lines(
+    py: Python<'_>,
+    lines: &Bound<'_, PySequence>,
+    max: u64,
+    cancel: Option<&almiladoc::CancelToken>,
+    refuse: impl Fn() -> PyErr,
+) -> PyResult<Vec<Py<OcrLine>>> {
+    refuse_cancelled(py, cancel)?;
+    let len = lines.len()?;
+    let mut bytes = (len as u64).saturating_mul(almiladoc::OcrLine::BOX_BYTES);
+    let admit = |bytes| if bytes > max { Err(refuse()) } else { Ok(()) };
+    admit(bytes)?;
+    let mut supplied = Vec::with_capacity(len);
+    for at in 0..len {
+        refuse_cancelled(py, cancel)?;
+        let line = lines.get_item(at)?.extract::<Py<OcrLine>>()?;
+        bytes = bytes.saturating_add(line.get().0.text().len() as u64);
+        admit(bytes)?;
+        supplied.push(line);
+    }
+    Ok(supplied)
+}
+
+fn lines_fill(supplied: &[Py<OcrLine>]) -> GapFill {
+    GapFill::Lines(supplied.iter().map(|line| line.get().0.clone()).collect())
+}
+
+fn refuse_cancelled(py: Python<'_>, cancel: Option<&almiladoc::CancelToken>) -> PyResult<()> {
+    if cancel.is_some_and(almiladoc::CancelToken::is_cancelled) {
+        return Err(convert_error(py, &ConvertError::Cancelled));
+    }
+    Ok(())
+}
+
 /// A gap's row as `Parsed.gaps` gives it.
 type GapKey<'py> = (
     Option<String>,
@@ -228,16 +271,9 @@ impl Parsed {
         wrap: fn(String) -> GapFill,
     ) -> PyResult<()> {
         let id = self.gap_id(gap).map_err(|e| gap_error(py, &e))?;
-        if self.cancel.as_ref().is_some_and(almiladoc::CancelToken::is_cancelled) {
-            return Err(convert_error(py, &ConvertError::Cancelled));
-        }
-        if markdown.code_point_len()? as u64 > self.max_ocr_text_bytes {
-            return Err(gap_refused(py, almiladoc::Limit::OcrTextBytes));
-        }
-        let text = markdown.to_str()?;
-        if text.len() as u64 > self.max_ocr_text_bytes {
-            return Err(gap_refused(py, almiladoc::Limit::OcrTextBytes));
-        }
+        refuse_cancelled(py, self.cancel.as_ref())?;
+        let text = ocr_text(markdown, self.max_ocr_text_bytes)?
+            .ok_or_else(|| gap_refused(py, almiladoc::Limit::OcrTextBytes))?;
         let fill = wrap(text.to_owned());
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
@@ -311,39 +347,14 @@ impl Parsed {
         lines: &Bound<'_, PySequence>,
     ) -> PyResult<()> {
         let id = self.gap_id(gap).map_err(|error| gap_error(py, &error))?;
-        let cancelled = || {
-            if self.cancel.as_ref().is_some_and(almiladoc::CancelToken::is_cancelled) {
-                Err(convert_error(py, &ConvertError::Cancelled))
-            } else {
-                Ok(())
-            }
-        };
-        cancelled()?;
-        let len = lines.len()?;
-        let mut bytes = (len as u64).saturating_mul(almiladoc::OcrLine::BOX_BYTES);
-        let admit = |bytes| {
-            if bytes > self.max_ocr_text_bytes {
-                Err(gap_refused(py, almiladoc::Limit::OcrTextBytes))
-            } else {
-                Ok(())
-            }
-        };
-        admit(bytes)?;
-        let mut supplied = Vec::with_capacity(len);
-        for at in 0..len {
-            cancelled()?;
-            let line = lines.get_item(at)?.extract::<Py<OcrLine>>()?;
-            bytes = bytes.saturating_add(line.get().0.text().len() as u64);
-            admit(bytes)?;
-            supplied.push(line);
-        }
+        let supplied =
+            admitted_lines(py, lines, self.max_ocr_text_bytes, self.cancel.as_ref(), || {
+                gap_refused(py, almiladoc::Limit::OcrTextBytes)
+            })?;
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
-        py.detach(|| {
-            let lines = supplied.iter().map(|line| line.get().0.clone()).collect();
-            parsed.fill_gap(id, GapFill::Lines(lines))
-        })
-        .map_err(|error| gap_error(py, &error))
+        py.detach(|| parsed.fill_gap(id, lines_fill(&supplied)))
+            .map_err(|error| gap_error(py, &error))
     }
 
     /// Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
@@ -645,9 +656,91 @@ impl Converter {
             .map_err(|f| f.raise(py))?;
         Conversion::new(py, &converted)
     }
+
+    /// Render `markdown`, the text OCR read from one image outside any document, as
+    /// `Parsed.fill_gap` reads it for a gap and a filled page writes it, with the GIL
+    /// released: raw HTML in it stays text, a link its label and an image its alt; TeX
+    /// math (`\(..\)`, `\[..\]`, `$..$`, `$$..$$`, a `math` fence) becomes math and OTSL
+    /// table markup (`<fcel>A<lcel><nl>`) a table whose merged cell shows once. Empty or
+    /// blank text renders `""`. Text past `Limits.max_ocr_text_bytes` raises
+    /// `ResourceLimitError` before it is copied, as does nesting past `max_nesting_depth`,
+    /// tables past `max_grid_slots` or `max_expansion`, work past `max_work` and output
+    /// past `max_output_bytes`; a cancelled `cancel` raises `CancelledError`.
+    #[pyo3(signature = (markdown, *, cancel = None))]
+    fn render_ocr(
+        &self,
+        py: Python<'_>,
+        markdown: &Bound<'_, PyString>,
+        cancel: Option<&Bound<'_, CancelToken>>,
+    ) -> PyResult<Conversion> {
+        self.render_text(py, markdown, cancel, GapFill::Markdown)
+    }
+
+    /// Render `markdown` as `render_ocr` does, reading standalone top-level HTML tables and
+    /// OTSL tables too and writing a merged cell as safe HTML, as `Parsed.fill_gap_tables`
+    /// does for a top-level gap. Only table/tr/td, text and positive spans are accepted;
+    /// unsupported markup, or a table inside a quote or list, raises `MalformedError`.
+    /// Limits and cancellation are those of `render_ocr`, and HTML tables past
+    /// `max_xml_nodes` raise `ResourceLimitError`.
+    #[pyo3(signature = (markdown, *, cancel = None))]
+    fn render_ocr_tables(
+        &self,
+        py: Python<'_>,
+        markdown: &Bound<'_, PyString>,
+        cancel: Option<&Bound<'_, CancelToken>>,
+    ) -> PyResult<Conversion> {
+        self.render_text(py, markdown, cancel, GapFill::MarkdownTables)
+    }
+
+    /// Render literal `OcrLine` values, grouped into columns and paragraphs in the core as
+    /// `Parsed.fill_gap_lines` groups them. Text and 32 bytes per box past
+    /// `Limits.max_ocr_text_bytes` raise `ResourceLimitError`, the boxes before any line is
+    /// read; the other limits and cancellation are those of `render_ocr`.
+    #[pyo3(signature = (lines, *, cancel = None))]
+    fn render_ocr_lines(
+        &self,
+        py: Python<'_>,
+        lines: &Bound<'_, PySequence>,
+        cancel: Option<&Bound<'_, CancelToken>>,
+    ) -> PyResult<Conversion> {
+        let cancel = cancel.map(|token| &token.get().0);
+        let max = self.max_ocr_text_bytes;
+        let supplied = admitted_lines(py, lines, max, cancel, || self.ocr_text_refusal(py))?;
+        self.render_fill(py, lines_fill(&supplied), cancel)
+    }
 }
 
 impl Converter {
+    fn render_text(
+        &self,
+        py: Python<'_>,
+        markdown: &Bound<'_, PyString>,
+        cancel: Option<&Bound<'_, CancelToken>>,
+        wrap: fn(String) -> GapFill,
+    ) -> PyResult<Conversion> {
+        let cancel = cancel.map(|token| &token.get().0);
+        refuse_cancelled(py, cancel)?;
+        let text = ocr_text(markdown, self.max_ocr_text_bytes)?
+            .ok_or_else(|| self.ocr_text_refusal(py))?;
+        self.render_fill(py, wrap(text.to_owned()), cancel)
+    }
+
+    fn render_fill(
+        &self,
+        py: Python<'_>,
+        fill: GapFill,
+        cancel: Option<&almiladoc::CancelToken>,
+    ) -> PyResult<Conversion> {
+        let rendered = py
+            .detach(|| self.inner.render_ocr(fill, cancel))
+            .map_err(|error| convert_error(py, &error))?;
+        Conversion::new(py, &rendered)
+    }
+
+    fn ocr_text_refusal(&self, py: Python<'_>) -> PyErr {
+        Failure::Limit(almiladoc::Limit::OcrTextBytes, self.max_ocr_text_bytes).raise(py)
+    }
+
     fn admission<'t>(&self, cancel: Option<&'t almiladoc::CancelToken>) -> Admission<'t> {
         Admission { max_input_bytes: self.max_input_bytes, cancel }
     }

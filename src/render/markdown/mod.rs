@@ -301,7 +301,18 @@ pub(crate) fn render(
     meter: &Meter<'_>,
     images: ImagePolicy,
 ) -> Result<Rendered, ConvertError> {
+    render_spanning(doc, fills, meter, images, false)
+}
+
+pub(crate) fn render_spanning(
+    doc: &Document,
+    fills: &GapFills,
+    meter: &Meter<'_>,
+    images: ImagePolicy,
+    preserve_spans: bool,
+) -> Result<Rendered, ConvertError> {
     let rc = Ctx::of(doc, fills, images, meter)?;
+    rc.preserve_spans.set(preserve_spans);
     let mut sink = Sink::new(meter);
     let units = write_body(&doc.blocks, &rc, &mut sink)?;
     for (note, num) in numbered_notes(&rc) {

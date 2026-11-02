@@ -185,6 +185,7 @@ path = [
     "tests/it/ocr_engine.rs",
     "tests/it/ocr_http.rs",
     "tests/it/ocr_images.rs",
+    "tests/it/ocr_render.rs",
     "tests/it/pdf.rs",
     "tests/it/raster.rs",
     "tests/it/sides.rs",

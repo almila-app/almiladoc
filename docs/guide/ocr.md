@@ -123,6 +123,8 @@ print(parsed.render().markdown)
 - A fill past `max_ocr_text_bytes` raises `GapRefused`; `fail_gap` records the failure
   (`ocr_failed`). `ocr_requests` returns an `OcrRefusal` (`unpaintable`, `over_bytes`) where no
   image can be made, and paints at its own `dpi` and `max_pixels`.
+- An image outside a document takes the same fills through `Converter.render_ocr`: see the
+  [Convert guide](convert.md#choose-the-call).
 
 ```python
 from pathlib import Path

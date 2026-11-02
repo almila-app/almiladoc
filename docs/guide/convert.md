@@ -1,6 +1,6 @@
 # Convert documents
 
-Turn files or bytes into Markdown, read each part of the result and choose what it keeps.
+Turn files, bytes or OCR text into Markdown, read each part of the result and choose what it keeps.
 
 ## Choose the call
 
@@ -10,11 +10,24 @@ Turn files or bytes into Markdown, read each part of the result and choose what 
 | Bytes in memory | `Converter.convert(data, format)` | `Converter::convert(Input)` |
 | Assets and JSON | `Converter.parse(data)`, then `Parsed.render()`, `Parsed.assets()`, `Parsed.to_json()` | `Converter::parse`, `Parsed::render`, `Parsed::to_json` |
 | Format of bytes | `Converter.sniff(data)` or `sniff(data)` | `Converter::sniff`, `Format::sniff` |
+| OCR text of an image outside a document | `Converter.render_ocr(markdown)`, `render_ocr_tables`, `render_ocr_lines(lines)` | `Converter::render_ocr(GapFill, cancel)` |
 
 - Rust: `Input::new(bytes, Format)` checks the name against the content;
   `Input::auto(bytes, fallback)` detects it, using `fallback` only when the content names nothing.
 - `Format::from_extension(ext)` is case-insensitive; `str::parse::<Format>` takes only the
   `format=` names of the README table.
+- `render_ocr` reads OCR text as a [fill](ocr.md#your-own-ocr) and returns the `Conversion` a
+  filled page holds, without `units`; blank text gives `""`. Text past `max_ocr_text_bytes` raises
+  `ResourceLimitError` before it is copied, never `GapRefused`, as do the nesting, grid, work and
+  output limits; invalid tables raise `MalformedError`, a cancelled `cancel=` token
+  `CancelledError`.
+
+```python
+import almiladoc
+
+fill = "Rate \\(x_1\\)\n\n<fcel>A<lcel><nl><fcel>b<fcel>c<nl>"
+print(almiladoc.Converter().render_ocr(fill).markdown)
+```
 
 ## Detection
 

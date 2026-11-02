@@ -12,7 +12,7 @@ Process model, limits, isolation, cancellation and caching for untrusted input.
 ## Untrusted input
 
 - A crossed limit raises `ResourceLimitError`; `limit` names the field, or `allocation` when memory
-  was refused. A fill past a per-fill limit raises `GapRefused` instead, except `max_work`.
+  was refused. A `Parsed` fill past a per-fill limit raises `GapRefused` instead, except `max_work`.
 - A limit is at least 1; `max_nesting_depth` is at most 1024 and `max_pages` at most 4,294,967,295.
 - PDF page decoding has no per-page budget: convert PDFs in a memory-capped worker process and
   recycle it after `InternalError` or a crash; `max_tasks_per_child=1` below does so per file.
@@ -49,6 +49,7 @@ Process model, limits, isolation, cancellation and caching for untrusted input.
 - `Converter.identity` holds `version` and `config_fingerprint`, which ignores `limits`, `threads`
   and the OCR engine. Equal identity, input, `ocr_pages` and gap outcomes give byte-identical
   output across calls, threads and, except for PDF, CPU architectures: key a cache on all four.
+- `render_ocr` output is fixed by `identity` and the fill alone.
 - A gap's outcome is open, failed (`fail_gap`), or the fill call with its complete arguments: the
   Markdown, or every `OcrLine` in order with its text and bounds. A filled page also carries the
   `RasterFidelity.lost` of the last `OcrRequest` made for it, reported as `raster_incomplete`; it

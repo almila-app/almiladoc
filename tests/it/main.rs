@@ -30,6 +30,7 @@ mod ocr_engine;
 #[cfg(feature = "ocr-http")]
 mod ocr_http;
 mod ocr_images;
+mod ocr_render;
 #[cfg(feature = "pdf")]
 mod pdf;
 #[cfg(feature = "raster")]

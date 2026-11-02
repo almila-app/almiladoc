@@ -24,7 +24,7 @@ Know what each outcome means and what to do next.
 |---|---|---|---|
 | `unsupported` | `UnsupportedError` | `kind`, `detected` | By `kind`, below |
 | `needs_ocr` | `NeedsOcrError` | `pages`, `page_count` | Run OCR ([OCR guide](ocr.md)) or use `OnLoss.REPORT` |
-| `malformed` | `MalformedError` | `part` | Refuse the file: it is damaged |
+| `malformed` | `MalformedError` | `part` | Refuse the file: it is damaged; from `render_ocr_tables`, the OCR table markup was refused: retry with `render_ocr` |
 | `encrypted` | `EncryptedError` | none | Ask for an unprotected copy |
 | `resource_limit` | `ResourceLimitError` | `limit`, `max` | Refuse the file, or raise the `limit` field for trusted input; `allocation` means memory was refused |
 | `missing_part` | `MissingPartError` | `part` | Refuse the file: it is damaged |

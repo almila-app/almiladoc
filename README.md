@@ -77,12 +77,13 @@ Copy these into the agent instructions of a project that uses almiladoc.
 - Branch on `error.code` and `kind`, never on messages.
 - CSV is never detected: pass `"csv"`. Format names are exact and lower case; every Excel file is `"xlsx"`.
 - A scanned PDF needs `ocr=` or the gap loop of the OCR guide; otherwise it raises `NeedsOcrError`.
+- OCR text of an image outside a document goes through `Converter.render_ocr`, not your own HTML or table conversion.
 - Convert untrusted PDFs in a memory-capped worker process and recycle it after `InternalError`.
 - Read signatures from the installed `_almiladoc.pyi` (Python) or `cargo doc --all-features` (Rust).
 
 ## Guides
 
-- [Convert documents](https://github.com/almila-app/almiladoc/blob/main/docs/guide/convert.md): calls, detection, output conventions, content policies.
+- [Convert documents](https://github.com/almila-app/almiladoc/blob/main/docs/guide/convert.md): calls, detection, OCR text of one image, output conventions, content policies.
 - [Errors and losses](https://github.com/almila-app/almiladoc/blob/main/docs/guide/errors.md): every error code and what to do.
 - [OCR for scans and images](https://github.com/almila-app/almiladoc/blob/main/docs/guide/ocr.md): routes, `OcrHttp` options, failures.
 - [Run almiladoc in a service](https://github.com/almila-app/almiladoc/blob/main/docs/guide/integrate.md): limits, isolation, cancellation, caching, recipes.

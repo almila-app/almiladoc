@@ -16,6 +16,7 @@
 //!   [`Parsed::render`], the gaps OCR fills and, with the `serde` feature, `Parsed::to_json`.
 //! - [`Converter::inspect`] gives PDF page verdicts. [`Converter::convert_with_ocr`] converts and
 //!   runs an [`OcrEngine`] in one call, such as `OcrHttp` with the `ocr-http` feature.
+//! - [`Converter::render_ocr`] writes the OCR text of one image outside any document as Markdown.
 //!
 //! What a conversion cannot carry into its output is reported as
 //! [`Diagnostics`]: content [`Lost`](LossClass::Lost) fails the conversion

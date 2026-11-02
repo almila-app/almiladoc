@@ -1051,6 +1051,30 @@ class Converter:
         against `max_input_bytes` before it is read, and a directory raises
         `OSError` unopened, as does a FIFO or device on Unix. Without a
         `format`, the content names it, else the path's extension does."""
+    def render_ocr(self, markdown: str, *, cancel: CancelToken | None = None) -> Conversion:
+        """Render `markdown`, the text OCR read from one image outside any document, as
+        `Parsed.fill_gap` reads it for a gap and a filled page writes it, with the GIL
+        released: raw HTML in it stays text, a link its label and an image its alt; TeX
+        math (`\\(..\\)`, `\\[..\\]`, `$..$`, `$$..$$`, a `math` fence) becomes math and OTSL
+        table markup (`<fcel>A<lcel><nl>`) a table whose merged cell shows once. Empty or
+        blank text renders `""`. Text past `Limits.max_ocr_text_bytes` raises
+        `ResourceLimitError` before it is copied, as does nesting past `max_nesting_depth`,
+        tables past `max_grid_slots` or `max_expansion`, work past `max_work` and output
+        past `max_output_bytes`; a cancelled `cancel` raises `CancelledError`."""
+    def render_ocr_tables(self, markdown: str, *, cancel: CancelToken | None = None) -> Conversion:
+        """Render `markdown` as `render_ocr` does, reading standalone top-level HTML tables and
+        OTSL tables too and writing a merged cell as safe HTML, as `Parsed.fill_gap_tables`
+        does for a top-level gap. Only table/tr/td, text and positive spans are accepted;
+        unsupported markup, or a table inside a quote or list, raises `MalformedError`.
+        Limits and cancellation are those of `render_ocr`, and HTML tables past
+        `max_xml_nodes` raise `ResourceLimitError`."""
+    def render_ocr_lines(
+        self, lines: collections.abc.Sequence[OcrLine], *, cancel: CancelToken | None = None
+    ) -> Conversion:
+        """Render literal `OcrLine` values, grouped into columns and paragraphs in the core as
+        `Parsed.fill_gap_lines` groups them. Text and 32 bytes per box past
+        `Limits.max_ocr_text_bytes` raise `ResourceLimitError`, the boxes before any line is
+        read; the other limits and cancellation are those of `render_ocr`."""
 
 def sniff(data: Buffer) -> Format | None:
     """The format `data`'s content names, detected under the default limits;

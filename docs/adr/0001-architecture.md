@@ -5,7 +5,7 @@ Accepted. The primary consumer converts untrusted documents in a child process a
 ## Decision
 
 1. **Distribution.** Crate `almiladoc` and unpublished abi3 binding `python/` (PyPI `almiladoc`) share a version; `fuzz/` is separate. Both declare `BUSL-1.1 AND MIT` and ship ADR 0003's `LICENCE_SET`; default features are `pdf`/`raster`, optional `serde`/`ocr-http`, all enabled by the binding; rten stays outside this graph (ADR 0002 decision 8).
-2. **API.** `Converter::new(Config)` validates configuration/limits; `inspect`, `parse`, `convert` and `convert_with_ocr` take checked `Input::new` or detected `Input::auto`, optional cancellation and PDF page selection, with one budget for detection, label validation and parsing (`Format::sniff` is separate). `Parsed` retains configuration/diagnostics for render, `Conversion::units()` gives Markdown byte spans, public extensible types are `#[non_exhaustive]`, and `Converter` is `Send + Sync`.
+2. **API.** `Converter::new(Config)` validates configuration/limits; `inspect`, `parse`, `convert` and `convert_with_ocr` take checked `Input::new` or detected `Input::auto`, optional cancellation and PDF page selection, with one budget for detection, label validation and parsing (`Format::sniff` is separate). `render_ocr(GapFill, cancel)` renders the OCR text of one standalone image on the call pool through the reader of gap fills, bounded as a fill is, with no `Input`, document or gap. `Parsed` retains configuration/diagnostics for render, `Conversion::units()` gives Markdown byte spans, public extensible types are `#[non_exhaustive]`, and `Converter` is `Send + Sync`.
 3. **Threads.** Input walks use `install` on a per-call pool of `Config::threads` (default 1), including PDF extraction; no global pool. Stack size is measured per-level cost times decision 12's ceiling.
 4. **Inspect.** PDF only: container facts, diagnostics and 1-based pages with `Text`, `Blank` (`no_text`) or `NeedsOcr { reasons }`; other formats are `Unsupported`.
 5. **Model.** Asset ids freeze in first-reference order: body, chosen notes, headers/footers, then unreferenced payloads in retention order; image/OCR origins share that mapping without changing payloads or gap ids. The model carries resolved super/subscript, typed unit milestones and document-scoped anchors with optional destination units; only that unit being unread suppresses a missing-anchor loss.
@@ -39,7 +39,7 @@ Accepted. The primary consumer converts untrusted documents in a child process a
 
 ## Rejected routes
 
-- `Format::Image`: standalone images belong to the consumer's OCR; public caller-built-model rendering adds an unrequired API and uses the caller's stack; an ambient-read inventory adds machinery for three known reads.
+- `Format::Image`: standalone images belong to the consumer's OCR, whose text `render_ocr` renders; public caller-built `Document` rendering adds an unrequired API and uses the caller's stack; an ambient-read inventory adds machinery for three known reads.
 - Release before OCR: forces the consumer to adopt and replace both PDF and `NeedsOcr` paths.
 - Git unpdf dependency: [cargo publish rejects it](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-dependencies-from-git-repositories); vendoring adds 50.6k lines of lint debt.
 - Previous-engine fork: a 535-page, 22-document corpus falsely sent 12 text pages to OCR (eight garbled, four pixel-count scan verdicts), versus none from unpdf facts; weak paper extraction and no outside PR merged after 2026-08-06 leave 132k lines to maintain alone.

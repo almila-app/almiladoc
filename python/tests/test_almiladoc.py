@@ -187,6 +187,20 @@ def rtf_flood(size):
     return b"".join((b"{\\rtf1 ", b"\\x" * (size // 2), b"}"))
 
 
+class Unread(Sequence):
+    def __init__(self):
+        self.reads = []
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        self.reads.append(index)
+        if index not in range(len(self)):
+            raise IndexError(index)
+        return almiladoc.OcrLine("a", (0, 0, 1, 1))
+
+
 class Vision(http.server.BaseHTTPRequestHandler):
     """Answers every `chat/completions` request with the server's `answer`."""
 
@@ -379,19 +393,6 @@ class ConversionTest(unittest.TestCase):
                     )
 
     def test_located_line_admission_is_atomic_and_precedes_sequence_access(self):
-        class Unread(Sequence):
-            def __init__(self):
-                self.reads = []
-
-            def __len__(self):
-                return 2
-
-            def __getitem__(self, index):
-                self.reads.append(index)
-                if index not in range(len(self)):
-                    raise IndexError(index)
-                return almiladoc.OcrLine("a", (0, 0, 1, 1))
-
         converter = almiladoc.Converter(
             almiladoc.Config(limits=almiladoc.Limits(max_ocr_text_bytes=32))
         )
@@ -809,6 +810,132 @@ class ConversionTest(unittest.TestCase):
             markdown = parsed.render().markdown
             self.assertIn(expected, markdown)
             self.assertNotIn("<fcel>", markdown)
+
+    def test_render_ocr_writes_a_fill_as_the_page_it_fills_in_a_pdf(self):
+        otsl = "<ched>N<ched>S<lcel><nl><ucel><ched>M<ched>D<nl><fcel>a<fcel>1<fcel>2<nl>"
+        source = f"Rate \\(x_1\\), $y$ and\n\n\\[a=b \\tag{{1}}\\]\n\n{otsl}\n\nTable 1."
+        line = almiladoc.OcrLine
+        lines = [
+            line("R1", (0.6, 0.1, 1.0, 0.15)),
+            line("L1", (0.0, 0.1, 0.4, 0.15)),
+            line("# *e\u0301*", (0.0, 0.02, 1.0, 0.07)),
+        ]
+        converter = almiladoc.Converter()
+        for fill, render, argument in [
+            ("fill_gap", converter.render_ocr, source),
+            ("fill_gap_tables", converter.render_ocr_tables, source),
+            ("fill_gap_lines", converter.render_ocr_lines, lines),
+        ]:
+            with self.subTest(fill=fill):
+                parsed = converter.parse(MIXED.read_bytes())
+                (gap,) = parsed.gaps
+                getattr(parsed, fill)(gap, argument)
+                page = parsed.render()
+                _, _, start, end = page.units[-1]
+                alone = render(argument)
+                self.assertEqual(alone.markdown, page.markdown[start:end] + "\n")
+                self.assertEqual(
+                    (alone.units, alone.diagnostics, alone.is_complete), ((), (), True)
+                )
+        flat = converter.render_ocr(source).markdown
+        self.assertIn("Rate $x_1$, $y$ and\n\n$$\n    a=b \\tag{1}\n$$\n\n", flat)
+        self.assertIn("| N | S |  |\n| --- | --- | --- |\n|  | M | D |\n| a | 1 | 2 |\n", flat)
+        self.assertNotIn("<table>", flat)
+        merged = converter.render_ocr_tables(source).markdown
+        self.assertIn('<th rowspan="2">N</th><th colspan="2">S</th>', merged)
+        self.assertEqual(converter.render_ocr_lines(lines).markdown, "\\# \\*é*\n\nL1\n\nR1\n")
+
+    def test_render_ocr_escapes_raw_html_and_keeps_link_labels_and_blank_text_empty(self):
+        converter = almiladoc.Converter()
+        source = (
+            "[site](https://example.test/x) ![alt text](https://example.test/i.png) "
+            "<img src=x onerror=y>\n\n<script>alert(1)</script>"
+        )
+        for render in (converter.render_ocr, converter.render_ocr_tables):
+            self.assertEqual(
+                render(source).markdown,
+                "site alt text \\<img src=x onerror=y>\n\n\\<script>alert(1)\\</script>\n",
+            )
+            for blank in ("", " ", "\n\n", " \t\n \n"):
+                self.assertEqual(render(blank).markdown, "", repr(blank))
+        empty = [almiladoc.OcrLine("  ", (0, 0, 1, 0.1))]
+        for lines in ([], empty):
+            self.assertEqual(converter.render_ocr_lines(lines).markdown, "")
+
+    def test_render_ocr_refuses_past_the_limits_with_resource_limit_error(self):
+        class Misleading(str):
+            def __len__(self):
+                return 0
+
+        small = converter(max_ocr_text_bytes=4)
+        for render in (small.render_ocr, small.render_ocr_tables):
+            oversized = Misleading("é" * 4096)
+            before = str.__sizeof__(oversized)
+            for text in (oversized, "😀😀", "12345"):
+                with self.subTest(render=render.__name__, text=text[:3]):
+                    with self.assertRaises(almiladoc.ResourceLimitError) as caught:
+                        render(text)
+                    self.assertEqual(
+                        refusal(caught.exception),
+                        (
+                            almiladoc.ResourceLimitError,
+                            "resource_limit",
+                            "max_ocr_text_bytes",
+                            4,
+                            "resource limit exceeded: max_ocr_text_bytes is 4",
+                        ),
+                    )
+                    self.assertNotIsInstance(caught.exception, almiladoc.GapRefused)
+            self.assertEqual(str.__sizeof__(oversized), before)
+            self.assertEqual(render("1234").markdown, "1234\n")
+        unread = Unread()
+        for lines in (unread, [almiladoc.OcrLine("a", (0, 0, 1, 1))]):
+            with self.assertRaises(almiladoc.ResourceLimitError) as caught:
+                converter(max_ocr_text_bytes=32).render_ocr_lines(lines)
+            self.assertEqual(limit_and_max(caught.exception), ("max_ocr_text_bytes", 32))
+        self.assertEqual(unread.reads, [])
+        fits = converter(max_ocr_text_bytes=33)
+        self.assertEqual(
+            fits.render_ocr_lines([almiladoc.OcrLine("a", (0, 0, 1, 1))]).markdown, "a\n"
+        )
+        for render in (small.render_ocr, small.render_ocr_tables):
+            with self.assertRaises(TypeError):
+                render(b"ab")
+        with self.assertRaises(TypeError):
+            converter(max_ocr_text_bytes=64).render_ocr_lines(["a"])
+
+    def test_render_ocr_names_each_limit_and_calls_invalid_tables_malformed(self):
+        grid = "|a|b\n|-|-\n" + "a\n" * 9
+        cases = [
+            (converter(max_nesting_depth=2).render_ocr, "> > > a", "max_nesting_depth", 2),
+            (converter(max_grid_slots=29).render_ocr, grid, "max_grid_slots", 29),
+            (converter(max_grid_slots=29).render_ocr_tables, grid, "max_grid_slots", 29),
+            (converter(max_output_bytes=10).render_ocr, "abcdefghij", "max_output_bytes", 10),
+            (converter(max_work=10_000).render_ocr, "\\( " * 349_525, "max_work", 10_000),
+            (converter(max_work=10_000).render_ocr_tables, "<fcel>" * 174_762, "max_work", 10_000),
+        ]
+        for render, text, limit, maximum in cases:
+            with self.subTest(limit=limit, render=render.__name__):
+                with self.assertRaises(almiladoc.ResourceLimitError) as caught:
+                    render(text)
+                self.assertEqual(limit_and_max(caught.exception), (limit, maximum))
+        sentinel = "OCR-SENTINEL-4b1d"
+        for text in (
+            f'<table><tr><td onclick="{sentinel}">x</td></tr></table>',
+            f"> <table><tr><td>{sentinel}</td></tr></table>",
+        ):
+            with self.assertRaises(almiladoc.MalformedError) as caught:
+                almiladoc.Converter().render_ocr_tables(text)
+            self.assertEqual(caught.exception.code, "malformed")
+            self.assertNotIn(sentinel, f"{caught.exception} {caught.exception!r}")
+            self.assertIn("\\<table>", almiladoc.Converter().render_ocr(text).markdown)
+
+    def test_equal_fills_render_equally_across_calls_and_thread_counts(self):
+        source = "Rate \\(x_1\\)\n\n<fcel>a<lcel><nl><fcel>b<fcel>c<nl>\n\n- a\n- b `c`"
+        reference = almiladoc.Converter().render_ocr(source).markdown
+        for threads in (1, 4, 1, 4):
+            config = almiladoc.Config(threads=threads)
+            self.assertEqual(almiladoc.Converter(config).render_ocr(source).markdown, reference)
 
     def test_unpickled_requests_fill_their_gaps(self):
         config = almiladoc.Config(
@@ -1418,6 +1545,51 @@ class CancellationTest(unittest.TestCase):
             with self.assertRaises(almiladoc.CancelledError) as caught:
                 call()
             self.assertEqual(caught.exception.code, "cancelled")
+
+    def test_render_ocr_is_cancelled_before_its_text_is_sized_and_from_another_thread(self):
+        small = converter(max_ocr_text_bytes=4)
+        token = almiladoc.CancelToken()
+        line = almiladoc.OcrLine("long text", (0, 0, 1, 1))
+        calls = [
+            lambda: small.render_ocr("longer than four", cancel=token),
+            lambda: small.render_ocr_tables("longer than four", cancel=token),
+            lambda: small.render_ocr_lines([line], cancel=token),
+        ]
+        for call in calls:
+            with self.assertRaises(almiladoc.ResourceLimitError):
+                call()
+        token.cancel()
+        for call in calls:
+            with self.assertRaises(almiladoc.CancelledError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "cancelled")
+
+        large = converter(max_ocr_text_bytes=32 << 20, max_work=U64_MAX, max_output_bytes=U64_MAX)
+        text = "word *emphasis* \\(x_1\\) [l](https://example.test)\n\n" * 400_000
+
+        def cancelled_while_running(render):
+            token = almiladoc.CancelToken()
+            started = threading.Event()
+            outcome = {}
+
+            def work():
+                started.set()
+                try:
+                    outcome["result"] = render(text, cancel=token)
+                except almiladoc.ConvertError as error:
+                    outcome["result"] = error
+
+            worker = threading.Thread(target=work)
+            worker.start()
+            started.wait()
+            time.sleep(0.02)
+            token.cancel()
+            worker.join(timeout=60)
+            self.assertFalse(worker.is_alive())
+            return outcome["result"]
+
+        for render in (large.render_ocr, large.render_ocr_tables):
+            self.assertIsInstance(cancelled_while_running(render), almiladoc.CancelledError)
 
     def test_a_parse_keeps_its_token_for_its_later_work(self):
         token = almiladoc.CancelToken()

@@ -23,7 +23,7 @@ use crate::ocr::{
     RasterFidelity, RasterSpec, Target, gaps, leave_image_gaps, requests,
 };
 use crate::pool::run_on_pool;
-use crate::render::markdown::{Meter, Unread, render, render_losses};
+use crate::render::markdown::{Meter, Unread, render, render_losses, render_spanning};
 use crate::shared::markdown;
 
 fn check_nesting(doc: &Document, fills: &GapFills, max: u64) -> Result<(), ConvertError> {
@@ -285,10 +285,84 @@ impl Converter {
         })
     }
 
+    /// Render what OCR read for one image outside any document: `fill` read as
+    /// [`Parsed::fill_gap`] reads it for a top-level gap, then written as the
+    /// Markdown a filled page holds. An empty or blank fill renders no
+    /// Markdown at all.
+    ///
+    /// # Errors
+    ///
+    /// [`ConvertError::Cancelled`] when `cancel` is cancelled, before the fill is sized or
+    /// while it is read or written; [`ConvertError::ResourceLimit`] when the fill passes
+    /// [`Limits::max_ocr_text_bytes`](crate::Limits::max_ocr_text_bytes),
+    /// [`Limits::max_nesting_depth`](crate::Limits::max_nesting_depth),
+    /// [`Limits::max_grid_slots`](crate::Limits::max_grid_slots),
+    /// [`Limits::max_expansion`](crate::Limits::max_expansion),
+    /// [`Limits::max_xml_nodes`](crate::Limits::max_xml_nodes),
+    /// [`Limits::max_work`](crate::Limits::max_work) or
+    /// [`Limits::max_output_bytes`](crate::Limits::max_output_bytes);
+    /// [`ConvertError::Malformed`] for [`GapFill::MarkdownTables`] markup that is invalid,
+    /// unsupported, or inside a quote or list; [`ConvertError::Internal`] when the pool cannot
+    /// start or the work panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{Config, Converter, GapFill};
+    ///
+    /// let converter = Converter::new(Config::default())?;
+    /// let table = "<fcel>Sample<lcel><nl><fcel>A<fcel>12.4<nl>";
+    ///
+    /// let text = format!("At \\(x_1\\)\n\n{table}");
+    /// let flat = converter.render_ocr(GapFill::Markdown(text), None)?;
+    /// assert_eq!(
+    ///     flat.markdown(),
+    ///     "At $x_1$\n\n|  |  |\n| --- | --- |\n| Sample |  |\n| A | 12.4 |\n"
+    /// );
+    ///
+    /// let merged = converter.render_ocr(GapFill::MarkdownTables(table.into()), None)?;
+    /// assert!(merged.markdown().contains("<td colspan=\"2\">Sample</td>"));
+    ///
+    /// let blank = converter.render_ocr(GapFill::Markdown(" \n".into()), None)?;
+    /// assert_eq!(blank.markdown(), "");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn render_ocr(
+        &self,
+        fill: GapFill,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Conversion, ConvertError> {
+        refuse_cancelled(cancel)?;
+        let tables = matches!(&fill, GapFill::MarkdownTables(_));
+        self.on_pool(|| {
+            let parse_ctx = ParseCtx::new(&self.config.limits).with_cancel(cancel);
+            let (blocks, ledger) = fill_blocks(parse_ctx, 0, fill)?;
+            self.render_blocks(blocks, &ledger, tables)
+        })
+    }
+
+    fn render_blocks(
+        &self,
+        blocks: Vec<Block>,
+        ledger: &Ledger<'_>,
+        preserve_spans: bool,
+    ) -> Result<Conversion, ConvertError> {
+        let limits = &self.config.limits;
+        let document = Document { blocks, ..Document::default() };
+        let fills = GapFills::default();
+        check_nesting(&document, &fills, limits.max_nesting_depth)?;
+        let meter = Meter::new(ledger, limits.max_output_bytes);
+        let rendered =
+            render_spanning(&document, &fills, &meter, self.config.images, preserve_spans)?;
+        Ok(Conversion {
+            markdown: rendered.markdown,
+            units: rendered.units,
+            diagnostics: Diagnostics::default(),
+        })
+    }
+
     fn admit(&self, bytes: &[u8], cancel: Option<&CancelToken>) -> Result<(), ConvertError> {
-        if cancel.is_some_and(CancelToken::is_cancelled) {
-            return Err(ConvertError::Cancelled);
-        }
+        refuse_cancelled(cancel)?;
         let max = self.config.limits.max_input_bytes;
         if bytes.len() as u64 > max {
             return Err(ConvertError::limit(Limit::InputBytes, max));
@@ -850,28 +924,14 @@ impl Parsed {
     }
 
     fn refuse_cancelled(&self) -> Result<(), ConvertError> {
-        match &self.cancel {
-            Some(cancel) if cancel.is_cancelled() => Err(ConvertError::Cancelled),
-            _ => Ok(()),
-        }
+        refuse_cancelled(self.cancel.as_ref())
     }
 
     fn read_fill(&self, depth: u64, fill: GapFill) -> Result<(Vec<Block>, u64), ConvertError> {
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_cancel(self.cancel.as_ref())
             .starting_at(self.fuel);
-        let blocks = match fill {
-            GapFill::Markdown(text) => markdown::blocks(&parse_ctx, &text, depth)?,
-            GapFill::Lines(lines) => crate::ocr::line_blocks(&parse_ctx, &lines)?,
-            GapFill::MarkdownTables(text) => {
-                markdown::blocks_with_tables(&parse_ctx, &text, depth)?
-            }
-        };
-        let fuel = parse_ctx.ledger().spent();
-        if !parse_ctx.into_report().0.is_empty() {
-            return Err(ConvertError::malformed("invalid OCR table markup"));
-        }
-        Ok((blocks, fuel))
+        fill_blocks(parse_ctx, depth, fill).map(|(blocks, ledger)| (blocks, ledger.spent()))
     }
 
     fn settle_fill(&mut self, id: GapId, (blocks, fuel): (Vec<Block>, u64), preserve_spans: bool) {
@@ -943,6 +1003,30 @@ impl Target for Parsed {
     fn fail(&mut self, id: GapId) -> Result<(), GapError> {
         self.fail_gap(id)
     }
+}
+
+fn refuse_cancelled(cancel: Option<&CancelToken>) -> Result<(), ConvertError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(ConvertError::Cancelled);
+    }
+    Ok(())
+}
+
+fn fill_blocks(
+    parse_ctx: ParseCtx<'_>,
+    depth: u64,
+    fill: GapFill,
+) -> Result<(Vec<Block>, Ledger<'_>), ConvertError> {
+    let blocks = match fill {
+        GapFill::Markdown(text) => markdown::blocks(&parse_ctx, &text, depth)?,
+        GapFill::Lines(lines) => crate::ocr::line_blocks(&parse_ctx, &lines)?,
+        GapFill::MarkdownTables(text) => markdown::blocks_with_tables(&parse_ctx, &text, depth)?,
+    };
+    let (diagnostics, _, ledger) = parse_ctx.into_report();
+    if !diagnostics.is_empty() {
+        return Err(ConvertError::malformed("invalid OCR table markup"));
+    }
+    Ok((blocks, ledger))
 }
 
 fn parse_document(
@@ -1597,6 +1681,47 @@ mod tests {
         assert!(rendered.is_ok_and(|conversion| conversion.markdown().starts_with('>')));
         #[cfg(feature = "serde")]
         on_a_small_stack(|| parsed.to_json()).unwrap();
+    }
+
+    #[test]
+    fn render_ocr_recurses_on_the_pool_not_the_callers_stack() {
+        let converter = converter(1);
+        let deep = GapFill::Markdown(format!("{}x", "> ".repeat(200)));
+        let rendered = on_a_small_stack(|| converter.render_ocr(deep, None));
+        assert!(rendered.is_ok_and(|conversion| conversion.markdown().starts_with('>')));
+    }
+
+    #[test]
+    fn a_fill_whose_read_reports_anything_is_malformed_whatever_its_kind() {
+        let text = "OCR-SENTINEL-7c2e";
+        let line = crate::ocr::OcrLine::new(text, [0.0, 0.0, 1.0, 0.1]).unwrap();
+        let fills = [
+            GapFill::Markdown(text.into()),
+            GapFill::MarkdownTables(text.into()),
+            GapFill::Lines(vec![line]),
+        ];
+        for fill in fills {
+            let limits = crate::Limits::DEFAULT;
+            fill_blocks(ParseCtx::new(&limits), 0, fill.clone()).unwrap();
+            let reported = ParseCtx::new(&limits);
+            reported.emit(DiagnosticCode::DanglingReference, Region::Body);
+            let error = fill_blocks(reported, 0, fill).err();
+            assert_eq!(error, Some(ConvertError::malformed("invalid OCR table markup")));
+        }
+    }
+
+    #[test]
+    fn render_ocr_writes_only_blocks_the_nesting_limit_admits_on_the_ledger_it_is_given() {
+        let mut config = Config::default();
+        config.limits.max_nesting_depth = 4;
+        let converter = Converter::new(config).unwrap();
+        let token = CancelToken::new();
+        let ledger = Ledger::new(converter.config.limits.max_work, Some(&token));
+        let render = |levels| converter.render_blocks(quoted(levels, "x"), &ledger, false);
+        assert_eq!(render(5), Err(ConvertError::limit(Limit::NestingDepth, 4)));
+        assert_eq!(render(4).unwrap().markdown(), "> > > > x\n");
+        token.cancel();
+        assert_eq!(render(4), Err(ConvertError::Cancelled));
     }
 
     #[test]
