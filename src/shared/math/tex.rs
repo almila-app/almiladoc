@@ -1,10 +1,129 @@
+use crate::shared::text::trim_tex;
+
 #[derive(Default)]
 pub(super) struct Tex {
     out: String,
-    /// The output ends in a letter-named control word, which would swallow
-    /// a letter appended directly after it.
-    after_macro: bool,
     unresolved: bool,
+    shape: Shape,
+}
+
+/// What the guards need to know about the output, kept as it is written so none reads it back.
+#[derive(Default)]
+struct Shape {
+    /// The levels around the innermost open group, each with the mark that group is the
+    /// argument of.
+    outer: Vec<(Level, Option<char>)>,
+    level: Level,
+    escaped: bool,
+    /// The output ends in a letter-named control word, which a letter written next would extend.
+    in_word: bool,
+    /// The first character other than a plain space, and where it is.
+    lead: Option<(char, usize)>,
+    chars: u8,
+    word: Word,
+    close_bracket: bool,
+    ampersand: bool,
+}
+
+/// The last atom written at one nesting level.
+#[derive(Default, Clone, Copy)]
+struct Level {
+    /// A `^` or `_` waiting for its argument.
+    pending: Option<char>,
+    sub: bool,
+    sup: bool,
+    /// The superscript is primes, which merge with a prime or `^` written next.
+    primed: bool,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Word {
+    #[default]
+    Empty,
+    Backslash,
+    Letters,
+    Other,
+}
+
+impl Level {
+    fn atom(&mut self) {
+        *self = Self::default();
+    }
+
+    fn token(&mut self) {
+        match self.pending.take() {
+            Some(mark) => self.script(mark),
+            None => self.atom(),
+        }
+    }
+
+    fn script(&mut self, mark: char) {
+        if mark == '^' {
+            self.sup = true;
+        } else {
+            self.sub = true;
+        }
+        self.primed = false;
+    }
+}
+
+impl Shape {
+    fn step(&mut self, c: char, at: usize) {
+        self.chars = self.chars.saturating_add(1).min(2);
+        self.word = match (self.word, c) {
+            (Word::Empty, '\\') => Word::Backslash,
+            (Word::Backslash | Word::Letters, c) if c.is_ascii_alphabetic() => Word::Letters,
+            _ => Word::Other,
+        };
+        if self.lead.is_none() && c != ' ' {
+            self.lead = Some((c, at));
+        }
+        self.close_bracket |= c == ']';
+        self.ampersand |= c == '&';
+        if self.escaped {
+            self.escaped = false;
+            self.in_word = c.is_ascii_alphabetic();
+            return;
+        }
+        if self.in_word && c.is_ascii_alphabetic() {
+            return;
+        }
+        self.in_word = false;
+        match c {
+            '\\' => {
+                self.escaped = true;
+                self.level.token();
+            }
+            '{' => {
+                let mark = self.level.pending.take();
+                self.outer.push((std::mem::take(&mut self.level), mark));
+            }
+            '}' => {
+                if let Some((level, mark)) = self.outer.pop() {
+                    self.level = level;
+                    match mark {
+                        Some(mark) => self.level.script(mark),
+                        None => self.level.atom(),
+                    }
+                }
+            }
+            ' ' => {}
+            '^' | '_' => self.level.pending = Some(c),
+            '\'' => {
+                self.level.sup = true;
+                self.level.primed = true;
+            }
+            _ => self.level.token(),
+        }
+    }
+
+    fn grouped(&mut self, start: usize) {
+        self.level.atom();
+        (self.escaped, self.in_word, self.chars, self.word) = (false, false, 2, Word::Other);
+        if self.lead.is_none_or(|(_, at)| start <= at) {
+            self.lead = Some(('{', start));
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -25,40 +144,48 @@ impl Tex {
         self.out.is_empty()
     }
 
-    pub(super) fn contains(&self, c: char) -> bool {
-        self.out.contains(c)
+    pub(super) fn len(&self) -> usize {
+        self.out.len()
+    }
+
+    pub(super) fn holds_ampersand(&self) -> bool {
+        self.shape.ampersand
+    }
+
+    fn write(&mut self, s: &str) {
+        let start = self.out.len();
+        for (offset, c) in s.char_indices() {
+            self.shape.step(c, start + offset);
+        }
+        self.out.push_str(s);
     }
 
     pub(super) fn push_str(&mut self, s: &str) {
         let Some(first) = s.chars().next() else { return };
-        if self.after_macro && first.is_ascii_alphabetic() {
-            self.out.push(' ');
+        if self.shape.in_word && first.is_ascii_alphabetic() {
+            self.write(" ");
         }
-        self.out.push_str(s);
-        self.after_macro = ends_with_control_word(s);
+        self.write(s);
     }
 
     pub(super) fn push_char(&mut self, c: char) {
-        if self.after_macro && c.is_ascii_alphabetic() {
-            self.out.push(' ');
-        }
-        self.out.push(c);
-        self.after_macro = false;
+        self.push_str(c.encode_utf8(&mut [0; 4]));
     }
 
     /// The backslash ends any control word before it, so no separator is needed.
     pub(super) fn push_macro(&mut self, name: &str) {
-        self.out.push_str(name);
-        self.after_macro = ends_with_control_word(name);
+        self.write(name);
     }
 
     pub(super) fn push_tex(&mut self, other: &Self) {
         if other.out.is_empty() {
             return;
         }
+        if other.raises() && self.carries_superscript() {
+            self.push_str("{}");
+        }
         self.unresolved |= other.unresolved;
         self.push_str(&other.out);
-        self.after_macro = other.after_macro;
     }
 
     pub(super) fn push_group(&mut self, inner: &Self) {
@@ -70,6 +197,55 @@ impl Tex {
     pub(super) fn push_script(&mut self, mark: char, inner: &Self) {
         self.push_char(mark);
         self.push_group(inner);
+    }
+
+    /// Only plain spaces, which math mode ignores, were written.
+    pub(super) fn is_blank(&self) -> bool {
+        self.shape.lead.is_none()
+    }
+
+    /// It opens, after plain spaces, with a prime or a superscript, which attach to the atom
+    /// written before it; a control space `\ ` opens with its backslash and is an atom.
+    pub(super) fn raises(&self) -> bool {
+        self.shape.lead.is_some_and(|(c, _)| c == '\'' || c == '^')
+    }
+
+    /// It opens, after plain spaces, with a `[` or `*` that a `\\` or `\begin{..}` before it
+    /// would read as its own optional argument.
+    fn opens_option(&self) -> bool {
+        self.shape.lead.is_some_and(|(c, _)| c == '[' || c == '*')
+    }
+
+    /// Its last atom ends in a script or a prime, so a script attached directly would double one.
+    pub(super) fn ends_with_script(&self) -> bool {
+        self.shape.level.sub || self.shape.level.sup
+    }
+
+    /// A prime or superscript written next would give its last atom a second superscript: it
+    /// has one already, unless that ends in primes, which merge with what follows.
+    pub(super) fn carries_superscript(&self) -> bool {
+        self.shape.level.sup && !self.shape.level.primed
+    }
+
+    /// Groups what was written from `start`, shifting it by the brace opened before it.
+    pub(super) fn group_from(&mut self, start: usize) {
+        self.out.insert(start, '{');
+        self.out.push('}');
+        self.shape.grouped(start);
+    }
+
+    /// `\sqrt`, then `[index]` braced when it holds a `]`, which would end the argument early.
+    pub(super) fn push_sqrt(&mut self, index: Option<&Self>) {
+        self.push_macro("\\sqrt");
+        if let Some(index) = index {
+            self.push_char('[');
+            if index.shape.close_bracket {
+                self.push_group(index);
+            } else {
+                self.push_tex(index);
+            }
+            self.push_char(']');
+        }
     }
 
     pub(super) fn push_fraction(&mut self, kind: Fraction, num: &Self, den: &Self) {
@@ -108,19 +284,30 @@ impl Tex {
             }
             for (j, cell) in row.iter().enumerate() {
                 self.push_str(if j > 0 { " & " } else { " " });
-                self.push_tex(cell);
+                if j == 0 {
+                    self.push_after_option(cell);
+                } else {
+                    self.push_tex(cell);
+                }
             }
         }
         self.push_str(&format!(" \\end{{{env}}}"));
     }
 
+    /// The first piece after `\\` or `\begin{..}`, which read a `[` or `*` that follows as
+    /// their own.
+    fn push_after_option(&mut self, piece: &Self) {
+        if piece.opens_option() {
+            self.push_str("{}");
+        }
+        self.push_tex(piece);
+    }
+
     /// A script base: `inner` as it stands when it is one atom (a single
     /// character or control word), `{inner}` otherwise.
     pub(super) fn push_base(&mut self, inner: &Self) {
-        let atom = inner.out.chars().count() == 1
-            || inner.out.strip_prefix('\\').is_some_and(|name| {
-                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic())
-            });
+        let atom = (inner.shape.chars == 1 || inner.shape.word == Word::Letters)
+            && !inner.ends_with_script();
         if atom { self.push_tex(inner) } else { self.push_group(inner) }
     }
 
@@ -157,6 +344,9 @@ impl Tex {
     }
 
     pub(super) fn push_math_char(&mut self, c: char) {
+        if raises(c) && self.carries_superscript() {
+            self.push_str("{}");
+        }
         if let Some(mapped) = symbol(c) {
             if mapped.starts_with('\\') {
                 self.push_macro(mapped);
@@ -171,7 +361,10 @@ impl Tex {
                 self.push_char(c);
             }
             '\\' => self.push_macro("\\backslash"),
-            '^' => self.push_str("\\char`^"),
+            '^' => {
+                self.push_str("\\char`^");
+                self.shape.level.atom();
+            }
             '~' => self.push_macro("\\sim"),
             '\u{a0}' => self.push_str("\\ "),
             c if c.is_whitespace() => self.push_char(' '),
@@ -212,7 +405,7 @@ impl Tex {
     pub(super) fn finish(self) -> String {
         let mut out = String::with_capacity(self.out.len());
         let mut prev_space = true;
-        for c in self.out.trim().chars() {
+        for c in trim_tex(&self.out).chars() {
             let space = c == ' ';
             if !(space && prev_space) {
                 out.push(c);
@@ -221,13 +414,6 @@ impl Tex {
         }
         out
     }
-}
-
-/// Whether `s` ends in a letter-named control word (`\alpha`, `\left\langle`),
-/// which would swallow a letter written directly after it.
-fn ends_with_control_word(s: &str) -> bool {
-    let stem = s.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    stem.len() < s.len() && stem.ends_with('\\')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -359,6 +545,10 @@ fn fold_digit(cp: u32) -> Option<(char, Variant)> {
     const STYLES: [Variant; 5] = [Bold, DoubleStruck, SansSerif, SansSerif, Monospace];
     let digit = cp.checked_sub(0x1D7CE).filter(|&d| d < 5 * 10)?;
     Some(((b'0' + (digit % 10) as u8) as char, STYLES[(digit / 10) as usize]))
+}
+
+fn raises(c: char) -> bool {
+    c == '\'' || symbol(c).is_some_and(|mapped| mapped.starts_with(['\'', '^']))
 }
 
 #[rustfmt::skip]
@@ -508,16 +698,56 @@ pub(super) fn function_name(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ends_with_control_word, fold_alnum};
+    use super::{Tex, fold_alnum};
+
+    fn written(tex: &str) -> Tex {
+        let mut written = Tex::default();
+        written.push_str(tex);
+        written
+    }
 
     #[test]
-    fn a_control_word_is_a_backslash_followed_by_letters() {
-        assert!(ends_with_control_word(r"x\alpha"));
-        assert!(ends_with_control_word(r"\left\langle"));
-        assert!(!ends_with_control_word(r"x\"));
-        assert!(!ends_with_control_word(r"\,"));
-        assert!(!ends_with_control_word("alpha"));
-        assert!(!ends_with_control_word(""));
+    fn a_raise_collides_only_with_a_superscript_it_cannot_merge_with() {
+        let rows = [
+            ("x^{2}", true),
+            ("x^{2} ", true),
+            (r"x^{\circ}", true),
+            ("x^{2}_{i}", true),
+            ("x_{i}^{2}", true),
+            ("x'_{i}", true),
+            ("x", false),
+            ("x'", false),
+            ("x''", false),
+            ("x_{i}", false),
+            ("{x^{2}}", false),
+            (r"x\ ", false),
+            (r"x^\{", true),
+            (r"x^{\}}", true),
+            ("", false),
+        ];
+        for (tex, collides) in rows {
+            assert_eq!(written(tex).carries_superscript(), collides, "{tex}");
+        }
+        let mut open = written("x^{2}");
+        open.push_char('{');
+        assert!(!open.carries_superscript(), "a group opened after it starts a level of its own");
+    }
+
+    #[test]
+    fn a_letter_after_a_control_word_is_kept_apart() {
+        let rows = [
+            (r"x\alpha", "x\\alpha y"),
+            (r"\left\langle", "\\left\\langle y"),
+            (r"\,", "\\,y"),
+            (r"\\", "\\\\y"),
+            ("alpha", "alphay"),
+            ("", "y"),
+        ];
+        for (before, after) in rows {
+            let mut tex = written(before);
+            tex.push_char('y');
+            assert_eq!(tex.out, after, "{before}");
+        }
     }
 
     #[test]

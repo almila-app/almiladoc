@@ -48,6 +48,8 @@ const CASES: &[(&str, Format, u64, u64, Build)] = &[
     ("rtf fields", Format::Rtf, 1, 2, rtf_fields),
     ("rtf math", Format::Rtf, 3, 2, rtf_math),
     ("doc links", Format::Doc, 0, 1, doc_links),
+    ("docx equation", Format::Docx, 1, 1, docx_equation),
+    ("pptx equation", Format::Pptx, 1, 1, pptx_equation),
 ];
 
 fn converter(max_nesting_depth: u64) -> Converter {
@@ -547,6 +549,40 @@ fn epub_heading_links(units: usize) -> Vec<u8> {
 fn epub_math(units: usize) -> Vec<u8> {
     let rows = nest("<mrow>", "</mrow>", units, "<mi>x</mi>");
     epub(&format!(r#"<p><math xmlns="http://www.w3.org/1998/Math/MathML">{rows}</math></p>"#))
+}
+
+/// An Equation Native stream: MTEF v5 whose top record list holds `units` LINEs, each nested
+/// in the one before, around one character.
+fn equation_object(units: usize) -> Vec<u8> {
+    let header = [&[5, 1, 0, 6, 0][..], b"DSMT4\0", &[0, 10]].concat();
+    let mtef = [header, [1, 0].repeat(units), vec![2, 0, 131, b'x', 0], vec![0; units + 1]];
+    let mtef = mtef.concat();
+    let declared = u32::try_from(mtef.len()).unwrap().to_le_bytes();
+    let native = [&28_u16.to_le_bytes()[..], &[0; 6], &declared, &[0; 16], &mtef].concat();
+    ole(&[("Equation Native", &native)])
+}
+
+fn docx_equation(units: usize) -> Vec<u8> {
+    let object = r#"<w:p><w:r><w:object><o:OLEObject xmlns:o="urn:schemas-microsoft-com:office:office" ProgID="Equation.DSMT4" r:id="rId4"/></w:object></w:r></w:p>"#;
+    let rels = relationships(&[("rId4", "oleObject", "embeddings/one.bin")]);
+    let payload = equation_object(units);
+    docx_with(
+        object,
+        &[("word/_rels/document.xml.rels", rels.as_bytes()), ("word/embeddings/one.bin", &payload)],
+    )
+}
+
+fn pptx_equation(units: usize) -> Vec<u8> {
+    let frame = r#"<p:graphicFrame><a:graphic><a:graphicData><p:oleObj progId="Equation.DSMT4" r:id="rId5"/></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let rels = relationships(&[("rId5", "oleObject", "../embeddings/one.bin")]);
+    let payload = equation_object(units);
+    pptx(
+        frame,
+        &[
+            ("ppt/slides/_rels/slide1.xml.rels", rels.as_bytes()),
+            ("ppt/embeddings/one.bin", &payload),
+        ],
+    )
 }
 
 fn rtf(body: &str) -> Vec<u8> {

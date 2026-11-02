@@ -25,6 +25,7 @@ use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
 use crate::shared::math::{math_lines, omath_para_with_damage};
 use crate::shared::mc::{alternate_branch, holds_graphic};
 use crate::shared::numbering::{LevelCounters, every_deeper};
+use crate::shared::ole_equation::ole_equation;
 use crate::shared::sides::{PageSides, SideTimeline};
 use crate::shared::text::clean_text;
 use crate::shared::typeface::run_inlines;
@@ -970,14 +971,25 @@ fn embedded_object(
     ctx: &SlideCtx<'_, '_>,
     blocks: &mut Vec<Block>,
 ) -> Result<(), ConvertError> {
-    ctx.emit(DiagnosticCode::EmbeddedObject);
-    retain_ole_payload(
+    let payload = retain_ole_payload(
         ctx.pkg,
         ctx.rels,
         ctx.base_part,
         ctx.assets,
         ole.attr_qualified(ns::R, "id"),
     )?;
+    let prog_id = ole.attr_unqualified("progId");
+    let equation = payload.map(|cfb| ole_equation(ctx.parse_ctx, prog_id, &cfb));
+    if let Some(equation) = equation.transpose()?.flatten() {
+        ctx.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, ctx.region, equation.unmapped);
+        blocks.push(if equation.inline {
+            Block::Paragraph(vec![Inline::Math(equation.tex)])
+        } else {
+            Block::Math(equation.tex)
+        });
+        return Ok(());
+    }
+    ctx.emit(DiagnosticCode::EmbeddedObject);
     let descr = frame
         .find(ns::P, "nvGraphicFramePr")
         .map(|properties| description(properties, ctx))
@@ -1308,7 +1320,9 @@ fn parse_table(
 #[expect(clippy::format_collect, reason = "fixture XML is built with format!")]
 mod tests {
     use super::*;
-    use crate::shared::test_support::{diagnostic_rows, unit_ordinals, zip_package};
+    use crate::shared::test_support::{
+        diagnostic_rows, equation_editor, equation_object, mathtype, unit_ordinals, zip_package,
+    };
     use std::assert_matches;
 
     const NS: &str = concat!(
@@ -1437,6 +1451,56 @@ mod tests {
         format!(
             "<p:graphicFrame><a:graphic><a:graphicData>{data}</a:graphicData></a:graphic></p:graphicFrame>"
         )
+    }
+
+    #[test]
+    fn an_equation_object_shows_its_tex_in_place_of_its_preview() {
+        type Read = (Vec<Block>, Vec<(DiagnosticCode, Region, u64)>, usize);
+        let read = |prog_id: &str, mtef: &[u8]| -> Read {
+            let ole = format!(
+                r#"<p:oleObj progId="{prog_id}" r:id="rId5"><p:pic><p:blipFill><a:blip r:embed="rId6"/></p:blipFill></p:pic></p:oleObj>"#
+            );
+            let rels = [
+                ("rId5", "oleObject", "../embeddings/one.bin"),
+                ("rId6", "image", "../media/one.png"),
+            ];
+            let mut parts: Vec<(String, Vec<u8>)> =
+                one(&frame(&ole), &rels, &[("ppt/media/one.png", "png".into())])
+                    .into_iter()
+                    .map(|(name, body)| (name, body.into_bytes()))
+                    .collect();
+            parts.push(("ppt/embeddings/one.bin".into(), equation_object(28, mtef.len(), mtef)));
+            let ctx = ParseCtx::default();
+            let doc = parse(&ctx, &zip_package(&parts)).unwrap();
+            let assets = doc.assets.len();
+            let blocks = doc.blocks.into_iter().filter(|b| !matches!(b, Block::UnitStart(_)));
+            (blocks.collect(), diagnostic_rows(&ctx.diagnostics()), assets)
+        };
+        let xy = [0x78, 0x79];
+        let math = |tex: &str| vec![Block::Math(tex.into())];
+        let cases: [(&str, Read, Read); 4] = [
+            ("display", read("Equation.DSMT4", &mathtype(false, &xy)), (math("xy"), vec![], 1)),
+            (
+                "inline",
+                read("Equation.DSMT4", &mathtype(true, &xy)),
+                (vec![Block::Paragraph(vec![Inline::Math("xy".into())])], vec![], 1),
+            ),
+            ("Equation Editor", read("Equation.3", &equation_editor(&xy)), (math("xy"), vec![], 1)),
+            (
+                "an unmapped character",
+                read("Equation.DSMT4", &mathtype(false, &[0x61, 0xE999, 0x62])),
+                (math("ab"), vec![(DiagnosticCode::UnmappedSymbol, Region::Body, 1)], 1),
+            ),
+        ];
+        for (case, got, expected) in cases {
+            assert_eq!(got, expected, "{case}");
+        }
+        let (blocks, reported, assets) = read("Excel.Sheet.12", &mathtype(false, &xy));
+        assert_matches!(blocks.as_slice(), [Block::Paragraph(preview)] if matches!(preview.as_slice(), [Inline::Image { .. }]));
+        assert_eq!(
+            (reported, assets),
+            (vec![(DiagnosticCode::EmbeddedObject, Region::Body, 1)], 2)
+        );
     }
 
     fn picture(nv_pr: &str, rid: &str) -> String {

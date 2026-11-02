@@ -25,6 +25,10 @@ def write_file(path: Path, data: bytes) -> None:
 
 
 def write_cfb(path: Path, streams: Sequence[tuple[str, bytes]]) -> None:
+    write_file(path, cfb_bytes(streams))
+
+
+def cfb_bytes(streams: Sequence[tuple[str, bytes]]) -> bytes:
     """Minimal CFB v3 writer (512-byte sectors) for handmade OLE2 fixtures.
 
     Streams are padded to the 4096-byte mini-stream cutoff so everything
@@ -103,7 +107,7 @@ def write_cfb(path: Path, streams: Sequence[tuple[str, bytes]]) -> None:
         )
         + struct.pack("<109I", *difat)
     )
-    write_file(path, header + b"".join(sectors))
+    return header + b"".join(sectors)
 
 
 def write_zip(

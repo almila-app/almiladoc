@@ -4,6 +4,7 @@ import struct
 from itertools import chain
 from pathlib import Path
 
+from fixturegen import mtef
 from fixturegen.common import (
     BIN_DEFAULT,
     DECL,
@@ -586,6 +587,50 @@ def ole_docx(out: Path) -> None:
     )
 
 
+def equations_docx(out: Path) -> None:
+    """MathType and Equation Editor objects, each beside its VML preview, decode to TeX in
+    place of the preview: display alone in a body paragraph, inline beside text, in a heading,
+    in a cell or by its own inline flag."""
+    VML = 'xmlns:v="urn:schemas-microsoft-com:vml"'
+    OFFICE = 'xmlns:o="urn:schemas-microsoft-com:office:office"'
+
+    def equation(prog_id: str, rid: str) -> str:
+        return (
+            '<w:r><w:object><v:shape id="_x0000_i1025" style="width:96pt;height:30pt">'
+            '<v:imagedata r:id="rId9" o:title=""/></v:shape>'
+            f'<o:OLEObject Type="Embed" ProgID="{prog_id}" ShapeID="_x0000_i1025" r:id="{rid}"/>'
+            "</w:object></w:r>"
+        )
+
+    mathtype = equation("Equation.DSMT4", "rId2")
+    editor = equation("Equation.3", "rId3")
+    document = f"""{DECL}
+<w:document {W} {R} {VML} {OFFICE}><w:body>
+{para("The roots are")}
+<w:p>{mathtype}</w:p>
+<w:p><w:r><w:t xml:space="preserve">or, from Equation Editor, </w:t></w:r>{editor}</w:p>
+<w:p>{equation("Equation.DSMT4", "rId4")}</w:p>
+<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr>{mathtype}</w:p>
+<w:tbl><w:tr><w:tc><w:p>{editor}</w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>"""
+    write_docx(
+        out / "docx" / "handmade-equations.docx",
+        document,
+        doc_rels(
+            ("rId2", "oleObject", "embeddings/oleObject1.bin"),
+            ("rId3", "oleObject", "embeddings/oleObject2.bin"),
+            ("rId4", "oleObject", "embeddings/oleObject3.bin"),
+            ("rId9", "image", "media/preview.png"),
+        ),
+        PLAIN_STYLES,
+        ("word/embeddings/oleObject1.bin", mtef.ole_object(mtef.quadratic(mtef.V5))),
+        ("word/embeddings/oleObject2.bin", mtef.ole_object(mtef.quadratic(mtef.V3))),
+        ("word/embeddings/oleObject3.bin", mtef.ole_object(mtef.energy())),
+        ("word/media/preview.png", DOT_PNG),
+        ct_extra=BIN_DEFAULT + PNG_DEFAULT,
+    )
+
+
 def ole_iso_docx(out: Path) -> None:
     """The ISO objects other producers write - a DrawingML preview then w:objectEmbed or
     w:objectLink, no VML - Word's ActiveX control, a VML preview then w:control, and a movie
@@ -1094,6 +1139,7 @@ def generate(out: Path) -> None:
     blockstyle_docx(out)
     ole_docx(out)
     ole_iso_docx(out)
+    equations_docx(out)
     manyrefs_docx(out)
     math_docx(out)
     run_marks_docx(out)

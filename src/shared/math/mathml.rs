@@ -2,6 +2,7 @@
 
 use super::tex::{Fraction, Tex, Variant, accent, big_operator, delimiter, function_name};
 use crate::package::xml::{Element, Node};
+use crate::shared::text::trim_tex;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MathTex {
@@ -82,12 +83,7 @@ fn walk_elem(glyphs: &mut u64, e: &Element, tex: &mut Tex) {
         "msqrt" => tex.push_command("\\sqrt", &sub_children(glyphs, e)),
         "mroot" => {
             let parts = args(e);
-            tex.push_macro("\\sqrt");
-            if let Some(index) = parts.get(1) {
-                tex.push_char('[');
-                tex.push_tex(&sub(glyphs, index));
-                tex.push_char(']');
-            }
+            tex.push_sqrt(parts.get(1).map(|index| sub(glyphs, index)).as_ref());
             if let Some(base) = parts.first() {
                 tex.push_group(&sub(glyphs, base));
             }
@@ -235,7 +231,7 @@ fn tex_annotation(semantics: &Element) -> Option<Tex> {
         })
         .and_then(|a| {
             let text = a.text();
-            let text = text.trim();
+            let text = trim_tex(&text);
             if text.is_empty() {
                 return None;
             }

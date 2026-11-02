@@ -63,12 +63,8 @@ fn walk_elem(e: &Element, tex: &mut Tex, mode: Mode) {
         "sSup" | "sSub" | "sSubSup" | "sPre" => scripts(e, tex),
         "rad" => {
             let deg = arg(e, "deg", Mode::Math);
-            tex.push_macro("\\sqrt");
-            if flag(e, "radPr", "degHide") != Some(true) && !deg.is_empty() {
-                tex.push_char('[');
-                tex.push_tex(&deg);
-                tex.push_char(']');
-            }
+            let shown = flag(e, "radPr", "degHide") != Some(true) && !deg.is_empty();
+            tex.push_sqrt(shown.then_some(&deg));
             tex.push_group(&arg(e, "e", Mode::Math));
         }
         "d" => delimited(e, tex),
@@ -369,7 +365,11 @@ fn limit(e: &Element, tex: &mut Tex, mode: Mode) {
     let base = arg(e, "e", mode);
     let lim = arg(e, "lim", Mode::Math);
     if mode == Mode::FuncName {
+        let start = tex.len();
         tex.push_tex(&base);
+        if base.ends_with_script() {
+            tex.group_from(start);
+        }
         tex.push_script(if upper { '^' } else { '_' }, &lim);
         return;
     }
@@ -389,6 +389,6 @@ fn matrix(e: &Element, tex: &mut Tex) {
 fn equation_array(e: &Element, tex: &mut Tex) {
     let rows: Vec<Vec<Tex>> =
         e.find_all(ns::M, "e").map(|row| vec![children_tex(row, Mode::Array)]).collect();
-    let aligned = rows.iter().flatten().any(|cell| cell.contains('&'));
+    let aligned = rows.iter().flatten().any(Tex::holds_ampersand);
     tex.push_environment(if aligned { "aligned" } else { "gathered" }, &rows);
 }

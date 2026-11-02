@@ -23,8 +23,9 @@ use crate::shared::fields::{
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
-use crate::shared::math::{omath_para_with_damage, omath_with_damage};
+use crate::shared::math::{math_lines, omath_para_with_damage, omath_with_damage};
 use crate::shared::mc::{self, is_picture_fill, is_text, is_vml_shape};
+use crate::shared::ole_equation::ole_equation;
 use crate::shared::symbol::{self, SymbolFont, Token};
 use crate::shared::text::{clean_text, is_layout_invisible};
 use std::cell::{Cell as Counter, RefCell};
@@ -493,7 +494,8 @@ enum Mark<'e> {
 struct Runs<'e> {
     list: Vec<ListEntry>,
     styled: StyledRun,
-    joining: Option<(Pending<'e>, Vec<Piece>)>,
+    joining: Option<(Pending<'e>, Vec<Piece>, bool)>,
+    in_cell: bool,
 }
 
 impl Runs<'_> {
@@ -502,11 +504,26 @@ impl Runs<'_> {
         flush_list(blocks, &mut self.list);
     }
 
+    /// A display equation alone in a body or list paragraph shows as a block; headings and
+    /// cells keep it inline.
+    fn emit(
+        &mut self,
+        kind: ParaKind,
+        pieces: Vec<Piece>,
+        displayable: bool,
+        blocks: &mut Vec<Block>,
+    ) {
+        let display =
+            displayable && !self.in_cell && matches!(kind, ParaKind::Plain | ParaKind::ListItem(_));
+        let pieces = if display { displayed(pieces) } else { pieces };
+        emit_paragraph(kind, pieces, blocks, self);
+    }
+
     fn release(&mut self, ctx: &Ctx<'_, '_>, blocks: &mut Vec<Block>) -> Result<(), ConvertError> {
-        if let Some((pending, pieces)) = self.joining.take()
+        if let Some((pending, pieces, displayable)) = self.joining.take()
             && !shows_nothing(&pieces)
         {
-            emit_paragraph(pending.kind(ctx)?, pieces, blocks, self);
+            self.emit(pending.kind(ctx)?, pieces, displayable, blocks);
         }
         self.flush(blocks);
         Ok(())
@@ -522,8 +539,19 @@ pub(super) fn parse_blocks(
     parent: &Element,
     ctx: &Ctx<'_, '_>,
 ) -> Result<Vec<Block>, ConvertError> {
+    blocks_in(parent, ctx, Runs::default())
+}
+
+fn parse_cell(parent: &Element, ctx: &Ctx<'_, '_>) -> Result<Vec<Block>, ConvertError> {
+    blocks_in(parent, ctx, Runs { in_cell: true, ..Runs::default() })
+}
+
+fn blocks_in<'e>(
+    parent: &'e Element,
+    ctx: &Ctx<'_, '_>,
+    mut runs: Runs<'e>,
+) -> Result<Vec<Block>, ConvertError> {
     let mut blocks: Vec<Block> = Vec::new();
-    let mut runs = Runs::default();
     collect_blocks(parent, ctx, &mut blocks, &mut runs, None)?;
     runs.release(ctx, &mut blocks)?;
     Ok(blocks)
@@ -570,13 +598,14 @@ fn collect_blocks<'e>(
         }
         match child.local.as_str() {
             "p" => {
-                let (mark, mut pieces) = parse_paragraph(child, ctx)?;
-                if let Some((_, held)) = runs.joining.take() {
+                let (mark, mut pieces, mut displayable) = parse_paragraph(child, ctx)?;
+                if let Some((_, held, held_displayable)) = runs.joining.take() {
                     pieces = joined(held, pieces);
+                    displayable |= held_displayable;
                 }
                 match mark {
-                    Mark::Dropped(pending) => runs.joining = Some((pending, pieces)),
-                    Mark::Kept(kind) => emit_paragraph(kind, pieces, blocks, runs),
+                    Mark::Dropped(pending) => runs.joining = Some((pending, pieces, displayable)),
+                    Mark::Kept(kind) => runs.emit(kind, pieces, displayable, blocks),
                 }
                 if let Some(breaks) = breaks.as_deref_mut() {
                     note_section_break(child, ctx, blocks, runs, breaks)?;
@@ -663,6 +692,15 @@ fn hidden_beside_runs(
     or_when_malformed(run_properties(ctx, rpr, base, hides).map(|(_, hidden)| hidden), || {
         rpr.and_then(|rpr| on_off(rpr, "vanish")).unwrap_or(hides)
     })
+}
+
+fn displayed(pieces: Vec<Piece>) -> Vec<Piece> {
+    if let [Piece::Inlines(inlines)] = pieces.as_slice()
+        && let Some([tex]) = math_lines(inlines).as_deref()
+    {
+        return vec![Piece::Blocks(vec![Block::Math(tex.clone())])];
+    }
+    pieces
 }
 
 fn shows_nothing(pieces: &[Piece]) -> bool {
@@ -768,10 +806,11 @@ fn pstyle_id(ppr: Option<&Element>) -> Option<&str> {
     val(ppr?, "pStyle")
 }
 
+/// The flag says an equation that may show as display math was placed.
 fn parse_paragraph<'e>(
     p: &'e Element,
     ctx: &Ctx<'_, '_>,
-) -> Result<(Mark<'e>, Vec<Piece>), ConvertError> {
+) -> Result<(Mark<'e>, Vec<Piece>, bool), ConvertError> {
     let ppr = p.find(ns::W, "pPr");
     let pstyle_id = pstyle_id(ppr);
 
@@ -801,7 +840,8 @@ fn parse_paragraph<'e>(
     let mut walker = InlineWalker::new(ctx, paragraph_level, hides, fonts);
     walker.walk(p)?;
     walker.close_range();
-    Ok((mark, walker.finish()))
+    let displayable = walker.displayable;
+    Ok((mark, walker.finish(), displayable))
 }
 
 /// Resolve a paragraph's effective numbering per ECMA-376: the direct
@@ -906,6 +946,7 @@ struct InlineWalker<'a, 'b, 'e> {
     revision: Option<Dropped>,
     range: Option<Dropped>,
     dropped: bool,
+    displayable: bool,
 }
 
 impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
@@ -924,6 +965,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
             revision: None,
             range: None,
             dropped: false,
+            displayable: false,
         }
     }
 
@@ -960,6 +1002,7 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
     fn rejoin(&mut self, mut inner: Self) -> (Vec<Inline>, Vec<Block>, bool) {
         self.range = inner.range.take();
         self.dropped |= inner.dropped;
+        self.displayable |= inner.displayable;
         let dropped = inner.dropped;
         let (content, attachments) = split_pieces(inner.finish());
         (content, attachments, dropped)
@@ -1756,7 +1799,11 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         descr: ImageLabel,
     ) -> Result<(), ConvertError> {
         match held {
-            Graphic::Object { rel_id, .. } => self.embedded_object(*rel_id)?,
+            Graphic::Object { rel_id, prog_id, .. } => {
+                if self.embedded_object(*rel_id, *prog_id)? {
+                    return Ok(());
+                }
+            }
             _ => self.ctx.emit(DiagnosticCode::FormControlUnread),
         }
         if let Some(Graphic::Picture { rel_id, shape, .. }) =
@@ -1802,10 +1849,23 @@ impl<'a, 'b, 'e> InlineWalker<'a, 'b, 'e> {
         }
     }
 
-    fn embedded_object(&self, rel_id: Option<&str>) -> Result<(), ConvertError> {
-        self.ctx.emit(DiagnosticCode::EmbeddedObject);
+    /// Whether the object read as an equation, which then takes its preview's place.
+    fn embedded_object(
+        &mut self,
+        rel_id: Option<&str>,
+        prog_id: Option<&str>,
+    ) -> Result<bool, ConvertError> {
         let ctx = self.ctx;
-        retain_ole_payload(ctx.pkg, &ctx.rels, &ctx.base_part, ctx.assets, rel_id)
+        let payload = retain_ole_payload(ctx.pkg, &ctx.rels, &ctx.base_part, ctx.assets, rel_id)?;
+        let equation = payload.map(|cfb| ole_equation(ctx.parse_ctx, prog_id, &cfb));
+        let Some(equation) = equation.transpose()?.flatten() else {
+            ctx.emit(DiagnosticCode::EmbeddedObject);
+            return Ok(false);
+        };
+        self.unmapped(equation.unmapped);
+        self.push(Inline::Math(equation.tex));
+        self.displayable |= !equation.inline;
+        Ok(true)
     }
 
     fn picture(&mut self, rel_id: Option<&str>, descr: ImageLabel) -> Result<(), ConvertError> {
@@ -1911,7 +1971,7 @@ fn pieces_into_blocks(pieces: Vec<Piece>) -> Vec<Block> {
 enum Graphic<'e> {
     Chart(Option<&'e str>),
     Diagram(Option<&'e str>),
-    Object { rel_id: Option<&'e str>, shape: Option<&'e str> },
+    Object { rel_id: Option<&'e str>, shape: Option<&'e str>, prog_id: Option<&'e str> },
     Control { shape: Option<&'e str> },
     Picture { rel_id: Option<&'e str>, shape: Option<&'e Element>, fill: bool },
     Movie,
@@ -2059,12 +2119,16 @@ fn graphic<'e>(elem: &'e Element, shape: Option<&'e Element>) -> Option<Graphic<
     Some(match (elem.ns.as_deref()?, elem.local.as_str()) {
         (ns::CHART, "chart") => Graphic::Chart(rel_id("id")),
         (ns::DGM, "relIds") => Graphic::Diagram(rel_id("dm")),
-        (ns::O_VML, "OLEObject") => {
-            Graphic::Object { rel_id: rel_id("id"), shape: elem.attr_unqualified("ShapeID") }
-        }
-        (ns::W, "objectEmbed" | "objectLink") => {
-            Graphic::Object { rel_id: rel_id("id"), shape: elem.attr(ns::W, "shapeId") }
-        }
+        (ns::O_VML, "OLEObject") => Graphic::Object {
+            rel_id: rel_id("id"),
+            shape: elem.attr_unqualified("ShapeID"),
+            prog_id: elem.attr_unqualified("ProgID"),
+        },
+        (ns::W, "objectEmbed" | "objectLink") => Graphic::Object {
+            rel_id: rel_id("id"),
+            shape: elem.attr(ns::W, "shapeId"),
+            prog_id: elem.attr(ns::W, "progId"),
+        },
         (ns::W, "control") => Graphic::Control { shape: elem.attr(ns::W, "shapeid") },
         (ns::W, "movie") => Graphic::Movie,
         (ns::A, "blip") => Graphic::Picture {
@@ -2231,10 +2295,10 @@ fn place_row(
                 builder.covered()?;
             }
         } else {
-            let mut blocks = parse_blocks(tc.elem, ctx)?;
+            let mut blocks = parse_cell(tc.elem, ctx)?;
             for (folded, merged) in tc.merged.iter().enumerate() {
                 drop_deleted_before(&mut deleted_cells, (i + 1, folded), ctx)?;
-                blocks.extend(parse_blocks(merged, ctx)?);
+                blocks.extend(parse_cell(merged, ctx)?);
             }
             let col_span = u32::try_from(tc.col_span).unwrap_or(u32::MAX);
             let row_span = u32::try_from(tc.row_span).unwrap_or(u32::MAX);
@@ -2426,9 +2490,9 @@ mod tests {
             Graphic::Picture { rel_id: None, shape: None, fill: false },
             held(2),
             held(3),
-            Graphic::Object { rel_id: None, shape: Some(long.as_str()) },
+            Graphic::Object { rel_id: None, shape: Some(long.as_str()), prog_id: None },
             Graphic::Control { shape: None },
-            Graphic::Object { rel_id: None, shape: Some("none") },
+            Graphic::Object { rel_id: None, shape: Some("none"), prog_id: None },
             Graphic::Movie,
         ];
         let parse_ctx = ParseCtx::default();

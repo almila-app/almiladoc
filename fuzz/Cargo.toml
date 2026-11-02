@@ -146,3 +146,9 @@ name = "pdf_raster"
 path = "fuzz_targets/pdf_raster.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "mtef"
+path = "fuzz_targets/mtef.rs"
+test = false
+doc = false

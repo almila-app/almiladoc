@@ -6,6 +6,7 @@ use crate::package::Package;
 use crate::package::relationships::{Relationships, TargetMode, rel_target_bytes};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 const OLE_OBJECT_MEDIA_TYPE: &str = "application/vnd.ms-ole-object";
 
@@ -140,19 +141,21 @@ pub(crate) fn rel_image_source(
     Ok(Some(ImageSource::Asset(id)))
 }
 
+/// The payload it retained, for a reader that decodes it.
 pub(crate) fn retain_ole_payload(
     pkg: &Package<'_>,
     rels: &Relationships,
     base_part: &str,
     assets: &RefCell<AssetSink>,
     rel_id: Option<&str>,
-) -> Result<(), ConvertError> {
-    if let Some((part, bytes)) =
+) -> Result<Option<Rc<[u8]>>, ConvertError> {
+    let Some((part, bytes)) =
         rel_id.map(|id| rel_target_bytes(pkg, rels, base_part, id)).transpose()?.flatten()
-    {
-        assets.borrow_mut().add(OLE_OBJECT_MEDIA_TYPE.into(), part, &bytes)?;
-    }
-    Ok(())
+    else {
+        return Ok(None);
+    };
+    assets.borrow_mut().add(OLE_OBJECT_MEDIA_TYPE.into(), part, &bytes)?;
+    Ok(Some(bytes))
 }
 
 pub(crate) fn media_type_for(part: &str) -> String {

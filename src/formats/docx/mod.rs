@@ -329,7 +329,8 @@ mod tests {
     use crate::model::{Block, CellSlot, ImageSource, Inline, MarkerKind, inlines_to_plain_text};
     use crate::render::markdown::document_to_markdown;
     use crate::shared::test_support::{
-        corrupt_entry, diagnostic_rows, stored, zip_package, zip_package_with,
+        corrupt_entry, diagnostic_rows, equation_editor, equation_object, mathtype, one_stream_cfb,
+        stored, zip_package, zip_package_with,
     };
     use std::assert_matches;
     use std::fmt::Debug;
@@ -5520,6 +5521,282 @@ mod tests {
             })
             .collect();
         assert_eq!(headings, vec!["1. Intro", "2. Details", "2.1 Part"]);
+    }
+
+    fn equation_run(prog_id: &str) -> String {
+        format!(
+            r#"<w:r><w:object>{VML_PICTURE}<o:OLEObject ProgID="{prog_id}" ShapeID="s1" r:id="rId4"/></w:object></w:r>"#
+        )
+    }
+
+    fn equation_parts(body: &str, payload: Vec<u8>) -> Vec<(&'static str, Vec<u8>)> {
+        let rels = relationships(&[
+            ("rId2", "image", "media/one.png"),
+            ("rId4", "oleObject", "embeddings/one.bin"),
+        ]);
+        vec![
+            ("word/document.xml", document(body).into_bytes()),
+            ("word/_rels/document.xml.rels", rels.into_bytes()),
+            ("word/media/one.png", b"png".to_vec()),
+            ("word/embeddings/one.bin", payload),
+        ]
+    }
+
+    fn equation_converted(body: &str, payload: Vec<u8>) -> (Document, String, Vec<Reported>) {
+        let parse_ctx = ParseCtx::default();
+        let doc = parse(&parse_ctx, &zip_package(&equation_parts(body, payload))).unwrap();
+        let diagnostics = diagnostics_of(parse_ctx, &doc, ImagePolicy::Placeholder).unwrap();
+        let markdown = document_to_markdown(&doc);
+        (doc, markdown, diagnostic_rows(&diagnostics))
+    }
+
+    fn xy(inline: bool) -> Vec<u8> {
+        equation_object(28, mathtype(inline, &[0x78, 0x79]).len(), &mathtype(inline, &[0x78, 0x79]))
+    }
+
+    const DELETED_MARK: &str = r#"<w:rPr><w:del w:id="1"/></w:rPr>"#;
+
+    fn mark_deleted(run: &str, next: &str) -> String {
+        format!("<w:p><w:pPr>{DELETED_MARK}</w:pPr>{run}</w:p><w:p>{next}</w:p>")
+    }
+
+    fn in_field(run: &str) -> String {
+        format!(r#"<w:p><w:fldSimple w:instr=" QUOTE ">{run}</w:fldSimple></w:p>"#)
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "the table of equation placements")]
+    fn an_equation_object_shows_its_tex_where_its_paragraph_decides() {
+        let display = "$$\n    xy\n$$\n";
+        let mathtype = equation_run("Equation.DSMT4");
+        let editor_mtef = equation_editor(&[0x78, 0x79]);
+        let editor = equation_object(28, editor_mtef.len(), &editor_mtef);
+        let cases = [
+            ("alone", format!("<w:p>{mathtype}</w:p>"), xy(false), display),
+            (
+                "beside blank text",
+                format!(r#"<w:p><w:r><w:t xml:space="preserve"> </w:t></w:r>{mathtype}</w:p>"#),
+                xy(false),
+                display,
+            ),
+            (
+                "beside text",
+                format!("<w:p><w:r><w:t>a</w:t></w:r>{mathtype}</w:p>"),
+                xy(false),
+                "a$xy$\n",
+            ),
+            ("marked inline", format!("<w:p>{mathtype}</w:p>"), xy(true), "$xy$\n"),
+            (
+                "from Equation Editor",
+                format!("<w:p>{}</w:p>", equation_run("Equation.3")),
+                editor,
+                display,
+            ),
+            ("alone in a field result", in_field(&mathtype), xy(false), display),
+            ("marked inline in a field result", in_field(&mathtype), xy(true), "$xy$\n"),
+            (
+                "alone in a hyperlink without a target",
+                format!("<w:p><w:hyperlink>{mathtype}</w:hyperlink></w:p>"),
+                xy(false),
+                display,
+            ),
+            (
+                "before a deleted mark and an empty paragraph",
+                mark_deleted(&mathtype, ""),
+                xy(false),
+                display,
+            ),
+            (
+                "marked inline before a deleted mark",
+                mark_deleted(&mathtype, ""),
+                xy(true),
+                "$xy$\n",
+            ),
+            (
+                "before a deleted mark and text",
+                mark_deleted(&mathtype, "<w:r><w:t>a</w:t></w:r>"),
+                xy(false),
+                "$xy$a\n",
+            ),
+            (
+                "across two deleted marks",
+                mark_deleted(&mathtype, &format!("<w:pPr>{DELETED_MARK}</w:pPr>")),
+                xy(false),
+                display,
+            ),
+            (
+                "last, its mark deleted",
+                format!("<w:p><w:pPr>{DELETED_MARK}</w:pPr>{mathtype}</w:p>"),
+                xy(false),
+                display,
+            ),
+            (
+                "marked inline, last, its mark deleted",
+                format!("<w:p><w:pPr>{DELETED_MARK}</w:pPr>{mathtype}</w:p>"),
+                xy(true),
+                "$xy$\n",
+            ),
+            (
+                "the text of a hyperlink",
+                format!(
+                    r#"<w:p><w:bookmarkStart w:id="0" w:name="a"/><w:hyperlink w:anchor="a">{mathtype}</w:hyperlink></w:p>"#
+                ),
+                xy(false),
+                "<a id=\"a\"></a>[$xy$](#a)\n",
+            ),
+        ];
+        for (case, body, payload, expected) in cases {
+            let (doc, markdown, reported) = equation_converted(&body, payload);
+            assert_eq!((markdown.as_str(), reported), (expected, vec![]), "{case}");
+            assert_eq!(doc.assets.len(), 1, "{case}: the payload stays and the preview is unread");
+        }
+        let heading = format!(r#"<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr>{mathtype}</w:p>"#);
+        let (doc, ..) = equation_converted(&heading, xy(false));
+        let content = vec![Inline::Math("xy".into())];
+        assert_eq!(doc.blocks, [Block::Heading { level: 1, anchor: None, content }]);
+        let cell = format!("<w:tbl><w:tr><w:tc><w:p>{mathtype}</w:p></w:tc></w:tr></w:tbl>");
+        let (doc, ..) = equation_converted(&cell, xy(false));
+        let [Block::Table(table)] = doc.blocks.as_slice() else { panic!("{:?}", doc.blocks) };
+        let cells: Vec<&[Block]> = table.origins().map(|cell| cell.blocks.as_slice()).collect();
+        assert_eq!(cells, [[Block::Paragraph(vec![Inline::Math("xy".into())])].as_slice()]);
+        let mut parts = equation_parts(&numbered("", &mathtype), xy(false));
+        parts.push(("word/numbering.xml", dropped_mark_numbering().into_bytes()));
+        let doc = parse(&ParseCtx::default(), &zip_package(&parts)).unwrap();
+        let [Block::List(list)] = doc.blocks.as_slice() else { panic!("{:?}", doc.blocks) };
+        let items: Vec<&[Block]> = list.items.iter().map(|item| item.blocks.as_slice()).collect();
+        assert_eq!(items, [[Block::Math("xy".into())].as_slice()]);
+    }
+
+    #[test]
+    fn an_equation_payload_is_charged_at_every_reference() {
+        let mtef = mathtype(false, &[0x78]);
+        let payload = equation_object(28, mtef.len(), &[mtef, vec![0; 1 << 18]].concat());
+        let limits =
+            crate::limits::Limits { max_work: 4 << 20, ..crate::limits::Limits::default() };
+        let read = |references: usize| {
+            let body = format!("<w:p>{}</w:p>", equation_run("Equation.DSMT4").repeat(references));
+            let bytes = zip_package(&equation_parts(&body, payload.clone()));
+            parse(&ParseCtx::new(&limits), &bytes).map(|_| ())
+        };
+        assert_eq!(read(1), Ok(()));
+        assert_eq!(
+            read(64),
+            Err(ConvertError::ResourceLimit { limit: crate::limits::Limit::Work, max: 4 << 20 })
+        );
+    }
+
+    #[test]
+    fn an_equation_this_reader_cannot_decode_keeps_its_preview() {
+        let mtef = mathtype(false, &[0x78]);
+        let first_record = 15;
+        let inserted = |bytes: &[u8]| {
+            let mtef = [&mtef[..first_record], bytes, &mtef[first_record..]].concat();
+            equation_object(28, mtef.len(), &mtef)
+        };
+        let mut four = mtef.clone();
+        four[0] = 4;
+        let char = |code: u8| [2, 0, 131, code, 0];
+        let slot = |code: u8| [&[1, 0][..], &char(code), &[0]].concat();
+        let fraction_and_z = [&[3, 0, 11, 0, 0][..], &slot(b'a'), &slot(b'b'), &char(b'z'), &[0]];
+        let fraction_and_z = fraction_and_z.concat();
+        let dividers =
+            [&[5, 0, 0, 1, 0, 1, 3, 0, 0x14][..], &slot(b'a'), &slot(b'b'), &slot(b'c'), &[0]];
+        let dividers = dividers.concat();
+        let today = equation_converted(
+            &format!("<w:p>{}</w:p>", equation_run("Equation.3")),
+            b"ole".to_vec(),
+        );
+        assert_eq!(
+            today.2,
+            vec![
+                (DiagnosticCode::ImagePlaceholder, Region::Body, 1),
+                (DiagnosticCode::EmbeddedObject, Region::Body, 1)
+            ]
+        );
+        let cases = [
+            ("another ProgID", "Excel.Sheet.12", equation_object(28, mtef.len(), &mtef)),
+            ("no Equation Native", "Equation.DSMT4", one_stream_cfb("Contents", &mtef)),
+            ("a header of another size", "Equation.DSMT4", equation_object(27, mtef.len(), &mtef)),
+            ("MTEF past its stream", "Equation.DSMT4", equation_object(28, mtef.len() + 1, &mtef)),
+            ("an unknown version", "Equation.DSMT4", equation_object(28, four.len(), &four)),
+            ("an unknown selector", "Equation.DSMT4", inserted(&[3, 0, 99, 0, 0, 0])),
+            ("a truncated record", "Equation.DSMT4", equation_object(28, mtef.len() - 3, &mtef)),
+            ("an END too many", "Equation.DSMT4", inserted(&[0, 0])),
+            ("a glyph its template does not draw", "Equation.DSMT4", inserted(&fraction_and_z)),
+            ("a matrix with drawn dividers", "Equation.DSMT4", inserted(&dividers)),
+        ];
+        let fail = crate::Converter::new(crate::Config::default()).unwrap();
+        for (case, prog_id, payload) in cases {
+            let body = format!("<w:p>{}</w:p>", equation_run(prog_id));
+            let bytes = zip_package(&equation_parts(&body, payload.clone()));
+            let failed = fail.convert(crate::Input::new(&bytes, crate::Format::Docx));
+            assert_matches!(failed, Err(ConvertError::Incomplete { .. }), "{case}");
+            let (_, markdown, reported) = equation_converted(&body, payload);
+            assert_eq!((markdown, reported), (today.1.clone(), today.2.clone()), "{case}");
+        }
+    }
+
+    #[test]
+    fn an_equation_ending_in_a_control_space_keeps_it_inline_and_on_display() {
+        let v3 = equation_editor(&[0x78, 0xEB08]);
+        let v5 = mathtype(false, &[0x78, 0xA0]);
+        let tex = |blocks: &[Block]| match blocks {
+            [Block::Math(tex)] => tex.clone(),
+            [Block::Paragraph(inlines)] => match inlines.last() {
+                Some(Inline::Math(tex)) => tex.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        for (prog_id, mtef) in [("Equation.3", v3), ("Equation.DSMT4", v5)] {
+            let run = equation_run(prog_id);
+            for body in
+                [format!("<w:p>{run}</w:p>"), format!("<w:p><w:r><w:t>a</w:t></w:r>{run}</w:p>")]
+            {
+                let (doc, ..) = equation_converted(&body, equation_object(28, mtef.len(), &mtef));
+                assert_eq!(tex(&doc.blocks), "x\\ ", "{prog_id}: {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unmapped_equation_character_is_lost_and_the_rest_shows() {
+        let mtef = mathtype(false, &[0x61, 0xE999, 0x62]);
+        let body = format!("<w:p>{}</w:p>", equation_run("Equation.DSMT4"));
+        let payload = equation_object(28, mtef.len(), &mtef);
+        let bytes = zip_package(&equation_parts(&body, payload.clone()));
+        let (_, markdown, reported) = equation_converted(&body, payload);
+        assert_eq!(
+            (markdown.as_str(), reported),
+            ("$$\n    ab\n$$\n", vec![(DiagnosticCode::UnmappedSymbol, Region::Body, 1)])
+        );
+        let convert = |on_loss| {
+            let config = crate::Config { on_loss, ..crate::Config::default() };
+            crate::Converter::new(config)
+                .unwrap()
+                .convert(crate::Input::new(&bytes, crate::Format::Docx))
+        };
+        assert_matches!(convert(crate::OnLoss::Fail), Err(ConvertError::Incomplete { .. }));
+        assert_eq!(convert(crate::OnLoss::Report).unwrap().markdown(), "$$\n    ab\n$$\n");
+    }
+
+    #[test]
+    fn an_equation_nested_past_the_nesting_depth_fails_the_conversion() {
+        let limits = crate::limits::Limits::default();
+        let lines = usize::try_from(limits.max_nesting_depth).unwrap();
+        let header = [&[5, 1, 0, 6, 0][..], b"DSMT4\0", &[0, 10]].concat();
+        let mtef = [header, [1, 0].repeat(lines), vec![2, 0, 131, b'x', 0], vec![0; lines + 1]];
+        let mtef = mtef.concat();
+        let bytes = zip_package(&equation_parts(
+            &format!("<w:p>{}</w:p>", equation_run("Equation.DSMT4")),
+            equation_object(28, mtef.len(), &mtef),
+        ));
+        let error = parse(&ParseCtx::new(&limits), &bytes).unwrap_err();
+        let max = limits.max_nesting_depth;
+        assert_matches!(
+            error,
+            ConvertError::ResourceLimit { limit: crate::limits::Limit::NestingDepth, max: m } if m == max
+        );
     }
 
     #[test]

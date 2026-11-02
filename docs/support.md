@@ -23,7 +23,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## Word
 
-- DOC/DOCX/DOCM retain body text, headings, numbered lists, tables, notes and hyperlinks; DOCX adds text boxes, TeX equations, charts/SmartArt text and OLE/ActiveX previews, retaining payload assets.
+- DOC/DOCX/DOCM retain body text, headings, numbered lists, tables, notes and hyperlinks; DOCX adds text boxes, TeX equations, charts/SmartArt text and OLE/ActiveX previews, retaining payload assets; DOCX MathType (MTEF v5) and Equation Editor 3.x (MTEF v3) objects show their TeX instead of the preview, and an undecodable one keeps its preview with `embedded_object`.
 - DOCX VML `v:fill` frame/tile pictures apply unless their own `on`, else shape `filled`, disables them, ranked after other drawing/object-preview pictures; unused ones emit `image_unplaced`. Object preview selection matches shape id to `o:OLEObject` ShapeID, `w:objectEmbed`/`w:objectLink` shapeId or `w:control` shapeid; otherwise use the first picture outside VML shapes, labelled only by drawing/shape description.
 - Symbol/Wingdings/Webdings/Zapf Dingbats text and inserted symbols map to drawn characters, ballot boxes to checkboxes; DOC chooses font by character/script from its font table and reads field instructions undecoded. Instructions cause no loss unless they render text boxes/charts/diagrams/display equations.
 
@@ -32,7 +32,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 | `embedded_object` | Both: unconverted OLE content |
 | `image_unavailable`, `image_unplaced` | Both: unread/undecodable bytes; pictures without output positions, including floating ones |
 | `graphic_unread`, `form_control_unread` | Both: unread shapes/charts and checkbox/drop-down fields; DOCX also movies/ActiveX |
-| `unmapped_symbol` | Both: unmapped symbol glyphs; DOC also U+F000–F0FF in text/unresolved fonts |
+| `unmapped_symbol` | Both: unmapped symbol glyphs; DOC also U+F000–F0FF in text/unresolved fonts; DOCX also MTEF content characters without a Unicode form |
 | `block_unread` | DOCX rows/cells inside content controls, custom XML or alternate content; math in declined choices |
 | `imported_part_unread`, `ruby_unread` | DOCX altChunk/subDoc; ruby text |
 | `field_value_unread`, `link_target_unread` | DOCX unstored page/date values; missing hyperlink relationship unless label is URL |
@@ -55,14 +55,14 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## PowerPoint
 
-- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets.
+- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets; MathType and Equation Editor objects show as TeX as in Word.
 - **Comments:** Emit reads legacy/modern PPTX threads/replies and binary PPT comments, retaining resolved content. **Omitted:** `comment_omitted` for declared parts/records, `hidden_omitted` for hidden slides and PPTX DrawingML objects.
 
 | Lost code | Scope |
 |---|---|
 | `unit_unreadable`, `embedded_object`, `form_control_unread` | Both: listed unread slides, OLE content, controls |
 | `image_unavailable`, `link_target_unread` | Both: missing/undecodable pictures; targets absent from labels; PPT also unread picture stores |
-| `graphic_unread`, `unmapped_symbol` | Both: unread media/graphics; unmapped glyphs; PPTX also declined-choice charts and nested notes-shape text |
+| `graphic_unread`, `unmapped_symbol` | Both: unread media/graphics; unmapped glyphs; PPTX also declined-choice charts, nested notes-shape text and MTEF content characters without a Unicode form |
 | `image_unplaced` | PPTX picture-filled shapes, slide backgrounds, declined-choice pictures; every shown PPT picture |
 | `block_unread` | PPTX declined-choice text |
 | `recovered_stream_order`, `invalid_encoding` | PPT raw order after unusable persist directory may include superseded edits; undecodable text |

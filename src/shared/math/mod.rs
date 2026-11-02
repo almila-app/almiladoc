@@ -1,4 +1,9 @@
 mod mathml;
+#[deny(
+    clippy::indexing_slicing,
+    reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
+)]
+mod mtef;
 mod omml;
 mod tex;
 
@@ -6,6 +11,7 @@ mod tex;
 pub(crate) use omml::omath_to_tex;
 
 pub(crate) use mathml::{MathTex, mathml_is_display, mathml_to_tex};
+pub(crate) use mtef::{Equation, mtef_to_tex};
 pub(crate) use omml::{omath_para_to_tex, omath_para_with_damage, omath_with_damage};
 
 use crate::model::Inline;

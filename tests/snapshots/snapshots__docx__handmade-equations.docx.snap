@@ -1,0 +1,19 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+The roots are
+
+$$
+    x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}
+$$
+
+or, from Equation Editor, $x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}$
+
+$E=mc^{2}$
+
+# $x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}$
+
+|  |
+| --- |
+| $x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}$ |

@@ -36,7 +36,8 @@ pub struct Limits {
     /// Entries in one archive: each costs memory before any is read.
     pub max_entry_count: u64,
     /// Nesting depth of input structure (XML elements in a part, RTF groups,
-    /// Word fields) and of the parsed document's lists, table cells, quotes
+    /// Word fields, an equation object's MTEF record lists) and of the parsed
+    /// document's lists, table cells, quotes
     /// and links, a gap's fill counted from the container the gap sits in:
     /// recursion over it needs stack in proportion. At most
     /// [`Limits::MAX_NESTING_CEILING`].

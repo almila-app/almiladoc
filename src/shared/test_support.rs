@@ -106,3 +106,36 @@ pub(crate) fn empty_deflate_blocks(len: usize) -> Vec<u8> {
 pub(crate) fn positions(data: &[u8], needle: &[u8]) -> Vec<usize> {
     data.windows(needle.len()).enumerate().filter(|(_, w)| *w == needle).map(|(i, _)| i).collect()
 }
+
+/// MTEF v5 of variables in one line, as `MathType` writes it.
+pub(crate) fn mathtype(inline: bool, mtcodes: &[u16]) -> Vec<u8> {
+    let chars = mtcodes.iter().flat_map(|code| [&[2, 0, 131][..], &code.to_le_bytes()].concat());
+    [&[5, 1, 0, 6, 0][..], b"DSMT4\0", &[u8::from(inline), 10, 1, 0]]
+        .concat()
+        .into_iter()
+        .chain(chars)
+        .chain([0, 0])
+        .collect()
+}
+
+/// MTEF v3 of variables in one line, as Equation Editor 3.x writes it.
+pub(crate) fn equation_editor(mtcodes: &[u16]) -> Vec<u8> {
+    let chars = mtcodes.iter().flat_map(|code| [&[2, 131][..], &code.to_le_bytes()].concat());
+    [3, 1, 1, 3, 0, 10, 1].into_iter().chain(chars).chain([0, 0]).collect()
+}
+
+/// The CFB an equation object embeds, its `Equation Native` stream an EQNOLEFILEHDR of
+/// `header_bytes` declaring `declared` MTEF bytes before `mtef`.
+pub(crate) fn equation_object(header_bytes: u16, declared: usize, mtef: &[u8]) -> Vec<u8> {
+    let declared = u32::try_from(declared).unwrap();
+    let header =
+        [&header_bytes.to_le_bytes()[..], &[0; 6], &declared.to_le_bytes(), &[0; 16]].concat();
+    one_stream_cfb("Equation Native", &[header, mtef.to_vec()].concat())
+}
+
+pub(crate) fn one_stream_cfb(name: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut ole = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    ole.create_stream(name).unwrap().write_all(bytes).unwrap();
+    ole.flush().unwrap();
+    ole.into_inner().into_inner()
+}

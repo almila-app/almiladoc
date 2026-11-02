@@ -367,6 +367,69 @@ fn omml_flags_and_run_text_follow_their_values() {
     check(omml, OMML_VALUES);
 }
 
+#[test]
+fn an_optional_argument_holds_its_brackets() {
+    let omml_cases = [
+        (
+            "an OMML index with brackets",
+            "<m:rad><m:deg><m:r>n[m]</m:r></m:deg><m:e><m:r>x</m:r></m:e></m:rad>",
+            "\\sqrt[{n[m]}]{x}",
+        ),
+        (
+            "an OMML matrix opening with a bracket",
+            "<m:m><m:mr><m:e><m:r>[b]</m:r></m:e><m:e><m:r>c</m:r></m:e></m:mr></m:m>",
+            "\\begin{matrix} {}[b] & c \\end{matrix}",
+        ),
+        (
+            "an OMML equation array opening with a bracket",
+            "<m:eqArr><m:e><m:r>[b]&amp;=c</m:r></m:e><m:e><m:r>d&amp;=e</m:r></m:e></m:eqArr>",
+            "\\begin{aligned} {}[b] & =c \\\\ d & =e \\end{aligned}",
+        ),
+    ];
+    check(omml, &omml_cases);
+    let mathml_cases = [(
+        "a MathML index with brackets",
+        "<mroot><mi>x</mi><mrow><mi>n</mi><mo>[</mo><mi>m</mi><mo>]</mo></mrow></mroot>",
+        "\\sqrt[{n[m]}]{x}",
+    )];
+    check(mathml, &mathml_cases);
+}
+
+#[test]
+fn a_prime_or_superscript_never_doubles_one() {
+    let squared = "<m:sSup><m:e><m:r>x</m:r></m:e><m:sup><m:r>2</m:r></m:sup></m:sSup>";
+    let after_squared = |run: &str| format!("{squared}<m:r>{run}</m:r>");
+    let cases = [
+        (
+            "an OMML prime base",
+            "<m:sSup><m:e><m:r>\u{2032}</m:r></m:e><m:sup><m:r>2</m:r></m:sup></m:sSup>".to_owned(),
+            "{'}^{2}",
+        ),
+        (
+            "an OMML function limit over a prime and a space",
+            "<m:func><m:fName><m:limUpp><m:e><m:r>x\u{2032} </m:r></m:e><m:lim><m:r>n</m:r></m:lim></m:limUpp></m:fName><m:e><m:r>y</m:r></m:e></m:func>".to_owned(),
+            "{x' }^{n}{y}",
+        ),
+        ("an OMML prime after a superscript", after_squared("\u{2032}"), "x^{2}{}'"),
+        ("an OMML degree after a superscript", after_squared("\u{B0}"), "x^{2}{}^{\\circ}"),
+        ("an OMML spaced prime after a superscript", after_squared(" \u{2032}"), "x^{2}{} '"),
+        ("OMML primes in a row", "<m:r>x\u{2032}\u{2032}</m:r>".to_owned(), "x''"),
+        ("an OMML prime after a degree in one run", "<m:r>x\u{B0}\u{2032}</m:r>".to_owned(), "x^{\\circ}{}'"),
+    ];
+    for (name, body, tex) in cases {
+        assert_eq!(omml(&body), tex, "{name}");
+    }
+    let prime = "<msup><mi>x</mi><mn>2</mn></msup><mo>\u{2032}</mo>";
+    assert_eq!(mathml(prime), "x^{2}{}'", "a MathML prime after a superscript");
+}
+
+#[test]
+fn a_trailing_control_space_keeps_its_space() {
+    assert_eq!(omml("<m:r>x\u{A0}</m:r>"), "x\\ ", "an OMML equation ending in a no-break space");
+    let annotated = r#"<semantics><mi>y</mi><annotation encoding="application/x-tex"> x\ </annotation></semantics>"#;
+    assert_eq!(mathml(annotated), "x\\ ", "a MathML TeX annotation ending in a control space");
+}
+
 const MATHML_FORMS: &[(&str, &str, &str)] = &[
     ("a subscript", "<msub><mi>x</mi><mi>i</mi></msub>", "x_{i}"),
     (

@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from pathlib import Path
 
+from fixturegen import mtef
 from fixturegen.common import (
     DECL,
     DOT_PNG,
@@ -175,6 +176,41 @@ def order_pptx(out: Path) -> None:
         slide1_rels(("rId2", "oleObject", "../embeddings/oleObject1.bin")),
         ("ppt/embeddings/oleObject1.bin", b"OLE-PAYLOAD-STAND-IN" * 4),
         ct=pptx_types(defaults=[("bin", OFFICE_CT + "oleObject")]),
+    )
+
+
+def equations_pptx(out: Path) -> None:
+    """MathType and Equation Editor p:oleObj frames decode to TeX in place of their p:pic
+    previews: display equations become math blocks, an inline one a paragraph."""
+
+    def frame(shape_id: int, prog_id: str, rid: str) -> str:
+        return f"""<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{shape_id}" name="Equation"/>\
+<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">
+<p:oleObj name="Equation" progId="{prog_id}" r:id="{rid}"><p:embed/>
+<p:pic><p:nvPicPr><p:cNvPr id="0" name=""/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+<p:blipFill><a:blip r:embed="rId9"/></p:blipFill><p:spPr/></p:pic>
+</p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"""
+
+    body = (
+        frame(2, "Equation.DSMT4", "rId2")
+        + frame(3, "Equation.3", "rId3")
+        + frame(4, "Equation.DSMT4", "rId4")
+    )
+    write_pptx(
+        out / "pptx" / "handmade-equations.pptx",
+        ("ppt/slides/slide1.xml", slide(body)),
+        slide1_rels(
+            ("rId2", "oleObject", "../embeddings/oleObject1.bin"),
+            ("rId3", "oleObject", "../embeddings/oleObject2.bin"),
+            ("rId4", "oleObject", "../embeddings/oleObject3.bin"),
+            ("rId9", "image", "../media/preview.png"),
+        ),
+        ("ppt/embeddings/oleObject1.bin", mtef.ole_object(mtef.quadratic(mtef.V5))),
+        ("ppt/embeddings/oleObject2.bin", mtef.ole_object(mtef.quadratic(mtef.V3))),
+        ("ppt/embeddings/oleObject3.bin", mtef.ole_object(mtef.energy())),
+        ("ppt/media/preview.png", DOT_PNG),
+        ct=pptx_types(defaults=[("bin", OFFICE_CT + "oleObject"), ("png", "image/png")]),
     )
 
 
@@ -355,6 +391,7 @@ def generate(out: Path) -> None:
     inherit_pptx(out)
     strict_alt(out)
     order_pptx(out)
+    equations_pptx(out)
     links_pptx(out)
     math_pptx(out)
     scripts_pptx(out)
