@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 
 use crate::config::{
     CommentPolicy, HeaderFooterPolicy, HiddenPolicy, ImageOcr, ImagePolicy, PageSelection,
-    RevisionPolicy,
+    PdfScanPolicy, RevisionPolicy,
 };
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
@@ -23,6 +23,7 @@ pub(crate) struct ParseCtx<'a> {
     limits: &'a Limits,
     images: ImagePolicy,
     image_ocr: ImageOcr,
+    pdf_scans: PdfScanPolicy,
     headers_footers: HeaderFooterPolicy,
     comments: CommentPolicy,
     hidden: HiddenPolicy,
@@ -88,6 +89,7 @@ impl<'a> ParseCtx<'a> {
             limits,
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
+            pdf_scans: PdfScanPolicy::Conservative,
             headers_footers: HeaderFooterPolicy::Omit,
             comments: CommentPolicy::Omit,
             hidden: HiddenPolicy::Omit,
@@ -123,6 +125,18 @@ impl<'a> ParseCtx<'a> {
 
     pub(crate) fn with_image_ocr(self, image_ocr: ImageOcr) -> Self {
         Self { image_ocr, ..self }
+    }
+
+    pub(crate) fn with_pdf_scans(self, pdf_scans: PdfScanPolicy) -> Self {
+        Self { pdf_scans, ..self }
+    }
+
+    #[cfg_attr(
+        not(feature = "pdf"),
+        expect(dead_code, reason = "only the PDF reader judges scans")
+    )]
+    pub(crate) fn scans_by_coverage(&self) -> bool {
+        self.pdf_scans == PdfScanPolicy::CoverageFirst
     }
 
     pub(crate) fn with_headers_footers(self, headers_footers: HeaderFooterPolicy) -> Self {

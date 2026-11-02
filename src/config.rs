@@ -53,6 +53,8 @@ pub struct Config {
     pub images: ImagePolicy,
     /// Which images a parse leaves gaps after, for the caller's OCR.
     pub image_ocr: ImageOcr,
+    /// Which PDF pages a parse treats as scans and leaves gaps for.
+    pub pdf_scans: PdfScanPolicy,
     /// Whether the page headers and footers a document declares appear.
     pub headers_footers: HeaderFooterPolicy,
     /// Whether supported source comments appear as isolated footnotes.
@@ -113,6 +115,7 @@ impl Default for Config {
             on_loss: OnLoss::Fail,
             images: ImagePolicy::Placeholder,
             image_ocr: ImageOcr::None,
+            pdf_scans: PdfScanPolicy::Conservative,
             headers_footers: HeaderFooterPolicy::Omit,
             comments: CommentPolicy::Omit,
             hidden: HiddenPolicy::Omit,
@@ -214,6 +217,30 @@ impl ImageOcr {
     }
 }
 
+/// Which PDF pages a parse treats as scans, for the caller's OCR; any other format ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum PdfScanPolicy {
+    /// An image and no readable text, or only furniture or margin text over at least half the
+    /// page.
+    #[default]
+    Conservative,
+    /// The conservative pages, and every page at least half covered by images whatever native
+    /// text it holds, which OCR then replaces.
+    CoverageFirst,
+}
+
+impl PdfScanPolicy {
+    /// The policy's stable `snake_case` name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::CoverageFirst => "coverage_first",
+        }
+    }
+}
+
 /// The PDF pages a parse makes gaps whatever their text layer, for the caller to OCR; any
 /// other format ignores it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -281,7 +308,15 @@ mod tests {
         assert_eq!(config.threads, 1);
         assert_eq!(config.limits, Limits::default());
         assert_eq!(config.on_loss, OnLoss::Fail);
+        assert_eq!(config.pdf_scans, PdfScanPolicy::Conservative);
+        assert_eq!(PdfScanPolicy::default(), PdfScanPolicy::Conservative);
         assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_pdf_scan_policy_has_a_stable_name() {
+        assert_eq!(PdfScanPolicy::Conservative.as_str(), "conservative");
+        assert_eq!(PdfScanPolicy::CoverageFirst.as_str(), "coverage_first");
     }
 
     #[test]

@@ -111,9 +111,10 @@ UNRESOLVED_FONT = (
 Case = Sequence[tuple[bytes, Sequence[bytes]]]
 
 
-def case_pdf(pages: Case) -> bytes:
+def case_pdf(pages: Case, crop_boxes: Sequence[bytes] = ()) -> bytes:
     """Pages of a content stream each, painting the named XObjects; /F1 is Helvetica and
-    /F2 a font whose codes give no characters."""
+    /F2 a font whose codes give no characters. `crop_boxes`, when given, holds each page's
+    /CropBox."""
     names = [name for name in XOBJECTS if any(name in used for _, used in pages)]
     n = len(pages)
     first_page = 5 + len(names)
@@ -130,10 +131,11 @@ def case_pdf(pages: Case) -> bytes:
     for i, (content, used) in enumerate(pages):
         page, contents = first_page + 2 * i, first_page + 2 * i + 1
         xobjects = b" ".join(b"/%s %d 0 R" % (x, 5 + names.index(x)) for x in used)
+        crop = b" /CropBox [%s]" % crop_boxes[i] if crop_boxes else b""
         objs[page] = (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
-            b" /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << " + xobjects + b" >> >>"
-            b" /Contents %d 0 R >>" % contents
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]%s"
+            b" /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << %s >> >>"
+            b" /Contents %d 0 R >>" % (crop, xobjects, contents)
         )
         objs[contents] = stream(content)
     return assemble(objs)
@@ -314,6 +316,10 @@ def tiles() -> bytes:
     )
 
 
+def strips() -> bytes:
+    return b"".join(b"q 204 0 0 792 %d 0 cm /Scan Do Q\n" % x for x in range(0, 361, 60))
+
+
 def vector_glyphs() -> bytes:
     return b"0 g\n" + b"".join(
         b"%d %d m %d %d l %d %d l %d %d l h f\n" % (x, y, x + 3, y + 8, x + 6, y, x + 3, y + 3)
@@ -330,6 +336,9 @@ UNRESOLVED_RUN = b"BT /F2 12 Tf 72 600 Td <0102030405060708> Tj ET"
 COVER = text_lines(TITLE, top=420, size=20)
 LOGO = b"q 40 0 0 40 540 730 cm /Fig Do Q\n"
 PLATE = band(b"Fig", 475)
+MIDPAGE_STAMP = b"BT /F1 24 Tf 72 700 Td (Sayfa 3 / 47 -- ustbilgi) Tj ET\n"
+# CropBoxes with no area, outside the Letter MediaBox, and on its edge.
+CROP_BOXES = {"zero-area-crop-scan": [b"0 0 0 0", b"1000 1000 1100 1100", b"612 0 700 792"]}
 
 # Each page's verdict is pinned in tests/it/pdf.rs.
 VERDICT_CASES: dict[str, Case] = {
@@ -376,6 +385,17 @@ VERDICT_CASES: dict[str, Case] = {
         (running_head(1) + LOGO + text_lines(BODY), [b"Fig"]),
         (running_head(2) + LOGO, [b"Fig"]),
         (running_head(3) + LOGO + text_lines(BODY), [b"Fig"]),
+    ],
+    "midpage-stamped-scan": [(FULL_SCAN + MIDPAGE_STAMP, [b"Scan"])],
+    "strip-scan-stamped": [(strips() + MIDPAGE_STAMP, [b"Scan"])],
+    "clipped-scan-text": [(CLIP_AWAY + FULL_SCAN + b"Q\n" + text_lines(BODY), [b"Scan"])],
+    "zero-area-crop-scan": [
+        (FULL_SCAN + text_lines(BODY[2 * i : 2 * i + 2]), [b"Scan"]) for i in range(3)
+    ],
+    "scan-running-head": [
+        (running_head(1) + text_lines(BODY[:2]), []),
+        (text_lines(BODY[2:4]), []),
+        (PLATE + running_head(3) + text_lines(BODY[4:]), [b"Fig"]),
     ],
     "tiled-scan": [(tiles(), TILE_NAMES)],
     "tiled-scan-layer": [(tiles() + text_lines(BODY, mode=3), TILE_NAMES)],
@@ -479,4 +499,4 @@ def generate(out: Path) -> None:
     )
     write_file(pdf / "handmade-mesh-shading.pdf", mesh_shading_pdf())
     for name, pages in VERDICT_CASES.items():
-        write_file(pdf / f"handmade-{name}.pdf", case_pdf(pages))
+        write_file(pdf / f"handmade-{name}.pdf", case_pdf(pages, CROP_BOXES.get(name, ())))

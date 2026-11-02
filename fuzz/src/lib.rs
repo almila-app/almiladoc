@@ -3,7 +3,7 @@
 
 use almiladoc::{
     CommentPolicy, Config, Conversion, ConvertError, Converter, Format, HeaderFooterPolicy,
-    HiddenPolicy, Input, RevisionPolicy,
+    HiddenPolicy, Input, PdfScanPolicy, RevisionPolicy,
 };
 use std::io::{Cursor, Write};
 use zip::result::ZipResult;
@@ -73,6 +73,9 @@ fn policy_config(data: &[u8]) -> Config {
     }
     if bits & 8 != 0 {
         config.headers_footers = HeaderFooterPolicy::Emit;
+    }
+    if bits & 16 != 0 {
+        config.pdf_scans = PdfScanPolicy::CoverageFirst;
     }
     config
 }
@@ -297,21 +300,22 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    fn policy_profile(config: &Config) -> (bool, bool, bool, bool) {
+    fn policy_profile(config: &Config) -> (bool, bool, bool, bool, bool) {
         (
             config.comments == CommentPolicy::Emit,
             config.hidden == HiddenPolicy::Emit,
             config.revisions == RevisionPolicy::Reject,
             config.headers_footers == HeaderFooterPolicy::Emit,
+            config.pdf_scans == PdfScanPolicy::CoverageFirst,
         )
     }
 
     #[test]
     fn policy_profiles_keep_saved_inputs_stable_across_toolchain_versions() {
         for (bytes, profile) in [
-            (b"".as_slice(), (true, false, true, false)),
-            (b"a".as_slice(), (false, false, true, true)),
-            (b"hello".as_slice(), (true, true, false, true)),
+            (b"".as_slice(), (true, false, true, false, false)),
+            (b"a".as_slice(), (false, false, true, true, false)),
+            (b"hello".as_slice(), (true, true, false, true, false)),
         ] {
             assert_eq!(policy_profile(&policy_config(bytes)), profile);
         }
@@ -330,7 +334,7 @@ mod tests {
                     policy_profile(&selected)
                 })
                 .collect();
-            assert_eq!(profiles.len(), 16, "{size}-byte payloads");
+            assert_eq!(profiles.len(), 32, "{size}-byte payloads");
         }
     }
 

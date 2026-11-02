@@ -38,6 +38,7 @@ RTF = FIXTURES / "rtf" / "text.rtf"
 ENCRYPTED = FIXTURES / "malformed" / "encrypted--errors.odt"
 ZIPBOMB = FIXTURES / "abuse" / "max_entry_bytes--zipbomb--errors.docx"
 MIXED = FIXTURES / "pdf" / "handmade-mixed.pdf"
+STAMPED_SCAN = FIXTURES / "pdf" / "handmade-midpage-stamped-scan.pdf"
 FIVE_PAGE = FIXTURES / "pdf" / "handmade-five-page.pdf"
 PREDEFINED_CMAP = FIXTURES / "pdf" / "handmade-predefined-cmap.pdf"
 UNCLOSED = FIXTURES / "malformed" / "unclosed-notes--skips.docx"
@@ -236,6 +237,14 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(inspection.page_count, 2)
         self.assertEqual(inspection.pages, ((1, "text", []), (2, "needs_ocr", ["image_backed"])))
         self.assertEqual([(d.code, d.unit) for d in inspection.diagnostics], [("ocr_gap", 2)])
+
+    def test_coverage_first_sends_a_scan_stamped_with_text_to_ocr(self):
+        data = STAMPED_SCAN.read_bytes()
+        default = almiladoc.Converter().inspect(data, "pdf")
+        self.assertEqual(default.pages, ((1, "text", []),))
+        config = almiladoc.Config(pdf_scans=almiladoc.PdfScanPolicy.COVERAGE_FIRST)
+        inspection = almiladoc.Converter(config).inspect(data, "pdf")
+        self.assertEqual(inspection.pages, ((1, "needs_ocr", ["image_backed"]),))
 
     def test_ocr_pages_makes_each_chosen_pdf_page_a_gap(self):
         data = MIXED.read_bytes()
@@ -892,6 +901,25 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(len({omitted, emitted}), 2)
         self.assertEqual(len({almiladoc.Converter(c).identity for c in (omitted, emitted)}), 2)
 
+    def test_pdf_scan_policy_is_frozen_and_fingerprinted(self):
+        default = almiladoc.Config()
+        first = almiladoc.Config(pdf_scans=almiladoc.PdfScanPolicy.COVERAGE_FIRST)
+        self.assertEqual(default.pdf_scans, almiladoc.PdfScanPolicy.CONSERVATIVE)
+        self.assertEqual(first.pdf_scans, almiladoc.PdfScanPolicy.COVERAGE_FIRST)
+        self.assertEqual(almiladoc.Config(pdf_scans=None), default)
+        self.assertEqual(
+            [repr(p) for p in (default.pdf_scans, first.pdf_scans)],
+            ["PdfScanPolicy.CONSERVATIVE", "PdfScanPolicy.COVERAGE_FIRST"],
+        )
+        self.assertIn("pdf_scans=PdfScanPolicy.COVERAGE_FIRST, ", repr(first))
+        self.assertEqual(len({default, first}), 2)
+        self.assertNotEqual(hash(default), hash(first))
+        self.assertEqual(len({almiladoc.Converter(c).identity for c in (default, first)}), 2)
+        with self.assertRaises(AttributeError):
+            first.pdf_scans = almiladoc.PdfScanPolicy.CONSERVATIVE
+        with self.assertRaises(TypeError):
+            almiladoc.Config(pdf_scans="coverage_first")
+
     def test_comment_policy_reaches_the_model_and_markdown(self):
         ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
         source = archive(
@@ -986,7 +1014,8 @@ class ConfigTest(unittest.TestCase):
             r"^Config\(limits=Limits\(max_entry_bytes=134217728, .*, max_work=536870912, "
             r"max_pages=100000, max_ocr_text_bytes=1048576\), "
             r"threads=1, on_loss=OnLoss\.FAIL, images=ImagePolicy\.PLACEHOLDER, "
-            r"image_ocr=ImageOcr\.NONE, headers_footers=HeaderFooterPolicy\.OMIT, "
+            r"image_ocr=ImageOcr\.NONE, pdf_scans=PdfScanPolicy\.CONSERVATIVE, "
+            r"headers_footers=HeaderFooterPolicy\.OMIT, "
             r"comments=CommentPolicy\.OMIT, hidden=HiddenPolicy\.OMIT, "
             r"revisions=RevisionPolicy\.ACCEPT\)$",
         )

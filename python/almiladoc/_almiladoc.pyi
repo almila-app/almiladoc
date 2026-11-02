@@ -41,6 +41,7 @@ __all__ = [
     "OnLoss",
     "PageOutOfRangeError",
     "Parsed",
+    "PdfScanPolicy",
     "ResourceLimitError",
     "RevisionPolicy",
     "TokenUsage",
@@ -213,6 +214,17 @@ class ImageOcr:
     ALL: ClassVar[ImageOcr]
 
 @final
+class PdfScanPolicy:
+    """Which PDF pages a parse treats as scans, for the caller's OCR:
+    `CONSERVATIVE`, an image and no readable text, or only furniture or
+    margin text over at least half the page; `COVERAGE_FIRST`, those pages
+    and every page at least half covered by images whatever native text it
+    holds, which OCR then replaces. Other formats ignore it."""
+
+    CONSERVATIVE: ClassVar[PdfScanPolicy]
+    COVERAGE_FIRST: ClassVar[PdfScanPolicy]
+
+@final
 class Limits:
     """The safety limits of one `Converter`, frozen; each crossing raises
     `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
@@ -306,9 +318,10 @@ class Limits:
 class Config:
     """The configuration of one `Converter`, frozen and keyword-only: its
     `Limits`, the threads each call runs on (1 to 64; no reader uses more
-    than one), what a loss does, how images appear and which leave gaps for
-    OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
-    1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
+    than one), what a loss does, how images appear, which leave gaps for
+    OCR and which PDF pages count as scans. Omitted fields, and `None`, take
+    almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL`,
+    `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`,
     `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and
     `RevisionPolicy.ACCEPT`.
     A thread count out of range raises `ConfigError`."""
@@ -321,6 +334,7 @@ class Config:
         on_loss: OnLoss | None = None,
         images: ImagePolicy | None = None,
         image_ocr: ImageOcr | None = None,
+        pdf_scans: PdfScanPolicy | None = None,
         headers_footers: HeaderFooterPolicy | None = None,
         comments: CommentPolicy | None = None,
         hidden: HiddenPolicy | None = None,
@@ -341,6 +355,9 @@ class Config:
     @property
     def image_ocr(self) -> ImageOcr:
         """Which images a parse leaves a gap after for OCR."""
+    @property
+    def pdf_scans(self) -> PdfScanPolicy:
+        """Which PDF pages a parse treats as scans."""
 
     @property
     def hidden(self) -> HiddenPolicy:

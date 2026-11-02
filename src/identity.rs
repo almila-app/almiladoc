@@ -38,6 +38,7 @@ fn fingerprinted(config: &Config) -> String {
         on_loss,
         images,
         image_ocr,
+        pdf_scans,
         headers_footers,
         comments,
         hidden,
@@ -49,6 +50,9 @@ fn fingerprinted(config: &Config) -> String {
         images.as_str(),
         image_ocr.as_str()
     );
+    if *pdf_scans == crate::PdfScanPolicy::CoverageFirst {
+        fields.push_str("pdf_scans=coverage_first;");
+    }
     if *headers_footers == crate::HeaderFooterPolicy::Emit {
         fields.push_str("headers_footers=emit;");
     }
@@ -72,6 +76,7 @@ mod tests {
     #[test]
     fn content_policies_follow_declaration_order_and_omit_defaults() {
         let config = Config {
+            pdf_scans: crate::PdfScanPolicy::CoverageFirst,
             headers_footers: crate::HeaderFooterPolicy::Emit,
             comments: crate::CommentPolicy::Emit,
             hidden: crate::HiddenPolicy::Emit,
@@ -80,7 +85,7 @@ mod tests {
         };
         assert_eq!(
             fingerprinted(&config),
-            "on_loss=fail;images=placeholder;image_ocr=none;headers_footers=emit;comments=emit;hidden=emit;revisions=reject;"
+            "on_loss=fail;images=placeholder;image_ocr=none;pdf_scans=coverage_first;headers_footers=emit;comments=emit;hidden=emit;revisions=reject;"
         );
     }
 
@@ -122,6 +127,8 @@ mod tests {
         );
         let image_ocr = crate::ImageOcr::All;
         assert_ne!(EngineIdentity::of(&Config { image_ocr, ..Config::default() }), fail);
+        let pdf_scans = crate::PdfScanPolicy::CoverageFirst;
+        assert_ne!(EngineIdentity::of(&Config { pdf_scans, ..Config::default() }), fail);
         let mut resourced = Config { threads: 8, ..Config::default() };
         resourced.limits.max_work = 1;
         assert_eq!(EngineIdentity::of(&resourced), fail);

@@ -7,8 +7,8 @@ use crate::build::docx;
 use crate::support::{configured, converter, corpus, fixture, limited, reported, reporting, trips};
 use almiladoc::model::{GapReason, OcrOrigin, UnitKind};
 use almiladoc::{
-    ConvertError, DiagnosticCode, Diagnostics, Format, HeaderFooterPolicy, Input, Limit, LossClass,
-    OnLoss, PageSelection, PageVerdict, Region, UnsupportedKind,
+    ConvertError, Converter, DiagnosticCode, Diagnostics, Format, HeaderFooterPolicy, Input, Limit,
+    LossClass, OnLoss, PageSelection, PageVerdict, PdfScanPolicy, Region, UnsupportedKind,
 };
 
 const VERDICTS: &[(&str, &[&str])] = &[
@@ -36,6 +36,11 @@ const VERDICTS: &[(&str, &[&str])] = &[
     ("handmade-figure-plates", &["text"; 5]),
     ("handmade-chapter-dividers", &["text"; 3]),
     ("handmade-logo-header", &["text"; 3]),
+    ("handmade-midpage-stamped-scan", &["text"]),
+    ("handmade-strip-scan-stamped", &["text"]),
+    ("handmade-clipped-scan-text", &["text"]),
+    ("handmade-zero-area-crop-scan", &["text"; 3]),
+    ("handmade-scan-running-head", &["text"; 3]),
     ("handmade-tiled-scan", &["needs_ocr image_backed"]),
     ("handmade-tiled-scan-layer", &["needs_ocr invisible_text"]),
     (
@@ -61,12 +66,34 @@ const VERDICTS: &[(&str, &[&str])] = &[
     ("text", &["text", "text"]),
 ];
 
+const COVERAGE_FIRST: &[(&str, &[&str])] = &[
+    ("handmade-invisible-mode3-scan", &["needs_ocr invisible_text image_backed"]),
+    ("handmade-inkless-mode3-scan", &["needs_ocr invisible_text image_backed"]),
+    ("handmade-midpage-stamped-scan", &["needs_ocr image_backed"]),
+    ("handmade-strip-scan-stamped", &["needs_ocr image_backed"]),
+    ("handmade-zero-area-crop-scan", &["needs_ocr image_backed"; 3]),
+    ("handmade-scan-running-head", &["text", "text", "needs_ocr image_backed"]),
+    (
+        "handmade-figure-plates",
+        &["text", "text", "text", "needs_ocr image_backed", "needs_ocr image_backed"],
+    ),
+    ("handmade-chapter-dividers", &["needs_ocr image_backed"; 3]),
+    ("handmade-tiled-scan-layer", &["needs_ocr invisible_text image_backed"]),
+    ("handmade-figure-cover-hires", &["needs_ocr image_backed"]),
+    ("handmade-figure-cover", &["needs_ocr image_backed"]),
+    ("handmade-census-cover", &["needs_ocr image_backed"]),
+];
+
 fn pdf_fixture(name: &str) -> Vec<u8> {
     fixture(&format!("pdf/{name}.pdf"))
 }
 
 fn verdicts(bytes: &[u8]) -> Vec<String> {
-    let inspection = converter(1).inspect(Input::new(bytes, Format::Pdf)).unwrap();
+    verdicts_by(&converter(1), bytes)
+}
+
+fn verdicts_by(converter: &Converter, bytes: &[u8]) -> Vec<String> {
+    let inspection = converter.inspect(Input::new(bytes, Format::Pdf)).unwrap();
     inspection
         .pages()
         .iter()
@@ -86,6 +113,83 @@ fn every_page_of_every_case_has_its_pinned_verdict() {
     }
     let pinned = corpus().into_iter().filter(|path| path.extension().is_some_and(|e| e == "pdf"));
     assert_eq!(pinned.count(), VERDICTS.len(), "every PDF fixture has its verdicts pinned");
+}
+
+fn coverage_first(on_loss: OnLoss) -> Converter {
+    configured(|config| {
+        config.pdf_scans = PdfScanPolicy::CoverageFirst;
+        config.on_loss = on_loss;
+    })
+}
+
+#[test]
+fn coverage_first_flags_pages_half_covered_by_images_and_leaves_every_other_verdict() {
+    let pinned = |name| VERDICTS.iter().any(|(pinned, _)| *pinned == name);
+    assert!(COVERAGE_FIRST.iter().all(|(name, _)| pinned(*name)));
+    let converter = coverage_first(OnLoss::Fail);
+    for (name, default) in VERDICTS {
+        let expected = COVERAGE_FIRST
+            .iter()
+            .find_map(|(flagged, verdicts)| (flagged == name).then_some(*verdicts))
+            .unwrap_or(default);
+        assert_eq!(verdicts_by(&converter, &pdf_fixture(name)), expected, "{name}");
+    }
+}
+
+#[test]
+fn coverage_first_replaces_the_native_text_of_a_scanned_page_with_a_gap() {
+    let bytes = pdf_fixture("handmade-midpage-stamped-scan");
+    let input = || Input::new(&bytes, Format::Pdf);
+    let gap = coverage_first(OnLoss::Report).convert(input()).unwrap();
+    assert_eq!(gap.markdown(), "<!-- needs-ocr page 1 -->\n");
+    assert_eq!(rows(gap.diagnostics()), [(DiagnosticCode::OcrGap, Some(1))]);
+    let error = coverage_first(OnLoss::Fail).convert(input()).unwrap_err();
+    assert_matches!(&error, ConvertError::NeedsOcr { pages, page_count: 1, .. } if pages == &[1]);
+}
+
+#[test]
+fn a_selected_page_keeps_its_coverage_first_reason_before_the_callers() {
+    use GapReason::{CallerRequested as Asked, ImageBacked as Scanned};
+    let bytes = pdf_fixture("handmade-figure-plates");
+    let pages = selecting(&[1, 4]);
+    let inspection = coverage_first(OnLoss::Fail).inspect(pdf_input(&bytes, &pages)).unwrap();
+    let needs: Vec<_> = inspection
+        .pages()
+        .iter()
+        .filter_map(|page| match &page.verdict {
+            PageVerdict::NeedsOcr { reasons } => Some((page.page.get(), reasons.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(needs, [(1, vec![Asked]), (4, vec![Scanned, Asked]), (5, vec![Scanned])]);
+}
+
+#[test]
+fn running_heads_are_judged_across_the_pages_coverage_first_sends_to_ocr() {
+    let bytes = pdf_fixture("handmade-scan-running-head");
+    let conversion =
+        coverage_first(OnLoss::Report).convert(Input::new(&bytes, Format::Pdf)).unwrap();
+    assert_eq!(
+        conversion.markdown(),
+        "Interviews were transcribed and coded by two raters working independently, and \
+         disagreements were settled by discussion.\n\n\
+         The coding frame followed the categories of the pilot study, with two additions that \
+         the pilot had not anticipated at all.\n\n\
+         <!-- needs-ocr page 3 -->\n"
+    );
+    let codes: Vec<_> = conversion
+        .diagnostics()
+        .iter()
+        .map(|d| (d.code, d.unit.map(NonZeroU32::get), d.count))
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            (DiagnosticCode::OcrGap, Some(3), 1),
+            (DiagnosticCode::HeaderOmitted, Some(1), 1),
+            (DiagnosticCode::FooterOmitted, Some(1), 1),
+        ]
+    );
 }
 
 #[test]
@@ -431,7 +535,7 @@ fn pdf_output_is_identical_across_runs_and_threads() {
     let (one, four) = (at(1), at(4));
     for (name, _) in VERDICTS {
         let bytes = pdf_fixture(name);
-        let run = |converter: &almiladoc::Converter| {
+        let run = |converter: &Converter| {
             let parsed = converter.parse(Input::new(&bytes, Format::Pdf)).unwrap();
             let converted = converter.convert(Input::new(&bytes, Format::Pdf)).unwrap();
             (parsed.document().clone(), converted)

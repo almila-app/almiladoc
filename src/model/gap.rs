@@ -69,8 +69,9 @@ pub enum GapReason {
     InvisibleText,
     /// Every text run it draws is in a font whose codes give no characters.
     GarbledText,
-    /// Its text is an image: no text over an image, or only furniture or margin text over at least
-    /// half the page.
+    /// Its text is an image: no text over an image, only furniture or margin text over at least
+    /// half the page, or any text there under
+    /// [`PdfScanPolicy::CoverageFirst`](crate::PdfScanPolicy::CoverageFirst).
     ImageBacked,
     /// Its glyphs are drawn as filled paths, with no text and no image.
     VectorDrawn,

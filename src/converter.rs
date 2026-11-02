@@ -287,6 +287,7 @@ impl Converter {
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_images(self.config.images)
             .with_image_ocr(self.config.image_ocr)
+            .with_pdf_scans(self.config.pdf_scans)
             .with_headers_footers(self.config.headers_footers)
             .with_comments(self.config.comments)
             .with_hidden(self.config.hidden)

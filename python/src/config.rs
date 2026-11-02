@@ -162,6 +162,31 @@ impl ImageOcr {
     }
 }
 
+/// Which PDF pages a parse treats as scans, for the caller's OCR: `CONSERVATIVE`, an image and
+/// no readable text, or only furniture or margin text over at least half the page;
+/// `COVERAGE_FIRST`, those pages and every page at least half covered by images whatever native
+/// text it holds, which OCR then replaces. Other formats ignore it.
+#[pyclass(frozen, eq, hash, module = "almiladoc")]
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct PdfScanPolicy(almiladoc::PdfScanPolicy);
+
+#[pymethods]
+impl PdfScanPolicy {
+    #[classattr]
+    const CONSERVATIVE: Self = Self(almiladoc::PdfScanPolicy::Conservative);
+
+    #[classattr]
+    const COVERAGE_FIRST: Self = Self(almiladoc::PdfScanPolicy::CoverageFirst);
+
+    fn __repr__(&self) -> &'static str {
+        match self.0 {
+            almiladoc::PdfScanPolicy::Conservative => "PdfScanPolicy.CONSERVATIVE",
+            almiladoc::PdfScanPolicy::CoverageFirst => "PdfScanPolicy.COVERAGE_FIRST",
+            _ => "PdfScanPolicy.<unknown>",
+        }
+    }
+}
+
 /// The safety limits of one `Converter`, frozen; each crossing raises
 /// `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
 /// than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
@@ -258,9 +283,10 @@ impl Hash for Limits {
 
 /// The configuration of one `Converter`, frozen and keyword-only: its
 /// `Limits`, the threads each call runs on (1 to 64; no reader uses more
-/// than one), what a loss does, how images appear and which leave gaps for
-/// OCR. Omitted fields, and `None`, take almiladoc's defaults: `Limits()`,
-/// 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`,
+/// than one), what a loss does, how images appear, which leave gaps for
+/// OCR and which PDF pages count as scans. Omitted fields, and `None`, take
+/// almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL`,
+/// `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`,
 /// `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and
 /// `RevisionPolicy.ACCEPT`.
 /// A thread count out of range raises `ConfigError`.
@@ -275,7 +301,7 @@ impl Config {
         clippy::too_many_arguments,
         reason = "Python keywords mirror the core configuration fields"
     )]
-    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, headers_footers = None, comments = None, hidden = None, revisions = None))]
+    #[pyo3(signature = (*, limits = None, threads = almiladoc::Config::default().threads, on_loss = None, images = None, image_ocr = None, pdf_scans = None, headers_footers = None, comments = None, hidden = None, revisions = None))]
     fn new(
         py: Python<'_>,
         limits: Option<&Bound<'_, Limits>>,
@@ -283,6 +309,7 @@ impl Config {
         on_loss: Option<&Bound<'_, OnLoss>>,
         images: Option<&Bound<'_, ImagePolicy>>,
         image_ocr: Option<&Bound<'_, ImageOcr>>,
+        pdf_scans: Option<&Bound<'_, PdfScanPolicy>>,
         headers_footers: Option<&Bound<'_, HeaderFooterPolicy>>,
         comments: Option<&Bound<'_, CommentPolicy>>,
         hidden: Option<&Bound<'_, HiddenPolicy>>,
@@ -301,6 +328,9 @@ impl Config {
         }
         if let Some(image_ocr) = image_ocr {
             config.image_ocr = image_ocr.get().0;
+        }
+        if let Some(pdf_scans) = pdf_scans {
+            config.pdf_scans = pdf_scans.get().0;
         }
         if let Some(policy) = hidden {
             config.hidden = policy.get().0;
@@ -348,6 +378,12 @@ impl Config {
         ImageOcr(self.0.image_ocr)
     }
 
+    /// Which PDF pages a parse treats as scans.
+    #[getter]
+    fn pdf_scans(&self) -> PdfScanPolicy {
+        PdfScanPolicy(self.0.pdf_scans)
+    }
+
     /// Whether the page headers and footers a document declares appear.
     #[getter]
     fn headers_footers(&self) -> HeaderFooterPolicy {
@@ -374,12 +410,13 @@ impl Config {
 
     fn __repr__(&self) -> String {
         format!(
-            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, headers_footers={}, comments={}, hidden={}, revisions={})",
+            "Config(limits={}, threads={}, on_loss={}, images={}, image_ocr={}, pdf_scans={}, headers_footers={}, comments={}, hidden={}, revisions={})",
             self.limits().__repr__(),
             self.0.threads,
             self.on_loss().__repr__(),
             self.images().__repr__(),
             self.image_ocr().__repr__(),
+            self.pdf_scans().__repr__(),
             self.headers_footers().__repr__(),
             self.comments().__repr__(),
             self.hidden().__repr__(),
@@ -395,6 +432,7 @@ impl Hash for Config {
         self.0.on_loss.hash(state);
         self.0.images.hash(state);
         self.0.image_ocr.hash(state);
+        self.0.pdf_scans.hash(state);
         self.0.headers_footers.hash(state);
         self.0.comments.hash(state);
         self.0.hidden.hash(state);

@@ -26,6 +26,7 @@ use crate::shared::sides::{PageSides, SideTimeline};
 
 const SCAN_COVERAGE: f32 = 0.9;
 const PARTIAL_SCAN_COVERAGE: f32 = 0.5;
+const HALF_PAGE: f32 = 0.5;
 const RUNNING_HEAD_CHARS: usize = 80;
 
 pub(crate) struct Read {
@@ -72,7 +73,7 @@ pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, Conve
         let scope = parse_ctx.begin_unit(UnitKind::Page, index)?;
         let unit = scope.unit().model();
         document.blocks.push(Block::UnitStart(unit));
-        let verdict = page_verdict(page.as_ref(), furnished);
+        let verdict = page_verdict(page.as_ref(), furnished, parse_ctx.scans_by_coverage());
         let verdict =
             if parse_ctx.ocr_requested(unit.ordinal) { requested(verdict) } else { verdict };
         if let PageVerdict::NeedsOcr { reasons } = &verdict {
@@ -381,16 +382,16 @@ fn numbers_hold(on: &[Sighting<'_>], folio: bool) -> bool {
     })
 }
 
-fn page_verdict(page: Option<&ReadPage>, furnished: Furnished) -> PageVerdict {
+fn page_verdict(page: Option<&ReadPage>, furnished: Furnished, by_coverage: bool) -> PageVerdict {
     page.map_or_else(
         || PageVerdict::NeedsOcr { reasons: vec![GapReason::UnreadableContent] },
-        |read| verdict(read, furnished),
+        |read| verdict(read, furnished, by_coverage),
     )
 }
 
-fn verdict(read: &ReadPage, furnished: Furnished) -> PageVerdict {
+fn verdict(read: &ReadPage, furnished: Furnished, by_coverage: bool) -> PageVerdict {
     let text_chars = read.texts.iter().map(|text| text.chars).sum();
-    let reasons = reasons(&read.page, text_chars, scanned(&read.page, furnished));
+    let reasons = reasons(&read.page, text_chars, scanned(&read.page, furnished, by_coverage));
     if !reasons.is_empty() {
         PageVerdict::NeedsOcr { reasons }
     } else if text_chars == 0 {
@@ -400,7 +401,10 @@ fn verdict(read: &ReadPage, furnished: Furnished) -> PageVerdict {
     }
 }
 
-fn scanned(page: &Page, furnished: Furnished) -> bool {
+fn scanned(page: &Page, furnished: Furnished, by_coverage: bool) -> bool {
+    if by_coverage && page.image_coverage >= HALF_PAGE {
+        return true;
+    }
     let margin_only =
         page.painted_text_chars > 0 && page.margin_text_chars == page.painted_text_chars;
     let furniture_only = if page.image_coverage >= SCAN_COVERAGE {
@@ -662,14 +666,23 @@ mod tests {
     }
 
     fn judged(pages: &[Option<ReadPage>]) -> Vec<PageVerdict> {
+        judged_by(pages, ParseCtx::default().scans_by_coverage())
+    }
+
+    fn judged_by(pages: &[Option<ReadPage>], by_coverage: bool) -> Vec<PageVerdict> {
         let furniture = Furniture::of(&ParseCtx::default(), pages).unwrap();
-        let judge =
-            |(read, &furnished): (&Option<ReadPage>, _)| page_verdict(read.as_ref(), furnished);
+        let judge = |(read, &furnished): (&Option<ReadPage>, _)| {
+            page_verdict(read.as_ref(), furnished, by_coverage)
+        };
         pages.iter().zip(&furniture.pages).map(judge).collect()
     }
 
     fn ruled(page: Page) -> PageVerdict {
-        judged(&[Some(read_page(page))]).remove(0)
+        ruled_by(page, ParseCtx::default().scans_by_coverage())
+    }
+
+    fn ruled_by(page: Page, by_coverage: bool) -> PageVerdict {
+        judged_by(&[Some(read_page(page))], by_coverage).remove(0)
     }
 
     fn needs_ocr(reasons: &[GapReason]) -> PageVerdict {
@@ -795,6 +808,10 @@ mod tests {
     }
 
     fn image_backed_pages(pages: &[&[&str]], coverage: f32) -> Vec<bool> {
+        image_backed_pages_by(pages, coverage, false)
+    }
+
+    fn image_backed_pages_by(pages: &[&[&str]], coverage: f32, by_coverage: bool) -> Vec<bool> {
         let pages: Vec<_> = pages
             .iter()
             .map(|texts| {
@@ -804,7 +821,7 @@ mod tests {
             })
             .collect();
         let image_backed = needs_ocr(&[GapReason::ImageBacked]);
-        judged(&pages).into_iter().map(|verdict| verdict == image_backed).collect()
+        judged_by(&pages, by_coverage).into_iter().map(|verdict| verdict == image_backed).collect()
     }
 
     #[test]
@@ -824,6 +841,59 @@ mod tests {
             [&["Chapter 1", "Handbook"], &["Chapter 2", "Handbook"], &["Chapter 3", "Handbook"]];
         assert_eq!(image_backed_pages(&dividers, 0.89), [false; 3]);
         assert_eq!(image_backed_pages(&dividers, 0.9), [true; 3]);
+    }
+
+    fn covered_page(texts: &[&str], coverage: f32, margin_chars: u32) -> Page {
+        let mut page = page(texts);
+        page.image_op_count = 1;
+        page.image_coverage = coverage;
+        (page.painted_text_chars, page.margin_text_chars) = (4, margin_chars);
+        page
+    }
+
+    #[test]
+    fn coverage_first_sends_a_page_half_covered_by_images_to_ocr_whatever_text_it_holds() {
+        let rows: [(&[&str], f32, bool, bool); 6] = [
+            (&["Body"], 0.5, false, true),
+            (&["Body"], 0.6, false, true),
+            (&["Body"], 0.49, false, false),
+            (&["Body"], 1.0, false, true),
+            (&["Body"], 0.0, false, false),
+            (&[], 0.49, true, true),
+        ];
+        let ruling = |scanned| {
+            if scanned { needs_ocr(&[GapReason::ImageBacked]) } else { PageVerdict::Text }
+        };
+        for (texts, coverage, by_default, coverage_first) in rows {
+            let page = || covered_page(texts, coverage, 0);
+            assert_eq!(ruled(page()), ruling(by_default), "{texts:?} {coverage}");
+            let found = ruled_by(page(), true);
+            assert_eq!(found, ruling(coverage_first), "{texts:?} {coverage}");
+        }
+    }
+
+    #[test]
+    fn coverage_first_flags_every_page_the_conservative_rule_flags() {
+        let scanned = needs_ocr(&[GapReason::ImageBacked]);
+        let shapes: [(&[&str], u32); 3] = [(&[], 0), (&["Body"], 0), (&["Body"], 4)];
+        for coverage in [0.0, 0.3, 0.49, 0.5, 0.75, 0.89, 0.9, 1.0] {
+            for (texts, margin) in shapes {
+                let flagged = |by_coverage| {
+                    ruled_by(covered_page(texts, coverage, margin), by_coverage) == scanned
+                };
+                let (conservative, coverage_first) = (flagged(false), flagged(true));
+                assert!(!conservative || coverage_first, "{texts:?} {margin} {coverage}");
+            }
+        }
+        let stamps: [&[&str]; 3] =
+            [&["PROCEEDINGS 1923", "17"], &["PROCEEDINGS 1923", "18"], &["PROCEEDINGS 1923", "19"]];
+        for by_coverage in [false, true] {
+            assert_eq!(
+                image_backed_pages_by(&stamps, 0.5, by_coverage),
+                [true; 3],
+                "{by_coverage}"
+            );
+        }
     }
 
     #[test]
