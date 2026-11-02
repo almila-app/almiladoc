@@ -26,8 +26,10 @@ description: Change the public surface the Python binding mirrors - `Format`, a 
    `JSON_SCHEMA_VERSION` only when a field or `kind` is removed, renamed or changes meaning.
 2. Mirror it in the binding (`python/src/`):
    - `errors.rs`: per error variant an exception class and its arm in `raise` with its
-     attributes; per `ConfigError` variant its arm in `config_error`. `lib.rs`: a new class,
-     function or exception joins a `#[pymodule_export]` import.
+     attributes, `InvalidConfig` alone raising `ConfigError` through `config_error` (an arm
+     raising another class names it in `raise`'s doc); per `ConfigError` variant its arm in
+     `config_error`. `lib.rs`: a new class, function or exception joins a `#[pymodule_export]`
+     import.
    - `config.rs`: a `Limits` field joins the `limits!` list with its one-line doc; a `Config`
      field gets its keyword, getter, `__repr__` and `Hash` term; an `OnLoss` variant its
      `#[classattr]` and `__repr__` arm.

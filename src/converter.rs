@@ -402,8 +402,7 @@ impl<'a> Input<'a> {
     ///
     /// # Errors
     ///
-    /// A call on it fails [`ConvertError::InvalidConfig`] with
-    /// [`ConfigError::PageOutOfRange`] before any page is read when `pages`
+    /// A call on it fails [`ConvertError::PageOutOfRange`] before any page is read when `pages`
     /// names one past the document's last.
     ///
     /// # Examples
@@ -411,7 +410,7 @@ impl<'a> Input<'a> {
     /// ```
     /// # #[cfg(feature = "pdf")] {
     /// use almiladoc::model::GapReason;
-    /// use almiladoc::{Config, ConfigError, ConvertError, Converter, Format, Input, PageSelection};
+    /// use almiladoc::{Config, ConvertError, Converter, Format, Input, PageSelection};
     ///
     /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pdf/handmade-mixed.pdf");
     /// let pdf = std::fs::read(path)?;
@@ -426,7 +425,7 @@ impl<'a> Input<'a> {
     /// let refused = converter.parse(Input::new(&pdf, Format::Pdf).with_ocr_pages(past));
     /// assert!(matches!(
     ///     refused,
-    ///     Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page: 3, page_count: 2, .. }))
+    ///     Err(ConvertError::PageOutOfRange { page: 3, page_count: 2, .. })
     /// ));
     /// # }
     /// # Ok::<(), Box<dyn std::error::Error>>(())

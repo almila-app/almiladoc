@@ -408,13 +408,9 @@ impl Parsed {
         let ids = self.gap_ids(gaps);
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
-        let requests =
-            py.detach(|| parsed.ocr_requests(&spec, ids.as_deref())).map_err(|e| match e {
-                ConvertError::InvalidConfig(error @ almiladoc::ConfigError::Raster) => {
-                    config_error(py, &error)
-                }
-                e => convert_error(py, &e),
-            })?;
+        let requests = py
+            .detach(|| parsed.ocr_requests(&spec, ids.as_deref()))
+            .map_err(|e| convert_error(py, &e))?;
         requests
             .iter()
             .map(|request| {
@@ -472,7 +468,7 @@ impl Parsed {
 ///
 /// `ocr_pages`, `"all"` or a set of 1-based pages, makes each selected PDF
 /// page a gap with reason `caller_requested` whatever its text, discarded
-/// without loss; a page past the last raises `InvalidConfigError`, any other
+/// without loss; a page past the last raises `PageOutOfRangeError`, any other
 /// page outside 1 to 4294967295 `ValueError`, and any other format ignores it.
 ///
 /// `ocr`, an `OcrHttp`, reads a conversion's gaps before it renders, as

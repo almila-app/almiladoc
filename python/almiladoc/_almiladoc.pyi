@@ -27,7 +27,6 @@ __all__ = [
     "IncompleteError",
     "Inspection",
     "InternalError",
-    "InvalidConfigError",
     "Limits",
     "MalformedError",
     "MissingPartError",
@@ -40,6 +39,7 @@ __all__ = [
     "OcrResult",
     "OcrSummary",
     "OnLoss",
+    "PageOutOfRangeError",
     "Parsed",
     "ResourceLimitError",
     "RevisionPolicy",
@@ -82,7 +82,7 @@ class ConvertError(Exception):
     code: str
     """The failure's stable snake_case name, one per subclass: `unsupported`,
     `needs_ocr`, `malformed`, `encrypted`, `resource_limit`, `missing_part`,
-    `incomplete`, `invalid_config`, `cancelled` or `internal`."""
+    `incomplete`, `page_out_of_range`, `cancelled` or `internal`."""
 
 class UnsupportedError(ConvertError):
     """The format is unknown, or cannot be converted at all."""
@@ -139,11 +139,11 @@ class IncompleteError(ConvertError):
     diagnostics: tuple[Diagnostic, ...]
     """Every diagnostic of the conversion, the losses among them."""
 
-class InvalidConfigError(ConvertError):
-    """The call's own options do not fit the input."""
+class PageOutOfRangeError(ConvertError):
+    """`ocr_pages` names a page past the PDF's last."""
 
     page: int
-    """The page `ocr_pages` names past the document's last."""
+    """The highest page `ocr_pages` names."""
     page_count: int
     """Pages in the document."""
 
@@ -800,7 +800,7 @@ class Converter:
 
     `ocr_pages`, `"all"` or a set of 1-based pages, makes each selected PDF
     page a gap with reason `caller_requested` whatever its text, discarded
-    without loss; a page past the last raises `InvalidConfigError`, any other
+    without loss; a page past the last raises `PageOutOfRangeError`, any other
     page outside 1 to 4294967295 `ValueError`, and any other format ignores it.
 
     `ocr`, an `OcrHttp`, reads a conversion's gaps before it renders, as

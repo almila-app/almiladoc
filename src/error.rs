@@ -76,8 +76,16 @@ pub enum ConvertError {
         /// Every diagnostic of the conversion, the losses among them.
         diagnostics: Diagnostics,
     },
-    /// The caller configured the call in a way the input refutes, such as an
-    /// [`ocr_pages`](crate::Input::with_ocr_pages) page past the document's last.
+    /// [`ocr_pages`](crate::Input::with_ocr_pages) names a page past the PDF's last.
+    #[error("ocr_pages names page {page}, past the {page_count} pages the document holds")]
+    #[non_exhaustive]
+    PageOutOfRange {
+        /// The highest page selected.
+        page: u32,
+        /// Pages in the document.
+        page_count: u32,
+    },
+    /// The call's options are invalid whatever the input.
     #[error("invalid configuration: {0}")]
     InvalidConfig(ConfigError),
     /// The caller cancelled the conversion.
@@ -225,6 +233,7 @@ impl ConvertError {
             Self::ResourceLimit { .. } => "resource_limit",
             Self::MissingPart { .. } => "missing_part",
             Self::Incomplete { .. } => "incomplete",
+            Self::PageOutOfRange { .. } => "page_out_of_range",
             Self::InvalidConfig(_) => "invalid_config",
             Self::Cancelled => "cancelled",
             Self::Internal => "internal",
@@ -317,7 +326,8 @@ mod tests {
             ConvertError::limit(Limit::EntryBytes, 1),
             ConvertError::missing_part("word/document.xml"),
             ConvertError::Incomplete { diagnostics: lost() },
-            ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page: 6, page_count: 5 }),
+            ConvertError::PageOutOfRange { page: 6, page_count: 5 },
+            ConvertError::InvalidConfig(ConfigError::Raster),
             ConvertError::Cancelled,
             ConvertError::Internal,
         ]
@@ -358,6 +368,7 @@ mod tests {
                 "resource_limit",
                 "missing_part",
                 "incomplete",
+                "page_out_of_range",
                 "invalid_config",
                 "cancelled",
                 "internal"
@@ -398,7 +409,10 @@ mod tests {
     #[test]
     fn recovery_never_swallows_limits_cancellation_or_internal_faults() {
         let fatal: Vec<bool> = every_variant().iter().map(ConvertError::is_fatal).collect();
-        assert_eq!(fatal, [false, false, false, false, true, false, false, false, true, true]);
+        assert_eq!(
+            fatal,
+            [false, false, false, false, true, false, false, false, false, true, true]
+        );
         assert!(ConvertError::limit(Limit::Allocation, 64).is_fatal());
     }
 
@@ -448,8 +462,12 @@ mod tests {
                 "incomplete conversion, content lost: part_unreadable, unclosed_structure",
             ),
             (
-                ConvertError::InvalidConfig(ConfigError::PageOutOfRange { page: 6, page_count: 5 }),
-                "invalid configuration: ocr_pages names page 6, past the 5 pages the document holds",
+                ConvertError::PageOutOfRange { page: 6, page_count: 5 },
+                "ocr_pages names page 6, past the 5 pages the document holds",
+            ),
+            (
+                ConvertError::InvalidConfig(ConfigError::Raster),
+                "invalid configuration: a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",
             ),
             (ConvertError::Cancelled, "conversion cancelled"),
             (ConvertError::Internal, "internal error"),

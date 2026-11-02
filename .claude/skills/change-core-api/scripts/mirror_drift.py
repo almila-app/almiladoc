@@ -30,7 +30,7 @@ ERROR_CLASS_MIRRORS = (
     "python/almiladoc/__init__.py",
 )
 LIMITS_MIRRORS = ("python/src/config.rs", "python/almiladoc/_almiladoc.pyi")
-PY_BUILTIN_ERRORS = {"Io"}
+PY_MAPPED_ERRORS = {"InvalidConfig"}
 READ = tuple(dict.fromkeys(("src", FORMAT_LITERAL, *ERROR_CLASS_MIRRORS, *LIMITS_MIRRORS)))
 
 
@@ -78,7 +78,7 @@ def drift(root: Path) -> list[str]:
         for name in sorted(set(named.values()))
         if name not in quoted
     ]
-    exceptions = [f"{v}Error" for v in errors if v not in PY_BUILTIN_ERRORS]
+    exceptions = [f"{v}Error" for v in errors if v not in PY_MAPPED_ERRORS]
     for mirror in ERROR_CLASS_MIRRORS:
         found += missing(mirror, exceptions, "exception")
     for mirror in LIMITS_MIRRORS:

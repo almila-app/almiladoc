@@ -9,7 +9,7 @@ use crate::diagnostics::diagnostic_tuple;
 
 use exceptions::{
     CancelledError, ConfigError, EncryptedError, GapRefused, IncompleteError, InternalError,
-    InvalidConfigError, MalformedError, MissingPartError, NeedsOcrError, ResourceLimitError,
+    MalformedError, MissingPartError, NeedsOcrError, PageOutOfRangeError, ResourceLimitError,
     UnsupportedError,
 };
 
@@ -26,10 +26,11 @@ pub(crate) mod exceptions {
         almiladoc,
         ConfigError,
         PyValueError,
-        "A `Limits`, `Config` or `OcrHttp` field is out of range. `limit` names \
-         the field (`threads` for the thread count); `ceiling` is the highest \
-         value a limit with one accepts and `max` the most threads, each `None` \
-         where it does not apply."
+        "A `Limits`, `Config` or `OcrHttp` field, or a raster spec, is out of \
+         range. `limit` names the field (`threads` for the thread count, \
+         `raster` for a raster spec's `dpi` and `max_pixels`); `ceiling` is the \
+         highest value a limit with one accepts and `max` the most threads, each \
+         `None` where it does not apply."
     );
 
     create_exception!(
@@ -116,10 +117,9 @@ pub(crate) mod exceptions {
 
     create_exception!(
         almiladoc,
-        InvalidConfigError,
+        PageOutOfRangeError,
         ConvertError,
-        "The call's own options do not fit the input: `ocr_pages` names `page`, \
-         past the `page_count` pages the PDF holds."
+        "`ocr_pages` names `page`, past the `page_count` pages the PDF holds."
     );
 
     create_exception!(
@@ -197,7 +197,8 @@ pub(crate) fn convert_error(py: Python<'_>, error: &ConvertError) -> PyErr {
 
 /// Raise the subclass that names the failure with `message`, carrying its
 /// `code`, and the kind, part or limit at fault where the variant knows one;
-/// a variant newer than this binding raises as `Internal`, class and code alike.
+/// `InvalidConfig` raises `ConfigError` through `config_error` instead, and a
+/// variant newer than this binding raises as `Internal`, class and code alike.
 fn raise(py: Python<'_>, error: &ConvertError, message: String) -> PyErr {
     let raised = match error {
         ConvertError::ResourceLimit { limit, max, .. } => {
@@ -209,7 +210,8 @@ fn raise(py: Python<'_>, error: &ConvertError, message: String) -> PyErr {
         ConvertError::Encrypted => EncryptedError::new_err(message),
         ConvertError::MissingPart { .. } => MissingPartError::new_err(message),
         ConvertError::Incomplete { .. } => IncompleteError::new_err(message),
-        ConvertError::InvalidConfig(_) => InvalidConfigError::new_err(message),
+        ConvertError::PageOutOfRange { .. } => PageOutOfRangeError::new_err(message),
+        ConvertError::InvalidConfig(error) => return config_error(py, error),
         ConvertError::Cancelled => CancelledError::new_err(message),
         ConvertError::Internal => InternalError::new_err(message),
         _ => return raise(py, &ConvertError::Internal, message),
@@ -229,11 +231,9 @@ fn raise(py: Python<'_>, error: &ConvertError, message: String) -> PyErr {
         ConvertError::Incomplete { diagnostics, .. } => {
             diagnostic_tuple(py, diagnostics).and_then(|tuple| value.setattr("diagnostics", tuple))
         }
-        ConvertError::InvalidConfig(almiladoc::ConfigError::PageOutOfRange {
-            page,
-            page_count,
-            ..
-        }) => value.setattr("page", *page).and_then(|()| value.setattr("page_count", *page_count)),
+        ConvertError::PageOutOfRange { page, page_count, .. } => {
+            value.setattr("page", *page).and_then(|()| value.setattr("page_count", *page_count))
+        }
         _ => Ok(()),
     });
     detail.err().unwrap_or(raised)

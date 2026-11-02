@@ -8,8 +8,8 @@ use std::fmt;
 use std::num::NonZeroU32;
 
 use crate::config::{
-    CommentPolicy, ConfigError, HeaderFooterPolicy, HiddenPolicy, ImageOcr, ImagePolicy,
-    PageSelection, RevisionPolicy,
+    CommentPolicy, HeaderFooterPolicy, HiddenPolicy, ImageOcr, ImagePolicy, PageSelection,
+    RevisionPolicy,
 };
 use crate::diagnostics::{DiagnosticCode, Diagnostics, Region};
 use crate::error::ConvertError;
@@ -182,10 +182,7 @@ impl<'a> ParseCtx<'a> {
         let PageSelection::Pages(pages) = &self.ocr_pages else { return Ok(()) };
         match pages.last() {
             Some(page) if page.get() > page_count => {
-                Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange {
-                    page: page.get(),
-                    page_count,
-                }))
+                Err(ConvertError::PageOutOfRange { page: page.get(), page_count })
             }
             _ => Ok(()),
         }

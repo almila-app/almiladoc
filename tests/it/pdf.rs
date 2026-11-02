@@ -7,8 +7,8 @@ use crate::build::docx;
 use crate::support::{configured, converter, corpus, fixture, limited, reporting, trips};
 use almiladoc::model::{GapReason, OcrOrigin, UnitKind};
 use almiladoc::{
-    ConfigError, ConvertError, DiagnosticCode, Diagnostics, Format, Input, Limit, LossClass,
-    OnLoss, PageSelection, PageVerdict, UnsupportedKind,
+    ConvertError, DiagnosticCode, Diagnostics, Format, Input, Limit, LossClass, OnLoss,
+    PageSelection, PageVerdict, UnsupportedKind,
 };
 
 const VERDICTS: &[(&str, &[&str])] = &[
@@ -254,24 +254,17 @@ fn a_selected_blank_page_becomes_a_gap() {
 
 #[test]
 fn a_page_past_the_last_is_refused_before_any_page_is_read() {
-    fn refused<T>(result: &Result<T, ConvertError>) -> bool {
-        matches!(
-            result,
-            Err(ConvertError::InvalidConfig(ConfigError::PageOutOfRange {
-                page: 6,
-                page_count: 5,
-                ..
-            }))
-        )
+    fn refused<T: std::fmt::Debug>(result: Result<T, ConvertError>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "page_out_of_range");
+        assert_matches!(error, ConvertError::PageOutOfRange { page: 6, page_count: 5, .. });
     }
     let bytes = pdf_fixture("handmade-five-page");
     let past = selecting(&[2, 6]);
-    assert!(refused(&converter(1).convert(pdf_input(&bytes, &past))));
-    assert!(refused(&converter(1).inspect(pdf_input(&bytes, &past))));
-    let starved = limited(|limits| limits.max_work = 2);
-    assert!(refused(&starved.parse(pdf_input(&bytes, &past))));
-    let error = converter(1).parse(pdf_input(&bytes, &past)).unwrap_err();
-    assert_eq!(error.code(), "invalid_config");
+    refused(converter(1).convert(pdf_input(&bytes, &past)));
+    refused(converter(1).inspect(pdf_input(&bytes, &past)));
+    refused(converter(1).parse(pdf_input(&bytes, &past)));
+    refused(limited(|limits| limits.max_work = 2).parse(pdf_input(&bytes, &past)));
 }
 
 #[test]

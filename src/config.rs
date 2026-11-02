@@ -254,15 +254,6 @@ pub enum ConfigError {
         /// [`Config::MAX_THREADS`].
         max: usize,
     },
-    /// [`PageSelection::Pages`] names a page past the document's last.
-    #[error("ocr_pages names page {page}, past the {page_count} pages the document holds")]
-    #[non_exhaustive]
-    PageOutOfRange {
-        /// The highest page selected.
-        page: u32,
-        /// Pages in the document.
-        page_count: u32,
-    },
     /// A [`RasterSpec`](crate::RasterSpec)'s dpi is outside 50 to 600, or its `max_pixels`
     /// outside 1 Mpx to [`RasterSpec::MAX_PIXELS_CEILING`](crate::RasterSpec::MAX_PIXELS_CEILING).
     #[error("a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels")]
@@ -345,10 +336,6 @@ mod tests {
                 "max_nesting_depth must not exceed 1024",
             ),
             (ConfigError::Threads { max: 64 }, "threads must be between 1 and 64"),
-            (
-                ConfigError::PageOutOfRange { page: 6, page_count: 5 },
-                "ocr_pages names page 6, past the 5 pages the document holds",
-            ),
             (
                 ConfigError::Raster,
                 "a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",

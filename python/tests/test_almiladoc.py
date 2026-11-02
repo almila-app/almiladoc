@@ -267,7 +267,7 @@ class ConversionTest(unittest.TestCase):
             reporting.convert(csv, "csv").markdown,
         )
 
-    def test_ocr_pages_past_the_last_raises_invalid_config_and_page_0_value_error(self):
+    def test_ocr_pages_past_the_last_raises_page_out_of_range_and_page_0_value_error(self):
         converter_ = almiladoc.Converter()
         data = MIXED.read_bytes()
         calls = [
@@ -277,11 +277,11 @@ class ConversionTest(unittest.TestCase):
             lambda _, **kwargs: converter_.convert_path(MIXED, **kwargs),
         ]
         for call in calls:
-            with self.assertRaises(almiladoc.InvalidConfigError) as caught:
+            with self.assertRaises(almiladoc.PageOutOfRangeError) as caught:
                 call(data, ocr_pages={2, 3})
             self.assertEqual(
                 attrgetter("code", "page", "page_count")(caught.exception),
-                ("invalid_config", 3, 2),
+                ("page_out_of_range", 3, 2),
             )
             for refused in [{0}, {-1}, {2**64}, "some"]:
                 with self.subTest(refused=refused), self.assertRaises(ValueError):
@@ -1564,9 +1564,9 @@ class ErrorTest(unittest.TestCase):
                 {"code": "incomplete"},
             ),
             (
-                almiladoc.InvalidConfigError,
+                almiladoc.PageOutOfRangeError,
                 lambda: converter_.convert_path(MIXED, ocr_pages={3}),
-                {"code": "invalid_config", "page": 3, "page_count": 2},
+                {"code": "page_out_of_range", "page": 3, "page_count": 2},
             ),
             (
                 almiladoc.ResourceLimitError,
@@ -1630,7 +1630,7 @@ class ErrorTest(unittest.TestCase):
             "ResourceLimitError",
             "MissingPartError",
             "IncompleteError",
-            "InvalidConfigError",
+            "PageOutOfRangeError",
             "CancelledError",
             "InternalError",
         ]:
