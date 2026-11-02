@@ -273,6 +273,19 @@ fn plain(content: &str) -> String {
     format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len())
 }
 
+fn korean_run(placement: &str) -> Vec<u8> {
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /HYSMyeongJo-Medium /Encoding /Identity-H \
+        /DescendantFonts [6 0 R] >>";
+    let descendant = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYSMyeongJo-Medium \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /DW 1000 \
+        /FontDescriptor 7 0 R >>";
+    let descriptor = "<< /Type /FontDescriptor /FontName /HYSMyeongJo-Medium /Flags 4 \
+        /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 \
+        /StemV 80 >>";
+    let content = format!("{placement} BT /F1 10 Tf 72 700 Td <0A490001> Tj ET");
+    painted("/Font << /F1 5 0 R >>", &plain(&content), &[font, descendant, descriptor])
+}
+
 const NOT_ZLIB: &str = "/Length 10 /Filter /FlateDecode >>\nstream\nnot zlib!!\nendstream";
 
 #[test]
@@ -295,6 +308,10 @@ fn a_filled_page_reports_each_kind_its_painting_left_out() {
     );
     for (bytes, expected) in [
         (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10)),
+        (korean_run(""), lost(1)),
+        (korean_run("0 600 612 192 re W n"), lost(1)),
+        (korean_run("0 0 10 10 re W n"), Vec::new()),
+        (korean_run("1 0 0 1 1000 0 cm"), Vec::new()),
         (undecodable, lost(1)),
         (image, lost(1)),
         (inline, lost(1)),

@@ -797,10 +797,11 @@ fn a_pdf_s_running_heads_become_its_header_under_emit_and_skip_pages_ocr_replace
     let bytes = crate::support::fixture("pdf/handmade-header-only.pdf");
     let (omitted, rows, _) = emitted(&bytes, Format::Pdf, HeaderFooterPolicy::Omit);
     assert!(!omitted.contains("Journal"), "{omitted}");
-    assert_eq!(
-        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-        [DiagnosticCode::HeaderOmitted; 3]
-    );
+    let footers =
+        [1, 2, 3].map(|page| (DiagnosticCode::FooterOmitted, Region::Footer, Some(page), 1));
+    let heads =
+        [1, 2, 3].map(|page| (DiagnosticCode::HeaderOmitted, Region::Header, Some(page), 1));
+    assert_eq!(rows, [heads, footers].concat());
     let (markdown, rows, _) = emitted(&bytes, Format::Pdf, HeaderFooterPolicy::Emit);
     assert_eq!(markdown.matches("Header (default):").count(), 1, "{markdown}");
     assert!(
@@ -808,7 +809,7 @@ fn a_pdf_s_running_heads_become_its_header_under_emit_and_skip_pages_ocr_replace
         "{markdown}"
     );
     assert!(markdown.contains("Journal"), "{markdown}");
-    assert_eq!(rows, []);
+    assert_eq!(rows, footers);
     let converter = configured(|config| {
         config.headers_footers = HeaderFooterPolicy::Emit;
         config.on_loss = OnLoss::Report;
@@ -821,7 +822,7 @@ fn a_pdf_s_running_heads_become_its_header_under_emit_and_skip_pages_ocr_replace
     assert_eq!(markdown.matches("Header (default):").count(), 1, "{markdown}");
     assert_eq!(
         reported(conversion.diagnostics()),
-        [(DiagnosticCode::OcrGap, Region::Body, Some(1), 1)]
+        [[(DiagnosticCode::OcrGap, Region::Body, Some(1), 1)].as_slice(), &footers[1..]].concat()
     );
 }
 

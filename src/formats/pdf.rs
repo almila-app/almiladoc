@@ -81,6 +81,7 @@ pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, Conve
             let figures = u64::from(read.page.image_op_count);
             parse_ctx.emit_count(DiagnosticCode::ImageOmitted, Region::Body, figures);
             garbled(parse_ctx, &read.page);
+            left_out(parse_ctx, &read.page);
             map_page(parse_ctx, read, &furniture, sides.as_mut(), &mut document.blocks)?;
         }
         verdicts.push(verdict);
@@ -165,7 +166,8 @@ fn keep(
     for (index, block) in page.elements.iter().enumerate() {
         parse_ctx.charge(1)?;
         let Some((text, plain)) = text_of(block) else { continue };
-        parse_ctx.charge(u64::try_from(text.len()).unwrap_or(u64::MAX))?;
+        let retained = text.len().saturating_add(link_bytes(block));
+        parse_ctx.charge(u64::try_from(retained).unwrap_or(u64::MAX))?;
         let chars = text.chars().filter(|c| !c.is_whitespace()).count();
         if chars > 0 {
             let running_head = plain && chars <= RUNNING_HEAD_CHARS;
@@ -205,6 +207,28 @@ fn text_of(block: &PdfBlock) -> Option<(String, bool)> {
         PdfBlock::Raw { content } => Some((content.clone(), true)),
         _ => None,
     }
+}
+
+fn link_bytes(block: &PdfBlock) -> usize {
+    let (paragraph, table) = match block {
+        PdfBlock::Paragraph(paragraph) => (Some(paragraph), None),
+        PdfBlock::Table(table) => (None, Some(table)),
+        _ => (None, None),
+    };
+    let cells = table
+        .into_iter()
+        .flat_map(|table| &table.rows)
+        .flat_map(|row| &row.cells)
+        .flat_map(|cell| &cell.content);
+    paragraph
+        .into_iter()
+        .chain(cells)
+        .flat_map(|paragraph| &paragraph.content)
+        .map(|inline| match inline {
+            InlineContent::Link { url, .. } => url.len(),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn furniture_key(text: &str) -> String {
@@ -343,7 +367,9 @@ fn reasons(page: &Page, text_chars: usize, furniture_only: bool) -> Vec<GapReaso
     .collect();
     let blank_runs_only =
         page.blank_text_runs > 0 && page.clipped_text_runs == 0 && page.suppressed_text_runs == 0;
-    if reasons.is_empty() && textless && page.text_op_count > 0 && !blank_runs_only {
+    let folio_only =
+        page.omitted_page_number_chars > 0 && u64::from(page.omitted_page_number_chars) >= shown;
+    if reasons.is_empty() && textless && page.text_op_count > 0 && !blank_runs_only && !folio_only {
         reasons.push(GapReason::UnreadableText);
     }
     reasons
@@ -367,6 +393,15 @@ fn garbled(parse_ctx: &ParseCtx<'_>, page: &Page) {
             count.saturating_add(u64::try_from(font.runs).unwrap_or(u64::MAX))
         });
     parse_ctx.emit_count(DiagnosticCode::GarbledFontEncoding, Region::Body, count);
+}
+
+fn left_out(parse_ctx: &ParseCtx<'_>, page: &Page) {
+    if page.link_annotations_incomplete {
+        parse_ctx.emit(DiagnosticCode::LinkTargetUnread, Region::Body);
+    }
+    if page.omitted_page_number_chars > 0 {
+        parse_ctx.emit(DiagnosticCode::FooterOmitted, Region::Footer);
+    }
 }
 
 fn map_page(
@@ -475,18 +510,20 @@ fn inlines(
     for inline in content {
         parse_ctx.charge(1)?;
         match inline {
-            InlineContent::Text(run) => {
-                out.push(Inline::Text { text: run.text.clone(), style: style(&run.style) });
-            }
+            InlineContent::Text(run) => out.push(styled(&run.text, &run.style)),
             InlineContent::LineBreak => out.push(Inline::LineBreak),
-            InlineContent::Link { text, url, .. } => out.push(Inline::Link {
-                content: vec![Inline::plain(text)],
+            InlineContent::Link { text, url, style: label, .. } => out.push(Inline::Link {
+                content: vec![styled(text, label)],
                 target: classify_rel_target(true, url),
             }),
             InlineContent::Image { .. } => {}
         }
     }
     Ok(out)
+}
+
+fn styled(text: &str, from: &TextStyle) -> Inline {
+    Inline::Text { text: text.to_owned(), style: style(from) }
 }
 
 fn style(style: &TextStyle) -> Style {
@@ -579,7 +616,7 @@ mod tests {
             set(&mut page);
             ruled(page)
         };
-        let cases: [Case; 19] = [
+        let cases: [Case; 21] = [
             (&[], |_| {}, PageVerdict::Blank),
             (&["  "], |_| {}, PageVerdict::Blank),
             (&["Body"], |_| {}, PageVerdict::Text),
@@ -607,6 +644,22 @@ mod tests {
             (&[], |p| (p.fill_op_count, p.image_op_count) = (1, 1), needs_ocr(&[ImageBacked])),
             (&[], |p| p.text_op_count = 1, needs_ocr(&[UnreadableText])),
             (&[], |p| (p.text_op_count, p.blank_text_runs) = (1, 1), PageVerdict::Blank),
+            (
+                &[],
+                |p| {
+                    (p.text_op_count, p.painted_text_chars, p.omitted_page_number_chars) =
+                        (1, 3, 3);
+                },
+                PageVerdict::Blank,
+            ),
+            (
+                &[],
+                |p| {
+                    (p.text_op_count, p.painted_text_chars, p.omitted_page_number_chars) =
+                        (1, 4, 3);
+                },
+                needs_ocr(&[UnreadableText]),
+            ),
         ];
         for (i, (texts, set, expected)) in cases.into_iter().enumerate() {
             assert_eq!(with(texts, set), expected, "case {i}");
@@ -997,6 +1050,7 @@ mod tests {
                 text: "site".into(),
                 url: "https://example.org".into(),
                 title: None,
+                style: TextStyle { bold: true, ..TextStyle::default() },
             },
             InlineContent::Image { resource_id: "Im1".into(), alt_text: Some("alt".into()) },
             InlineContent::LineBreak,
@@ -1005,7 +1059,10 @@ mod tests {
             inlines(&parse_ctx, &content).unwrap(),
             [
                 Inline::Link {
-                    content: vec![Inline::plain("site")],
+                    content: vec![Inline::Text {
+                        text: "site".into(),
+                        style: Style { bold: true, ..Style::PLAIN },
+                    }],
                     target: crate::model::LinkTarget::External("https://example.org".into()),
                 },
                 Inline::LineBreak,
@@ -1048,6 +1105,32 @@ mod tests {
         assert!(text(&grid.grid[0][0]).1.contains("down"));
         assert!(!matches!(grid.grid[1][0], crate::model::CellSlot::Origin(_)));
         assert!(text(&grid.grid[1][1]).1.contains("\"c\""));
+    }
+
+    #[test]
+    fn links_in_table_cells_charge_work_by_their_targets_length() {
+        use crate::limits::Limits;
+        use unpdf::{TableCell, TableRow};
+        let url = format!("https://example.test/{}", "a".repeat(8000));
+        let linked = || {
+            let mut paragraph = Paragraph::new();
+            paragraph.content.push(InlineContent::Link {
+                text: "a".into(),
+                url: url.clone(),
+                title: None,
+                style: TextStyle::default(),
+            });
+            TableCell::with_content(vec![paragraph])
+        };
+        let mut table = PdfTable::new();
+        for _ in 0..4 {
+            table.add_row(TableRow::new(vec![linked(), linked()]));
+        }
+        let mut page = Page::new(1, 612.0, 792.0);
+        page.add_table(table);
+        let limits = Limits { max_work: 8 * 8000, ..Limits::default() };
+        let err = keep(&ParseCtx::new(&limits), page, &mut [None]).unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::Work, .. });
     }
 
     #[test]

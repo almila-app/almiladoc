@@ -29,7 +29,7 @@ Music clef 𝄞 appears before this footnote1 reference. An endnote follows here
 
 ## Links and anchors
 
-External link to example. Relative link to a sibling file. This plain paragraph carries a bookmark. Jump to the bookmarked paragraph.
+External link to [example](https://example.com/page). Relative link to [a sibling file](sibling.odt). This plain paragraph carries a bookmark. Jump to the bookmarked paragraph.
 
 ## Objects
 

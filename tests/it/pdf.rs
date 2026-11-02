@@ -4,11 +4,11 @@ use std::num::NonZeroU32;
 
 use crate::bounds::least_work;
 use crate::build::docx;
-use crate::support::{configured, converter, corpus, fixture, limited, reporting, trips};
+use crate::support::{configured, converter, corpus, fixture, limited, reported, reporting, trips};
 use almiladoc::model::{GapReason, OcrOrigin, UnitKind};
 use almiladoc::{
-    ConvertError, DiagnosticCode, Diagnostics, Format, Input, Limit, LossClass, OnLoss,
-    PageSelection, PageVerdict, UnsupportedKind,
+    ConvertError, DiagnosticCode, Diagnostics, Format, HeaderFooterPolicy, Input, Limit, LossClass,
+    OnLoss, PageSelection, PageVerdict, Region, UnsupportedKind,
 };
 
 const VERDICTS: &[(&str, &[&str])] = &[
@@ -347,10 +347,12 @@ fn running_heads_are_judged_across_selected_pages_too() {
     assert!(markdown.starts_with("<!-- needs-ocr page 1 -->\n\nInterviews were transcribed"));
     assert!(!markdown.contains("Journal"), "{markdown}");
     assert_eq!(markdown.matches("Interviews were transcribed").count(), 1, "{markdown}");
-    let heads = [2, 3].map(|page| (DiagnosticCode::HeaderOmitted, Some(page)));
+    let omitted = [DiagnosticCode::HeaderOmitted, DiagnosticCode::FooterOmitted]
+        .into_iter()
+        .flat_map(|code| [2, 3].map(|page| (code, Some(page))));
     assert_eq!(
         rows(conversion.diagnostics()),
-        [[(DiagnosticCode::OcrGap, Some(1))].as_slice(), &heads].concat()
+        [(DiagnosticCode::OcrGap, Some(1))].into_iter().chain(omitted).collect::<Vec<_>>()
     );
 }
 
@@ -725,4 +727,136 @@ fn unreadable_codes_and_runs_hidden_by_the_clip_or_page_report_no_loss() {
             assert_eq!(verdicts(&bytes), ["text"], "{clip}");
         }
     }
+}
+
+const TARGET: &str = "https://example.test/paper";
+
+const PROSE: &str = "BT /F1 12 Tf 72 700 Td (Link) Tj ET";
+const OVER_PROSE: &str = "72 696 132 712";
+
+fn annotated(content: &str, links: &[(&str, &str)]) -> Vec<u8> {
+    let annots: String = links
+        .iter()
+        .map(|(rect, target)| {
+            format!("<< /Subtype /Link /Rect [{rect}] /A << /S /URI /URI ({target}) >> >>")
+        })
+        .collect();
+    write_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+             /Annots [{annots}] \
+             /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> \
+             /F3 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >> >> >>"
+        ),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ])
+}
+
+#[test]
+fn a_uri_link_over_prose_is_kept_and_over_code_it_is_lost_and_fails_incomplete() {
+    let prose = annotated(PROSE, &[(OVER_PROSE, TARGET)]);
+    let kept = converter(1).convert(Input::new(&prose, Format::Pdf)).unwrap();
+    assert_eq!(kept.markdown(), format!("[Link]({TARGET})\n"));
+    assert!(kept.diagnostics().is_empty());
+
+    let code = annotated("BT /F3 10 Tf 72 700 Td (let x = 1;) Tj ET", &[(OVER_PROSE, TARGET)]);
+    let Err(ConvertError::Incomplete { diagnostics, .. }) =
+        converter(1).convert(Input::new(&code, Format::Pdf))
+    else {
+        panic!("a link left unread passed fail");
+    };
+    let lost = [(DiagnosticCode::LinkTargetUnread, Region::Body, Some(1), 1)];
+    assert_eq!(reported(&diagnostics), lost);
+    let report = reporting().convert(Input::new(&code, Format::Pdf)).unwrap();
+    assert_eq!(report.markdown(), "```\nlet x = 1;\n```\n");
+    let asked = reporting().convert(pdf_input(&code, &PageSelection::All)).unwrap();
+    let gap = [(DiagnosticCode::OcrGap, Region::Body, Some(1), 1)];
+    assert_eq!(reported(asked.diagnostics()), gap);
+}
+
+#[test]
+fn a_link_over_code_loses_only_its_own_target_and_reports_its_page_once() {
+    let content = format!("{PROSE}\nBT /F3 10 Tf 72 600 Td (let x = 1;) Tj ET");
+    let links = [(OVER_PROSE, TARGET), ("72 596 140 612", "https://example.test/code")];
+    let bytes = annotated(&content, &links);
+    let conversion = reporting().convert(Input::new(&bytes, Format::Pdf)).unwrap();
+    assert_eq!(conversion.markdown(), format!("[Link]({TARGET})\n\n```\nlet x = 1;\n```\n"));
+    let lost = [(DiagnosticCode::LinkTargetUnread, Region::Body, Some(1), 1)];
+    assert_eq!(reported(conversion.diagnostics()), lost);
+}
+
+#[test]
+fn a_pdf_uri_link_with_an_unsafe_scheme_keeps_its_label() {
+    for target in ["ftp://example.test/f", "tel:+15550100", "javascript:void(0)"] {
+        let bytes = annotated(PROSE, &[(OVER_PROSE, target)]);
+        let conversion = reporting().convert(Input::new(&bytes, Format::Pdf)).unwrap();
+        assert_eq!(conversion.markdown(), "Link\n", "{target}");
+        let refused = [(DiagnosticCode::UnsafeLink, Region::Body, None, 1)];
+        assert_eq!(reported(conversion.diagnostics()), refused, "{target}");
+    }
+}
+
+#[test]
+fn each_link_a_page_keeps_charges_work_by_its_targets_length() {
+    let target = format!("https://example.test/{}", "a".repeat(8000));
+    let links = 18;
+    let lines: String = (0..links)
+        .map(|line| {
+            let y = 700 - 14 * line;
+            format!("BT /F1 12 Tf 72 {y} Td (Link) Tj ET\nBT /F1 12 Tf 97 {y} Td (plain) Tj ET\n")
+        })
+        .collect();
+    let linked = annotated(&lines, &[("0 0 95 792", &target)]);
+    let kept = reporting().convert(Input::new(&linked, Format::Pdf)).unwrap();
+    assert_eq!(kept.markdown().matches(&target).count(), links as usize);
+    let plain = annotated(&lines, &[]);
+    let least = least_work(|converter| converter.parse(Input::new(&plain, Format::Pdf)).is_ok());
+    let max = least + (links - 1) * target.len() as u64;
+    let refusal = limited(|limits| limits.max_work = max).parse(Input::new(&linked, Format::Pdf));
+    assert!(trips(&refusal, Limit::Work, max), "{:?}", refusal.err());
+}
+
+#[test]
+fn a_bare_margin_page_number_the_engine_removes_is_one_omitted_footer_for_its_page() {
+    let page = |folio: &str| format!("BT /F1 12 Tf 72 400 Td (Body) Tj ET\n{folio}");
+    let pages = [
+        page("BT /F1 12 Tf 300 30 Td (Page 12) Tj ET"),
+        page("BT /F1 12 Tf 300 770 Td (7) Tj ET"),
+        page("BT /F1 12 Tf 300 300 Td (8) Tj ET"),
+        page("BT /F1 12 Tf 580 200 Td (9) Tj ET"),
+    ];
+    let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let bytes = pdf_pages(&pages);
+    for policy in [HeaderFooterPolicy::Omit, HeaderFooterPolicy::Emit] {
+        let converter = configured(|config| {
+            config.headers_footers = policy;
+            config.on_loss = OnLoss::Report;
+        });
+        let conversion = converter.convert(Input::new(&bytes, Format::Pdf)).unwrap();
+        assert_eq!(conversion.markdown(), "Body\n\nBody\n\nBody\n\n8\n\nBody\n", "{policy:?}");
+        let footer = |page| (DiagnosticCode::FooterOmitted, Region::Footer, Some(page), 1);
+        let footers = [footer(1), footer(2), footer(4)];
+        assert_eq!(reported(conversion.diagnostics()), footers, "{policy:?}");
+        let asked = converter.convert(pdf_input(&bytes, &selecting(&[1]))).unwrap();
+        let gap = (DiagnosticCode::OcrGap, Region::Body, Some(1), 1);
+        assert_eq!(reported(asked.diagnostics()), [gap, footer(2), footer(4)], "{policy:?}");
+    }
+}
+
+#[test]
+fn a_page_whose_only_text_is_a_folio_the_engine_removes_is_blank_beside_its_omitted_footer() {
+    let folio = "BT /F1 10 Tf 500 20 Td (362) Tj ET";
+    let bytes = pdf(folio);
+    for policy in [HeaderFooterPolicy::Omit, HeaderFooterPolicy::Emit] {
+        let converter = configured(|config| config.headers_footers = policy);
+        let conversion = converter.convert(Input::new(&bytes, Format::Pdf)).unwrap();
+        assert_eq!(conversion.markdown(), "", "{policy:?}");
+        let footer = [(DiagnosticCode::FooterOmitted, Region::Footer, Some(1), 1)];
+        assert_eq!(reported(conversion.diagnostics()), footer, "{policy:?}");
+    }
+    assert_eq!(verdicts(&bytes), ["no_text"]);
+    let garbled = pdf(&format!("BT /F2 12 Tf 72 700 Td <0001> Tj ET\n{folio}"));
+    assert_eq!(verdicts(&garbled), ["needs_ocr garbled_text"]);
 }

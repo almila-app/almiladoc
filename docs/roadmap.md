@@ -18,30 +18,18 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 `∥` means disjoint parallel work; `then` binds tighter and means serial. Unlisted items land separately before the first wave sharing their files.
 
-| Wave | Items | Placement |
-|---|---|---|
-| W7 | unpdf-clip (when upstream excludes hidden raster gaps) | |
+No wave is open.
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
 
-## Items
-
-### W7
-
-#### unpdf-clip: count only unpaintable runs the page shows
-
-- Adopt unpdf's release whose `RasterGaps` excludes clipped/off-page unpaintable runs; a filled page then reports no `raster_incomplete` for them and ADR 0002's limitation disappears.
-- Files: `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `tests/it/raster.rs`, `THIRD-PARTY-LICENSES`, ADR 0001 decision 6, ADR 0002; depends on upstream release, about 40 lines, T2, no external credit.
-
 ## External tracks
 
-Check open unpdf PRs at each wave start with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`; 0.51.0 already carries the merged text/paint-budget fixes.
+Check open unpdf PRs at each wave start with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`; 0.52.0 already carries the text, paint-budget, raster-gap, page-number and link fixes; its CHANGELOG, not the PR state, shows a landing.
 
 | Upstream | Needed behavior |
 |---|---|
-| [unpdf #24](https://github.com/iyulab/unpdf/pull/24) | exclude hidden/off-page raster gaps (unpdf-clip) |
-| [unpdf #25](https://github.com/iyulab/unpdf/pull/25) | count dropped bare margin page numbers for `footer_omitted` |
-| [unpdf #26](https://github.com/iyulab/unpdf/pull/26) | retain URI annotations on covered text |
+| [unpdf #27](https://github.com/iyulab/unpdf/pull/27) | page pixel size before painting, for an exact long-edge raster |
+| [unpdf #28](https://github.com/iyulab/unpdf/pull/28) | raster gaps that count text, deep forms and unpainted patterns the painter drops, so an OCR page's loss is reported |
 
 - **Offline OCR quality:** evaluate native OCR on representative consumer scans once a labelled corpus has paragraph ground truth and marked headings.
 - **Consumer proof:** after the candidate wheel reaches TestPyPI/PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the candidate, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, every later 0.x minor repeats it, and 1.0 proves its own candidate.
