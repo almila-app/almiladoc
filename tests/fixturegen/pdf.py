@@ -270,8 +270,12 @@ def korea1_page() -> bytes:
     return b"BT /F1 10 Tf 72 700 Td " + shows + b" ET"
 
 
-FULL_SCAN = b"q 612 0 0 792 0 0 cm /Scan Do Q\n"
-FULL_SCAN_HI = b"q 612 0 0 792 0 0 cm /ScanHi Do Q\n"
+def band(image: bytes, height: int) -> bytes:
+    return b"q 612 0 0 %d 0 0 cm /%s Do Q\n" % (height, image)
+
+
+FULL_SCAN = band(b"Scan", 792)
+FULL_SCAN_HI = band(b"ScanHi", 792)
 BODY = [
     b"Interviews were transcribed and coded by two raters working",
     b"independently, and disagreements were settled by discussion.",
@@ -288,17 +292,18 @@ def text_lines(lines: Sequence[bytes], top: int = 690, mode: int = 0, size: int 
     return b"BT /F1 %d Tf %d Tr 14 TL 72 %d Td " % (size, mode, top) + shows + b" ET\n"
 
 
+def folio(n: int) -> bytes:
+    return b"BT /F1 9 Tf 300 30 Td (%d) Tj ET\n" % n
+
+
 def running_head(n: int) -> bytes:
-    return (
-        b"BT /F1 9 Tf 72 765 Td (Journal of Verdict Tests, Vol. 7) Tj ET\n"
-        b"BT /F1 9 Tf 300 30 Td (%d) Tj ET\n" % n
-    )
+    return b"BT /F1 9 Tf 72 765 Td (Journal of Verdict Tests, Vol. 7) Tj ET\n" + folio(n)
 
 
-def stamp(n: int) -> bytes:
+def stamp(n: int, y: int = 770) -> bytes:
     return (
-        b"BT /F1 10 Tf 160 770 Td (PROCEEDINGS OF THE ROYAL SOCIETY, 1923) Tj ET\n"
-        b"BT /F1 10 Tf 520 770 Td (%d) Tj ET\n" % (16 + n)
+        b"BT /F1 10 Tf 160 %d Td (PROCEEDINGS OF THE ROYAL SOCIETY, 1923) Tj ET\n"
+        b"BT /F1 10 Tf 520 %d Td (%d) Tj ET\n" % (y, y, 16 + n)
     )
 
 
@@ -323,6 +328,8 @@ DIGITISED = b"BT /F1 8 Tf 220 20 Td (Digitized by the Internet Archive) Tj ET"
 SPACES = b"BT /F1 12 Tf 72 700 Td (          ) Tj ET"
 UNRESOLVED_RUN = b"BT /F2 12 Tf 72 600 Td <0102030405060708> Tj ET"
 COVER = text_lines(TITLE, top=420, size=20)
+LOGO = b"q 40 0 0 40 540 730 cm /Fig Do Q\n"
+PLATE = band(b"Fig", 475)
 
 # Each page's verdict is pinned in tests/it/pdf.rs.
 VERDICT_CASES: dict[str, Case] = {
@@ -349,6 +356,27 @@ VERDICT_CASES: dict[str, Case] = {
     "stamped-scan-single": [(FULL_SCAN + DIGITISED, [b"Scan"])],
     "stamped-scan-hires": [(FULL_SCAN_HI + stamp(i), [b"ScanHi"]) for i in range(1, 4)],
     "stamped-scan-single-hires": [(FULL_SCAN_HI + DIGITISED, [b"ScanHi"])],
+    "partial-scan-margin": [(band(b"Scan", 600) + DIGITISED, [b"Scan"])],
+    "partial-scan-stamped": [(band(b"Scan", 475) + stamp(i, 300), [b"Scan"]) for i in range(1, 4)],
+    "plate-folio": [(PLATE + folio(i), [b"Fig"]) for i in range(1, 4)],
+    "figure-plates": [
+        *[(text_lines(BODY[2 * i : 2 * i + 2]), []) for i in range(3)],
+        *[(PLATE + text_lines([b"Figure S%d" % i], top=420), [b"Fig"]) for i in (1, 2)],
+    ],
+    "chapter-dividers": [
+        (
+            PLATE
+            + text_lines([b"Chapter %d" % i], top=420, size=20)
+            + text_lines([b"The Coding Handbook"], top=300),
+            [b"Fig"],
+        )
+        for i in range(1, 4)
+    ],
+    "logo-header": [
+        (running_head(1) + LOGO + text_lines(BODY), [b"Fig"]),
+        (running_head(2) + LOGO, [b"Fig"]),
+        (running_head(3) + LOGO + text_lines(BODY), [b"Fig"]),
+    ],
     "tiled-scan": [(tiles(), TILE_NAMES)],
     "tiled-scan-layer": [(tiles() + text_lines(BODY, mode=3), TILE_NAMES)],
     "five-page": [

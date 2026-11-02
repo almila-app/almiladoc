@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
@@ -24,6 +25,7 @@ use crate::shared::fields::classify_rel_target;
 use crate::shared::sides::{PageSides, SideTimeline};
 
 const SCAN_COVERAGE: f32 = 0.9;
+const PARTIAL_SCAN_COVERAGE: f32 = 0.5;
 const RUNNING_HEAD_CHARS: usize = 80;
 
 pub(crate) struct Read {
@@ -62,15 +64,15 @@ impl PageBox {
 
 pub(crate) fn read(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Read, ConvertError> {
     let Extracted { pages, missing, parser } = extract(parse_ctx, bytes)?;
-    let furniture = Furniture::of(&pages);
+    let furniture = Furniture::of(parse_ctx, &pages)?;
     let mut sides = parse_ctx.headers_footers_requested().then(SideTimeline::default);
     let mut document = Document::default();
     let mut verdicts = Vec::with_capacity(pages.len());
-    for (index, page) in pages.iter().enumerate() {
+    for (index, (page, &furnished)) in pages.iter().zip(&furniture.pages).enumerate() {
         let scope = parse_ctx.begin_unit(UnitKind::Page, index)?;
         let unit = scope.unit().model();
         document.blocks.push(Block::UnitStart(unit));
-        let verdict = page_verdict(page.as_ref(), &furniture);
+        let verdict = page_verdict(page.as_ref(), furnished);
         let verdict =
             if parse_ctx.ocr_requested(unit.ordinal) { requested(verdict) } else { verdict };
         if let PageVerdict::NeedsOcr { reasons } = &verdict {
@@ -116,7 +118,7 @@ struct ReadPage {
 struct Text {
     index: usize,
     key: String,
-    numbers: Vec<u64>,
+    numbers: Vec<String>,
     chars: usize,
     running_head: bool,
 }
@@ -237,65 +239,91 @@ fn furniture_key(text: &str) -> String {
     kept.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn numbers(text: &str) -> Vec<u64> {
+fn numbers(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_ascii_digit())
         .filter(|run| !run.is_empty())
-        .map(|run| run.parse().unwrap_or(u64::MAX))
+        .map(|run| {
+            let value = run.trim_start_matches('0');
+            if value.is_empty() { "0" } else { value }.to_owned()
+        })
         .collect()
 }
 
+fn digits(numbers: &[String]) -> usize {
+    numbers.iter().map(String::len).sum()
+}
+
 struct Furniture {
-    pages_with: BTreeMap<String, usize>,
     running: BTreeSet<String>,
+    pages: Vec<Furnished>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Furnished {
+    all_repeated: bool,
+    all_running: bool,
+}
+
+#[derive(Default)]
+struct Seen<'a> {
+    agreeing: Vec<Sighting<'a>>,
+    clashing: Vec<usize>,
 }
 
 struct Sighting<'a> {
-    page: u64,
-    numbers: &'a [u64],
+    slot: usize,
+    numbers: &'a [String],
     beside_other_text: bool,
 }
 
+impl Seen<'_> {
+    fn slots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.agreeing.iter().map(|sighting| sighting.slot).chain(self.clashing.iter().copied())
+    }
+
+    fn weight(&self) -> usize {
+        let numbers: usize = self.agreeing.iter().map(|sighting| digits(sighting.numbers)).sum();
+        numbers + self.agreeing.len() + self.clashing.len()
+    }
+}
+
 impl Furniture {
-    fn of(pages: &[Option<ReadPage>]) -> Self {
-        let mut sightings: BTreeMap<&str, Vec<Sighting<'_>>> = BTreeMap::new();
-        for (page, read) in (1_u64..).zip(pages) {
+    fn of(parse_ctx: &ParseCtx<'_>, pages: &[Option<ReadPage>]) -> Result<Self, ConvertError> {
+        let mut seen: BTreeMap<&str, Seen<'_>> = BTreeMap::new();
+        let mut furnished = vec![Furnished::default(); pages.len()];
+        let mut bodied = vec![false; pages.len()];
+        for (slot, read) in pages.iter().enumerate() {
             let Some(read) = read else { continue };
-            let mut first: BTreeMap<&str, &Text> = BTreeMap::new();
-            for text in &read.texts {
-                first.entry(text.key.as_str()).or_insert(text);
-            }
-            let beside_other_text = first.len() > 1;
-            for (key, text) in first {
-                let numbers = text.numbers.as_slice();
-                let sighting = Sighting { page, numbers, beside_other_text };
-                sightings.entry(key).or_default().push(sighting);
-            }
+            let agrees = index_page(parse_ctx, slot, read, &mut seen)?;
+            let plain = read.texts.iter().all(|text| text.running_head);
+            furnished[slot] = Furnished { all_repeated: true, all_running: agrees && plain };
+            bodied[slot] = !plain;
         }
         let text_pages = pages.iter().flatten().filter(|read| !read.texts.is_empty()).count();
-        let pages_with = sightings.iter().map(|(key, on)| ((*key).to_owned(), on.len())).collect();
-        let candidates: BTreeSet<&str> = sightings
-            .iter()
-            .filter(|(key, on)| runs_through(key, on, text_pages))
-            .map(|(key, _)| *key)
+        let mut candidates = Vec::new();
+        for (key, on) in &seen {
+            parse_ctx.charge(u64::try_from(on.weight()).unwrap_or(u64::MAX))?;
+            let agreeing = on.agreeing.len();
+            let recurs = agreeing >= 2
+                && agreeing * 2 >= text_pages
+                && numbers_hold(&on.agreeing, key.is_empty());
+            let beside = on.agreeing.iter().filter(|sighting| sighting.beside_other_text).count();
+            let candidate = recurs && beside >= 2;
+            for slot in on.slots() {
+                furnished[slot].all_repeated &= agreeing + on.clashing.len() >= 2;
+                furnished[slot].all_running &= recurs;
+                bodied[slot] |= !candidate;
+            }
+            if candidate {
+                candidates.push((*key, on));
+            }
+        }
+        let running = candidates
+            .into_iter()
+            .filter(|(_, on)| on.slots().any(|slot| bodied[slot]))
+            .map(|(key, _)| key.to_owned())
             .collect();
-        let running = Self::beside_body(pages, &candidates);
-        Self { pages_with, running }
-    }
-
-    fn beside_body(pages: &[Option<ReadPage>], candidates: &BTreeSet<&str>) -> BTreeSet<String> {
-        let strippable = |text: &Text| text.running_head && candidates.contains(text.key.as_str());
-        pages
-            .iter()
-            .flatten()
-            .filter(|read| read.texts.iter().any(|text| !strippable(text)))
-            .flat_map(|read| &read.texts)
-            .filter(|text| candidates.contains(text.key.as_str()))
-            .map(|text| text.key.clone())
-            .collect()
-    }
-
-    fn repeats(&self, text: &Text) -> bool {
-        self.pages_with.get(&text.key).is_some_and(|&pages| pages >= 2)
+        Ok(Self { running, pages: furnished })
     }
 
     fn strips(&self, text: &Text) -> bool {
@@ -303,10 +331,37 @@ impl Furniture {
     }
 }
 
-fn runs_through(key: &str, on: &[Sighting<'_>], text_pages: usize) -> bool {
-    on.len() * 2 >= text_pages
-        && on.iter().filter(|sighting| sighting.beside_other_text).count() >= 2
-        && numbers_hold(on, key.is_empty())
+fn index_page<'a>(
+    parse_ctx: &ParseCtx<'_>,
+    slot: usize,
+    read: &'a ReadPage,
+    seen: &mut BTreeMap<&'a str, Seen<'a>>,
+) -> Result<bool, ConvertError> {
+    let mut first: BTreeMap<&str, (&Text, bool)> = BTreeMap::new();
+    for text in &read.texts {
+        let traversed = text.key.len() + digits(&text.numbers);
+        parse_ctx.charge(u64::try_from(traversed).unwrap_or(u64::MAX))?;
+        match first.entry(text.key.as_str()) {
+            Entry::Vacant(entry) => {
+                entry.insert((text, false));
+            }
+            Entry::Occupied(mut entry) => {
+                let (kept, clashes) = entry.get_mut();
+                *clashes |= kept.numbers != text.numbers;
+            }
+        }
+    }
+    let beside_other_text = first.len() > 1;
+    let agrees = first.values().all(|&(_, clashes)| !clashes);
+    for (key, (text, clashes)) in first {
+        let on = seen.entry(key).or_default();
+        if clashes {
+            on.clashing.push(slot);
+        } else {
+            on.agreeing.push(Sighting { slot, numbers: &text.numbers, beside_other_text });
+        }
+    }
+    Ok(agrees)
 }
 
 fn numbers_hold(on: &[Sighting<'_>], folio: bool) -> bool {
@@ -314,26 +369,28 @@ fn numbers_hold(on: &[Sighting<'_>], folio: bool) -> bool {
     if rest.iter().any(|sighting| sighting.numbers.len() != first.numbers.len()) {
         return false;
     }
-    first.numbers.iter().enumerate().all(|(at, &number)| {
-        let value = |sighting: &Sighting<'_>| sighting.numbers.get(at).copied().unwrap_or(number);
-        let offset =
-            |sighting: &Sighting<'_>| i128::from(value(sighting)) - i128::from(sighting.page);
-        rest.iter().all(|sighting| value(sighting) == number)
-            || (folio && rest.iter().all(|sighting| offset(sighting) == offset(first)))
+    first.numbers.iter().enumerate().all(|(at, number)| {
+        let offset = |sighting: &Sighting<'_>| {
+            let value: i128 = sighting.numbers.get(at)?.parse().ok()?;
+            value.checked_sub(i128::try_from(sighting.slot).ok()?)
+        };
+        let stepping =
+            || offset(first).is_some_and(|step| rest.iter().all(|on| offset(on) == Some(step)));
+        rest.iter().all(|sighting| sighting.numbers.get(at) == Some(number))
+            || (folio && stepping())
     })
 }
 
-fn page_verdict(page: Option<&ReadPage>, furniture: &Furniture) -> PageVerdict {
+fn page_verdict(page: Option<&ReadPage>, furnished: Furnished) -> PageVerdict {
     page.map_or_else(
         || PageVerdict::NeedsOcr { reasons: vec![GapReason::UnreadableContent] },
-        |read| verdict(read, furniture),
+        |read| verdict(read, furnished),
     )
 }
 
-fn verdict(read: &ReadPage, furniture: &Furniture) -> PageVerdict {
+fn verdict(read: &ReadPage, furnished: Furnished) -> PageVerdict {
     let text_chars = read.texts.iter().map(|text| text.chars).sum();
-    let furniture_only = read.texts.iter().all(|text| furniture.repeats(text));
-    let reasons = reasons(&read.page, text_chars, furniture_only);
+    let reasons = reasons(&read.page, text_chars, scanned(&read.page, furnished));
     if !reasons.is_empty() {
         PageVerdict::NeedsOcr { reasons }
     } else if text_chars == 0 {
@@ -343,13 +400,21 @@ fn verdict(read: &ReadPage, furniture: &Furniture) -> PageVerdict {
     }
 }
 
-fn reasons(page: &Page, text_chars: usize, furniture_only: bool) -> Vec<GapReason> {
+fn scanned(page: &Page, furnished: Furnished) -> bool {
+    let margin_only =
+        page.painted_text_chars > 0 && page.margin_text_chars == page.painted_text_chars;
+    let furniture_only = if page.image_coverage >= SCAN_COVERAGE {
+        furnished.all_repeated
+    } else {
+        furnished.all_running
+    };
+    page.image_coverage >= PARTIAL_SCAN_COVERAGE && (margin_only || furniture_only)
+}
+
+fn reasons(page: &Page, text_chars: usize, scanned: bool) -> Vec<GapReason> {
     let invisible = u64::from(page.invisible_text_chars);
     let shown = invisible + u64::from(page.painted_text_chars);
     let textless = text_chars == 0;
-    let margin_only =
-        page.painted_text_chars > 0 && page.margin_text_chars == page.painted_text_chars;
-    let scanned = page.image_coverage >= SCAN_COVERAGE && (furniture_only || margin_only);
     let mut reasons: Vec<GapReason> = [
         (GapReason::UnreadableContent, page.undecodable_content_streams > 0),
         (
@@ -596,10 +661,15 @@ mod tests {
         page
     }
 
+    fn judged(pages: &[Option<ReadPage>]) -> Vec<PageVerdict> {
+        let furniture = Furniture::of(&ParseCtx::default(), pages).unwrap();
+        let judge =
+            |(read, &furnished): (&Option<ReadPage>, _)| page_verdict(read.as_ref(), furnished);
+        pages.iter().zip(&furniture.pages).map(judge).collect()
+    }
+
     fn ruled(page: Page) -> PageVerdict {
-        let read = read_page(page);
-        let furniture = Furniture::of(&[Some(read_page(Page::new(1, 612.0, 792.0)))]);
-        verdict(&read, &furniture)
+        judged(&[Some(read_page(page))]).remove(0)
     }
 
     fn needs_ocr(reasons: &[GapReason]) -> PageVerdict {
@@ -689,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn text_over_a_page_sized_image_is_a_scan_only_when_it_is_furniture_or_margin() {
+    fn text_over_half_a_page_is_a_scan_only_when_it_is_furniture_or_margin() {
         let scan = |coverage: f32, margin: u32| {
             let mut page = page(&["Body"]);
             page.image_op_count = 1;
@@ -697,9 +767,13 @@ mod tests {
             (page.painted_text_chars, page.margin_text_chars) = (4, margin);
             ruled(page)
         };
-        assert_eq!(scan(1.0, 4), needs_ocr(&[GapReason::ImageBacked]));
-        assert_eq!(scan(0.89, 4), PageVerdict::Text);
+        let scanned = needs_ocr(&[GapReason::ImageBacked]);
+        for coverage in [1.0, 0.89, 0.5] {
+            assert_eq!(scan(coverage, 4), scanned, "{coverage}");
+        }
+        assert_eq!(scan(0.49, 4), PageVerdict::Text);
         assert_eq!(scan(1.0, 3), PageVerdict::Text);
+        assert_eq!(scan(0.5, 3), PageVerdict::Text);
         let mut zero = page(&["Body"]);
         (zero.image_op_count, zero.image_coverage) = (1, 1.0);
         assert_eq!(ruled(zero), PageVerdict::Text);
@@ -709,14 +783,107 @@ mod tests {
             (page.image_op_count, page.image_coverage) = (1, 1.0);
             read_page(page)
         };
-        let pages = [Some(stamp("17")), Some(stamp("18")), Some(read_page(page(&["Body"])))];
-        let furniture = Furniture::of(&pages);
-        let [Some(first), _, Some(body)] = &pages else { panic!() };
-        assert_eq!(verdict(first, &furniture), needs_ocr(&[GapReason::ImageBacked]));
-        let mut covered = page(&["Body", "PROCEEDINGS 1923"]);
+        let mut covered = page(&["Other", "PROCEEDINGS 1923"]);
         (covered.image_op_count, covered.image_coverage) = (1, 1.0);
-        assert_eq!(verdict(&read_page(covered), &furniture), PageVerdict::Text);
-        assert_eq!(verdict(body, &furniture), PageVerdict::Text);
+        let body = read_page(page(&["Body"]));
+        let pages = [Some(stamp("17")), Some(stamp("18")), Some(body), Some(read_page(covered))];
+        let scanned = needs_ocr(&[GapReason::ImageBacked]);
+        assert_eq!(
+            judged(&pages),
+            [scanned.clone(), scanned, PageVerdict::Text, PageVerdict::Text]
+        );
+    }
+
+    fn image_backed_pages(pages: &[&[&str]], coverage: f32) -> Vec<bool> {
+        let pages: Vec<_> = pages
+            .iter()
+            .map(|texts| {
+                let mut page = page(texts);
+                (page.image_op_count, page.image_coverage) = (1, coverage);
+                Some(read_page(page))
+            })
+            .collect();
+        let image_backed = needs_ocr(&[GapReason::ImageBacked]);
+        judged(&pages).into_iter().map(|verdict| verdict == image_backed).collect()
+    }
+
+    #[test]
+    fn below_nine_tenths_only_running_heads_and_folios_are_furniture() {
+        let stamps: [&[&str]; 3] =
+            [&["PROCEEDINGS 1923", "17"], &["PROCEEDINGS 1923", "18"], &["PROCEEDINGS 1923", "19"]];
+        assert_eq!(image_backed_pages(&stamps, 0.5), [true; 3]);
+        assert_eq!(image_backed_pages(&stamps, 0.49), [false; 3]);
+        let over_body: [&[&str]; 3] = [&["Body", "PROCEEDINGS 1923", "17"], stamps[1], stamps[2]];
+        assert_eq!(image_backed_pages(&over_body, 0.6), [false, true, true]);
+        let tick: [&[&str]; 3] = [&["PROCEEDINGS 1923", "17", "40"], stamps[1], stamps[2]];
+        assert_eq!(image_backed_pages(&tick, 0.6), [false, true, true]);
+        let legend = "L".repeat(RUNNING_HEAD_CHARS + 1);
+        let legends: [&[&str]; 3] = [&[&legend, "17"], &[&legend, "18"], &[&legend, "19"]];
+        assert_eq!(image_backed_pages(&legends, 0.6), [false; 3]);
+        let dividers: [&[&str]; 3] =
+            [&["Chapter 1", "Handbook"], &["Chapter 2", "Handbook"], &["Chapter 3", "Handbook"]];
+        assert_eq!(image_backed_pages(&dividers, 0.89), [false; 3]);
+        assert_eq!(image_backed_pages(&dividers, 0.9), [true; 3]);
+    }
+
+    #[test]
+    fn a_stamp_alone_on_each_partial_scan_is_furniture_only_where_it_recurs() {
+        let alone: [&[&str]; 3] = [&["PROCEEDINGS 1923"]; 3];
+        assert_eq!(image_backed_pages(&alone, 0.6), [true; 3]);
+        assert_eq!(image_backed_pages(&[&["PROCEEDINGS 1923"]], 0.6), [false]);
+        let once: [&[&str]; 3] = [&["PROCEEDINGS 1923"], &["Plate one"], &["Plate two"]];
+        assert_eq!(image_backed_pages(&once, 0.6), [false; 3]);
+        let few: [&[&str]; 5] = [
+            &["PROCEEDINGS 1923"],
+            &["PROCEEDINGS 1923"],
+            &["Plate one"],
+            &["Plate two"],
+            &["Map"],
+        ];
+        assert_eq!(image_backed_pages(&few, 0.6), [false; 5]);
+    }
+
+    #[test]
+    fn copies_of_a_text_whose_numbers_agree_are_one_sighting_on_their_page() {
+        let twice: [&[&str]; 3] = [&["PROCEEDINGS 1923", "PROCEEDINGS 1923"]; 3];
+        assert_eq!(image_backed_pages(&twice, 0.6), [true; 3]);
+        assert_eq!(image_backed_pages(&twice, 0.49), [false; 3]);
+        let labels: [&[&str]; 3] = [&["Label", "Label"]; 3];
+        assert_eq!(image_backed_pages(&labels, 0.0033), [false; 3]);
+        let born_digital: Vec<_> =
+            labels.iter().map(|texts| Some(read_page(page(texts)))).collect();
+        assert_eq!(judged(&born_digital), vec![PageVerdict::Text; 3]);
+        let heads: [&[&str]; 2] = [&["Head", "Head", "Body"], &["Head", "Other"]];
+        assert_eq!(kept(&heads, 0), paragraphs(&["Body"]));
+    }
+
+    #[test]
+    fn a_page_repeating_a_key_with_other_numbers_is_judged_alike_in_either_order() {
+        let stamps: [&[&str]; 2] = [&["PROCEEDINGS 1923", "18"], &["PROCEEDINGS 1923", "19"]];
+        let heads: [&[&str]; 2] = [&["Head", "Other", "4"], &["Head", "More", "5"]];
+        for (tick, body) in [(["17", "40"], ["3", "40"]), (["40", "17"], ["40", "3"])] {
+            let ticked: [&[&str]; 3] =
+                [&["PROCEEDINGS 1923", tick[0], tick[1]], stamps[0], stamps[1]];
+            assert_eq!(image_backed_pages(&ticked, 0.6), [false, true, true], "{tick:?}");
+            let ruled: [&[&str]; 3] = [&["Head", "Body", body[0], body[1]], heads[0], heads[1]];
+            assert_eq!(kept(&ruled, 1), paragraphs(&["Other"]), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn numbers_past_the_largest_integer_keep_their_value() {
+        let captions: [&[&str]; 3] = [
+            &["Figure S18446744073709551616", "Source: Archive"],
+            &["Figure S18446744073709551617", "Source: Archive"],
+            &["Figure S18446744073709551618", "Source: Archive"],
+        ];
+        assert_eq!(image_backed_pages(&captions, 0.6), [false; 3]);
+        let caption = "Figure S18446744073709551616";
+        let heads: [&[&str]; 2] = [&[caption, "Body"], &["Figure S18446744073709551617", "Other"]];
+        assert_eq!(kept(&heads, 0), paragraphs(&[caption, "Body"]));
+        let same: [&[&str]; 2] =
+            [&["Report 18446744073709551616", "Body"], &["Report 018446744073709551616", "Other"]];
+        assert_eq!(kept(&same, 0), paragraphs(&["Body"]));
     }
 
     #[test]
@@ -727,8 +894,8 @@ mod tests {
 
     fn mapped(pages: &[&[&str]], at: usize) -> (Vec<Block>, Vec<(DiagnosticCode, Region, u64)>) {
         let pages: Vec<_> = pages.iter().map(|texts| Some(read_page(page(texts)))).collect();
-        let furniture = Furniture::of(&pages);
         let parse_ctx = ParseCtx::default();
+        let furniture = Furniture::of(&parse_ctx, &pages).unwrap();
         let mut blocks = Vec::new();
         map_page(&parse_ctx, pages[at].as_ref().unwrap(), &furniture, None, &mut blocks).unwrap();
         (blocks, diagnostic_rows(&parse_ctx.into_diagnostics()))
@@ -738,7 +905,7 @@ mod tests {
     fn under_emit_a_page_writes_its_running_head_and_folio_as_painted_and_a_page_without_them_clears_them()
      {
         let pages = furnished();
-        let furniture = Furniture::of(&pages);
+        let furniture = Furniture::of(&ParseCtx::default(), &pages).unwrap();
         let limits = crate::limits::Limits::default();
         let parse_ctx =
             ParseCtx::new(&limits).with_headers_footers(crate::HeaderFooterPolicy::Emit);
@@ -886,8 +1053,8 @@ mod tests {
     #[test]
     fn a_heading_or_a_table_is_never_a_running_head() {
         use unpdf::{TableCell, TableRow};
-        let with = |block: fn() -> PdfBlock| {
-            let pages: Vec<_> = ["Body", "Other"]
+        let beside = |block: fn() -> PdfBlock, texts: [&str; 2]| {
+            let pages: Vec<_> = texts
                 .into_iter()
                 .map(|text| {
                     let mut page = page(&[]);
@@ -896,7 +1063,7 @@ mod tests {
                     Some(read_page(page))
                 })
                 .collect();
-            let furniture = Furniture::of(&pages);
+            let furniture = Furniture::of(&ParseCtx::default(), &pages).unwrap();
             let mut blocks = Vec::new();
             map_page(
                 &ParseCtx::default(),
@@ -908,7 +1075,10 @@ mod tests {
             .unwrap();
             blocks.len()
         };
-        assert_eq!(with(|| PdfBlock::Paragraph(Paragraph::heading("Chapter", 1))), 2);
+        let with = |block: fn() -> PdfBlock| beside(block, ["Body", "Other"]);
+        let heading = || PdfBlock::Paragraph(Paragraph::heading("Chapter", 1));
+        assert_eq!(with(heading), 2);
+        assert_eq!(beside(heading, ["Head", "Head"]), 1);
         let table = || {
             let mut table = PdfTable::new();
             table.add_row(TableRow::new(vec![TableCell::text("Head")]));
@@ -921,17 +1091,17 @@ mod tests {
 
     #[test]
     fn a_number_is_each_digit_run_of_a_text() {
-        assert_eq!(numbers("Vol. 7, pp. 12-130"), [7, 12, 130]);
-        assert_eq!(numbers("none"), [] as [u64; 0]);
-        assert_eq!(numbers("99999999999999999999"), [u64::MAX]);
+        assert_eq!(numbers("Vol. 7, pp. 12-130"), ["7", "12", "130"]);
+        assert_eq!(numbers("none"), [] as [&str; 0]);
+        assert_eq!(numbers("007 000"), ["7", "0"]);
+        assert_eq!(numbers("99999999999999999999"), ["99999999999999999999"]);
     }
 
     #[test]
     fn a_page_the_engine_could_not_read_needs_ocr_for_its_content() {
-        let furniture = Furniture::of(&[]);
-        assert_eq!(page_verdict(None, &furniture), needs_ocr(&[GapReason::UnreadableContent]));
-        let read = read_page(page(&["Body"]));
-        assert_eq!(page_verdict(Some(&read), &furniture), PageVerdict::Text);
+        let pages = [None, Some(read_page(page(&["Body"])))];
+        let unreadable = needs_ocr(&[GapReason::UnreadableContent]);
+        assert_eq!(judged(&pages), [unreadable, PageVerdict::Text]);
     }
 
     fn item(style: ListStyle, number: Option<u32>, text: &str) -> Paragraph {

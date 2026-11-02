@@ -1,0 +1,11 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+image_omitted omitted body unit=1 count=1
+image_omitted omitted body unit=2 count=1
+image_omitted omitted body unit=3 count=1
+footer_omitted omitted footer unit=1 count=1
+footer_omitted omitted footer unit=2 count=1
+footer_omitted omitted footer unit=3 count=1
+under fail: complete

@@ -148,15 +148,16 @@ One table; BOM encoding else UTF-8 else windows-1252, detected comma/semicolon/t
 ## PDF
 
 - unpdf reads page units with headings/paragraphs/lists/spanned tables/fixed-pitch code blocks and bold/italic/strike/super/subscript; URI links keep their label emphasis and pass the link rules (ftp, tel, javascript and other unsafe schemes keep labels with `unsafe_link`); internal destinations and other actions keep labels only. A page where unpdf could not keep every link target reports one `link_target_unread`, so default conversion fails Incomplete; unread annotations, an unindexable page box or an overflowing link index clear all its targets, while a link over a fixed-pitch code block loses only its own target and a spent target-size or lookup bound loses every target after it. Composite-font codes unmapped by both ToUnicode and font data are reported only where clip/page box shows the run, including missing codes inside otherwise readable runs.
-- Running heads/folios are non-headings of ≤80 nonspace characters, recurring digit-insensitively on at least half of text pages, beside other text on two, with stable numbers or bare numbers stepping with page ordinal; at least one recurrence must have ordinary text, and only leading/trailing occurrences drop. unpdf's own bare page-number removal is reported as `footer_omitted` (below).
+- Running heads/folios are non-headings of ≤80 nonspace characters, recurring digit-insensitively on at least half of text pages, beside other text on two, with stable numbers of any length or bare numbers stepping with page ordinal; a page repeating the text with other numbers does not count as a recurrence. At least one recurrence must have ordinary text, and only leading/trailing occurrences drop. unpdf's own bare page-number removal is reported as `footer_omitted` (below).
 - `inspect` returns NeedsOcr for matching reasons below, otherwise Blank without shown text, else Text; running content is judged across every page, including caller-selected gaps.
+- A scan carrying one non-recurring mid-page stamp stays Text; select its pages with with_ocr_pages.
 
 | GapReason | Condition |
 |---|---|
 | `UnreadableContent` | Undecodable stream or unparseable page |
 | `InvisibleText` | Dropped unreadable OCR layer, ≥90% invisible shown characters, or no readable text with clipped text |
 | `GarbledText` | No readable text and font-suppressed runs |
-| `ImageBacked` | Painted image without readable text, or ≥90% coverage with all text recurring digit-insensitively elsewhere or confined to margins |
+| `ImageBacked` | Painted image without readable text; or ≥50% coverage with all text confined to margins or each text recurring as a running head/folio does, with any copies on its page agreeing in their numbers, needing neither other text beside it nor ordinary-text recurrence; or ≥90% coverage with all text recurring digit-insensitively elsewhere |
 | `VectorDrawn` | No text/images, but filled paths |
 | `UnreadableText` | None above, yet shown non-whitespace text reads nothing and is not all page numbers unpdf removed |
 | `CallerRequested` | Selected by with_ocr_pages, after other reasons; discarded text costs no loss |

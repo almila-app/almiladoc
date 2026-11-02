@@ -30,6 +30,12 @@ const VERDICTS: &[(&str, &[&str])] = &[
     ("handmade-stamped-scan-single", &["needs_ocr image_backed"]),
     ("handmade-stamped-scan-hires", &["needs_ocr image_backed"; 3]),
     ("handmade-stamped-scan-single-hires", &["needs_ocr image_backed"]),
+    ("handmade-partial-scan-margin", &["needs_ocr image_backed"]),
+    ("handmade-partial-scan-stamped", &["needs_ocr image_backed"; 3]),
+    ("handmade-plate-folio", &["needs_ocr image_backed"; 3]),
+    ("handmade-figure-plates", &["text"; 5]),
+    ("handmade-chapter-dividers", &["text"; 3]),
+    ("handmade-logo-header", &["text"; 3]),
     ("handmade-tiled-scan", &["needs_ocr image_backed"]),
     ("handmade-tiled-scan-layer", &["needs_ocr invisible_text"]),
     (
@@ -312,7 +318,7 @@ fn each_page_its_blocks_and_their_text_charge_work() {
     let text = "BT /F1 12 Tf 72 700 Td (Text) Tj ET";
     assert_eq!(least(&[text, ""]) - least(&[text]), 1);
     let more = "BT /F1 12 Tf 72 700 Td (More) Tj ET";
-    assert_eq!(least(&[text, more]) - least(&[text, ""]), 1 + 4 + 1);
+    assert_eq!(least(&[text, more]) - least(&[text, ""]), 1 + 4 + 1 + 4 + 1);
 }
 
 #[test]
@@ -859,4 +865,57 @@ fn a_page_whose_only_text_is_a_folio_the_engine_removes_is_blank_beside_its_omit
     assert_eq!(verdicts(&bytes), ["no_text"]);
     let garbled = pdf(&format!("BT /F2 12 Tf 72 700 Td <0001> Tj ET\n{folio}"));
     assert_eq!(verdicts(&garbled), ["needs_ocr garbled_text"]);
+}
+
+const SCAN: &str = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+                    /BitsPerComponent 8 /Length 1 >>\nstream\na\nendstream";
+
+fn scanned_pages(contents: &[String]) -> Vec<u8> {
+    let kids: Vec<String> = (0..contents.len()).map(|at| format!("{} 0 R", 5 + 2 * at)).collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), contents.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        SCAN.to_owned(),
+    ];
+    for (at, content) in contents.iter().enumerate() {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R \
+             /Resources << /Font << /F1 3 0 R >> /XObject << /Scan 4 0 R >> >> >>",
+            6 + 2 * at
+        ));
+        objects.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+    }
+    write_pdf(&objects)
+}
+
+fn stamped_scans(stamp: &str) -> Vec<u8> {
+    let pages: Vec<String> = (1..=3)
+        .map(|folio| {
+            format!(
+                "q 612 0 0 475 0 0 cm /Scan Do Q\nBT /F1 10 Tf 72 300 Td ({stamp}) Tj ET\n\
+                 BT /F1 9 Tf 300 30 Td ({folio}) Tj ET"
+            )
+        })
+        .collect();
+    scanned_pages(&pages)
+}
+
+#[test]
+fn a_stamp_alone_on_partial_scans_is_furniture_judged_at_a_charge_by_its_key() {
+    let short = stamped_scans("PROCEEDINGS 1923");
+    let longer = "X".repeat(60);
+    let long = stamped_scans(&format!("PROCEEDINGS {longer} 1923"));
+    for bytes in [&short, &long] {
+        assert_eq!(verdicts(bytes), ["needs_ocr image_backed"; 3]);
+    }
+    let least = |bytes: &[u8]| {
+        least_work(|converter| converter.parse(Input::new(bytes, Format::Pdf)).is_ok())
+    };
+    let (short_work, long_work) = (least(&short), least(&long));
+    let read_once = 3 * (longer.len() as u64 + 1);
+    assert!(long_work >= short_work + 2 * read_once, "{short_work} {long_work}");
+    let refusal =
+        limited(|limits| limits.max_work = long_work - 1).parse(Input::new(&long, Format::Pdf));
+    assert!(trips(&refusal, Limit::Work, long_work - 1), "{:?}", refusal.err());
 }
