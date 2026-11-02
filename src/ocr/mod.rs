@@ -36,15 +36,18 @@ pub use request::{OcrImage, OcrRefusal, OcrRequest, RefusalKind};
 pub enum GapFill {
     /// Markdown, plain text included: raw HTML in it stays text, a link its label and an image
     /// its alt, TeX math (`\(..\)`, `\[..\]`, `$..$`, `$$..$$`, a `math` fence) becomes math,
-    /// and its text is composed to NFC.
+    /// OTSL table markup (`<fcel>A<lcel><nl>`, also `<ecel>`, `<ched>`, `<rhed>`, `<srow>`,
+    /// `<ucel>`, `<xcel>`) becomes a table whose merged cell shows once, and its text is composed
+    /// to NFC.
     Markdown(String),
     /// Literal horizontal lines, grouped into left-to-right columns and paragraphs.
     ///
     /// Whitespace gutters identify columns; lines crossing a gutter separate sections.
     /// Vertical gaps larger than adjacent line heights separate paragraphs; ties keep input order.
     Lines(Vec<OcrLine>),
-    /// Markdown for a top-level gap with standalone top-level `table`/`tr`/`td` HTML and positive
-    /// spans; merged cells render as safe HTML. Unsupported markup or contexts refuse the fill.
+    /// Markdown with standalone top-level `table`/`tr`/`td` HTML and positive spans, and OTSL
+    /// tables; a top-level gap renders merged cells as safe HTML, a nested gap shows each once.
+    /// Unsupported markup, or a table inside a quote or list, refuses the fill.
     MarkdownTables(String),
 }
 

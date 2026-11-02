@@ -1,5 +1,5 @@
 use crate::error::ConvertError;
-use crate::model::{Block, Cell, CellSlot, List, MarkerKind, Style, Table};
+use crate::model::{Block, Cell, CellSlot, Inline, List, MarkerKind, Style, Table};
 use crate::render::markdown::Ctx;
 use crate::render::markdown::escape::{InlineContext, escape_marker_label};
 use crate::render::markdown::inline::{holds_math, push_code_span, push_math_span, render_based};
@@ -76,12 +76,13 @@ pub(crate) fn write_table(
 
 pub(crate) fn write_preserved(table: &Table, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
     sink.write("<table>")?;
-    for row in &table.grid {
+    for (at, row) in table.grid.iter().enumerate() {
         sink.meter().charge(row.len() as u64 + 1)?;
         sink.write("<tr>")?;
+        let tag = if at < table.header_rows { "th" } else { "td" };
         for slot in row {
             let CellSlot::Origin(cell) = slot else { continue };
-            sink.write("<td")?;
+            sink.write(&format!("<{tag}"))?;
             for (name, value) in [("rowspan", cell.row_span), ("colspan", cell.col_span)] {
                 if value > 1 {
                     sink.write(&format!(" {name}=\"{value}\""))?;
@@ -99,36 +100,50 @@ pub(crate) fn write_preserved(table: &Table, sink: &mut Sink<'_>) -> Result<(), 
                     preserved_inline(inline, sink)?;
                 }
             }
-            sink.write("</td>")?;
+            sink.write(&format!("</{tag}>"))?;
         }
         sink.write("</tr>")?;
     }
     sink.write("</table>")
 }
 
-fn preserved_inline(
-    inline: &crate::model::Inline,
-    sink: &mut Sink<'_>,
-) -> Result<(), ConvertError> {
+fn preserved_inline(inline: &Inline, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
     match inline {
-        crate::model::Inline::Text { text, style } => {
-            if *style != Style::PLAIN {
-                return Err(ConvertError::Internal);
+        Inline::Text { text, style } => {
+            let tags = [
+                (style.bold, "strong"),
+                (style.italic, "em"),
+                (style.strike, "del"),
+                (style.code, "code"),
+            ];
+            for (_, tag) in tags.iter().filter(|(on, _)| *on) {
+                sink.write(&format!("<{tag}>"))?;
             }
-            for c in text.chars() {
-                sink.meter().charge(1)?;
-                match c {
-                    '&' => sink.write("&amp;")?,
-                    '<' => sink.write("&lt;")?,
-                    '>' => sink.write("&gt;")?,
-                    c => {
-                        sink.write(c.encode_utf8(&mut [0; 4]))?;
-                    }
-                }
+            preserved_text(text, sink)?;
+            for (_, tag) in tags.iter().rev().filter(|(on, _)| *on) {
+                sink.write(&format!("</{tag}>"))?;
             }
+            Ok(())
         }
-        crate::model::Inline::LineBreak => sink.write("<br>")?,
-        _ => return Err(ConvertError::Internal),
+        Inline::Math(tex) => {
+            sink.write("$")?;
+            preserved_text(tex, sink)?;
+            sink.write("$")
+        }
+        Inline::LineBreak => sink.write("<br>"),
+        _ => Err(ConvertError::Internal),
+    }
+}
+
+fn preserved_text(text: &str, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    for c in text.chars() {
+        sink.meter().charge(1)?;
+        match c {
+            '&' => sink.write("&amp;")?,
+            '<' => sink.write("&lt;")?,
+            '>' => sink.write("&gt;")?,
+            c => sink.write(c.encode_utf8(&mut [0; 4]))?,
+        }
     }
     Ok(())
 }

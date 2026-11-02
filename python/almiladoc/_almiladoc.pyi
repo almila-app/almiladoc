@@ -660,8 +660,8 @@ class OcrHttp:
       `service_tiers`, one code or a prefix, and at most 16 codes. A 429 whose
       error code is among the codes or whose message starts with the prefix moves
       the request to its next tier, each such 429 one tier on until the last.
-    - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, failing a gap
-      below the top level.
+    - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, keeping HTML and
+      OTSL table spans at a top-level gap and showing each merge once below it.
     - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
       paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
       bound.
@@ -861,7 +861,8 @@ class Parsed:
         """Fill `gap`, a row of `gaps`, with the Markdown OCR read for it,
         plain text included, with the GIL released: raw HTML in it stays text,
         a link its label and an image its alt; TeX math (`\\(..\\)`, `\\[..\\]`,
-        `$..$`, `$$..$$`, a `math` fence) becomes math. A gap no row of
+        `$..$`, `$$..$$`, a `math` fence) becomes math and OTSL table markup
+        (`<fcel>A<lcel><nl>`) a table whose merged cell shows once. A gap no row of
         `gaps` names raises `KeyError`, one filled or failed already
         `ValueError`, Markdown past `Limits.max_ocr_text_bytes`, nested past
         `max_nesting_depth` or whose tables may pass `max_grid_slots`
@@ -875,12 +876,13 @@ class Parsed:
         past `max_ocr_text_bytes` or another per-fill limit, `ResourceLimitError` past
         `max_work`, and `CancelledError` once the parse's token is cancelled."""
     def fill_gap_tables(self, gap: _GapRow, markdown: str) -> None:
-        """Fill a top-level `gap` with Markdown and standalone top-level HTML tables.
-        Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
-        Unsupported tables or context raise `ValueError`, per-fill limits `GapRefused`, work
-        past `max_work` `ResourceLimitError`, and a cancel of the parse's token
-        `CancelledError`, each leaving the gap unfilled. A gap no row of `gaps` names raises
-        `KeyError`, and one filled or failed already `ValueError`."""
+        """Fill `gap` with Markdown, standalone top-level HTML tables and OTSL tables.
+        Only table/tr/td, text and positive spans are accepted; a top-level gap renders merged
+        cells as safe HTML and a nested gap shows each merge once. Unsupported tables or
+        context raise `ValueError`, per-fill limits `GapRefused`, work past `max_work`
+        `ResourceLimitError`, and a cancel of the parse's token `CancelledError`, each leaving
+        the gap unfilled. A gap no row of `gaps` names raises `KeyError`, and one filled or
+        failed already `ValueError`."""
     def fail_gap(self, gap: _GapRow) -> None:
         """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
         `<!-- ocr-failed page N -->` in a page's place and nothing after an

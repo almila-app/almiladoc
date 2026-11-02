@@ -202,6 +202,7 @@ path = [
     "src/shared/math/mtef.rs",
     "src/shared/ocr_table.rs",
     "src/shared/ole_equation.rs",
+    "src/shared/otsl.rs",
     "src/shared/tag_scan.rs",
     "src/shared/test_support.rs",
     "tests/common/word97.rs",

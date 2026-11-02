@@ -29,7 +29,7 @@ fn scan(
     let mut rest: &[u8] = &text;
     while let Some(open) = rest.iter().position(|&b| b == b'<') {
         rest = &rest[open + 1..];
-        if let Some(after) = past_doctype(rest).or_else(|| past_unmarked(rest)) {
+        if let Some(after) = past_markup(rest) {
             rest = after;
             continue;
         }
@@ -79,6 +79,10 @@ impl<'a> Iterator for Attributes<'a> {
         self.rest = &after[1..];
         Some((name, value))
     }
+}
+
+pub(crate) fn past_markup(rest: &[u8]) -> Option<&[u8]> {
+    past_doctype(rest).or_else(|| past_unmarked(rest))
 }
 
 fn past_unmarked(rest: &[u8]) -> Option<&[u8]> {

@@ -469,8 +469,8 @@ impl OcrRefusal {
 ///   `service_tiers`, one code or a prefix, and at most 16 codes. A 429 whose
 ///   error code is among the codes or whose message starts with the prefix moves
 ///   the request to its next tier, each such 429 one tier on until the last.
-/// - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, failing a gap
-///   below the top level.
+/// - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, keeping HTML and
+///   OTSL table spans at a top-level gap and showing each merge once below it.
 /// - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
 ///   paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
 ///   bound.

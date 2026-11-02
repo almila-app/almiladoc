@@ -262,6 +262,22 @@ mod tests {
     }
 
     #[test]
+    fn a_table_in_a_nested_gap_needs_the_depth_it_nests_into_and_a_top_level_place_in_the_fill() {
+        let limits = Limits { max_nesting_depth: 4, ..Limits::default() };
+        let ctx = ParseCtx::new(&limits);
+        assert_eq!(markdown::blocks_with_tables(&ctx, TABLE, 3).map(|blocks| blocks.len()), Ok(1));
+        assert_eq!(
+            markdown::blocks_with_tables(&ctx, TABLE, 4),
+            Err(ConvertError::limit(Limit::NestingDepth, 4))
+        );
+        let quoted = format!("> {TABLE}");
+        assert!(matches!(
+            markdown::blocks_with_tables(&ctx, &quoted, 1),
+            Err(ConvertError::Malformed { .. })
+        ));
+    }
+
+    #[test]
     fn backslash_events_do_not_rescan_their_prefixes() {
         let source = "\\".repeat(100_000);
         let limits = Limits { max_work: 200_000, ..Limits::default() };

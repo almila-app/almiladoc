@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 
-use crate::build::{docx_with, relationships};
+use crate::build::{W, docx_with, relationships};
 use crate::support::{all_requests, bounded, configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr,
@@ -632,17 +632,96 @@ fn opted_in_tables_preserve_merges_without_changing_other_tables_or_html() {
     assert!(default.render().unwrap().markdown().contains("\\<table>"));
 }
 
+struct Tables(&'static str);
+
+impl OcrEngine for Tables {
+    fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+        requests.iter().map(|_| OcrOutcome::Fill(GapFill::MarkdownTables(self.0.into()))).collect()
+    }
+}
+
+const OTSL: &str = "<fcel>Sample<lcel><nl><fcel>A<fcel>12.4<nl>";
+
+fn filled_with(fill: GapFill) -> String {
+    let converter = image_ocr(|_| {});
+    let mut filled = parsed(&converter, &pictures(1, 8));
+    let gap = filled.gaps().next().unwrap().id;
+    filled.fill_gap(gap, fill).unwrap();
+    filled.render().unwrap().into_markdown()
+}
+
 #[test]
-fn unsupported_table_context_refuses_atomically_and_engines_use_the_same_owner() {
-    struct Tables(&'static str);
-    impl OcrEngine for Tables {
-        fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
-            requests
-                .iter()
-                .map(|_| OcrOutcome::Fill(GapFill::MarkdownTables(self.0.into())))
-                .collect()
+fn otsl_in_a_markdown_fill_is_a_table_that_shows_its_merge_once() {
+    let markdown = filled_with(GapFill::Markdown(format!("Table 1.\n{OTSL}")));
+    let table = "Table 1.\n\n|  |  |\n| --- | --- |\n| Sample |  |\n| A | 12.4 |";
+    assert!(markdown.contains(table), "{markdown}");
+    assert!(!markdown.contains("cel>") && !markdown.contains("<nl>"), "{markdown}");
+}
+
+#[test]
+fn otsl_in_a_tables_fill_is_safe_html_keeping_spans_headers_and_emphasis() {
+    let cases = [
+        (
+            "<ched>N<ched>S<lcel><nl><ucel><ched>M<ched>D<nl><fcel>a<fcel>1<fcel>2<nl>",
+            "<table><tr><th rowspan=\"2\">N</th><th colspan=\"2\">S</th></tr><tr><th>M</th><th>D</th></tr><tr><td>a</td><td>1</td><td>2</td></tr></table>",
+        ),
+        (
+            OTSL,
+            "<table><tr><td colspan=\"2\">Sample</td></tr><tr><td>A</td><td>12.4</td></tr></table>",
+        ),
+        (
+            "<fcel>S<lcel><nl><ucel><xcel><nl>",
+            "<table><tr><td rowspan=\"2\" colspan=\"2\">S</td></tr><tr></tr></table>",
+        ),
+        (
+            "<fcel>**p** _i_ ~~s~~ `<c>` $x<2$ & y<lcel><nl>",
+            "<table><tr><td colspan=\"2\"><strong>p</strong> <em>i</em> <del>s</del> <code>&lt;c&gt;</code> $x&lt;2$ &amp; y</td></tr></table>",
+        ),
+    ];
+    for (otsl, table) in cases {
+        let markdown = filled_with(GapFill::MarkdownTables(otsl.into()));
+        assert!(markdown.contains(table), "{markdown}");
+    }
+}
+
+#[test]
+fn a_tables_fill_in_a_nested_gap_is_read_and_shows_each_merge_once() {
+    let numbering = format!(
+        r#"<w:numbering {W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="-"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let rels =
+        relationships(&[("png", "image", "media/a.png"), ("n", "numbering", "numbering.xml")]);
+    let parts: [(&str, &[u8]); 3] = [
+        ("word/_rels/document.xml.rels", rels.as_bytes()),
+        ("word/media/a.png", PNG),
+        ("word/numbering.xml", numbering.as_bytes()),
+    ];
+    let picture = r#"<w:r><w:drawing><a:blip r:embed="png"/></w:drawing></w:r>"#;
+    let item = r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>"#;
+    let documents = [
+        docx_with(
+            &format!("<w:tbl><w:tr><w:tc><w:p>{picture}</w:p></w:tc></w:tr></w:tbl>"),
+            &parts,
+        ),
+        docx_with(&format!("<w:p>{item}{picture}</w:p>"), &parts),
+    ];
+    let converter = image_ocr(|_| {});
+    for (bytes, source) in documents.iter().flat_map(|bytes| [(bytes, MERGED), (bytes, OTSL)]) {
+        let mut direct = parsed(&converter, bytes);
+        let id = direct.gaps().next().unwrap().id;
+        direct.fill_gap(id, GapFill::MarkdownTables(source.into())).unwrap();
+        let mut engine = parsed(&converter, bytes);
+        assert_eq!(engine.ocr(&Tables(source), None), Ok(summary(1, 0, 0)));
+        for filled in [direct, engine] {
+            let markdown = filled.render().unwrap().into_markdown();
+            assert_eq!(markdown.matches("Sample").count(), 1, "{markdown}");
+            assert!(!markdown.contains("<table>") && !markdown.contains("span"), "{markdown}");
         }
     }
+}
+
+#[test]
+fn unsupported_table_context_refuses_atomically_and_engines_use_the_same_owner() {
     let rels = relationships(&[("png", "image", "media/a.png")]);
     let bytes = docx_with(
         "<w:tbl><w:tr><w:tc><w:p><w:r><w:drawing><a:blip r:embed=\"png\"/></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>",
@@ -652,13 +731,14 @@ fn unsupported_table_context_refuses_atomically_and_engines_use_the_same_owner()
     let mut nested = parsed(&converter, &bytes);
     let id = nested.gaps().next().unwrap().id;
     assert_eq!(
-        nested.fill_gap(id, GapFill::MarkdownTables(MERGED.into())),
+        nested.fill_gap(id, GapFill::MarkdownTables(format!("> {MERGED}"))),
         Err(almiladoc::GapError::InvalidTable)
     );
     nested.fill_gap(id, GapFill::Markdown("ordinary fill".into())).unwrap();
     assert!(nested.render().unwrap().markdown().contains("ordinary fill"));
     let mut inside = parsed(&converter, &bytes);
-    assert_eq!(inside.ocr(&Tables(MERGED), None), Ok(summary(0, 1, 0)));
+    let quoted = Tables("> <table><tr><td>x</td></tr></table>");
+    assert_eq!(inside.ocr(&quoted, None), Ok(summary(0, 1, 0)));
     assert_eq!(counts(&inside, DiagnosticCode::OcrFailed), 1);
     let mut engine = parsed(&converter, &pictures(1, 8));
     assert_eq!(engine.ocr(&Tables(MERGED), None), Ok(summary(1, 0, 0)));

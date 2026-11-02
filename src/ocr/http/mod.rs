@@ -76,8 +76,8 @@ pub struct OcrHttpConfig {
     /// Which `429` replies move a request to its next service tier, each matching one again
     /// until the last; none by default.
     pub tier_fallback: Option<TierFallback>,
-    /// Whether a reply fills as [`GapFill::MarkdownTables`], keeping its HTML table spans but
-    /// failing a gap below the top level, rather than [`GapFill::Markdown`]; false by default.
+    /// Whether a reply fills as [`GapFill::MarkdownTables`], keeping the spans of its HTML and
+    /// OTSL tables as HTML at a top-level gap, rather than [`GapFill::Markdown`]; false by default.
     pub preserve_table_spans: bool,
     /// How large an image the server takes: what [`Parsed::ocr`](crate::Parsed::ocr) paints a
     /// page at and refuses an image over.

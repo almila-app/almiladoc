@@ -797,6 +797,19 @@ class ConversionTest(unittest.TestCase):
             self.assertEqual(str.__sizeof__(oversized), before)
             getattr(limited, method)(gap, "ok")
 
+    def test_otsl_in_a_fill_becomes_a_table_and_a_tables_fill_keeps_its_spans(self):
+        otsl = "<fcel>Sample<lcel><nl><fcel>A<fcel>12.4<nl>"
+        for method, expected in (
+            ("fill_gap", "|  |  |\n| --- | --- |\n| Sample |  |\n| A | 12.4 |"),
+            ("fill_gap_tables", '<td colspan="2">Sample</td>'),
+        ):
+            parsed = almiladoc.Converter().parse(MIXED.read_bytes())
+            (gap,) = parsed.gaps
+            getattr(parsed, method)(gap, otsl)
+            markdown = parsed.render().markdown
+            self.assertIn(expected, markdown)
+            self.assertNotIn("<fcel>", markdown)
+
     def test_unpickled_requests_fill_their_gaps(self):
         config = almiladoc.Config(
             on_loss=almiladoc.OnLoss.REPORT, image_ocr=almiladoc.ImageOcr.ALL

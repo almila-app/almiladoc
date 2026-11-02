@@ -42,6 +42,7 @@ pub(crate) mod officeart;
     reason = "a binary record reader reads through checked views (ADR 0001 decision 16)"
 )]
 pub(crate) mod ole_equation;
+pub(crate) mod otsl;
 pub(crate) mod sides;
 pub(crate) mod symbol;
 pub(crate) mod tag_scan;

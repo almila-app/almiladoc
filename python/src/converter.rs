@@ -266,7 +266,8 @@ impl Parsed {
     /// Fill `gap`, a row of `gaps`, with the Markdown OCR read for it, plain
     /// text included, with the GIL released: raw HTML in it stays text, a
     /// link its label and an image its alt; TeX math (`\(..\)`, `\[..\]`,
-    /// `$..$`, `$$..$$`, a `math` fence) becomes math. A gap no row of
+    /// `$..$`, `$$..$$`, a `math` fence) becomes math and OTSL table markup
+    /// (`<fcel>A<lcel><nl>`) a table whose merged cell shows once. A gap no row of
     /// `gaps` names raises `KeyError`, one filled or failed already
     /// `ValueError`, Markdown past `Limits.max_ocr_text_bytes`, nested past
     /// `max_nesting_depth` or whose tables may pass `max_grid_slots`
@@ -281,12 +282,13 @@ impl Parsed {
         self.fill(py, gap, markdown, GapFill::Markdown)
     }
 
-    /// Fill a top-level `gap` with Markdown and standalone top-level HTML tables.
-    /// Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
-    /// Unsupported tables or context raise `ValueError`, per-fill limits `GapRefused`, work
-    /// past `max_work` `ResourceLimitError`, and a cancel of the parse's token
-    /// `CancelledError`, each leaving the gap unfilled. A gap no row of `gaps` names raises
-    /// `KeyError`, and one filled or failed already `ValueError`.
+    /// Fill `gap` with Markdown, standalone top-level HTML tables and OTSL tables.
+    /// Only table/tr/td, text and positive spans are accepted; a top-level gap renders merged
+    /// cells as safe HTML and a nested gap shows each merge once. Unsupported tables or
+    /// context raise `ValueError`, per-fill limits `GapRefused`, work past `max_work`
+    /// `ResourceLimitError`, and a cancel of the parse's token `CancelledError`, each leaving
+    /// the gap unfilled. A gap no row of `gaps` names raises `KeyError`, and one filled or
+    /// failed already `ValueError`.
     fn fill_gap_tables(
         &self,
         py: Python<'_>,

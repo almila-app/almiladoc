@@ -1025,6 +1025,30 @@ fn a_fill_keeps_its_table_spans_when_asked() {
 }
 
 #[test]
+fn a_reply_written_as_otsl_fills_a_table_whatever_the_settings() {
+    let otsl = "<fcel>Sample<lcel><nl><fcel>A<fcel>12.4<nl>";
+    for (preserve, table) in [
+        (false, "|  |  |\n| --- | --- |\n| Sample |  |\n| A | 12.4 |"),
+        (
+            true,
+            "<table><tr><td colspan=\"2\">Sample</td></tr><tr><td>A</td><td>12.4</td></tr></table>",
+        ),
+    ] {
+        let (mut parsed, _) = images(1 << 20);
+        let server = Server::start(vec![reply(otsl)]);
+        let engine = engine(&server.base_url, |config| config.preserve_table_spans = preserve);
+        let summary = parsed.ocr(&engine, None).unwrap();
+        assert_eq!((summary.filled, summary.failed, summary.unattempted), (1, 0, 0));
+        let markdown = parsed.render().unwrap().into_markdown();
+        assert!(markdown.contains(table), "{markdown}");
+        assert!(!markdown.contains("cel>") && !markdown.contains("<nl>"), "{markdown}");
+        #[cfg(feature = "serde")]
+        assert!(parsed.to_json().unwrap().contains("\"col_span\":2"));
+        server.finish();
+    }
+}
+
+#[test]
 fn a_cancel_interrupts_a_request_in_flight_and_the_engine_reads_again() {
     let (_, requests) = images(1 << 20);
     let whole = finished(&json!("cut"), "stop");

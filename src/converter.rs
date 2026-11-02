@@ -544,7 +544,7 @@ impl Parsed {
     /// [`GapError::Settled`] when it was filled or failed already, and
     /// [`GapError::Refused`] when the fill exceeds a per-fill text, nesting, node, grid or
     /// expansion limit; [`GapError::InvalidTable`] for malformed or unsupported opted-in tables,
-    /// including a gap or table inside another container;
+    /// including a table inside a quote or list;
     /// [`GapError::Convert`] when the work passes
     /// [`Limits::max_work`](crate::Limits::max_work), with
     /// [`ConvertError::Cancelled`] once the parse's token is cancelled, or with
@@ -583,7 +583,7 @@ impl Parsed {
         let read = self
             .on_pool(|| self.read_fill(depth, fill))
             .map_err(|error| GapError::for_fill(error, tables))?;
-        self.settle_fill(id, read, tables);
+        self.settle_fill(id, read, tables && depth == 0);
         Ok(())
     }
 
@@ -857,9 +857,6 @@ impl Parsed {
     }
 
     fn read_fill(&self, depth: u64, fill: GapFill) -> Result<(Vec<Block>, u64), ConvertError> {
-        if depth > 0 && matches!(&fill, GapFill::MarkdownTables(_)) {
-            return Err(ConvertError::malformed("OCR tables require a top-level gap"));
-        }
         let parse_ctx = ParseCtx::new(&self.config.limits)
             .with_cancel(self.cancel.as_ref())
             .starting_at(self.fuel);
@@ -939,7 +936,7 @@ impl Target for Parsed {
         let tables = matches!(&fill, GapFill::MarkdownTables(_));
         let read =
             self.read_fill(depth, fill).map_err(|error| GapError::for_fill(error, tables))?;
-        self.settle_fill(id, read, tables);
+        self.settle_fill(id, read, tables && depth == 0);
         Ok(())
     }
 

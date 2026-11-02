@@ -12,6 +12,7 @@ use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::model::{Block, Cell, Inline, List, ListItem, MarkerKind, Style, Table};
+use crate::shared::otsl;
 use crate::shared::text::trim_tex;
 
 const OPTIONS: Options =
@@ -22,7 +23,7 @@ pub(crate) fn blocks(
     markdown: &str,
     depth: u64,
 ) -> Result<Vec<Block>, ConvertError> {
-    read(ctx, markdown, depth, false)
+    read(ctx, markdown, depth, Mode::Blocks)
 }
 
 pub(crate) fn blocks_with_tables(
@@ -30,20 +31,27 @@ pub(crate) fn blocks_with_tables(
     markdown: &str,
     depth: u64,
 ) -> Result<Vec<Block>, ConvertError> {
-    read(ctx, markdown, depth, true)
+    read(ctx, markdown, depth, Mode::Tables)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Blocks,
+    Tables,
+    Cell,
 }
 
 fn read(
     ctx: &ParseCtx<'_>,
     markdown: &str,
     depth: u64,
-    tables: bool,
+    mode: Mode,
 ) -> Result<Vec<Block>, ConvertError> {
     let limits = ctx.limits();
     if markdown.len() as u64 > limits.max_ocr_text_bytes {
         return Err(ConvertError::limit(Limit::OcrTextBytes, limits.max_ocr_text_bytes));
     }
-    if tables {
+    if mode == Mode::Tables {
         ctx.charge(markdown.len() as u64)?;
     }
     let room = limits.max_nesting_depth.saturating_sub(depth);
@@ -51,14 +59,192 @@ fn read(
         return Err(ConvertError::limit(Limit::NestingDepth, limits.max_nesting_depth));
     }
     ctx.admit_grid_positions(table_cells(markdown))?;
-    if let Some(Rewritten { text, marks }) = rewrite(ctx, markdown)? {
-        match build(ctx, &text, marks, depth, tables) {
+    if otsl::mentions(markdown) {
+        return with_otsl(ctx, markdown, depth, mode);
+    }
+    segment(ctx, markdown, depth, mode)
+}
+
+fn segment(
+    ctx: &ParseCtx<'_>,
+    markdown: &str,
+    depth: u64,
+    mode: Mode,
+) -> Result<Vec<Block>, ConvertError> {
+    if let Some(Rewritten { text, marks, .. }) = rewrite(ctx, markdown)? {
+        match build(ctx, &text, marks, depth, mode) {
             Ok((blocks, true)) => return Ok(blocks),
             Err(error) if error.is_fatal() => return Err(error),
             _ => {}
         }
     }
-    build(ctx, markdown, Marks::default(), depth, tables).map(|(blocks, _)| blocks)
+    build(ctx, markdown, Marks::default(), depth, mode).map(|(blocks, _)| blocks)
+}
+
+fn with_otsl(
+    ctx: &ParseCtx<'_>,
+    markdown: &str,
+    depth: u64,
+    mode: Mode,
+) -> Result<Vec<Block>, ConvertError> {
+    ctx.charge(markdown.len() as u64)?;
+    let (regions, html, mut layout) = otsl_layout(markdown);
+    if let Some(rewritten) = rewrite(ctx, markdown)? {
+        layout.verbatim.extend(rewritten.sources);
+    }
+    for block in html {
+        let source = markdown.get(block.clone()).ok_or(ConvertError::Internal)?;
+        if otsl::mentions(source) {
+            let math = continued_math(ctx, source)?;
+            layout
+                .verbatim
+                .extend(math.into_iter().map(|at| at.start + block.start..at.end + block.start));
+        }
+    }
+    let mut tokens = otsl::tokens(markdown, &layout);
+    let (mut blocks, mut from) = (Vec::new(), 0);
+    for region in regions {
+        while let Some(run) = otsl::run(ctx, markdown, region.clone(), &layout.ends, &mut tokens)? {
+            let above = markdown.get(from..run.start).ok_or(ConvertError::Internal)?;
+            blocks.extend(segment(ctx, above, depth, mode)?);
+            let table = otsl::table(ctx, markdown, &run, depth, |text| cell(ctx, text, depth))?;
+            blocks.push(Block::Table(table));
+            from = run.end;
+        }
+    }
+    let below = markdown.get(from..).ok_or(ConvertError::Internal)?;
+    blocks.extend(segment(ctx, below, depth, mode)?);
+    Ok(blocks)
+}
+
+fn otsl_layout(markdown: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>, otsl::Layout) {
+    let (mut regions, mut html, mut layout) = (Vec::new(), Vec::new(), otsl::Layout::default());
+    let (mut containers, mut top) = (0_usize, false);
+    for (event, range) in Parser::new_ext(markdown, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::BlockQuote(_) | Tag::Item) => containers += 1,
+            Event::End(TagEnd::BlockQuote(_) | TagEnd::Item) => {
+                containers = containers.saturating_sub(1);
+            }
+            Event::Start(ref tag @ (Tag::Paragraph | Tag::HtmlBlock)) => {
+                top = containers == 0;
+                if matches!(tag, Tag::HtmlBlock) {
+                    html.push(range.clone());
+                }
+                layout.cuts.push(range.start);
+                layout.ends.push(range.end);
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::HtmlBlock) => top = false,
+            Event::Start(Tag::CodeBlock(_)) => layout.verbatim.push(range),
+            Event::InlineMath(_) | Event::DisplayMath(_) => {
+                if protected(markdown, &event, &range) {
+                    layout.verbatim.push(range);
+                }
+            }
+            Event::InlineHtml(_) | Event::Html(_) if top => regions.push(range),
+            _ => {}
+        }
+    }
+    (regions, html, layout)
+}
+
+fn protected(markdown: &str, event: &Event<'_>, range: &Range<usize>) -> bool {
+    match event {
+        Event::InlineMath(tex) => {
+            !otsl::edged(tex) && !markdown.as_bytes().get(range.end).is_some_and(u8::is_ascii_digit)
+        }
+        Event::DisplayMath(_) => true,
+        _ => false,
+    }
+}
+
+const LEAD: &str = "x";
+const CONTINUATION: &str = "\n    ";
+
+/// Indents text under a lead line so that no line of it can open a Markdown block.
+fn continued(ctx: &ParseCtx<'_>, text: &str) -> Result<String, ConvertError> {
+    let verbatim = inline_verbatim(ctx, text)?;
+    let mut out = String::with_capacity(text.len() + LEAD.len() + CONTINUATION.len());
+    out.push_str(LEAD);
+    out.push_str(CONTINUATION);
+    let (mut from, mut cursor) = (0, 0);
+    for (at, _) in text.match_indices('\n') {
+        out.push_str(text.get(from..at).ok_or(ConvertError::Internal)?);
+        out.push_str(if inside(&verbatim, &mut cursor, at) { " " } else { CONTINUATION });
+        from = at + 1;
+    }
+    out.push_str(text.get(from..).ok_or(ConvertError::Internal)?);
+    Ok(out)
+}
+
+fn continued_math(ctx: &ParseCtx<'_>, source: &str) -> Result<Vec<Range<usize>>, ConvertError> {
+    let bytes = source.as_bytes();
+    let text: String = source
+        .char_indices()
+        .map(|(at, c)| if c == '\r' && bytes.get(at + 1) != Some(&b'\n') { '\n' } else { c })
+        .collect();
+    let probe = continued(ctx, &text)?;
+    let lines: Vec<usize> = probe.match_indices('\n').map(|(at, _)| at + 1).collect();
+    let indent = CONTINUATION.len() - 1;
+    let back = |at: usize| {
+        let line = lines.partition_point(|&start| start <= at);
+        at.saturating_sub(LEAD.len() + 1 + line * indent)
+    };
+    let mut math: Vec<Range<usize>> = Parser::new_ext(&probe, OPTIONS)
+        .into_offset_iter()
+        .filter(|(event, range)| protected(&probe, event, range))
+        .map(|(_, range)| range)
+        .collect();
+    if let Some(rewritten) = rewrite(ctx, &probe)? {
+        math.extend(rewritten.sources);
+    }
+    Ok(math.into_iter().map(|range| back(range.start)..back(range.end)).collect())
+}
+
+fn cell(ctx: &ParseCtx<'_>, text: &str, depth: u64) -> Result<Vec<Inline>, ConvertError> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let paragraph = continued(ctx, text.trim_matches([' ', '\t', '\n']))?;
+    let mut blocks = segment(ctx, &paragraph, depth, Mode::Cell)?;
+    let [Block::Paragraph(inlines)] = blocks.as_mut_slice() else {
+        return Err(ConvertError::Internal);
+    };
+    let Some(Inline::Text { text: lead, .. }) = inlines.first_mut() else {
+        return Err(ConvertError::Internal);
+    };
+    let lead_len = LEAD.len() + 1;
+    if !lead.starts_with(LEAD) || lead.len() < lead_len {
+        return Err(ConvertError::Internal);
+    }
+    lead.drain(..lead_len);
+    if lead.is_empty() {
+        inlines.remove(0);
+    }
+    Ok(mem::take(inlines))
+}
+
+fn inline_verbatim(ctx: &ParseCtx<'_>, text: &str) -> Result<Vec<Range<usize>>, ConvertError> {
+    let heading = format!("# {}", text.replace('\n', " "));
+    let mut verbatim: Vec<Range<usize>> = Parser::new_ext(&heading, OPTIONS)
+        .into_offset_iter()
+        .filter(|(event, _)| {
+            matches!(
+                event,
+                Event::Code(_)
+                    | Event::InlineMath(_)
+                    | Event::DisplayMath(_)
+                    | Event::InlineHtml(_)
+            )
+        })
+        .map(|(_, range)| range)
+        .collect();
+    if let Some(rewritten) = rewrite(ctx, &heading)? {
+        verbatim.extend(rewritten.sources);
+    }
+    verbatim.sort_unstable_by_key(|range| range.start);
+    Ok(verbatim
+        .into_iter()
+        .map(|range| range.start.saturating_sub(2)..range.end.saturating_sub(2))
+        .collect())
 }
 
 fn build(
@@ -66,17 +252,21 @@ fn build(
     markdown: &str,
     mut marks: Marks,
     depth: u64,
-    tables: bool,
+    mode: Mode,
 ) -> Result<(Vec<Block>, bool), ConvertError> {
-    let mut builder =
-        Builder { depth, max_depth: ctx.limits().max_nesting_depth, ..Builder::default() };
+    let mut builder = Builder {
+        depth,
+        max_depth: ctx.limits().max_nesting_depth,
+        inline_display: mode == Mode::Cell,
+        ..Builder::default()
+    };
     let (mut raw, mut cost) = (None, Cost::default());
     for (event, range) in Parser::new_ext(markdown, OPTIONS).into_offset_iter() {
         ctx.charge(cost.of(markdown, &event, &range))?;
         let Some(event) = marks.translate(event, &range) else {
             continue;
         };
-        if tables {
+        if mode == Mode::Tables {
             let source = markdown.get(range.clone()).ok_or(ConvertError::Internal)?;
             let prefix = markdown.get(..range.start).ok_or(ConvertError::Internal)?;
             table_event(ctx, &mut builder, &mut raw, event, source, prefix)?;
@@ -106,9 +296,10 @@ fn table_event(
         Event::End(TagEnd::HtmlBlock) => {
             let text = raw.take().ok_or(ConvertError::Internal)?;
             if super::ocr_table::mentions_table(ctx, &text)? {
-                if builder.depth > 0 {
+                if !builder.frames.is_empty() {
                     return Err(ConvertError::malformed("OCR tables must be top-level blocks"));
                 }
+                builder.room()?;
                 builder.flush();
                 for block in super::ocr_table::blocks(ctx, &text)? {
                     builder.push(block);
@@ -322,6 +513,7 @@ impl Marks {
 struct Rewritten {
     text: String,
     marks: Marks,
+    sources: Vec<Range<usize>>,
 }
 
 fn rewrite(ctx: &ParseCtx<'_>, markdown: &str) -> Result<Option<Rewritten>, ConvertError> {
@@ -341,6 +533,7 @@ fn rewrite(ctx: &ParseCtx<'_>, markdown: &str) -> Result<Option<Rewritten>, Conv
         copied: 0,
         next_tail: 0,
         marks: Vec::new(),
+        sources: Vec::new(),
         shut: [0; 4],
         steps: 0,
     };
@@ -349,7 +542,8 @@ fn rewrite(ctx: &ParseCtx<'_>, markdown: &str) -> Result<Option<Rewritten>, Conv
         return Ok(None);
     }
     scan.copy(markdown.len(), markdown.len())?;
-    Ok(Some(Rewritten { text: scan.out, marks: Marks { spans: scan.marks, ..Marks::default() } }))
+    let marks = Marks { spans: scan.marks, ..Marks::default() };
+    Ok(Some(Rewritten { text: scan.out, marks, sources: scan.sources }))
 }
 
 #[derive(Default)]
@@ -573,6 +767,7 @@ struct Scan<'a> {
     copied: usize,
     next_tail: usize,
     marks: Vec<(usize, Mark)>,
+    sources: Vec<Range<usize>>,
     shut: [usize; 4],
     steps: u64,
 }
@@ -810,6 +1005,7 @@ impl<'a> Scan<'a> {
         if text.as_bytes().get(end + 2) == Some(&b'`') {
             self.pad(" ")?;
         }
+        self.sources.push(at..end + 2);
         self.copied = end + 2;
         Ok(Some(self.copied))
     }
@@ -889,6 +1085,7 @@ impl<'a> Scan<'a> {
             line,
             indent,
         ])?;
+        self.sources.push(at..end + 2);
         self.copied = end + 2;
         Ok(Some(self.copied))
     }
@@ -964,6 +1161,7 @@ struct Builder {
     italic: u32,
     strike: u32,
     split: bool,
+    inline_display: bool,
     depth: u64,
     max_depth: u64,
 }
@@ -1070,11 +1268,16 @@ impl Builder {
         self.leaf = Some(leaf);
     }
 
-    fn open(&mut self, frame: Frame) -> Result<(), ConvertError> {
-        self.flush();
+    fn room(&self) -> Result<(), ConvertError> {
         if self.depth >= self.max_depth {
             return Err(ConvertError::limit(Limit::NestingDepth, self.max_depth));
         }
+        Ok(())
+    }
+
+    fn open(&mut self, frame: Frame) -> Result<(), ConvertError> {
+        self.flush();
+        self.room()?;
         self.depth += 1;
         self.frames.push(frame);
         Ok(())
@@ -1116,7 +1319,7 @@ impl Builder {
     }
 
     fn display_math(&mut self, tex: &str) {
-        if matches!(self.leaf, None | Some(Leaf::Paragraph)) {
+        if !self.inline_display && matches!(self.leaf, None | Some(Leaf::Paragraph)) {
             self.paragraph(true);
             self.push(Block::Math(trim_tex(tex).nfc().collect()));
             self.split = true;

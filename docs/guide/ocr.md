@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `answer_model` | `None` | A reply must name this model |
 | `service_tiers` | `()` | Up to 4 tier names; the first is sent |
 | `tier_fallback` | `None` | `(codes, message_prefix)`: a matching 429 moves to the next tier |
-| `preserve_table_spans` | `False` | Replies fill as HTML tables, top-level gaps only |
+| `preserve_table_spans` | `False` | Replies keep HTML and OTSL table spans; a nested gap shows each merge once |
 | `dpi` | `150` | Page painting resolution, 50 to 600 |
 | `max_pixels` | `12,845,056` | Pixel cap per page image, 1,048,576 to 41,943,040 |
 | `max_bytes` | `None` | Refuse an encoded image over this size |
@@ -116,9 +116,9 @@ print(parsed.render().markdown)
 
 | Fill | Input | Notes |
 |---|---|---|
-| `Parsed.fill_gap` | Markdown | TeX math is read; raw HTML stays text; links keep their label, images their alt |
+| `Parsed.fill_gap` | Markdown | TeX math and OTSL tables are read; other raw HTML stays text; links keep their label, images their alt |
 | `Parsed.fill_gap_lines` | `OcrLine(text, (left, top, right, bottom))` | Bounds 0 to 1; columns and paragraphs are inferred, headings and tables are not |
-| `Parsed.fill_gap_tables` | Markdown with `table`, `tr`, `td` HTML | Top-level gaps only; spans kept |
+| `Parsed.fill_gap_tables` | Markdown with `table`, `tr`, `td` HTML or OTSL | Spans kept at a top-level gap; a nested gap shows each merge once |
 
 - A fill past `max_ocr_text_bytes` raises `GapRefused`; `fail_gap` records the failure
   (`ocr_failed`). `ocr_requests` returns an `OcrRefusal` (`unpaintable`, `over_bytes`) where no
