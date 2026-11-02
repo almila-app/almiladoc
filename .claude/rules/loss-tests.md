@@ -27,6 +27,9 @@ paths:
   storage) and prove a mutant fails it.
 - Every new arm, reset or default has a case that fails when it alone is deleted.
 - A lookup by key is tested with a decoy that precedes the match.
+- A test that untrusted text cannot become markup parses the output with and without each
+  extension it bypasses and rejects every active event (`Html`, `InlineHtml`, `Link`, `Image`),
+  with markup split across adjacent inlines, not only the reported class.
 - A lenient reader that replaces a strict parse keeps a row for each input the strict one took
   (a sign, leading zeros) beside the new ones.
 - A test table for a switch holds its off value at every nesting level the change touches.

@@ -28,6 +28,10 @@ pub(crate) struct EscapeOpts {
     /// The run's first character, where it would join the delimiter run written right before
     /// the run: it is escaped with the rest of its own run.
     pub joining: Option<char>,
+    /// The run shares a Markdown inline context with math, which a reader without math reads as
+    /// text that can complete a link, an autolink or a code span and a reader with math pairs by
+    /// its dollars, so every `$`, backtick, bracket and `<` a non-space follows is escaped.
+    pub beside_math: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -155,8 +159,10 @@ impl Scan {
             trailing_nonspace,
             trailing_delims,
             in_label,
+            beside_math,
             ..
         } = self.opts;
+        let in_label = in_label || beside_math;
         let next = rest.chars().nth(1);
         let next_nonspace =
             next.map_or(trailing_active || trailing_nonspace, |n| !n.is_whitespace());
@@ -168,11 +174,11 @@ impl Scan {
         match c {
             '\\' => true,
             '(' | ':' if at == 0 => note_syntax(c, self.ctx, out.after_note()),
-            '$' => next_nonspace && paired(5),
+            '$' => beside_math || (next_nonspace && paired(5)),
             ']' if in_label => true,
             '~' if start_of_line && rest.starts_with("~~~") => true,
             '_' if start_of_line && line_is_only(rest, '_', 3) => true,
-            '`' => styled || paired(3),
+            '`' => styled || beside_math || paired(3),
             '*' => styled || start_of_line || (next_nonspace && paired(0)),
             '_' => {
                 let prev_alnum = prev.is_some_and(char::is_alphanumeric);
@@ -181,7 +187,7 @@ impl Scan {
             }
             '~' => styled || (next_nonspace && paired(2)),
             '[' => in_label || paired(4),
-            '<' => next.is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?')),
+            '<' => opens_markup(next) || (beside_math && !next.is_some_and(char::is_whitespace)),
             '!' => next.is_none() && trailing_active,
             '|' if self.ctx == InlineContext::TableCell => true,
             '#' if start_of_line => {
@@ -336,20 +342,24 @@ pub(crate) fn format_url(url: &str, out: &mut Text<'_>) -> Result<(), ConvertErr
 pub(crate) fn escape_url_as_text(
     url: &str,
     ctx: InlineContext,
+    beside_math: bool,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    let opts = EscapeOpts { trailing_active: true, in_label: true, ..Default::default() };
+    let opts =
+        EscapeOpts { trailing_active: true, in_label: true, beside_math, ..Default::default() };
     escape_text(&controls_to_spaces(url), ctx, opts, out)
 }
 
 pub(super) fn escape_marker_label(
     label: &str,
     ctx: InlineContext,
+    beside_math: bool,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let opts = EscapeOpts {
         at_line_start: ctx == InlineContext::Block,
         trailing_active: true,
+        beside_math,
         ..Default::default()
     };
     escape_text(&controls_to_spaces(label), ctx, opts, out)
@@ -375,8 +385,14 @@ pub(super) enum MathSite {
     TableCell,
 }
 
-/// Escapes each `$` no odd backslash run escapes, as it would close math; off a block a line break
-/// ends math, so it becomes a space, and a cell escapes a bare `|`, since GFM splits rows first.
+fn opens_markup(next: Option<char>) -> bool {
+    next.is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?'))
+}
+
+/// Escapes each `$`, backtick and unmatched brace no odd backslash run escapes, as pulldown-cmark
+/// closes math only at a dollar in the brace context it opened in; off a block a line break
+/// becomes a space, a cell escapes a bare `|` (GFM splits rows first) and a space follows each `<`
+/// a non-space follows and each `]` before `(`, `[` or `:`.
 pub(super) fn escape_math(
     tex: &str,
     site: MathSite,
@@ -384,22 +400,48 @@ pub(super) fn escape_math(
 ) -> Result<(), ConvertError> {
     let mut flushed = 0;
     let mut backslashes = 0;
-    for (i, c) in tex.char_indices() {
-        let newline = c == '\n' && site != MathSite::Block;
-        let escaped = c == '$' || (c == '|' && site == MathSite::TableCell);
-        if newline || (escaped && backslashes % 2 == 0) {
-            write(tex.get(flushed..i).unwrap_or_default())?;
-            if newline {
-                write(" ")?;
-                flushed = i + 1;
-            } else {
-                write("\\")?;
-                flushed = i;
-            }
+    let mut unmatched = unmatched_braces(tex).into_iter().peekable();
+    let mut chars = tex.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, next)| next);
+        let escaped = matches!(c, '$' | '`')
+            || (c == '|' && site == MathSite::TableCell)
+            || unmatched.next_if_eq(&i).is_some();
+        let cut = if c == '\n' && site != MathSite::Block {
+            Some((i, " ", i + 1))
+        } else if (c == '<' && next.is_some_and(|next| !next.is_whitespace()))
+            || (c == ']' && matches!(next, Some('(' | '[' | ':')))
+        {
+            Some((i + 1, " ", i + 1))
+        } else if escaped && backslashes % 2 == 0 {
+            Some((i, "\\", i))
+        } else {
+            None
+        };
+        if let Some((end, insert, resume)) = cut {
+            write(tex.get(flushed..end).unwrap_or_default())?;
+            write(insert)?;
+            flushed = resume;
         }
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
     }
     write(tex.get(flushed..).unwrap_or_default())
+}
+
+fn unmatched_braces(tex: &str) -> Vec<usize> {
+    let (mut open, mut unmatched) = (Vec::new(), Vec::new());
+    let mut backslashes = 0;
+    for (i, c) in tex.char_indices() {
+        match c {
+            '{' if backslashes % 2 == 0 => open.push(i),
+            '}' if backslashes % 2 == 0 && open.pop().is_none() => unmatched.push(i),
+            _ => {}
+        }
+        backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+    }
+    unmatched.extend(open);
+    unmatched.sort_unstable();
+    unmatched
 }
 
 #[cfg(test)]
@@ -441,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "the table of math sources and their written pieces")]
     fn math_source_is_written_in_the_pieces_its_site_escapes() {
         for (label, site, tex, pieces) in [
             ("block escapes a bare dollar", MathSite::Block, "a$b", &["a", "\\", "$b"][..]),
@@ -450,10 +493,53 @@ mod tests {
             ("span writes a line break as a space", MathSite::Span, "a\nb", &["a", " ", "b"]),
             ("span leaves a pipe", MathSite::Span, "a|b", &["a|b"]),
             (
+                "span escapes each brace left unmatched by its unescaped braces",
+                MathSite::Span,
+                "a}{b}{\\{\\\\{",
+                &["a", "\\", "}{b}", "\\", "{\\{\\\\", "\\", "{"],
+            ),
+            (
+                "block leaves balanced braces",
+                MathSite::Block,
+                "\\frac{a}{b_{1}}",
+                &["\\frac{a}{b_{1}}"],
+            ),
+            (
+                "span escapes each backtick no odd run escapes",
+                MathSite::Span,
+                "a`b``c\\`d",
+                &["a", "\\", "`b", "\\", "`", "\\", "`c\\`d"],
+            ),
+            (
                 "span restarts the run at a line break",
                 MathSite::Span,
                 "\\\n$",
                 &["\\", " ", "", "\\", "$"],
+            ),
+            (
+                "block spaces each opener of markup",
+                MathSite::Block,
+                "<script>\n</b><!x<?y",
+                &["<", " ", "script>\n<", " ", "/b><", " ", "!x<", " ", "?y"],
+            ),
+            (
+                "span spaces each opener a non-space follows",
+                MathSite::Span,
+                "a < b<c<1<",
+                &["a < b<", " ", "c<", " ", "1<"],
+            ),
+            (
+                "span spaces an email opener",
+                MathSite::Span,
+                "<1@example.com><+a@example.com>",
+                &["<", " ", "1@example.com><", " ", "+a@example.com>"],
+            ),
+            ("cell spaces a tag opener", MathSite::TableCell, "<img>", &["<", " ", "img>"]),
+            (
+                "span spaces a bracket before link syntax",
+                MathSite::Span,
+                "![a](b)[c][d]: e]f",
+                &["![a]", " ", "(b)[c]", " ", "[d]", " ", ": e]f"],
             ),
             ("cell escapes a pipe", MathSite::TableCell, "a|b", &["a", "\\", "|b"]),
             ("cell keeps an escaped pipe", MathSite::TableCell, "a\\|b", &["a\\|b"]),

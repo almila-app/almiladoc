@@ -33,9 +33,33 @@ pub(crate) fn collapse_ws(text: &str) -> String {
     out
 }
 
+/// Trims TeX but keeps a trailing space a backslash escapes, which TeX reads as a control space.
+pub(crate) fn trim_tex(tex: &str) -> &str {
+    let tex = tex.trim_start();
+    let kept = tex.trim_end();
+    let escapes = kept.bytes().rev().take_while(|&byte| byte == b'\\').count();
+    match tex.get(kept.len()..).and_then(|rest| rest.chars().next()) {
+        Some(space) if escapes % 2 == 1 => tex.get(..kept.len() + space.len_utf8()).unwrap_or(kept),
+        _ => kept,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clean_text, collapse_ws};
+    use super::{clean_text, collapse_ws, trim_tex};
+
+    #[test]
+    fn tex_keeps_a_trailing_space_only_a_backslash_escapes() {
+        for (tex, trimmed) in [
+            (" a \\  ", "a \\ "),
+            ("a\\\t\n", "a\\\t"),
+            ("a\\\\ ", "a\\\\"),
+            ("\\ ", "\\ "),
+            (" a ", "a"),
+        ] {
+            assert_eq!(trim_tex(tex), trimmed, "{tex:?}");
+        }
+    }
 
     #[test]
     fn join_controls_preserved() {

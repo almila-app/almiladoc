@@ -9,6 +9,7 @@ use crate::render::markdown::image::{Presentation, label, project};
 use crate::render::markdown::marks::{Cluster, Side, Stack, Writer, push_reference};
 use crate::render::markdown::shape::nonspace;
 use crate::render::markdown::sink::{Meter, Text};
+use crate::shared::text::trim_tex;
 use crate::shared::uri::is_safe_link;
 use std::borrow::Cow;
 
@@ -116,7 +117,7 @@ impl<'a> Flatten<'a, '_, '_> {
                 }
                 Inline::LineBreak => self.push(owner, Norm::LineBreak),
                 Inline::Math(tex) if !tex.trim().is_empty() => {
-                    self.push(owner, Norm::Math(tex.trim()));
+                    self.push(owner, Norm::Math(trim_tex(tex)));
                 }
                 Inline::Checkbox(checked) => self.push(owner, Norm::Checkbox(*checked)),
                 Inline::Anchor(_)
@@ -252,18 +253,30 @@ pub(crate) fn render_inlines(
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    render_based(inlines, ctx, Style::PLAIN, rc, out)
+    render_based(inlines, ctx, Style::PLAIN, false, rc, out)
 }
 
+/// Renders inlines into an inline context that already holds math elsewhere when `beside_math`.
 pub(crate) fn render_based(
     inlines: &[Inline],
     ctx: InlineContext,
     base: Style,
+    beside_math: bool,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let items = normalize(inlines, ctx, base, rc, out.meter())?;
-    render_scope(&items, Scope { ctx, in_label: false, base: Stack::of(base) }, rc, out)
+    let beside_math = beside_math || holds_math(inlines);
+    let scope = Scope { ctx, in_label: false, base: Stack::of(base), beside_math };
+    render_scope(&items, scope, rc, out)
+}
+
+pub(crate) fn holds_math(inlines: &[Inline]) -> bool {
+    inlines.iter().any(|inline| match inline {
+        Inline::Math(tex) => !tex.trim().is_empty(),
+        Inline::Link { content, .. } => holds_math(content),
+        _ => false,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -282,6 +295,7 @@ struct Scope {
     ctx: InlineContext,
     in_label: bool,
     base: Stack,
+    beside_math: bool,
 }
 
 fn lookahead(items: &[Norm<'_>], scope: Scope, out: &Text<'_>) -> Result<Vec<Ahead>, ConvertError> {
@@ -403,13 +417,18 @@ fn render_scope(
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    let Scope { ctx, in_label, .. } = scope;
+    let Scope { ctx, in_label, beside_math, .. } = scope;
     let start = out.len();
     let ahead = lookahead(items, scope, out)?;
     let references = references(items, &ahead);
     let mut marks = Writer::default();
+    let mut math_angle = false;
     for (idx, item) in items.iter().enumerate() {
         out.charge(1)?;
+        // A space after math ending in `<` goes here, since a closing `$` cannot follow a space.
+        if std::mem::take(&mut math_angle) && !starts_with_space(item) {
+            out.push(' ')?;
+        }
         let here = ahead.get(idx).copied().unwrap_or(END);
         let next = ahead.get(idx + 1).copied().unwrap_or(END);
         if here.visible {
@@ -426,6 +445,7 @@ fn render_scope(
                     styled: *style != Style::PLAIN,
                     trailing_delims: next.delims,
                     in_label,
+                    beside_math,
                     joining: text
                         .chars()
                         .next()
@@ -438,25 +458,44 @@ fn render_scope(
             Norm::CommentRef(id) => write_note_ref(id, true, rc, out)?,
             Norm::Link { label, target } => render_link(label, target, scope, rc, out)?,
             Norm::Image { alt, presentation } => render_image(alt, *presentation, scope, out)?,
-            Norm::Anchor(id) => {
-                if let Some(html_id) = rc.anchors.html_id(id) {
-                    out.push_str(&format!("<a id=\"{html_id}\"></a>"))?;
-                }
+            Norm::Math(tex) => {
+                math_angle = tex.trim_end().ends_with('<');
+                push_math_span(tex, ctx, out)?;
             }
-            Norm::LineBreak => match ctx {
-                InlineContext::Block => out.push_str("\\\n")?,
-                InlineContext::Heading => out.push(' ')?,
-                InlineContext::TableCell => out.push('\n')?,
-            },
-            Norm::Math(tex) => push_math_span(tex, ctx, out)?,
-            Norm::Checkbox(checked) => {
-                out.push_str(if *checked { "[x]" } else { "[ ]" })?;
-                if matches!(items.get(idx + 1), Some(item) if !starts_with_space(item)) {
-                    out.push(' ')?;
-                }
+            Norm::Anchor(_) | Norm::LineBreak | Norm::Checkbox(_) => {
+                push_mark(item, items.get(idx + 1), ctx, rc, out)?;
             }
         }
         marks.close_to(next.marks, out)?;
+    }
+    Ok(())
+}
+
+fn push_mark(
+    item: &Norm<'_>,
+    next: Option<&Norm<'_>>,
+    ctx: InlineContext,
+    rc: &Ctx<'_>,
+    out: &mut Text<'_>,
+) -> Result<(), ConvertError> {
+    match item {
+        Norm::Anchor(id) => {
+            if let Some(html_id) = rc.anchors.html_id(id) {
+                out.push_str(&format!("<a id=\"{html_id}\"></a>"))?;
+            }
+        }
+        Norm::LineBreak => match ctx {
+            InlineContext::Block => out.push_str("\\\n")?,
+            InlineContext::Heading => out.push(' ')?,
+            InlineContext::TableCell => out.push('\n')?,
+        },
+        Norm::Checkbox(checked) => {
+            out.push_str(if *checked { "[x]" } else { "[ ]" })?;
+            if matches!(next, Some(item) if !starts_with_space(item)) {
+                out.push(' ')?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -536,7 +575,7 @@ fn render_link(
     out.push('[')?;
     match label {
         Label::Content(items) => render_scope(items, Scope { in_label: true, ..scope }, rc, out)?,
-        Label::Url(label) => escape_url_as_text(label, ctx, out)?,
+        Label::Url(label) => escape_url_as_text(label, ctx, scope.beside_math, out)?,
     }
     out.push_str("](")?;
     format_url(&url, out)?;
@@ -546,7 +585,7 @@ fn render_link(
 fn render_image(
     alt: &str,
     presentation: Presentation<'_>,
-    Scope { ctx, in_label, .. }: Scope,
+    Scope { ctx, in_label, beside_math, .. }: Scope,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let bracketed = matches!(presentation, Presentation::Asset(_) | Presentation::Link(_));
@@ -563,6 +602,7 @@ fn render_image(
             in_label: in_label || bracketed,
             at_line_start: ctx == InlineContext::Block,
             trailing_active: true,
+            beside_math,
             ..Default::default()
         },
         out,
@@ -649,8 +689,16 @@ pub(crate) fn push_math_span(
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let site = if ctx == InlineContext::TableCell { MathSite::TableCell } else { MathSite::Span };
+    let tex = trim_tex(tex);
     out.push('$')?;
-    escape_math(tex.trim(), site, |piece| out.push_str(piece))?;
+    escape_math(tex, site, |piece| out.push_str(piece))?;
+    // A closing `$` cannot follow a space or a backslash escaping it: a control space and an empty
+    // group close such math off.
+    if tex.bytes().rev().take_while(|&byte| byte == b'\\').count() % 2 == 1 {
+        out.push_str(" {}")?;
+    } else if tex.ends_with(char::is_whitespace) {
+        out.push_str("{}")?;
+    }
     out.push('$')
 }
 

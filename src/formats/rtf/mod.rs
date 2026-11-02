@@ -2917,7 +2917,7 @@ mod tests {
     fn one_display_equation_displays_every_equation_of_its_paragraph() {
         let source =
             r"{\rtf1 {\mmath{\*\moMathPara{\moMath{\mr y}}}}{\mmath{\*\moMath{\mr x}}}\par}";
-        assert_eq!(markdown(source), "$$\ny\n$$\n\n$$\nx\n$$\n");
+        assert_eq!(markdown(source), "$$\n    y\n$$\n\n$$\n    x\n$$\n");
     }
 
     #[test]

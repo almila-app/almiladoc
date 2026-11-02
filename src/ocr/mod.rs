@@ -35,7 +35,8 @@ pub use request::{OcrImage, OcrRequest};
 #[non_exhaustive]
 pub enum GapFill {
     /// Markdown, plain text included: raw HTML in it stays text, a link its label and an image
-    /// its alt, and its text is composed to NFC.
+    /// its alt, TeX math (`\(..\)`, `\[..\]`, `$..$`, `$$..$$`, a `math` fence) becomes math,
+    /// and its text is composed to NFC.
     Markdown(String),
     /// Literal horizontal lines, grouped into left-to-right columns and paragraphs.
     ///

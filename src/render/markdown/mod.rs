@@ -19,6 +19,7 @@ use crate::model::{
     OcrOrigin, Table, Unit, UnitKind, inlines_are_empty,
 };
 use crate::ocr::{GapFills, GapState};
+use crate::shared::text::trim_tex;
 use crate::shared::uri::is_safe_link;
 use crate::{ImagePolicy, UnitSpan};
 use anchors::{AnchorMap, AnchorScope, resolve_anchors};
@@ -766,6 +767,25 @@ impl ListMark {
     }
 }
 
+fn write_display_math(tex: &str, sink: &mut Sink<'_>) -> Result<(), ConvertError> {
+    let lines: Vec<_> =
+        trim_tex(tex).split(['\n', '\r']).filter(|line| !line.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return Ok(());
+    }
+    // A paragraph line indented four columns opens no block; TeX ignores the indent.
+    sink.write("$$\n    ")?;
+    escape_math(&lines.join("\n"), MathSite::Block, |piece| {
+        piece.split('\n').enumerate().try_for_each(|(at, part)| {
+            if at > 0 {
+                sink.write("\n    ")?;
+            }
+            sink.write(part)
+        })
+    })?;
+    sink.write("\n$$")
+}
+
 fn write_blocks(
     blocks: &[Block],
     rc: &Ctx<'_>,
@@ -870,14 +890,7 @@ fn write_block(
             sink.write(&fence)?;
         }
         Block::Rule => sink.write("---")?,
-        Block::Math(tex) => {
-            let tex = tex.trim();
-            if !tex.is_empty() {
-                sink.write("$$\n")?;
-                escape_math(tex, MathSite::Block, |piece| sink.write(piece))?;
-                sink.write("\n$$")?;
-            }
-        }
+        Block::Math(tex) => write_display_math(tex, sink)?,
         Block::Gap(gap) => return write_gap(gap, rc, sink, last),
         Block::HeaderFooter(value) => write_header_footer(value, rc, sink)?,
         Block::UnitStart(_) => {}
@@ -917,7 +930,7 @@ fn write_header_footer(
     sink.write(&format!("<a id=\"{prefix}\"></a>{label} ({variant}{inherited})"))?;
     if let Some(name) = &value.page_style {
         let mut text = Text::new(sink.meter());
-        escape_marker_label(name, InlineContext::Block, &mut text)?;
+        escape_marker_label(name, InlineContext::Block, false, &mut text)?;
         sink.write(" of page style ")?;
         sink.write(text.as_str())?;
     }
@@ -985,7 +998,8 @@ fn write_list(
                 (None, kind) => Some(Cow::Owned(kind.label(n))),
             };
             if let Some(label) = label {
-                escape_marker_label(&label, InlineContext::Block, &mut marker)?;
+                let beside_math = table::holds_math_in(&item.blocks, rc);
+                escape_marker_label(&label, InlineContext::Block, beside_math, &mut marker)?;
                 marker.push(' ')?;
             }
         }

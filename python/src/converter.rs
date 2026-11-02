@@ -266,11 +266,13 @@ impl Parsed {
 
     /// Fill `gap`, a row of `gaps`, with the Markdown OCR read for it, plain
     /// text included, with the GIL released: raw HTML in it stays text, a
-    /// link its label and an image its alt. A gap no row of `gaps` names
-    /// raises `KeyError`, one filled or failed already `ValueError`, Markdown
-    /// past `Limits.max_ocr_text_bytes`, nested past `max_nesting_depth` or
-    /// whose tables may pass `max_grid_slots` `GapRefused`, and work past
-    /// `max_work` `ResourceLimitError`; each leaves the document as it was.
+    /// link its label and an image its alt; TeX math (`\(..\)`, `\[..\]`,
+    /// `$..$`, `$$..$$`, a `math` fence) becomes math. A gap no row of
+    /// `gaps` names raises `KeyError`, one filled or failed already
+    /// `ValueError`, Markdown past `Limits.max_ocr_text_bytes`, nested past
+    /// `max_nesting_depth` or whose tables may pass `max_grid_slots`
+    /// `GapRefused`, and work past `max_work` `ResourceLimitError`; each
+    /// leaves the document as it was.
     fn fill_gap(
         &self,
         py: Python<'_>,

@@ -2639,7 +2639,7 @@ mod tests {
             (
                 "display math with a hidden run",
                 styled(&p("", &display(&math(&[(true, "x"), (false, "y")]))), ""),
-                "$$\ny\n$$\n",
+                "$$\n    y\n$$\n",
                 vec![(HiddenOmitted, Body, 1)],
             ),
             (
@@ -2685,7 +2685,7 @@ mod tests {
             (
                 "display math under the body with a hidden run",
                 styled(&then_a(BLOCK_MATH.into()), ""),
-                "$$\ny\n$$\n\na\n",
+                "$$\n    y\n$$\n\na\n",
                 vec![(HiddenOmitted, Body, 1)],
             ),
             (
@@ -2982,7 +2982,7 @@ mod tests {
             (
                 "a hidden run of display math in a field instruction",
                 one(&in_instruction(BLOCK_MATH)),
-                "$$\ny\n$$\n\nresult\n",
+                "$$\n    y\n$$\n\nresult\n",
                 hide(1),
             ),
             (
@@ -3006,7 +3006,7 @@ mod tests {
                         math_run("moved")
                     )))),
                 ),
-                "$$\nmoved\n$$\n\nresult\n",
+                "$$\n    moved\n$$\n\nresult\n",
                 vec![],
             ),
         ];
@@ -3466,7 +3466,7 @@ mod tests {
             (
                 "display math in a field instruction still renders and splits",
                 between_hidden(BLOCK_MATH),
-                "$$\ny\n$$\n\nx\n",
+                "$$\n    y\n$$\n\nx\n",
                 hide(2),
             ),
             (
@@ -3779,7 +3779,7 @@ mod tests {
             (
                 "shown math text in display math",
                 one(&display(&after_x(&math_text("")))),
-                "$$\nx\n$$\n",
+                "$$\n    x\n$$\n",
                 unread(),
             ),
             (
@@ -4670,7 +4670,7 @@ mod tests {
             (
                 "numbered, before display math",
                 format!("{}{math}{}", item(deleted_mark, "one"), p("", &shown("two"))),
-                "1. one\n\n$$\ny\n$$\n\ntwo\n",
+                "1. one\n\n$$\n    y\n$$\n\ntwo\n",
             ),
             (
                 "the next paragraph's kind",

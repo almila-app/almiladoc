@@ -1129,7 +1129,7 @@ mod tests {
             (
                 "on a slide",
                 slides(&format!("<draw:page>{}</draw:page>", frame(&object(&glyph)))),
-                "$$\nx\n$$\n",
+                "$$\n    x\n$$\n",
                 lost(BODY, Some(1), 1),
             ),
             (

@@ -4,9 +4,9 @@ use std::sync::Mutex;
 use crate::build::{docx_with, relationships};
 use crate::support::{configured, fixture, trips};
 use almiladoc::{
-    CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr, Input,
-    Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrLine, OcrOutcome, OcrRequest, OcrSummary,
-    OnLoss, Parsed, RasterSpec,
+    CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr,
+    ImagePolicy, Input, Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrLine, OcrOutcome,
+    OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -326,6 +326,214 @@ fn located_lines_fill_directly_and_through_an_engine_without_markdown_interpreta
     assert_eq!(active, 0);
 }
 
+#[test]
+fn markdown_fills_keep_tex_math_as_math_nodes_and_leave_lines_literal() {
+    let bytes = pictures(1, 8);
+    let converter = image_ocr(|_| {});
+    let mut filled = parsed(&converter, &bytes);
+    let gap = filled.gaps().next().unwrap().id;
+    let source = "Area \\(a_1 * b_2\\) and\n\n\\[ E = mc^2 \\tag{3} \\]";
+    filled.fill_gap(gap, GapFill::Markdown(source.into())).unwrap();
+    let markdown = filled.render().unwrap().into_markdown();
+    assert!(
+        markdown.contains("Area $a_1 * b_2$ and\n\n$$\n    E = mc^2 \\tag{3}\n$$"),
+        "{markdown}"
+    );
+    #[cfg(feature = "serde")]
+    {
+        let json = filled.to_json().unwrap();
+        assert!(json.contains(r#"{"kind":"math","value":"a_1 * b_2"}"#), "{json}");
+        assert!(json.contains(r#"{"kind":"math","value":"E = mc^2 \\tag{3}"}"#), "{json}");
+    }
+
+    let mut lines = parsed(&converter, &bytes);
+    let gap = lines.gaps().next().unwrap().id;
+    let located = OcrLine::new("\\(x\\) $y$", [0.0, 0.0, 1.0, 0.1]).unwrap();
+    lines.fill_gap(gap, GapFill::Lines(vec![located])).unwrap();
+    let markdown = lines.render().unwrap().into_markdown();
+    assert!(markdown.contains("\\\\(x\\\\) \\$y$"), "{markdown}");
+}
+
+#[test]
+fn math_in_a_markdown_fill_never_reaches_the_output_as_markup() {
+    let bytes = pictures(1, 8);
+    let converter = image_ocr(|config| config.images = ImagePolicy::Omit);
+    let fills: [fn(String) -> GapFill; 2] = [GapFill::Markdown, GapFill::MarkdownTables];
+    let sources = [
+        "\\[\n<script>x</script>\n\\]",
+        "\\(<img src=x onerror=y>\\)",
+        "$<img src=x onerror=y>$",
+        "\\(<table><tr><td>x</td></tr></table>\\)",
+        "\\([a](javascript:x)\\)",
+        "\\(![t](http://t/x.png)\\)",
+        "\\(x[\\) *y*](javascript:x)",
+        "\\[\n- [a]: javascript:x\n[a]\n\\]",
+    ];
+    let crossing = [
+        "\\(<1@example.com>\\)",
+        "\\(<+1@example.com>\\)",
+        "\\(x<\\)1@example.com>",
+        "*\\(x<\\)*1@example.com>",
+        "\\(x<\\)`1@example.com>`",
+        "\\(x<\\)\\(1@example.com>\\)",
+        "\\(x<\\)https://x>",
+        "\\(x<\\)a href=x>",
+        "\\(<a\\) href=x>",
+        "[a<1](u)\\(x\\)@example.com>",
+        "\\(`\\)``<img src=x onerror=y>``",
+        "\\(x{\\)`}$<img src=x>`",
+        "\\(x}\\)`{$<img src=x>`",
+    ];
+    let cases =
+        sources.map(|source| (source, false)).into_iter().chain(crossing.map(|c| (c, true)));
+    for (fill, (source, crossing)) in
+        fills.into_iter().flat_map(|fill| cases.clone().map(move |case| (fill, case)))
+    {
+        let mut filled = parsed(&converter, &bytes);
+        let gap = filled.gaps().next().unwrap().id;
+        filled.fill_gap(gap, fill(source.into())).unwrap();
+        let markdown = filled.render().unwrap().into_markdown();
+        for tag in ["<script", "</script", "<img", "<table"] {
+            assert!(crossing || !markdown.contains(tag), "{source:?} -> {markdown:?}");
+        }
+        for options in [pulldown_cmark::Options::empty(), pulldown_cmark::Options::ENABLE_MATH] {
+            let markup = pulldown_cmark::Parser::new_ext(&markdown, options).any(|event| {
+                matches!(
+                    event,
+                    pulldown_cmark::Event::Html(_)
+                        | pulldown_cmark::Event::InlineHtml(_)
+                        | pulldown_cmark::Event::Start(
+                            pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. }
+                        )
+                )
+            });
+            assert!(!markup, "{source:?} -> {markdown:?}");
+        }
+        let read = pulldown_cmark::Parser::new_ext(&markdown, pulldown_cmark::Options::ENABLE_MATH)
+            .any(|event| matches!(event, pulldown_cmark::Event::InlineMath(_)));
+        assert!(read || !crossing, "{source:?} -> {markdown:?}");
+    }
+}
+
+#[test]
+fn a_fill_in_a_table_cell_never_pairs_math_across_its_paragraphs() {
+    let png = [PNG, &[0; 8][..]].concat();
+    let rels = relationships(&[("png", "image", "media/a.png")]);
+    let bytes = docx_with(
+        r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:drawing><a:blip r:embed="png"/></w:drawing></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        &[("word/_rels/document.xml.rels", rels.as_bytes()), ("word/media/a.png", &png)],
+    );
+    let converter = image_ocr(|config| config.images = ImagePolicy::Omit);
+    let mut filled = parsed(&converter, &bytes);
+    let gap = filled.gaps().next().unwrap().id;
+    let fill = "$x\n\n\\(y $ z\\)\n\n`$<img src=x>`";
+    filled.fill_gap(gap, GapFill::Markdown(fill.into())).unwrap();
+    let markdown = filled.render().unwrap().into_markdown();
+    let tables = pulldown_cmark::Options::ENABLE_TABLES;
+    for options in [tables, tables | pulldown_cmark::Options::ENABLE_MATH] {
+        let active = pulldown_cmark::Parser::new_ext(&markdown, options).any(|event| match event {
+            pulldown_cmark::Event::InlineHtml(html) => html.as_ref() != "<br>",
+            pulldown_cmark::Event::Html(_)
+            | pulldown_cmark::Event::Start(
+                pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. },
+            ) => true,
+            _ => false,
+        });
+        assert!(!active, "{markdown:?}");
+    }
+    let math: Vec<_> =
+        pulldown_cmark::Parser::new_ext(&markdown, tables | pulldown_cmark::Options::ENABLE_MATH)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::InlineMath(tex) => Some(tex.into_string()),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(math, ["y \\$ z"], "{markdown:?}");
+}
+
+#[test]
+fn a_table_holding_math_is_one_context_whether_or_not_tables_are_read() {
+    let bytes = pictures(1, 8);
+    let converter = image_ocr(|config| config.images = ImagePolicy::Omit);
+    let mut filled = parsed(&converter, &bytes);
+    let gap = filled.gaps().next().unwrap().id;
+    let fill = "| $x | a\\(y $ z\\)b | `$<img src=x>` |\n| - | - | - |";
+    filled.fill_gap(gap, GapFill::Markdown(fill.into())).unwrap();
+    let markdown = filled.render().unwrap().into_markdown();
+    for tables in [pulldown_cmark::Options::empty(), pulldown_cmark::Options::ENABLE_TABLES] {
+        for math in [pulldown_cmark::Options::empty(), pulldown_cmark::Options::ENABLE_MATH] {
+            let events: Vec<_> =
+                pulldown_cmark::Parser::new_ext(&markdown, tables | math).collect();
+            let active = events.iter().any(|event| match event {
+                pulldown_cmark::Event::InlineHtml(html) => html.as_ref() != "<br>",
+                pulldown_cmark::Event::Html(_)
+                | pulldown_cmark::Event::Start(
+                    pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. },
+                ) => true,
+                _ => false,
+            });
+            assert!(!active, "{markdown:?}");
+            let read: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::InlineMath(tex) => Some(tex.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            let expected: &[&str] = if math.is_empty() { &[] } else { &["y \\$ z"] };
+            assert_eq!(read, expected, "{markdown:?}");
+        }
+    }
+}
+
+#[test]
+fn display_math_lines_never_start_a_block_under_any_reader() {
+    let bytes = pictures(1, 8);
+    let converter = image_ocr(|config| config.images = ImagePolicy::Omit);
+    let mut filled = parsed(&converter, &bytes);
+    let gap = filled.gaps().next().unwrap().id;
+    let fill = "```math\n~~~\n```\n\n```\n~~~\n<img src=x>\n```";
+    filled.fill_gap(gap, GapFill::Markdown(fill.into())).unwrap();
+    let markdown = filled.render().unwrap().into_markdown();
+    for tables in [pulldown_cmark::Options::empty(), pulldown_cmark::Options::ENABLE_TABLES] {
+        for math in [pulldown_cmark::Options::empty(), pulldown_cmark::Options::ENABLE_MATH] {
+            let events: Vec<_> =
+                pulldown_cmark::Parser::new_ext(&markdown, tables | math).collect();
+            let active = events.iter().any(|event| {
+                matches!(
+                    event,
+                    pulldown_cmark::Event::Html(_)
+                        | pulldown_cmark::Event::InlineHtml(_)
+                        | pulldown_cmark::Event::Start(
+                            pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. }
+                        )
+                )
+            });
+            assert!(!active, "{markdown:?}");
+            let code: Vec<_> = events
+                .windows(2)
+                .filter_map(|pair| match pair {
+                    [
+                        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)),
+                        pulldown_cmark::Event::Text(text),
+                    ] => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(code, ["~~~\n<img src=x>\n"], "{markdown:?}");
+            let read: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::DisplayMath(tex) => Some(tex.trim()),
+                    _ => None,
+                })
+                .collect();
+            let expected: &[&str] = if math.is_empty() { &[] } else { &["~~~"] };
+            assert_eq!(read, expected, "{markdown:?}");
+        }
+    }
+}
+
 const MERGED: &str = concat!(
     "<table><tr><td rowspan=\"2\">Sample</td><td colspan=\"2\">Yield (%)</td></tr>",
     "<tr><td>Run 1</td><td>Run 2</td></tr>",
@@ -358,6 +566,13 @@ fn opted_in_tables_preserve_merges_without_changing_other_tables_or_html() {
     assert!(output.markdown().contains("| **native** |"));
     assert!(output.markdown().contains("| after |\n| --- |\n| native |"));
     assert!(output.markdown().contains("## Reaction conditions"));
+    assert!(
+        output.markdown().contains(
+            "At $25^{\\circ}\\mathrm{C}$, with\n\n$$\n    d = (M _ {1} - M _ {2}) / S D\n$$\n\n| **plain**"
+        ),
+        "{}",
+        output.markdown()
+    );
     assert!(output.markdown().contains("Table 1. Mean yields per sample."));
     #[cfg(feature = "serde")]
     assert!(filled.to_json().unwrap().contains("\"row_span\":2"));

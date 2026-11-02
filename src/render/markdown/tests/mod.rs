@@ -364,9 +364,420 @@ fn math_renders_in_dollar_delimiters_and_text_dollars_are_escaped() {
     ]);
     assert_eq!(
         md,
-        "Costs \\$5 or \\$6, and $x_1 < y$ holds.\n\n$$\n\\sum_{i=1}^{n} i \\$\n$$\n\n\
+        "Costs \\$5 or \\$6, and $x_1 < y$ holds.\n\n$$\n    \\sum_{i=1}^{n} i \\$\n$$\n\n\
          Plans at $20 or $17.50.\n\nPair \\$x with y$ here.\n"
     );
+}
+
+#[test]
+fn math_beside_text_never_opens_an_autolink_or_tag() {
+    let tex = |t: &str| Inline::Math(t.into());
+    for (inlines, expected) in [
+        (vec![tex("<1@example.com>")], "$< 1@example.com>$\n"),
+        (vec![tex("<+1@example.com>")], "$< +1@example.com>$\n"),
+        (vec![tex("x<"), Inline::plain("1@example.com>")], "$x<$ 1@example.com>\n"),
+        (vec![tex("x<"), tex("1@example.com>")], "$x<$ $1@example.com>$\n"),
+        (vec![tex("x<"), styled("1@example.com>", CODE)], "$x<$ `1@example.com>`\n"),
+        (
+            vec![Inline::plain("a<"), tex("x"), Inline::plain("1@example.com>")],
+            "a\\<$x$1@example.com>\n",
+        ),
+        (
+            vec![Inline::plain("a<1"), tex("x"), Inline::plain("@example.com>")],
+            "a\\<1$x$@example.com>\n",
+        ),
+        (vec![tex("<https:"), Inline::plain("//x>")], "$< https:$//x>\n"),
+        (vec![tex("x<"), Inline::plain("https://x>")], "$x<$ https://x>\n"),
+        (vec![tex("<a"), Inline::plain(" href=x>")], "$< a$ href=x>\n"),
+        (vec![tex("<!--"), Inline::plain("x-->")], "$< !--$x-->\n"),
+        (vec![tex("<?"), Inline::plain("x?>")], "$< ?$x?>\n"),
+        (vec![tex("`"), styled("<img>", CODE)], "$\\`$`<img>`\n"),
+        (
+            vec![styled("$", Style { italic: true, ..Style::PLAIN }), Inline::plain("<"), tex("x")],
+            "_\\$_\\<$x$\n",
+        ),
+        (vec![tex("x\\ ")], "$x\\ {}$\n"),
+        (vec![tex("x{"), styled("}$<img src=x>", CODE)], "$x\\{$`}$<img src=x>`\n"),
+        (vec![tex("x}"), styled("{$<img src=x>", CODE)], "$x\\}$`{$<img src=x>`\n"),
+        (vec![tex("\\frac{a}{b}"), Inline::plain(" y")], "$\\frac{a}{b}$ y\n"),
+        (vec![tex("x\\"), styled("$<img src=x>", CODE)], "$x\\ {}$`$<img src=x>`\n"),
+    ] {
+        let md = paragraph(inlines);
+        assert_eq!(md, expected);
+        for options in [Options::empty(), Options::ENABLE_MATH] {
+            let active = Parser::new_ext(&md, options).any(|event| {
+                matches!(
+                    event,
+                    Event::Html(_)
+                        | Event::InlineHtml(_)
+                        | Event::Start(Tag::Link { .. } | Tag::Image { .. })
+                )
+            });
+            assert!(!active, "{md:?}");
+        }
+        let math = Parser::new_ext(&md, Options::ENABLE_MATH)
+            .any(|event| matches!(event, Event::InlineMath(_)));
+        assert!(math, "{md:?}");
+    }
+}
+
+fn active(md: &str, options: Options) -> usize {
+    Parser::new_ext(md, options)
+        .filter(|event| match event {
+            Event::InlineHtml(html) => html.as_ref() != "<br>",
+            Event::Html(_) | Event::Start(Tag::Link { .. } | Tag::Image { .. }) => true,
+            _ => false,
+        })
+        .count()
+}
+
+fn math_read(md: &str, options: Options) -> usize {
+    Parser::new_ext(md, options | Options::ENABLE_MATH)
+        .filter(|event| matches!(event, Event::InlineMath(_)))
+        .count()
+}
+
+#[test]
+fn math_anywhere_in_one_inline_context_guards_all_of_its_text() {
+    let tex = |t: &str| Inline::Math(t.into());
+    let cell = Cell::new(vec![
+        text("$x"),
+        Block::Paragraph(vec![tex("y $ z")]),
+        Block::Paragraph(vec![styled("$<img src=x>", CODE)]),
+    ]);
+    let alt = Inline::Image {
+        alt: "<1".into(),
+        source: ImageSource::Unavailable,
+        origin: ImageOrigin::new(Region::Body, None),
+    };
+    let label = link(vec![tex("y")], external("http://e.test"));
+    let labelled = List {
+        marker: MarkerKind::Bullet,
+        start: 1,
+        items: vec![ListItem {
+            blocks: vec![Block::Paragraph(vec![tex("x")])],
+            marker_label: Some("<1@example.com>".into()),
+        }],
+    };
+    for (name, blocks, expected, links) in [
+        (
+            "cell paragraphs",
+            vec![Block::Table(Table::from_rows(vec![vec![cell]], 0))],
+            "|  |\n| --- |\n| \\$x<br>$y \\$ z$<br>`$<img src=x>` |\n",
+            0,
+        ),
+        (
+            "link label",
+            vec![Block::Paragraph(vec![label, Inline::plain("<1@example.com>")])],
+            "[$y$](http://e.test)\\<1@example.com>\n",
+            1,
+        ),
+        ("list marker label", vec![Block::List(labelled)], "- \\<1@example.com> $x$\n", 0),
+        (
+            "image alt",
+            vec![Block::Paragraph(vec![alt, tex("x"), Inline::plain("@example.com>")])],
+            "\\<1$x$@example.com>\n",
+            0,
+        ),
+    ] {
+        let md = rendered(&Document { blocks, ..Document::default() }, AltText);
+        assert_eq!(md, expected, "{name}");
+        for options in [Options::ENABLE_TABLES, Options::ENABLE_TABLES | Options::ENABLE_MATH] {
+            assert_eq!(active(&md, options), links, "{name}: {md:?}");
+        }
+        assert_eq!(math_read(&md, Options::ENABLE_TABLES), 1, "{name}: {md:?}");
+    }
+}
+
+fn table_holds(sources: &[String]) -> Result<(), proptest::test_runner::TestCaseError> {
+    let cells: Vec<_> = sources
+        .iter()
+        .map(|source| crate::shared::markdown::blocks(&ParseCtx::default(), source, 0).unwrap())
+        .collect();
+    let read: usize = cells.iter().map(|blocks| inline_math(blocks) + display_math(blocks)).sum();
+    if read == 0 {
+        return Ok(());
+    }
+    let row = cells.into_iter().map(Cell::new).collect();
+    let md = doc(vec![Block::Table(Table::from_rows(vec![row], 0))]);
+    for tables in [Options::empty(), Options::ENABLE_TABLES] {
+        for options in [tables, tables | Options::ENABLE_MATH] {
+            proptest::prop_assert_eq!(active(&md, options), 0, "{:?} -> {:?}", sources, md);
+        }
+        proptest::prop_assert_eq!(math_read(&md, tables), read, "{:?} -> {:?}", sources, md);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_table_beside_math_is_one_context_under_either_table_setting() {
+    let cases: [&[&str]; 2] =
+        [&["\\(<\\)\n\n# \\(<\\)"], &["$x", "a\\(y $ z\\)b", "`$<img src=x>`"]];
+    for sources in cases {
+        table_holds(&sources.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap();
+    }
+}
+
+const LINE_STARTS: &[&str] = &[
+    "```",
+    "~~~",
+    "# ",
+    "#",
+    "===",
+    "---",
+    "***",
+    "___",
+    "> ",
+    ">",
+    "- ",
+    "* ",
+    "+ ",
+    "1. ",
+    "1) ",
+    "<div>",
+    "<!--",
+    "<?x",
+    "<!X",
+    "<![CDATA[",
+    "<script>",
+    "<pre>",
+    "<a>",
+    "</a>",
+    "| a |",
+    "| - |",
+    "-|-",
+    ":-:",
+    "",
+    "\t",
+    "x",
+];
+
+fn display_line() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::strategy::Strategy;
+    (
+        proptest::sample::select(&["", " ", "  ", "   "][..]),
+        proptest::sample::select(LINE_STARTS),
+        proptest::sample::select(&["", " x", "y \\\\", " % c", "-->"][..]),
+    )
+        .prop_map(|(indent, start, rest)| format!("{indent}{start}{rest}"))
+}
+
+fn display_math_holds(
+    body: &str,
+    container: usize,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let math = Block::Math(body.into());
+    let held = match container {
+        0 => math,
+        1 => Block::BlockQuote(vec![math]),
+        _ => Block::List(List {
+            marker: MarkerKind::Bullet,
+            start: 1,
+            items: vec![ListItem { blocks: vec![math], marker_label: None }],
+        }),
+    };
+    let code = Block::CodeBlock { lang: None, text: "~~~\n<img src=x>\n".into() };
+    let md = doc(vec![held, code]);
+    for tables in [Options::empty(), Options::ENABLE_TABLES] {
+        for options in [tables, tables | Options::ENABLE_MATH] {
+            let events: Vec<_> = Parser::new_ext(&md, options).collect();
+            let blocks: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Start(Tag::Paragraph) => None,
+                    Event::Start(tag) if !matches!(tag, Tag::Emphasis | Tag::Strong) => {
+                        Some(format!("{tag:?}"))
+                    }
+                    Event::Rule | Event::Html(_) | Event::InlineHtml(_) => {
+                        Some(format!("{event:?}"))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let expected = match container {
+                0 => vec!["CodeBlock(Fenced(Borrowed(\"\")))"],
+                1 => vec!["BlockQuote(None)", "CodeBlock(Fenced(Borrowed(\"\")))"],
+                _ => vec!["List(None)", "Item", "CodeBlock(Fenced(Borrowed(\"\")))"],
+            };
+            proptest::prop_assert_eq!(blocks, expected, "{:?} -> {:?}", body, md);
+            let paragraphs =
+                events.iter().filter(|event| matches!(event, Event::Start(Tag::Paragraph))).count();
+            proptest::prop_assert!(paragraphs <= 1, "{:?} -> {:?}", body, md);
+            let read = events.iter().filter(|event| matches!(event, Event::DisplayMath(_))).count();
+            let math = usize::from(options.contains(Options::ENABLE_MATH));
+            proptest::prop_assert_eq!(read, math, "{:?} -> {:?}", body, md);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_display_line_that_would_open_a_fence_stays_in_its_math() {
+    display_math_holds("~~~", 0).unwrap();
+}
+
+const BESIDE_MATH: &[&str] = &[
+    "<",
+    ">",
+    "@",
+    ":",
+    "a",
+    "1",
+    "-",
+    " ",
+    "<1",
+    "<-",
+    "@a>",
+    "a@1>",
+    "a:",
+    "<a",
+    "</a>",
+    "<!--",
+    "-->",
+    "<?",
+    "?>",
+    "`",
+    "``",
+    "```",
+    "*",
+    "_",
+    "~",
+    "[",
+    "]",
+    "(",
+    ")",
+    "!",
+    "&",
+    "\\",
+    "$",
+    "|",
+    "#",
+    "<img src=x>",
+    "](u)",
+    "{",
+    "}",
+];
+
+fn run() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    proptest::collection::vec(proptest::sample::select(BESIDE_MATH), 1..4)
+        .prop_map(|run| run.concat())
+}
+
+fn ocr_piece() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    prop_oneof![
+        3 => run(),
+        1 => run().prop_map(|t| format!("\\({t}\\)")),
+        2 => run().prop_map(|t| format!("[{t}](javascript:x)")),
+        2 => run().prop_map(|t| format!("[{t}](http://x)")),
+        1 => run().prop_map(|t| format!("*{t}*")),
+        1 => (proptest::sample::select(&["`", "``", "```"][..]), run())
+            .prop_map(|(fence, t)| format!("{fence}{t}{fence}")),
+    ]
+}
+
+fn inline_math(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Paragraph(inlines) | Block::Heading { content: inlines, .. } => {
+                inlines.iter().filter(|inline| matches!(inline, Inline::Math(_))).count()
+            }
+            Block::BlockQuote(blocks) => inline_math(blocks),
+            Block::List(list) => list.items.iter().map(|item| inline_math(&item.blocks)).sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn display_math(blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Math(_) => 1,
+            Block::BlockQuote(blocks) => display_math(blocks),
+            Block::List(list) => list.items.iter().map(|item| display_math(&item.blocks)).sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 4096,
+        failure_persistence: None,
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+    #[test]
+    fn no_angle_bracket_beside_math_opens_an_autolink_or_tag(
+        before in proptest::collection::vec(ocr_piece(), 0..4),
+        math in run(),
+        after in proptest::collection::vec(ocr_piece(), 0..4),
+    ) {
+        let source = format!("{}\\({math}\\){}", before.concat(), after.concat());
+        let blocks = crate::shared::markdown::blocks(&ParseCtx::default(), &source, 0).unwrap();
+        let read = inline_math(&blocks);
+        if read == 0 {
+            return Ok(());
+        }
+        let md = doc(blocks);
+        for options in [Options::empty(), Options::ENABLE_MATH] {
+            let active = Parser::new_ext(&md, options).any(|event| {
+                matches!(
+                    event,
+                    Event::Html(_)
+                        | Event::InlineHtml(_)
+                        | Event::Start(Tag::Link { .. } | Tag::Image { .. })
+                )
+            });
+            proptest::prop_assert!(!active, "{:?} -> {:?}", source, md);
+        }
+        let math = Parser::new_ext(&md, Options::ENABLE_MATH)
+            .filter(|event| matches!(event, Event::InlineMath(_)))
+            .count();
+        proptest::prop_assert_eq!(math, read, "{:?} -> {:?}", source, md);
+    }
+
+    #[test]
+    fn no_display_math_line_starts_a_block_or_breaks_its_paragraph(
+        lines in proptest::collection::vec(display_line(), 1..5),
+        container in 0..3_usize,
+    ) {
+        let body = lines.join("\n");
+        if crate::shared::text::trim_tex(&body).is_empty() {
+            return Ok(());
+        }
+        display_math_holds(&body, container)?;
+    }
+
+    #[test]
+    fn no_text_in_a_table_beside_math_opens_markup_across_its_cells(
+        cells in proptest::collection::vec(
+            proptest::collection::vec(
+                (
+                    proptest::sample::select(&["", "> ", "- "][..]),
+                    proptest::collection::vec(ocr_piece(), 1..4),
+                ),
+                1..3,
+            ),
+            1..4,
+        ),
+        math in run(),
+        (cell, part) in (0..4_usize, 0..4_usize),
+    ) {
+        let mut sources: Vec<Vec<String>> = cells
+            .iter()
+            .map(|parts| {
+                parts.iter().map(|(prefix, pieces)| format!("{prefix}{}", pieces.concat())).collect()
+            })
+            .collect();
+        let at = cell % sources.len();
+        if let Some(parts) = sources.get_mut(at) {
+            parts.insert(part.min(parts.len()), format!("\\({math}\\)"));
+        }
+        table_holds(&sources.iter().map(|parts| parts.join("\n\n")).collect::<Vec<_>>())?;
+    }
 }
 
 #[test]
@@ -826,7 +1237,8 @@ fn a_nested_cell_holds_its_text_once_whatever_its_depth() {
     let mut out = super::sink::Text::new(&meter);
     let fills = GapFills::default();
     let rc = Ctx::of(&document, &fills, Placeholder, &meter).unwrap();
-    super::table::render_cell(&nested, &rc, &mut out).unwrap();
+    let beside_math = super::table::holds_math_in(&nested.blocks, &rc);
+    super::table::render_cell(&nested, beside_math, &rc, &mut out).unwrap();
     assert_eq!(out.as_str(), long);
     assert!(meter.admitted() <= long.len() as u64 + 100 * 8, "{}", meter.admitted());
 }

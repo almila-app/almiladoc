@@ -255,12 +255,12 @@ fn blank(block: &Block, rc: &Ctx<'_>, meter: &Meter<'_>) -> Result<bool, Convert
             text.trim_end_matches('\n'),
             "\n```",
         ]),
-        Block::Math(tex) => !tex.trim().is_empty() && has_empty_line(["$$\n", tex.trim(), "\n$$"]),
         Block::Gap(gap) => match rc.fills.filled(gap) {
             Some(blocks) => blank_body(blocks, rc, meter)?,
             None => false,
         },
-        Block::HeaderFooter(_)
+        Block::Math(_)
+        | Block::HeaderFooter(_)
         | Block::Table(_)
         | Block::BlockQuote(_)
         | Block::Rule
@@ -296,7 +296,7 @@ mod tests {
     };
     use crate::ocr::GapFills;
     use crate::render::markdown::sink::Sink;
-    use crate::render::markdown::table::render_cell;
+    use crate::render::markdown::table::{holds_math_in, render_cell};
     use crate::render::markdown::write_block;
     use std::assert_matches;
 
@@ -335,7 +335,8 @@ mod tests {
                 Block::Table(table) => {
                     for cell in table.origins() {
                         let mut text = Text::new(&meter);
-                        render_cell(cell, &rc, &mut text).unwrap();
+                        render_cell(cell, holds_math_in(&cell.blocks, &rc), &rc, &mut text)
+                            .unwrap();
                         let flattened =
                             any(&cell.blocks, |b| shows_in_cell(b, &rc, &meter)).unwrap();
                         assert_eq!(flattened, !text.as_str().is_empty(), "{name}: {cell:?}");
