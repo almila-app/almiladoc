@@ -30,6 +30,16 @@ Check open unpdf PRs at each wave start with `gh pr view <n> --repo <repo> --jso
 |---|---|
 | [unpdf #27](https://github.com/iyulab/unpdf/pull/27) | page pixel size before painting, for an exact long-edge raster |
 | [unpdf #28](https://github.com/iyulab/unpdf/pull/28) | raster gaps that count text, deep forms and unpainted patterns the painter drops, so an OCR page's loss is reported |
+| [unpdf #29](https://github.com/iyulab/unpdf/pull/29) | a page's count of codes in discarded text runs, so a substantially garbled page becomes an OCR gap |
+| [unpdf #30](https://github.com/iyulab/unpdf/pull/30) | `/Differences` codes past a byte ignored instead of overflowing; the scheduled `pdf` fuzz target fails until it ships, then its input joins the regressions |
+| [unpdf #31](https://github.com/iyulab/unpdf/pull/31) | the page share bilevel images cover, so a stamp over a full-page scan still makes an OCR gap |
+| [unpdf #32](https://github.com/iyulab/unpdf/pull/32) | Lab, Separation and DeviceN colours painted through their declared spaces in OCR images |
+| [unpdf #33](https://github.com/iyulab/unpdf/pull/33) | annotation appearances painted in OCR images |
+| [unpdf #34](https://github.com/iyulab/unpdf/pull/34) | JPEG images painted through their declared colour spaces |
+| [unpdf #35](https://github.com/iyulab/unpdf/pull/35) | CMap code ranges that cannot overflow |
+| [unpdf #36](https://github.com/iyulab/unpdf/pull/36) | bounded parser nesting, so a deeply nested PDF cannot overflow the stack and abort the process |
+| [unpdf #37](https://github.com/iyulab/unpdf/pull/37) | an indirect XObject `/Subtype` resolved, so its form text is extracted |
+| [unpdf #39](https://github.com/iyulab/unpdf/pull/39) | malformed ToUnicode and TrueType cmaps read without panicking |
 
 - **Offline OCR quality:** evaluate native OCR on representative consumer scans once a labelled corpus has paragraph ground truth and marked headings.
 - **Consumer proof:** after the candidate wheel reaches TestPyPI/PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the candidate, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, every later 0.x minor repeats it, and 1.0 proves its own candidate.
