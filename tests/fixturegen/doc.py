@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from itertools import accumulate
 from pathlib import Path
 
+from fixturegen import mtef
 from fixturegen.common import write_cfb, write_file
 
 FIB_SIZE = 0x400
@@ -23,6 +24,8 @@ SPRM_CF_ITALIC = 0x0836
 SPRM_C_ISS = 0x2A48
 SPRM_C_ISTD = 0x4A30
 SPRM_CF_VANISH = 0x083C
+SPRM_CF_OLE2 = 0x080A
+SPRM_C_PIC_LOCATION = 0x6A03
 SPRM_CF_SPEC = 0x0855
 SPRM_C_RG_FTC0 = 0x4A4F
 SPRM_C_RG_FTC1 = 0x4A50
@@ -82,11 +85,13 @@ def word_document(
     return bytes(stream), table + pcdt
 
 
-def write_doc(path: Path, word: bytes, table: bytes) -> None:
+def write_doc(
+    path: Path, word: bytes, table: bytes, objects: Sequence[tuple[str, bytes]] = ()
+) -> None:
     """Write a Word 97 document after checking what its FIB declares: the section counts nFib
     0x00C1 fixes ([MS-DOC] 2.5.1 Fib), FibBase's fExtChar and nFibBack, cbMac as the bytes
     written, every FibRgFcLcb97 range inside the table stream, and each piece's text between
-    the FIB and cbMac."""
+    the FIB and cbMac. Each `(path, bytes)` of `objects` is a stream of the compound file."""
 
     def u16(at: int) -> int:
         return struct.unpack_from("<H", word, at)[0]
@@ -109,7 +114,7 @@ def write_doc(path: Path, word: bytes, table: bytes) -> None:
         start = (fc & 0x3FFFFFFF) // 2 if compressed else fc
         end = start + (cps[i + 1] - cps[i]) * (1 if compressed else 2)
         assert start >= FIB_END and end <= len(word), f"piece {i}"
-    write_cfb(path, [("0Table", table), ("WordDocument", word)])
+    write_cfb(path, [("0Table", table), *objects, ("WordDocument", word)])
 
 
 def pieces_doc(out: Path) -> None:
@@ -333,6 +338,46 @@ def scientific_doc(out: Path) -> None:
     write_doc(out / "doc" / "handmade-scientific.doc", word, table)
 
 
+def equations_doc(out: Path) -> None:
+    """MathType and Equation Editor objects, each an `ObjectPool/_<id>` storage named by the
+    `sprmCPicLocation` of its object character, decode to TeX: display in an EMBED field of its
+    own paragraph, inline beside text, inline by MathType's own flag; a storage without an
+    Equation Native stream is reported."""
+
+    def object_run(location: int) -> bytes:
+        return struct.pack(
+            "<HBHBHI", SPRM_CF_SPEC, 1, SPRM_CF_OLE2, 1, SPRM_C_PIC_LOCATION, location
+        )
+
+    runs = [
+        ("The roots are\r\x13 EMBED Equation.DSMT4 \x14", b""),
+        ("\x01", object_run(1001)),
+        ("\x15\ror, from Equation Editor, ", b""),
+        ("\x01", object_run(1002)),
+        (" for any a.\rEnergy is ", b""),
+        ("\x01", object_run(1003)),
+        (".\rA sheet follows: ", b""),
+        ("\x01", object_run(1004)),
+        (" done.\r", b""),
+    ]
+    text = "".join(chars for chars, _ in runs).encode("ascii")
+    bounds = list(accumulate((len(chars) for chars, _ in runs), initial=FIB_SIZE))
+    chpx = [bytes([len(props)]) + props if props else b"" for _, props in runs]
+    PN = 3
+    word, table = word_document(
+        [text],
+        tables=[(FC_PLCF_BTE_CHPX, bin_table(FIB_SIZE, bounds[-1], PN))],
+        pages=[(PN, fkp_page(bounds, chpx, 1))],
+    )
+    objects = [
+        ("ObjectPool/_1001/Equation Native", mtef.equation_native(mtef.quadratic(mtef.V5))),
+        ("ObjectPool/_1002/Equation Native", mtef.equation_native(mtef.quadratic(mtef.V3))),
+        ("ObjectPool/_1003/Equation Native", mtef.equation_native(mtef.energy())),
+        ("ObjectPool/_1004/Contents", b"not an equation"),
+    ]
+    write_doc(out / "doc" / "handmade-equations.doc", word, table, objects)
+
+
 def malformed(out: Path) -> None:
     doc = out / "doc" / "text.doc"
     if doc.exists():
@@ -354,5 +399,6 @@ def generate(out: Path) -> None:
     blockstyle_doc(out)
     charstyle_doc(out)
     scientific_doc(out)
+    equations_doc(out)
     malformed(out)
     abuse(out)

@@ -1,7 +1,7 @@
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::shared::binary::{ByteReader, get_u16, get_u32};
-use crate::shared::inflate::{admit_ratio, admitted, deflated, inflate_capped, room};
+use crate::shared::inflate::{deflated, inflate_record};
 use std::borrow::Cow;
 use std::io::Read;
 
@@ -151,16 +151,8 @@ fn inflate(
     data: &[u8],
     cb_size: u64,
 ) -> Result<Option<Vec<u8>>, ConvertError> {
-    admit_ratio(parse_ctx.limits(), data.len() as u64, cb_size)?;
     let source = deflated(data).take(cb_size);
-    let read = admitted(parse_ctx, || {
-        inflate_capped(parse_ctx, source, cb_size, room(parse_ctx), PICTURE, CORRUPT_PICTURE)
-    });
-    match read {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.is_fatal() => Err(e),
-        Err(_) => Ok(None),
-    }
+    inflate_record(parse_ctx, source, data.len() as u64, cb_size, PICTURE, CORRUPT_PICTURE)
 }
 
 /// Bounded traversal: record counts and nesting beyond any real drawing abort the search.

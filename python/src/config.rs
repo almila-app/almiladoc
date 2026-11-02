@@ -235,9 +235,11 @@ macro_rules! limits {
 }
 
 limits! {
-    /// Decompressed bytes of one archive entry, OfficeArt picture or compound-file stream.
+    /// Decompressed bytes of one archive entry, OfficeArt picture, embedded OLE object or
+    /// compound-file stream.
     max_entry_bytes,
-    /// Decompressed bytes one parse inflates (archive entries and OfficeArt pictures).
+    /// Decompressed bytes one parse inflates (archive entries, OfficeArt pictures and embedded
+    /// OLE objects).
     max_total_bytes,
     /// Entries in one archive.
     max_entry_count,
@@ -260,7 +262,8 @@ limits! {
     max_records,
     /// Bytes of one input, checked before it is copied or read.
     max_input_bytes,
-    /// Ratio of an archive entry's or OfficeArt picture's decompressed to compressed size.
+    /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE object's decompressed to
+    /// compressed size.
     max_compression_ratio,
     /// Markdown or JSON bytes one call writes.
     max_output_bytes,

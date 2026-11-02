@@ -58,10 +58,9 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
     let text = TextView::new(&word_doc, pieces);
 
     let data = optional_ole_stream(parse_ctx, &mut ole, "Data")?.or_empty();
-    let chpx_runs =
-        parse_fkps(parse_ctx, fib, &word_doc, &table, Fib::FC_PLCF_BTE_CHPX, FkpKind::Chpx, &data)?;
-    let papx_runs =
-        parse_fkps(parse_ctx, fib, &word_doc, &table, Fib::FC_PLCF_BTE_PAPX, FkpKind::Papx, &data)?;
+    let runs = |at, kind| parse_fkps(parse_ctx, fib, &word_doc, &table, at, kind, &data);
+    let chpx_runs = runs(Fib::FC_PLCF_BTE_CHPX, FkpKind::Chpx)?;
+    let papx_runs = runs(Fib::FC_PLCF_BTE_PAPX, FkpKind::Papx)?;
     let stylesheet = stsh::parse(parse_ctx, fib, &table, fib.size(Fib::LCB_PLF_LST) > 0)?;
     let fonts = fonts::parse(parse_ctx, fib, &table)?;
     let list_tables = lists::parse(parse_ctx, fib, &table);
@@ -80,7 +79,8 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         shapes,
         data,
     )
-    .with_comments(comments::References::read(parse_ctx, fib, &table)?);
+    .with_comments(comments::References::read(parse_ctx, fib, &table)?)
+    .with_ole(ole);
     let layout = sides::Layout { fib, table: &table, word_doc: &word_doc, stories: &stories };
     let mut blocks = sides::body(parse_ctx, &layout, &assembler)?;
     let mut notes = Vec::new();
@@ -429,7 +429,9 @@ mod tests {
     use crate::limits::Limit;
     use crate::model::Block;
     use crate::shared::officeart::record;
-    use crate::shared::test_support::diagnostic_rows;
+    use crate::shared::test_support::{
+        diagnostic_rows, equation_editor, equation_native, mathtype,
+    };
     use sprm::{PapDelta, apply_pap_sprms};
     use std::assert_matches;
 
@@ -914,6 +916,7 @@ mod tests {
         pieces: Vec<(u32, u32, u16)>,
         cb_mac: Option<u32>,
         clx: bool,
+        objects: Vec<(String, Vec<u8>)>,
     }
 
     impl DocBuilder {
@@ -927,6 +930,7 @@ mod tests {
                 pieces: Vec::new(),
                 cb_mac: None,
                 clx: true,
+                objects: Vec::new(),
             };
             // [MS-DOC] 2.5.1 Fib and 2.5.2 FibBase for nFib 0x00C1: fExtChar, nFibBack, csw,
             // cslw and cbRgFcLcb; cswNew at FIB_MIN stays 0.
@@ -1090,6 +1094,11 @@ mod tests {
             Self { data: Some(data), ..self }
         }
 
+        fn object(mut self, path: &str, bytes: &[u8]) -> Self {
+            self.objects.push((path.to_owned(), bytes.to_vec()));
+            self
+        }
+
         fn bytes(self) -> Vec<u8> {
             use std::io::Write;
             let doc = self.covered();
@@ -1101,6 +1110,10 @@ mod tests {
                 if let Some(bytes) = bytes {
                     ole.create_stream(name).unwrap().write_all(&bytes).unwrap();
                 }
+            }
+            for (path, bytes) in doc.objects {
+                ole.create_storage_all(path.rsplit_once('/').unwrap().0).unwrap();
+                ole.create_stream(&path).unwrap().write_all(&bytes).unwrap();
             }
             ole.into_inner().into_inner()
         }
@@ -1959,6 +1972,10 @@ mod tests {
     }
 
     fn bulleted_doc(text: &[u8], lsid: u32, papx: &[(u32, &[u8])]) -> Vec<u8> {
+        bulleted(text, lsid, papx).bytes()
+    }
+
+    fn bulleted(text: &[u8], lsid: u32, papx: &[(u32, &[u8])]) -> DocBuilder {
         let mut plf = [0u8; 30];
         plf[0] = 1;
         plf[2..6].copy_from_slice(&lsid.to_le_bytes());
@@ -1970,7 +1987,6 @@ mod tests {
             .fib(0x2E6, 30)
             .table(0x2EA, &words(&[1, lsid, 0, 0, 0, u32::MAX]))
             .papx(papx)
-            .bytes()
     }
 
     #[test]
@@ -3781,5 +3797,246 @@ mod tests {
             let doc = unicode_runs(&[("a\r", &in_font(1))]).table(Fib::FC_STTBF_FFN, &table);
             assert_eq!(converted(&doc.bytes()), ("a\n".into(), expected), "{case}");
         }
+    }
+
+    const EQUATION_NATIVE: &str = "/ObjectPool/_7/Equation Native";
+    const HEADING: &[u8] = &[0x40, 0x26, 0];
+
+    fn object_run(location: u32) -> Vec<u8> {
+        [&[0x0A, 0x08, 1, 0x03, 0x6A][..], &location.to_le_bytes()].concat()
+    }
+
+    fn mathtype_native(inline: bool, mtcodes: &[u16]) -> Vec<u8> {
+        let mtef = mathtype(inline, mtcodes);
+        equation_native(28, mtef.len(), &mtef)
+    }
+
+    fn equation_doc(before: &str, after: &str, native: &[u8]) -> DocBuilder {
+        runs_doc(&[(before, &[]), ("\x01", &object_run(7)), (after, &[])])
+            .object(EQUATION_NATIVE, native)
+    }
+
+    #[test]
+    fn an_equation_object_shows_its_tex_in_place_of_its_preview() {
+        let (x, y) = (0x78, 0x79);
+        let display = mathtype_native(false, &[x, y]);
+        let editor = equation_editor(&[x, y]);
+        let editor = equation_native(28, editor.len(), &editor);
+        let in_cell = equation_doc("", "\x07\x07", &display).papx(&[(2, IN_TABLE), (1, ROW_END)]);
+        let cases: [(&str, DocBuilder, &str, Vec<Reported>); 8] = [
+            (
+                "a display equation alone",
+                equation_doc("", "\r", &display),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "an inline equation",
+                equation_doc("", "\r", &mathtype_native(true, &[x, y])),
+                "$xy$\n",
+                vec![],
+            ),
+            (
+                "an Equation Editor equation",
+                equation_doc("", "\r", &editor),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "a display equation beside text",
+                equation_doc("a ", " b\r", &display),
+                "a $xy$ b\n",
+                vec![],
+            ),
+            (
+                "an equation in an EMBED field",
+                equation_doc("\x13 EMBED Equation.DSMT4 \x14", "\x15\r", &display),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "an equation in a heading",
+                equation_doc("", "\r", &display).papx(&[(2, HEADING)]),
+                "# $xy$\n",
+                vec![],
+            ),
+            ("an equation in a table cell", in_cell, "|  |\n| --- |\n| $xy$ |\n", vec![]),
+            (
+                "a character with no counterpart",
+                equation_doc("", "\r", &mathtype_native(false, &[0x61, 0xE999, 0x62])),
+                "$$\n    ab\n$$\n",
+                vec![(DiagnosticCode::UnmappedSymbol, Region::Body, 1)],
+            ),
+        ];
+        for (case, doc, expected, reported) in cases {
+            assert_eq!(converted(&doc.bytes()), (expected.into(), reported), "{case}");
+        }
+    }
+
+    #[test]
+    fn an_object_the_reader_cannot_decode_keeps_its_report_and_adds_nothing() {
+        let whole = mathtype_native(false, &[0x78]);
+        let mtef = mathtype(false, &[0x78]);
+        let object = || runs_doc(&[("a", &[]), ("\x01", &object_run(7)), ("\r", &[])]);
+        let at = |path: &str, native: &[u8]| object().object(path, native);
+        let located = [0x0A, 0x08, 1];
+        let cases = [
+            ("no object pool", object()),
+            ("another object", at("/ObjectPool/_8/Equation Native", &whole)),
+            ("no Equation Native", at("/ObjectPool/_7/Contents", &whole)),
+            (
+                "a header of another size",
+                at(EQUATION_NATIVE, &equation_native(27, mtef.len(), &mtef)),
+            ),
+            (
+                "an unknown MTEF version",
+                at(EQUATION_NATIVE, &equation_native(28, 5, &[9, 1, 0, 6, 0])),
+            ),
+            ("a stream where a storage is", at("/ObjectPool/_7", &whole)),
+            (
+                "no picture location",
+                runs_doc(&[("a", &[]), ("\x01", &located), ("\r", &[])])
+                    .object(EQUATION_NATIVE, &whole),
+            ),
+        ];
+        for (case, doc) in cases {
+            let expected = ("a\n".into(), vec![(DiagnosticCode::EmbeddedObject, Region::Body, 1)]);
+            assert_eq!(converted(&doc.bytes()), expected, "{case}");
+        }
+        let flagless = runs_doc(&[("a\x01\r", &[])]).object(EQUATION_NATIVE, &whole);
+        let picture =
+            ("a\\[Image\\]\n".into(), vec![(DiagnosticCode::ImageUnavailable, Region::Body, 1)]);
+        assert_eq!(converted(&flagless.bytes()), picture);
+    }
+
+    #[test]
+    fn a_pooled_equation_stream_stops_at_the_entry_limit() {
+        let native = mathtype_native(false, &[0x78; 3000]);
+        let doc = equation_doc("a", "\r", &native).bytes();
+        let limited = |max_entry_bytes| {
+            let limits = crate::limits::Limits { max_entry_bytes, ..Default::default() };
+            parse(&ParseCtx::new(&limits), &doc).map(|_| ())
+        };
+        let max = native.len() as u64;
+        assert_matches!(limited(max), Ok(()));
+        assert_matches!(
+            limited(max - 1),
+            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: m }) if m == max - 1
+        );
+    }
+
+    #[test]
+    fn an_object_charges_only_the_equation_stream_it_reads() {
+        let mtef = mathtype(false, &[0x78; 3000]);
+        let native = equation_native(28, mtef.len(), &mtef);
+        let doc = |location, native: Option<&[u8]>| {
+            let doc = runs_doc(&[("a", &[]), ("\x01", &object_run(location)), ("\r", &[])]);
+            match native {
+                Some(native) => doc.object(EQUATION_NATIVE, native).bytes(),
+                None => doc.bytes(),
+            }
+        };
+        let fuel = |bytes: &[u8]| {
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, bytes).unwrap();
+            parse_ctx.fuel()
+        };
+        let decoding = ParseCtx::default();
+        crate::shared::math::mtef_to_tex(&decoding, &mtef).unwrap();
+        let unread = fuel(&doc(8, None));
+        assert_eq!(fuel(&doc(8, Some(&native))), unread);
+        assert_eq!(fuel(&doc(7, Some(&native))), unread + native.len() as u64 + decoding.fuel());
+    }
+
+    fn declare_equation_streams(bytes: &mut [u8], declared: u64) -> usize {
+        let name: Vec<u8> = "Equation Native".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let entries: Vec<usize> = (0..=bytes.len() - name.len())
+            .filter(|&at| bytes[at..at + name.len()] == name[..])
+            .collect();
+        for &entry in &entries {
+            bytes[entry + 120..entry + 128].copy_from_slice(&declared.to_le_bytes());
+        }
+        entries.len()
+    }
+
+    fn objects_doc(locations: &[u32]) -> DocBuilder {
+        let objects: Vec<Vec<u8>> =
+            locations.iter().map(|&location| object_run(location)).collect();
+        let runs: Vec<(&str, &[u8])> = [("a", &[][..])]
+            .into_iter()
+            .chain(objects.iter().map(|run| ("\x01", run.as_slice())))
+            .chain([("\r", &[][..])])
+            .collect();
+        runs_doc(&runs)
+    }
+
+    fn fuel_of(bytes: &[u8]) -> u64 {
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, bytes).unwrap();
+        parse_ctx.fuel()
+    }
+
+    #[test]
+    fn each_storage_its_chain_cuts_short_is_charged_for_what_it_copies() {
+        let prefix = vec![0x55; 200_000];
+        let claiming = |pooled: bool| {
+            let mut doc = objects_doc(&[7, 8, 9]);
+            for location in [7, 8, 9].into_iter().filter(|_| pooled) {
+                doc = doc.object(&format!("/ObjectPool/_{location}/Equation Native"), &prefix);
+            }
+            let mut bytes = doc.bytes();
+            let declared = declare_equation_streams(&mut bytes, 1 << 20);
+            assert_eq!(declared, if pooled { 3 } else { 0 });
+            bytes
+        };
+        let embedded = vec![(DiagnosticCode::EmbeddedObject, Region::Body, 3)];
+        assert_eq!(converted(&claiming(true)), ("a\n".into(), embedded));
+        let unread = fuel_of(&claiming(false));
+        let copied = fuel_of(&claiming(true)) - unread;
+        assert!(copied >= 3 * prefix.len() as u64, "{copied}");
+        let max_work = unread + 2 * prefix.len() as u64;
+        let limits = crate::limits::Limits { max_work, ..Default::default() };
+        assert_matches!(
+            parse(&ParseCtx::new(&limits), &claiming(true)),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })
+        );
+    }
+
+    #[test]
+    fn references_alternating_between_two_long_storages_read_each_once() {
+        let mtef = mathtype(false, &[0x78]);
+        let long = |header_bytes| {
+            [equation_native(header_bytes, mtef.len(), &mtef), vec![0; 1 << 20]].concat()
+        };
+        let pooled = |pairs: usize| {
+            let alternating: Vec<u32> = [7, 8].into_iter().cycle().take(2 * pairs).collect();
+            let doc = objects_doc(&alternating).object(EQUATION_NATIVE, &long(28));
+            let mut bytes = doc.object("/ObjectPool/_8/Equation Native", &long(27)).bytes();
+            assert_eq!(declare_equation_streams(&mut bytes, 4096), 2);
+            bytes
+        };
+        let unread = |pairs: usize| {
+            let distinct: Vec<u32> = (100..).take(2 * pairs).collect();
+            objects_doc(&distinct).bytes()
+        };
+        let embedded = vec![(DiagnosticCode::EmbeddedObject, Region::Body, 3)];
+        assert_eq!(converted(&pooled(3)), ("a$x$$x$$x$\n".into(), embedded));
+        let charged = |pairs| fuel_of(&pooled(pairs)) - fuel_of(&unread(pairs));
+        let reused = 2 * (1 + "x".len() as u64) + 2;
+        assert_eq!(charged(3) - charged(1), reused);
+    }
+
+    #[test]
+    fn a_display_equation_alone_in_a_list_item_shows_as_a_block_beside_text_inline() {
+        let item = vec![0x0B, 0x46, 1, 0, 0x0A, 0x26, 0];
+        let listed = |before: &str| {
+            let text = format!("{before}\x01\r");
+            let runs = [(u32::try_from(before.len()).unwrap(), &[][..]), (2, &object_run(7)[..])];
+            let doc = bulleted(text.as_bytes(), 0, &[(u32::try_from(text.len()).unwrap(), &item)]);
+            let native = mathtype_native(false, &[0x78]);
+            converted(&doc.chpx_runs(&runs).object(EQUATION_NATIVE, &native).bytes()).0
+        };
+        assert_eq!(listed(""), "- $$\n      x\n  $$\n");
+        assert_eq!(listed("a "), "- a $x$\n");
     }
 }

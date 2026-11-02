@@ -2,6 +2,7 @@ use crate::ctx::ParseCtx;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, LossClass, Region};
 use crate::ledger::CancelToken;
 use crate::model::{Block, Document, UnitKind};
+use std::fmt::Write as _;
 use std::io::{Cursor, Write};
 use std::num::NonZeroU32;
 use zip::CompressionMethod;
@@ -124,13 +125,39 @@ pub(crate) fn equation_editor(mtcodes: &[u16]) -> Vec<u8> {
     [3, 1, 1, 3, 0, 10, 1].into_iter().chain(chars).chain([0, 0]).collect()
 }
 
-/// The CFB an equation object embeds, its `Equation Native` stream an EQNOLEFILEHDR of
-/// `header_bytes` declaring `declared` MTEF bytes before `mtef`.
-pub(crate) fn equation_object(header_bytes: u16, declared: usize, mtef: &[u8]) -> Vec<u8> {
+/// The `Equation Native` stream: an EQNOLEFILEHDR of `header_bytes` declaring `declared` MTEF
+/// bytes, then `mtef`.
+pub(crate) fn equation_native(header_bytes: u16, declared: usize, mtef: &[u8]) -> Vec<u8> {
     let declared = u32::try_from(declared).unwrap();
     let header =
         [&header_bytes.to_le_bytes()[..], &[0; 6], &declared.to_le_bytes(), &[0; 16]].concat();
-    one_stream_cfb("Equation Native", &[header, mtef.to_vec()].concat())
+    [header, mtef.to_vec()].concat()
+}
+
+/// The CFB an equation object embeds, holding that stream.
+pub(crate) fn equation_object(header_bytes: u16, declared: usize, mtef: &[u8]) -> Vec<u8> {
+    one_stream_cfb("Equation Native", &equation_native(header_bytes, declared, mtef))
+}
+
+/// The OLE1 embedded object an RTF `\objdata` holds: a header naming `class`, then `native`.
+pub(crate) fn ole1_data(class: &str, native: &[u8]) -> Vec<u8> {
+    let name = [class.as_bytes(), &[0]].concat();
+    let length = |bytes: &[u8]| u32::try_from(bytes.len()).unwrap().to_le_bytes();
+    let (version, embedded, none) = (0x0501_u32.to_le_bytes(), 2_u32.to_le_bytes(), [0; 4]);
+    [&version[..], &embedded, &length(&name), &name, &none, &none, &length(native), native].concat()
+}
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        write!(hex, "{byte:02x}").unwrap();
+        hex
+    })
+}
+
+pub(crate) fn zlib(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
 }
 
 pub(crate) fn one_stream_cfb(name: &str, bytes: &[u8]) -> Vec<u8> {

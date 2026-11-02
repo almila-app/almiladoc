@@ -6,7 +6,12 @@ use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::Limit;
 use crate::shared::inflate::read_capped;
-use std::io::Read;
+use std::io::{Read, Seek};
+
+const UNREADABLE: &str = "unreadable stream";
+/// A stream read of at least this many bytes copies straight from its sector chain, at most what
+/// it asks for, where a smaller one first refills the stream's own buffer with up to a MiB.
+const DIRECT_READ: usize = 64 * 1024;
 
 pub(crate) fn get_u16(b: &[u8], off: usize) -> Option<u16> {
     b.get(off..)?.first_chunk().copied().map(u16::from_le_bytes)
@@ -84,18 +89,25 @@ pub(crate) fn decode_utf16(units: impl IntoIterator<Item = u16>) -> (String, boo
     (text, replaced)
 }
 
-pub(crate) fn read_ole_stream<R: Read + std::io::Seek>(
+fn open_ole_stream<R: Read + Seek>(
+    ole: &mut cfb::CompoundFile<R>,
+    name: &str,
+) -> Result<cfb::Stream<R>, ConvertError> {
+    ole.open_stream(name).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ConvertError::missing_part(name),
+        _ => ConvertError::malformed_part(name, UNREADABLE),
+    })
+}
+
+pub(crate) fn read_ole_stream<R: Read + Seek>(
     parse_ctx: &ParseCtx<'_>,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<Vec<u8>, ConvertError> {
     let max = parse_ctx.limits().max_entry_bytes;
-    let stream = ole.open_stream(name).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ConvertError::missing_part(name),
-        _ => ConvertError::malformed_part(name, "unreadable stream"),
-    })?;
+    let stream = open_ole_stream(ole, name)?;
     let declared = stream.len();
-    let bytes = read_capped(stream, declared, max, name, "unreadable stream")?;
+    let bytes = read_capped(stream, declared, max, name, UNREADABLE)?;
     if bytes.len() as u64 > max {
         return Err(ConvertError::limit(Limit::EntryBytes, max));
     }
@@ -118,12 +130,56 @@ impl OptionalStream {
     }
 }
 
-pub(crate) fn optional_ole_stream<R: Read + std::io::Seek>(
+pub(crate) fn optional_ole_stream<R: Read + Seek>(
     parse_ctx: &ParseCtx<'_>,
     ole: &mut cfb::CompoundFile<R>,
     name: &str,
 ) -> Result<OptionalStream, ConvertError> {
     unless_fatal(read_ole_stream(parse_ctx, ole, name))
+}
+
+/// [`optional_ole_stream`] metered as it reads: a declared length past the entry cap is refused
+/// unread, and each chunk, never past that length, is charged before it is read, so a stream
+/// whose chain ends early still pays for its prefix.
+pub(crate) fn charged_ole_stream<R: Read + Seek>(
+    parse_ctx: &ParseCtx<'_>,
+    ole: &mut cfb::CompoundFile<R>,
+    name: &str,
+) -> Result<OptionalStream, ConvertError> {
+    unless_fatal(
+        open_ole_stream(ole, name).and_then(|stream| read_charged(parse_ctx, stream, name)),
+    )
+}
+
+fn read_charged<R: Read + Seek>(
+    parse_ctx: &ParseCtx<'_>,
+    mut stream: cfb::Stream<R>,
+    name: &str,
+) -> Result<Vec<u8>, ConvertError> {
+    let max = parse_ctx.limits().max_entry_bytes;
+    let declared = stream.len();
+    if declared > max {
+        return Err(ConvertError::limit(Limit::EntryBytes, max));
+    }
+    let mut bytes = Vec::new();
+    while (bytes.len() as u64) < declared {
+        let start = bytes.len();
+        let left = usize::try_from(declared - start as u64).unwrap_or(usize::MAX);
+        let want = left.min(DIRECT_READ);
+        parse_ctx.charge(want as u64)?;
+        bytes
+            .try_reserve(want)
+            .map_err(|_| ConvertError::limit(Limit::Allocation, (start + want) as u64))?;
+        bytes.resize(start + want, 0);
+        let got = stream
+            .read(bytes.get_mut(start..).unwrap_or_default())
+            .map_err(|_| ConvertError::malformed_part(name, UNREADABLE))?;
+        bytes.truncate(start + got);
+        if got == 0 {
+            break;
+        }
+    }
+    Ok(bytes)
 }
 
 fn unless_fatal(read: Result<Vec<u8>, ConvertError>) -> Result<OptionalStream, ConvertError> {
@@ -318,6 +374,56 @@ mod tests {
         limits.max_entry_bytes = 999;
         let err = optional_ole_stream(&ParseCtx::new(&limits), &mut ole, "Data").unwrap_err();
         assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 999 });
+    }
+
+    fn declaring(
+        ole: cfb::CompoundFile<Cursor<Vec<u8>>>,
+        declared: u64,
+    ) -> cfb::CompoundFile<Cursor<Vec<u8>>> {
+        let mut bytes = ole.into_inner().into_inner();
+        let name: Vec<u8> = "Data".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let entry = bytes.windows(name.len()).position(|at| at == name).unwrap();
+        bytes[entry + 120..entry + 128].copy_from_slice(&declared.to_le_bytes());
+        cfb::CompoundFile::open(Cursor::new(bytes)).unwrap()
+    }
+
+    #[test]
+    fn a_charged_stream_pays_for_each_chunk_it_copies_a_cut_one_too() {
+        let len = 200_000;
+        let mut ole = one_stream_ole("Data", &vec![7; len]);
+        let ctx = ParseCtx::default();
+        let read = charged_ole_stream(&ctx, &mut ole, "Data");
+        assert_matches!(read, Ok(OptionalStream::Read(b)) if b.len() == len);
+        assert_eq!(ctx.fuel(), len as u64);
+        let mut cut = declaring(ole, 1 << 20);
+        let ctx = ParseCtx::default();
+        assert_matches!(charged_ole_stream(&ctx, &mut cut, "Data"), Ok(OptionalStream::Unreadable));
+        assert!((len as u64..(len + 64 * 1024) as u64).contains(&ctx.fuel()), "{}", ctx.fuel());
+        let token = crate::ledger::CancelToken::new();
+        let cancelled = crate::shared::test_support::cancelled(&token);
+        assert_matches!(
+            charged_ole_stream(&cancelled, &mut cut, "Data"),
+            Err(ConvertError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_charged_stream_declaring_more_than_the_entry_cap_is_refused_unread() {
+        let limits =
+            |max_entry_bytes| crate::limits::Limits { max_entry_bytes, ..Default::default() };
+        let mut cut = declaring(one_stream_ole("Data", &vec![7; 20 * 1024]), 0xFFFF_FFF0);
+        let small = limits(8192);
+        let ctx = ParseCtx::new(&small);
+        let err = charged_ole_stream(&ctx, &mut cut, "Data").unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 8192 });
+        assert_eq!(ctx.fuel(), 0);
+        let mut whole = one_stream_ole("Data", &[7; 1000]);
+        let capped = limits(999);
+        let err = charged_ole_stream(&ParseCtx::new(&capped), &mut whole, "Data").unwrap_err();
+        assert_matches!(err, ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 999 });
+        let fitting = limits(1000);
+        let read = charged_ole_stream(&ParseCtx::new(&fitting), &mut whole, "Data");
+        assert_matches!(read, Ok(OptionalStream::Read(b)) if b.len() == 1000);
     }
 
     #[test]

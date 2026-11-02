@@ -1,5 +1,6 @@
 mod fonts;
 mod hidden;
+mod objects;
 mod records;
 mod side;
 mod styletext;
@@ -20,10 +21,13 @@ use crate::shared::binary::{
 use crate::shared::delta::{StyleDelta, rebase_emphasis};
 use crate::shared::link_label::{label_is_absolute_url, label_shows_target};
 use crate::shared::list::{ListEntry, ListKey, ListMark, MarkerKind, flush_list};
+use crate::shared::math::Equation;
 use crate::shared::officeart::{self, Record, record_at};
+use crate::shared::ole_equation::is_equation;
 use crate::shared::sides::{PageSides, SideTimeline};
 use crate::shared::typeface::{Route, Slot, Slots, run_inlines};
 use fonts::FontCollection;
+use objects::{OleObject, Persisted};
 use records as rt;
 use side::{Defaults, Kind, PageFacts, Settings};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -55,7 +59,7 @@ pub(super) fn parse(parse_ctx: &ParseCtx<'_>, bytes: &[u8]) -> Result<Document, 
         let mut documents =
             scan(parse_ctx, &data)?.into_iter().filter(|r| r.rec_type == rt::DOCUMENT);
         if let Some(document) = documents.next_back() {
-            ex.read_document(document.body)?;
+            ex.read_document(document.body, None)?;
         }
         ex.walk(&data)?;
         ex.end_segment(None)?;
@@ -162,8 +166,14 @@ fn children<'a>(
     Ok(found.map(|r| r.body))
 }
 
+const PERSIST_REF_AT: usize = 16;
 const FSP_PATRIARCH: u32 = 0x0004;
 const FSP_BACKGROUND: u32 = 0x0400;
+
+fn names_equation(parse_ctx: &ParseCtx<'_>, class: &[u8]) -> Result<bool, ConvertError> {
+    parse_ctx.charge(class.len() as u64)?;
+    Ok(is_equation(&decode_utf16(utf16le_units(class)).0))
+}
 
 #[derive(Default)]
 struct MasterFacts {
@@ -370,6 +380,7 @@ struct Extractor<'c> {
     records: u64,
     links: HashMap<u32, String>,
     objects: HashMap<u32, DiagnosticCode>,
+    ole_objects: HashMap<u32, OleObject>,
     bstore: Vec<StoreEntry>,
     shape: Option<ShapeFacts>,
     link: Option<u32>,
@@ -534,6 +545,7 @@ impl<'c> Extractor<'c> {
             records: 0,
             links: HashMap::new(),
             objects: HashMap::new(),
+            ole_objects: HashMap::new(),
             bstore: Vec::new(),
             shape: None,
             link: None,
@@ -569,7 +581,8 @@ impl<'c> Extractor<'c> {
         let Some(layout) = locate_document(data, current_user) else {
             return Ok(false);
         };
-        self.read_document(layout.document)?;
+        let persisted = Persisted { persist: &layout.persist, data };
+        self.read_document(layout.document, Some(&persisted))?;
         let masters = collect_masters(layout.master_list, &layout.persist, data);
         for &(id, _, master) in &masters {
             self.read_master(id, master)?;
@@ -778,7 +791,11 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    fn read_document(&mut self, document: &[u8]) -> Result<(), ConvertError> {
+    fn read_document(
+        &mut self,
+        document: &[u8],
+        persisted: Option<&Persisted<'_>>,
+    ) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         for record in scan(parse_ctx, document)? {
             let Record { rec_type, body, .. } = record;
@@ -798,7 +815,7 @@ impl<'c> Extractor<'c> {
                         self.fonts = FontCollection::read(parse_ctx, collection)?;
                     }
                 }
-                rt::EXTERNAL_OBJECT_LIST => self.read_objects(body)?,
+                rt::EXTERNAL_OBJECT_LIST => self.read_objects(body, persisted)?,
                 rt::DRAWING_GROUP => {
                     for group in children(parse_ctx, body, officeart::DGG_CONTAINER)? {
                         for store in children(parse_ctx, group, officeart::BSTORE_CONTAINER)? {
@@ -813,7 +830,11 @@ impl<'c> Extractor<'c> {
         Ok(())
     }
 
-    fn read_objects(&mut self, list: &[u8]) -> Result<(), ConvertError> {
+    fn read_objects(
+        &mut self,
+        list: &[u8],
+        persisted: Option<&Persisted<'_>>,
+    ) -> Result<(), ConvertError> {
         let parse_ctx = self.parse_ctx;
         for Record { rec_type, body, .. } in scan(parse_ctx, list)? {
             let (code, id_atom, id_at) = match rec_type {
@@ -845,6 +866,17 @@ impl<'c> Extractor<'c> {
             };
             if let Some(code) = code {
                 self.objects.insert(id, code);
+                self.ole_objects.remove(&id);
+                if rec_type == rt::EXTERNAL_OLE_EMBED
+                    && let Some(persisted) = persisted
+                    && let Some(class) = atom(rt::CSTRING, 2)
+                    && names_equation(parse_ctx, class)?
+                    && let Some(persist_ref) =
+                        atom(id_atom, 0).and_then(|a| get_u32(a, PERSIST_REF_AT))
+                    && let Some(object) = OleObject::read(parse_ctx, persisted, persist_ref)?
+                {
+                    self.ole_objects.insert(id, object);
+                }
             } else {
                 let target = atom(rt::CSTRING, 1).map(|s| decode_utf16(utf16le_units(s)).0);
                 self.links.insert(id, target.unwrap_or_default());
@@ -1206,14 +1238,7 @@ impl<'c> Extractor<'c> {
                     }
                 }
             }
-            rt::EXTERNAL_OBJECT_REF_ATOM => {
-                if let Some(&code) = get_u32(body, 0).and_then(|id| self.objects.get(&id)) {
-                    self.parse_ctx.emit(code, self.region());
-                    if let Some(shape) = &mut self.shape {
-                        shape.preview |= code != DiagnosticCode::GraphicUnread;
-                    }
-                }
-            }
+            rt::EXTERNAL_OBJECT_REF_ATOM => self.object_ref(get_u32(body, 0))?,
             rt::INTERACTIVE_INFO_ATOM => {
                 let link = get_u32(body, 4).filter(|_| body.get(8) == Some(&4));
                 if in_client_data {
@@ -1234,6 +1259,38 @@ impl<'c> Extractor<'c> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn object_ref(&mut self, id: Option<u32>) -> Result<(), ConvertError> {
+        let Some((id, &code)) = id.and_then(|id| Some((id, self.objects.get(&id)?))) else {
+            return Ok(());
+        };
+        let shown = self.place_equation(id)?;
+        if !shown {
+            self.parse_ctx.emit(code, self.region());
+        }
+        if let Some(shape) = &mut self.shape {
+            shape.preview |= code != DiagnosticCode::GraphicUnread;
+        }
+        Ok(())
+    }
+
+    fn place_equation(&mut self, id: u32) -> Result<bool, ConvertError> {
+        let object = self.ole_objects.get(&id).filter(|_| self.master.is_none());
+        let Some(Equation { tex, inline, unmapped }) =
+            object.map(|object| object.equation(self.parse_ctx)).transpose()?.flatten()
+        else {
+            return Ok(false);
+        };
+        self.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, self.region(), unmapped);
+        self.flush_shape()?;
+        flush_list(&mut self.current, &mut self.list_run);
+        self.current.push(if inline {
+            Block::Paragraph(vec![Inline::Math(tex)])
+        } else {
+            Block::Math(tex)
+        });
+        Ok(true)
     }
 
     fn pending_range(&self, begin: Option<u32>, end: Option<u32>) -> Result<String, ConvertError> {
@@ -1529,7 +1586,9 @@ mod tests {
     use crate::model::UnitKind::{self, Slide};
     use crate::shared::inflate::RATIO_FLOOR;
     use crate::shared::officeart::record;
-    use crate::shared::test_support::{diagnostic_rows, unit_ordinals};
+    use crate::shared::test_support::{
+        diagnostic_rows, equation_editor, equation_object, mathtype, unit_ordinals, zlib,
+    };
     use page_side::{
         FOOTER, FOOTER_TEXT, HEADER, SLIDE_NUMBER, TODAY, USER_DATE, binary_tag, by_default,
         comment, drawn, flagged, footer_of, headers_footers, on_notes, on_slide, recovered, tagged,
@@ -2918,9 +2977,9 @@ mod tests {
         .concat();
         type Read = fn(&mut Extractor<'_>, &[u8]) -> Result<(), ConvertError>;
         let reads: [(&[u8], u64, Read); 4] = [
-            (&document, 12, |ex, data| ex.read_document(data)),
-            (&fonts, 5, |ex, data| ex.read_document(data)),
-            (&defaults, 2 + 2 + 3, |ex, data| ex.read_document(data)),
+            (&document, 12, |ex, data| ex.read_document(data, None)),
+            (&fonts, 5, |ex, data| ex.read_document(data, None)),
+            (&defaults, 2 + 2 + 3, |ex, data| ex.read_document(data, None)),
             (&master, 21, |ex, data| ex.read_master(1, data)),
         ];
         for (data, records, read) in reads {
@@ -3516,5 +3575,326 @@ mod tests {
             ]
         );
         assert_eq!(markdown_of(&bytes), "\u{2713}\n\n> \u{2713}\n");
+    }
+
+    fn embed(id: u32, persist: u32, prog_id: Option<&str>) -> Vec<u8> {
+        embed_as(0x0FCC, id, persist, prog_id)
+    }
+
+    fn embed_as(rec_type: u16, id: u32, persist: u32, prog_id: Option<&str>) -> Vec<u8> {
+        let prog_id = prog_id.map(|name| record(2 << 4, 0x0FBA, &utf16(name)));
+        let atoms = [atom32(0x0FCD, &[0, 0]), atom32(0x0FC3, &[0, 0, id, 0, persist, 0])];
+        container(0, rec_type, &[&atoms[..], &prog_id.into_iter().collect::<Vec<_>>()].concat())
+    }
+
+    fn stored(instance: u16, body: &[u8]) -> Vec<u8> {
+        record(instance << 4, 0x1011, body)
+    }
+
+    fn compressed(storage: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(storage.len()).unwrap();
+        stored(1, &[&size.to_le_bytes()[..], &zlib(storage)].concat())
+    }
+
+    fn showing_object(id: u32) -> Vec<u8> {
+        shape(0x0A10, &[(0x4104, 1)], &[atom32(0x0BC1, &[id])])
+    }
+
+    fn words_in_a_shape(text: &str) -> Vec<u8> {
+        text_shape(0x0A00, &[], &[], &[label(text)])
+    }
+
+    fn equation_deck(shapes: &[Vec<u8>], embeds: &[Vec<u8>], storage: Vec<u8>) -> Vec<u8> {
+        let doc = [pages(0, &[(2, 256)]), container(0, 0x0409, embeds)];
+        listed(&doc, &[slide(0, &[drawing(shapes)]), storage])
+    }
+
+    fn mathtype_storage(inline: bool, mtcodes: &[u16]) -> Vec<u8> {
+        let mtef = mathtype(inline, mtcodes);
+        equation_object(28, mtef.len(), &mtef)
+    }
+
+    #[test]
+    fn an_equation_object_shows_its_tex_in_place_of_its_preview() {
+        let xy = [0x78, 0x79];
+        let one = |storage: Vec<u8>, prog_id: &str| {
+            let embeds = [embed(7, 3, Some(prog_id))];
+            equation_deck(&[showing_object(7)], &embeds, storage)
+        };
+        let display = mathtype_storage(false, &xy);
+        let editor = equation_editor(&xy);
+        let editor = equation_object(28, editor.len(), &editor);
+        let cases = [
+            (
+                "a compressed display equation",
+                one(compressed(&display), "Equation.DSMT4"),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "an uncompressed display equation",
+                one(stored(0, &display), "Equation.DSMT4"),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "an Equation Editor equation",
+                one(compressed(&editor), "Equation.3"),
+                "$$\n    xy\n$$\n",
+                vec![],
+            ),
+            (
+                "an inline equation",
+                one(compressed(&mathtype_storage(true, &xy)), "Equation.DSMT4"),
+                "$xy$\n",
+                vec![],
+            ),
+        ];
+        for (case, bytes, expected, reported_rows) in cases {
+            let got = (markdown_of(&bytes), reported(&bytes));
+            assert_eq!(got, (expected.into(), reported_rows), "{case}");
+        }
+    }
+
+    #[test]
+    fn equations_keep_their_place_among_text_and_repeat_per_reference() {
+        let decoded = mathtype_storage(false, &[0x78]);
+        let storage = compressed(&decoded);
+        let embeds = [embed(7, 3, Some("Equation.DSMT4"))];
+        let shapes = [
+            words_in_a_shape("before\r"),
+            showing_object(7),
+            words_in_a_shape("between\r"),
+            showing_object(7),
+            words_in_a_shape("after\r"),
+        ];
+        let bytes = equation_deck(&shapes, &embeds, storage);
+        let math = "$$\n    x\n$$\n";
+        let expected = format!("before\n\n{math}\nbetween\n\n{math}\nafter\n");
+        assert_eq!((markdown_of(&bytes), reported(&bytes)), (expected, vec![]));
+        let parse_ctx = ParseCtx::default();
+        parse(&parse_ctx, &bytes).unwrap();
+        assert_eq!(parse_ctx.inflated_bytes(), decoded.len() as u64);
+    }
+
+    #[test]
+    fn a_character_with_no_counterpart_is_reported_in_the_unit_that_shows_the_equation() {
+        let storage = compressed(&mathtype_storage(false, &[0x61, 0xE999]));
+        let embeds = [embed(7, 3, Some("Equation.DSMT4"))];
+        let bytes = equation_deck(&[showing_object(7), showing_object(7)], &embeds, storage);
+        assert_eq!(markdown_of(&bytes), "$$\n    a\n$$\n\n$$\n    a\n$$\n");
+        assert_eq!(reported(&bytes), [(DiagnosticCode::UnmappedSymbol, Region::Body, Some(1), 2)]);
+    }
+
+    #[test]
+    fn an_object_the_reader_cannot_decode_keeps_its_report_and_adds_nothing() {
+        let display = mathtype_storage(false, &[0x78]);
+        let size = |len: usize| u32::try_from(len).unwrap().to_le_bytes();
+        let embedded = |prog_id: Option<&str>, persist: u32, storage: Vec<u8>| {
+            equation_deck(&[showing_object(7)], &[embed(7, persist, prog_id)], storage)
+        };
+        let mathtype_class = Some("Equation.DSMT4");
+        let cases = [
+            (
+                "a class that is not an equation",
+                embedded(Some("Excel.Sheet.12"), 3, compressed(&display)),
+            ),
+            ("no class", embedded(None, 3, compressed(&display))),
+            (
+                "a persist object nothing defines",
+                embedded(mathtype_class, 99, compressed(&display)),
+            ),
+            (
+                "a persist object of another record",
+                embedded(mathtype_class, 3, record(1 << 4, 0x1010, &compressed(&display)[8..])),
+            ),
+            ("an unknown instance", embedded(mathtype_class, 3, stored(2, &display))),
+            (
+                "a stream that is no zlib stream",
+                embedded(
+                    mathtype_class,
+                    3,
+                    stored(1, &[&size(display.len())[..], &display].concat()),
+                ),
+            ),
+            (
+                "compressed bytes that are no compound file",
+                embedded(mathtype_class, 3, compressed(b"ole")),
+            ),
+            (
+                "a stream cut at its declared size",
+                embedded(mathtype_class, 3, stored(1, &[&size(4)[..], &zlib(&display)].concat())),
+            ),
+            ("no declared size", embedded(mathtype_class, 3, stored(1, &[0, 0]))),
+            (
+                "a linked object",
+                equation_deck(
+                    &[showing_object(7)],
+                    &[embed_as(0x0FCE, 7, 3, mathtype_class)],
+                    compressed(&display),
+                ),
+            ),
+        ];
+        for (case, bytes) in cases {
+            let expected = vec![(DiagnosticCode::EmbeddedObject, Region::Body, Some(1), 1)];
+            assert_eq!(
+                (markdown_of(&bytes), reported(&bytes)),
+                (String::new(), expected),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_definition_of_an_object_id_replaces_its_equation() {
+        let storage = compressed(&mathtype_storage(false, &[0x78]));
+        let mathtype_class = Some("Equation.DSMT4");
+        let equation = embed(7, 3, mathtype_class);
+        let deck =
+            |embeds: &[Vec<u8>]| equation_deck(&[showing_object(7)], embeds, storage.clone());
+        let cases = [
+            ("an object that is no equation", embed(7, 3, Some("Excel.Sheet.12"))),
+            ("a linked object", embed_as(0x0FCE, 7, 3, mathtype_class)),
+            ("a persist object nothing defines", embed(7, 99, mathtype_class)),
+        ];
+        for (case, replacement) in cases {
+            let bytes = deck(&[equation.clone(), replacement]);
+            let expected = vec![(DiagnosticCode::EmbeddedObject, Region::Body, Some(1), 1)];
+            let got = (markdown_of(&bytes), reported(&bytes));
+            assert_eq!(got, (String::new(), expected), "{case}");
+        }
+        let restored = deck(&[embed(7, 3, Some("Excel.Sheet.12")), equation]);
+        assert_eq!(
+            (markdown_of(&restored), reported(&restored)),
+            ("$$\n    x\n$$\n".into(), vec![])
+        );
+    }
+
+    #[test]
+    fn an_embedded_objects_class_is_charged_by_its_length() {
+        let storage = compressed(&mathtype_storage(false, &[0x78]));
+        let deck = |class: &str| {
+            equation_deck(&[showing_object(7)], &[embed(7, 99, Some(class))], storage.clone())
+        };
+        let long = format!("Equation.DSMT{}", "4".repeat(1 << 19));
+        let fuel = |bytes: &[u8]| {
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, bytes).unwrap();
+            parse_ctx.fuel()
+        };
+        let short = fuel(&deck("Equation.DSMT4"));
+        let longer = (utf16(&long).len() - utf16("Equation.DSMT4").len()) as u64;
+        assert_eq!(fuel(&deck(&long)) - short, longer);
+        let limits = Limits { max_work: short + longer / 2, ..Limits::default() };
+        assert_matches!(
+            parse(&ParseCtx::new(&limits), &deck(&long)),
+            Err(ConvertError::ResourceLimit { limit: Limit::Work, .. })
+        );
+    }
+
+    #[test]
+    fn an_object_that_is_no_equation_is_not_copied() {
+        let fuel = |prog_id: &str, persist: u32| {
+            let embeds = [embed(7, persist, Some(prog_id))];
+            let storage = compressed(&mathtype_storage(false, &[0x78; 400]));
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, &equation_deck(&[showing_object(7)], &embeds, storage)).unwrap();
+            parse_ctx.fuel()
+        };
+        assert_eq!(fuel("Excel.Sheet.12", 3), fuel("Excel.Sheet.12", 99));
+        assert!(fuel("Equation.DSMT4", 3) > fuel("Equation.DSMT4", 99));
+    }
+
+    #[test]
+    fn a_deck_with_no_usable_persist_directory_keeps_its_objects_unread() {
+        let embeds = [embed(7, 3, Some("Equation.DSMT4"))];
+        let doc = [pages(0, &[(2, 256)]), container(0, 0x0409, &embeds)];
+        let objects = [
+            slide(0, &[drawing(&[showing_object(7)])]),
+            compressed(&mathtype_storage(false, &[0x78])),
+        ];
+        let bytes = deck(&doc, &objects, OptionalStream::Absent, false);
+        assert_eq!(markdown_of(&bytes), "");
+        assert_eq!(
+            reported(&bytes),
+            [
+                (DiagnosticCode::EmbeddedObject, Region::Body, Some(1), 1),
+                (DiagnosticCode::RecoveredStreamOrder, Region::Body, None, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_compressed_object_follows_the_inflation_limits_and_counts_what_it_inflates() {
+        let floor = usize::try_from(RATIO_FLOOR).unwrap();
+        let deck_of = |storage: &[u8]| {
+            let embeds = [embed(7, 3, Some("Equation.DSMT4"))];
+            equation_deck(&[showing_object(7)], &embeds, compressed(storage))
+        };
+        let parsed = |limits: &Limits, bytes: &[u8]| {
+            let parse_ctx = ParseCtx::new(limits);
+            (parse(&parse_ctx, bytes).map(|_| ()), parse_ctx.inflated_bytes())
+        };
+        let ratio = |max_compression_ratio| Limits { max_compression_ratio, ..Limits::default() };
+        for (declared, max, refused) in
+            [(floor, 100, true), (floor - 1, 100, false), (floor, 2000, false)]
+        {
+            let (read, inflated) = parsed(&ratio(max), &deck_of(&vec![0; declared]));
+            if refused {
+                assert_matches!(
+                    read,
+                    Err(ConvertError::ResourceLimit { limit: Limit::CompressionRatio, max: 100 })
+                );
+                assert_eq!(inflated, 0);
+            } else {
+                assert_matches!(read, Ok(()));
+                assert_eq!(inflated, declared as u64, "{declared} at {max}");
+            }
+        }
+        let storage = mathtype_storage(false, &[0x78; 800]);
+        let bytes = deck_of(&storage);
+        let len = storage.len() as u64;
+        assert_eq!(parsed(&Limits::default(), &bytes), (Ok(()), len));
+        let entry = Limits { max_entry_bytes: len - 1, ..Limits::default() };
+        assert_matches!(
+            parsed(&entry, &bytes).0,
+            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max }) if max == len - 1
+        );
+        let total = Limits { max_total_bytes: len - 1, ..Limits::default() };
+        assert_matches!(
+            parsed(&total, &bytes).0,
+            Err(ConvertError::ResourceLimit { limit: Limit::TotalBytes, max }) if max == len - 1
+        );
+    }
+
+    #[test]
+    fn an_equation_object_on_a_master_stays_unread_like_any_other_object() {
+        let on_master = |prog_id: &str| {
+            let embeds = [embed(7, 4, Some(prog_id))];
+            let doc = [pages(0, &[(2, 256)]), pages(1, &[(3, 1)]), container(0, 0x0409, &embeds)];
+            let objects = [
+                slide(1, &[]),
+                master(&[showing_object(7)], 0),
+                compressed(&mathtype_storage(false, &[0x78])),
+            ];
+            let ctx = ParseCtx::default().with_headers_footers(HeaderFooterPolicy::Emit);
+            let document = parse(&ctx, &listed(&doc, &objects)).unwrap();
+            (markdown_of_document(&document), diagnostic_rows::<Reported>(&ctx.into_diagnostics()))
+        };
+        let unread = on_master("Excel.Sheet.12");
+        assert_eq!(unread.1, [(DiagnosticCode::EmbeddedObject, Region::Header, Some(1), 1)]);
+        assert_eq!(on_master("Equation.DSMT4"), unread);
+    }
+
+    #[test]
+    fn a_list_before_an_equation_ends_before_it() {
+        let embeds = [embed(7, 3, Some("Equation.DSMT4"))];
+        let shapes = [
+            text_shape(0x0A00, &[], &[], &[bulleted("item")]),
+            showing_object(7),
+            words_in_a_shape("after\r"),
+        ];
+        let bytes = equation_deck(&shapes, &embeds, compressed(&mathtype_storage(false, &[0x78])));
+        assert_eq!(markdown_of(&bytes), "- item\n\n$$\n    x\n$$\n\nafter\n");
     }
 }

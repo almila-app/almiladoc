@@ -33,8 +33,9 @@ def cfb_bytes(streams: Sequence[tuple[str, bytes]]) -> bytes:
 
     Streams are padded to the 4096-byte mini-stream cutoff so everything
     lives in regular FAT sectors; no mini-FAT is written. `streams` is a
-    list of (name, bytes) in CFB name order (shorter names first, then
-    case-insensitive).
+    list of (path, bytes) in CFB name order (shorter names first, then
+    case-insensitive) within each storage; a `/` in a path nests the stream in storages
+    that are created in order of first appearance.
     """
     SECT = 512
     ENDOFCHAIN = 0xFFFFFFFE
@@ -64,12 +65,35 @@ def cfb_bytes(streams: Sequence[tuple[str, bytes]]) -> bytes:
             + struct.pack("<IQ", start, size)
         )
 
-    entries = [dir_entry("Root Entry", 5, NOSTREAM, 1 if streams else NOSTREAM, ENDOFCHAIN, 0)]
-    for sid, (name, data) in enumerate(streams, 1):
-        if 0 < len(data) < 4096:
-            data = data.ljust(4096, b"\x00")
-        right = sid + 1 if sid < len(streams) else NOSTREAM
-        entries.append(dir_entry(name, 2, right, NOSTREAM, add_chain(data), len(data)))
+    tree: dict = {}
+    for path, data in streams:
+        *storages, name = path.split("/")
+        node = tree
+        for storage in storages:
+            node = node.setdefault(storage, {})
+        node[name] = data
+
+    entries: list[bytes] = []
+
+    def place(children: dict) -> int:
+        """Directory entries for `children`, chained through their right siblings; the first."""
+        first = len(entries)
+        entries.extend(b"" for _ in children)
+        for offset, (name, node) in enumerate(children.items()):
+            right = first + offset + 1 if offset + 1 < len(children) else NOSTREAM
+            if isinstance(node, dict):
+                child = place(node) if node else NOSTREAM
+                entries[first + offset] = dir_entry(name, 1, right, child, ENDOFCHAIN, 0)
+                continue
+            data = node.ljust(4096, b"\x00") if 0 < len(node) < 4096 else node
+            start = add_chain(data)
+            entries[first + offset] = dir_entry(name, 2, right, NOSTREAM, start, len(data))
+        return first
+
+    entries.append(b"")
+    entries[0] = dir_entry(
+        "Root Entry", 5, NOSTREAM, place(tree) if tree else NOSTREAM, ENDOFCHAIN, 0
+    )
     dir_start = add_chain(b"".join(entries))
 
     fat_count = 1

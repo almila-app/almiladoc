@@ -1,7 +1,7 @@
 use crate::ctx::ParseCtx;
 use crate::error::ConvertError;
 use crate::limits::{Limit, Limits};
-use flate2::bufread::DeflateDecoder;
+use flate2::bufread::{DeflateDecoder, ZlibDecoder};
 use std::io::{BufRead, Error, ErrorKind, Read, Take};
 
 const CHUNK: usize = 64 * 1024;
@@ -16,6 +16,16 @@ pub(crate) trait Metered: Read {
 }
 
 impl<R: BufRead> Metered for DeflateDecoder<Stepped<R>> {
+    fn consumed(&self) -> u64 {
+        self.total_in()
+    }
+
+    fn produced(&self) -> u64 {
+        self.total_out()
+    }
+}
+
+impl<R: BufRead> Metered for ZlibDecoder<Stepped<R>> {
     fn consumed(&self) -> u64 {
         self.total_in()
     }
@@ -44,6 +54,10 @@ pub(crate) struct Stepped<R> {
 
 pub(crate) fn deflated<R: BufRead>(source: R) -> DeflateDecoder<Stepped<R>> {
     DeflateDecoder::new(Stepped { inner: source, left: CHUNK })
+}
+
+pub(crate) fn zlibbed<R: BufRead>(source: R) -> ZlibDecoder<Stepped<R>> {
+    ZlibDecoder::new(Stepped { inner: source, left: CHUNK })
 }
 
 impl<R: BufRead> Read for Stepped<R> {
@@ -139,6 +153,27 @@ pub(crate) fn admit_ratio(
     Ok(())
 }
 
+/// A record's compressed stream inflated to the size its header declares, counted against the
+/// limits: damage is `None`, while a bomb, a crossed limit or a cancellation fails.
+pub(crate) fn inflate_record(
+    parse_ctx: &ParseCtx<'_>,
+    source: impl Metered,
+    compressed: u64,
+    declared: u64,
+    part: &str,
+    reason: &'static str,
+) -> Result<Option<Vec<u8>>, ConvertError> {
+    admit_ratio(parse_ctx.limits(), compressed, declared)?;
+    let read = admitted(parse_ctx, || {
+        inflate_capped(parse_ctx, source, declared, room(parse_ctx), part, reason)
+    });
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.is_fatal() => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
 fn reserved(declared: u64, cap: u64) -> Result<Vec<u8>, ConvertError> {
     let reserve = declared.min(cap);
     let mut bytes = Vec::new();
@@ -207,7 +242,9 @@ pub(crate) fn inflate_capped(
 mod tests {
     use super::*;
     use crate::ledger::CancelToken;
-    use crate::shared::test_support::{cancelled, empty_deflate_blocks, stored_deflate_stream};
+    use crate::shared::test_support::{
+        cancelled, empty_deflate_blocks, stored_deflate_stream, zlib,
+    };
     use std::assert_matches;
     use std::io::Cursor;
     use std::iter::repeat_n;
@@ -308,6 +345,44 @@ mod tests {
             inflate_capped(&cancelled(&token), deflated(&mut unread), 0, 64, "a", "x").unwrap_err();
         assert_matches!(err, ConvertError::Cancelled);
         assert_eq!(unread.len(), stream.len() - CHUNK);
+    }
+
+    #[test]
+    fn a_zlib_record_inflates_to_its_declared_size_and_a_damaged_one_counts_what_it_inflated() {
+        let data: Vec<u8> = (0..5000_u32).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let packed = zlib(&data);
+        let parse_ctx = ParseCtx::default();
+        let source = zlibbed(packed.as_slice()).take(data.len() as u64);
+        let inflated = inflate_record(&parse_ctx, source, packed.len() as u64, 5000, "a", "x");
+        assert_eq!(inflated.unwrap().as_deref(), Some(data.as_slice()));
+        assert_eq!((parse_ctx.inflated_bytes(), parse_ctx.fuel()), (5000, 5));
+        let mut damaged = packed.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        let parse_ctx = ParseCtx::default();
+        let source = zlibbed(damaged.as_slice()).take(data.len() as u64);
+        let inflated = inflate_record(&parse_ctx, source, damaged.len() as u64, 5000, "a", "x");
+        assert_eq!(inflated.unwrap(), None);
+        assert_eq!(parse_ctx.inflated_bytes(), 5000);
+        let parse_ctx = ParseCtx::default();
+        let raw = zlibbed(data.as_slice()).take(data.len() as u64);
+        assert_eq!(inflate_record(&parse_ctx, raw, 5000, 5000, "a", "x").unwrap(), None);
+        assert_eq!(parse_ctx.inflated_bytes(), 0);
+    }
+
+    #[test]
+    fn a_record_past_a_limit_or_cancelled_fails_instead_of_reading_as_damaged() {
+        let packed = zlib(&[7; 4000]);
+        let limits = Limits { max_entry_bytes: 3999, ..Limits::default() };
+        let source = zlibbed(packed.as_slice()).take(4000);
+        let refused = inflate_record(&ParseCtx::new(&limits), source, 100, 4000, "a", "x");
+        assert_matches!(
+            refused,
+            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: 3999 })
+        );
+        let token = CancelToken::new();
+        let source = zlibbed(packed.as_slice()).take(4000);
+        let refused = inflate_record(&cancelled(&token), source, 100, 4000, "a", "x");
+        assert_matches!(refused, Err(ConvertError::Cancelled));
     }
 
     #[test]

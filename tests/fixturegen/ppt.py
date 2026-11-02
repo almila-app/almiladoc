@@ -1,8 +1,10 @@
 import struct
+import zlib
 from collections.abc import Sequence
 from itertools import accumulate
 from pathlib import Path
 
+from fixturegen import mtef
 from fixturegen.common import write_cfb, write_file
 
 Paragraphs = Sequence[Sequence[tuple[str, dict[str, int]]]]
@@ -35,6 +37,11 @@ PROG_BINARY_TAG = 0x138A
 BINARY_TAG_DATA_BLOB = 0x138B
 PERSIST_DIRECTORY_ATOM = 0x1772
 COMMENT10 = 0x2EE0
+EXTERNAL_OBJECT_LIST = 0x0409
+EXTERNAL_OBJECT_REF_ATOM = 0x0BC1
+EXTERNAL_OLE_EMBED = 0x0FCC
+EXTERNAL_OLE_OBJECT_ATOM = 0x0FC3
+EX_OLE_OBJ_STG = 0x1011
 COMMENT10_ATOM = 0x2EE1
 DG_CONTAINER = 0xF002
 SPGR_CONTAINER = 0xF003
@@ -283,6 +290,58 @@ def side_ppt(out: Path) -> None:
     write_ppt(out / "ppt" / "handmade-side.ppt", doc, first, second, first_notes)
 
 
+def equations_ppt(out: Path) -> None:
+    """MathType and Equation Editor objects, each an ExOleEmbed naming its ExOleObjStg through
+    the persist directory, decode to TeX in place of the shape that previews them: one stored,
+    one zlib-compressed, one inline by MathType's own flag; an Excel object is reported."""
+
+    def embed(object_id: int, persist: int, prog_id: str) -> bytes:
+        atom = struct.pack("<6I", 1, 1, object_id, 0, persist, 0)
+        name = ppt_rec(2 << 4, CSTRING, prog_id.encode("utf-16-le"))
+        return ppt_container(
+            0, EXTERNAL_OLE_EMBED, ppt_rec(0, EXTERNAL_OLE_OBJECT_ATOM, atom) + name
+        )
+
+    def shape(object_id: int) -> bytes:
+        fsp = ppt_rec(2, FSP, struct.pack("<II", 1, 0x0A10))
+        ref = ppt_rec(0, EXTERNAL_OBJECT_REF_ATOM, struct.pack("<I", object_id))
+        return ppt_container(0, SP_CONTAINER, fsp + ppt_container(0, CLIENT_DATA, ref))
+
+    def stored(native: bytes) -> bytes:
+        return ppt_rec(0, EX_OLE_OBJ_STG, native)
+
+    def compressed(native: bytes) -> bytes:
+        body = struct.pack("<I", len(native)) + zlib.compress(native, 9)
+        return ppt_rec(1 << 4, EX_OLE_OBJ_STG, body)
+
+    quadratic = mtef.ole_object(mtef.quadratic(mtef.V5))
+    editor = mtef.ole_object(mtef.quadratic(mtef.V3))
+    objects = [
+        (embed(1, 3, "Equation.DSMT4"), compressed(quadratic)),
+        (embed(2, 4, "Equation.3"), stored(editor)),
+        (embed(3, 5, "Equation.DSMT4"), compressed(mtef.ole_object(mtef.energy()))),
+        (embed(4, 6, "Excel.Sheet.12"), stored(b"not an equation")),
+    ]
+    title = text_header(0) + ppt_rec(0, TEXT_CHARS_ATOM, "Equations".encode("utf-16-le"))
+    drawing = ppt_container(
+        0,
+        DRAWING,
+        ppt_container(
+            0,
+            DG_CONTAINER,
+            ppt_container(0, SPGR_CONTAINER, b"".join(shape(i) for i in range(1, 5))),
+        ),
+    )
+    slide = ppt_container(0, SLIDE, slide_atom() + title + drawing)
+    embeds = ppt_container(0, EXTERNAL_OBJECT_LIST, b"".join(embed for embed, _ in objects))
+    doc = ppt_container(
+        0,
+        DOCUMENT,
+        ppt_container(SLIDE_LIST_INSTANCE, SLIDE_LIST_WITH_TEXT, persist_atom(2, 256)) + embeds,
+    )
+    write_ppt(out / "ppt" / "handmade-equations.ppt", doc, slide, *(blob for _, blob in objects))
+
+
 def malformed(out: Path) -> None:
     ppt = out / "ppt" / "pres.ppt"
     if ppt.exists():
@@ -311,5 +370,6 @@ def generate(out: Path) -> None:
     sparsenotes_ppt(out)
     scripts_ppt(out)
     side_ppt(out)
+    equations_ppt(out)
     malformed(out)
     abuse(out)

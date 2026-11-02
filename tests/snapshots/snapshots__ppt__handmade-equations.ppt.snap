@@ -1,0 +1,15 @@
+---
+source: tests/it/snapshots.rs
+expression: value
+---
+## Equations
+
+$$
+    x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}
+$$
+
+$$
+    x=\frac{-b\pm\sqrt{b^{2}-4ac}}{2a}
+$$
+
+$E=mc^{2}$

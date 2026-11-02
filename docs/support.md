@@ -23,7 +23,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## Word
 
-- DOC/DOCX/DOCM retain body text, headings, numbered lists, tables, notes and hyperlinks; DOCX adds text boxes, TeX equations, charts/SmartArt text and OLE/ActiveX previews, retaining payload assets; DOCX MathType (MTEF v5) and Equation Editor 3.x (MTEF v3) objects show their TeX instead of the preview, and an undecodable one keeps its preview with `embedded_object`.
+- DOC/DOCX/DOCM retain body text, headings, numbered lists, tables, notes and hyperlinks; DOCX adds text boxes, TeX equations, charts/SmartArt text and OLE/ActiveX previews, retaining payload assets; MathType (MTEF v5) and Equation Editor 3.x (MTEF v3) objects show their TeX in the preview's place (DOC: from the `ObjectPool/_<id>` storage `sprmCPicLocation` names); an undecodable one stays as before and reports `embedded_object`.
 - DOCX VML `v:fill` frame/tile pictures apply unless their own `on`, else shape `filled`, disables them, ranked after other drawing/object-preview pictures; unused ones emit `image_unplaced`. Object preview selection matches shape id to `o:OLEObject` ShapeID, `w:objectEmbed`/`w:objectLink` shapeId or `w:control` shapeid; otherwise use the first picture outside VML shapes, labelled only by drawing/shape description.
 - Symbol/Wingdings/Webdings/Zapf Dingbats text and inserted symbols map to drawn characters, ballot boxes to checkboxes; DOC chooses font by character/script from its font table and reads field instructions undecoded. Instructions cause no loss unless they render text boxes/charts/diagrams/display equations.
 
@@ -55,7 +55,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## PowerPoint
 
-- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets; MathType and Equation Editor objects show as TeX as in Word.
+- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets; MathType and Equation Editor objects show as TeX as in Word, PPT reading the `ExOleObjStg` a `ProgID`-named `ExOleEmbed` points to (stored or zlib-compressed, counted against the inflation limits; none on masters).
 - **Comments:** Emit reads legacy/modern PPTX threads/replies and binary PPT comments, retaining resolved content. **Omitted:** `comment_omitted` for declared parts/records, `hidden_omitted` for hidden slides and PPTX DrawingML objects.
 
 | Lost code | Scope |
@@ -113,7 +113,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## Rich Text Format
 
-- RTF retains text/lists/tables/notes/links/equations and policy-controlled image assets; Symbol/Wingdings/Webdings/Zapf Dingbats map drawn glyphs/checkboxes, U+F020–F0FF in text fonts uses the last symbol font. Instructions/bookmarks/list labels/equations/picture properties remain undecoded, including fallback `\listtext` labels using the code page.
+- RTF retains text/lists/tables/notes/links/equations and policy-controlled image assets; MathType and Equation Editor `\object`s (`\objclass` naming the equation, `\objdata` an OLE1 object around the compound file, hex capped by the entry-bytes limit) show their TeX instead of `\result`, an undecodable one keeping `\result` and reporting `embedded_object`; Symbol/Wingdings/Webdings/Zapf Dingbats map drawn glyphs/checkboxes, U+F020–F0FF in text fonts uses the last symbol font. Instructions/bookmarks/list labels/equations/picture properties remain undecoded, including fallback `\listtext` labels using the code page.
 
 | Lost code | Scope |
 |---|---|

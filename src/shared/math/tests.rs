@@ -588,3 +588,19 @@ fn mathml_limits_on_big_operators_and_functions_take_script_form() {
     ];
     check(mathml, OTHERS);
 }
+
+#[test]
+fn a_lone_equation_is_the_only_math_beside_blanks_and_breaks() {
+    let math = |tex: &str| Inline::Math(tex.into());
+    let cases: [(&str, Vec<Inline>, Option<&str>); 6] = [
+        ("one equation", vec![math("x")], Some("x")),
+        ("blanks around it", vec![Inline::plain(" "), math("x"), Inline::LineBreak], Some("x")),
+        ("text beside it", vec![Inline::plain("a"), math("x")], None),
+        ("two equations", vec![math("x"), math("y")], None),
+        ("two equations apart", vec![math("x"), Inline::LineBreak, math("y")], None),
+        ("none", vec![Inline::plain(" ")], None),
+    ];
+    for (case, inlines, expected) in cases {
+        assert_eq!(lone_math(&inlines).as_deref(), expected, "{case}");
+    }
+}

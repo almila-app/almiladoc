@@ -27,6 +27,8 @@ EQNOLEFILEHDR_BYTES = 28
 EQUATION_NATIVE = "Equation Native"
 EQN_VERSION = 0x00020000
 EQN_CLIPBOARD_FORMAT = 0xC1C6
+OLE1_VERSION = 0x00000501
+OLE1_EMBEDDED = 2
 
 
 class Mtef:
@@ -103,10 +105,22 @@ def energy() -> bytes:
     )
 
 
-def ole_object(mtef: bytes) -> bytes:
-    """The CFB an Equation.3 or Equation.DSMT4 object embeds: its Equation Native stream is
-    the EQNOLEFILEHDR then the MTEF."""
+def equation_native(mtef: bytes) -> bytes:
+    """The Equation Native stream: an EQNOLEFILEHDR then the MTEF."""
     header = struct.pack(
         "<HIHI16x", EQNOLEFILEHDR_BYTES, EQN_VERSION, EQN_CLIPBOARD_FORMAT, len(mtef)
     )
-    return cfb_bytes([(EQUATION_NATIVE, header + mtef)])
+    return header + mtef
+
+
+def ole_object(mtef: bytes) -> bytes:
+    """The CFB an Equation.3 or Equation.DSMT4 object embeds, holding that stream."""
+    return cfb_bytes([(EQUATION_NATIVE, equation_native(mtef))])
+
+
+def ole1_object(class_name: str, native: bytes) -> bytes:
+    """The OLE1 embedded object an RTF \\objdata holds: a header naming the class, its native
+    data the compound file."""
+    name = class_name.encode("ascii") + b"\0"
+    header = struct.pack("<III", OLE1_VERSION, OLE1_EMBEDDED, len(name)) + name
+    return header + bytes(8) + struct.pack("<I", len(native)) + native

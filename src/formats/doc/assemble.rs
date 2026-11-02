@@ -23,7 +23,9 @@ use crate::shared::fields::{
 };
 use crate::shared::grid::{CellProp, GridRow, build_edge_table};
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
+use crate::shared::math::{Equation, lone_math};
 use crate::shared::officeart;
+use crate::shared::ole_equation::pooled_equation;
 use crate::shared::symbol::Glyph;
 use crate::shared::uri::is_safe_link;
 use std::borrow::Cow;
@@ -47,6 +49,8 @@ fn lift(parse_ctx: &ParseCtx<'_>, into: &mut Pieces, from: Pieces) -> Result<(),
     Ok(())
 }
 
+type Ole<'w> = cfb::CompoundFile<std::io::Cursor<&'w [u8]>>;
+
 pub(super) struct Assembler<'c, 'w> {
     parse_ctx: &'c ParseCtx<'c>,
     text: TextView<'w>,
@@ -64,6 +68,8 @@ pub(super) struct Assembler<'c, 'w> {
     data: Vec<u8>,
     pub(super) assets: RefCell<AssetSink>,
     pictures: RefCell<HashMap<usize, Option<AssetId>>>,
+    ole: RefCell<Option<Ole<'w>>>,
+    equations: RefCell<HashMap<u32, Option<Equation>>>,
     pub(super) field_locks: RefCell<FieldLocks<'w>>,
 }
 
@@ -219,6 +225,7 @@ struct ParaBuilder<'c> {
     text_damage: Pieces,
     damage: Pieces,
     side: Option<Region>,
+    displayable: bool,
 }
 
 impl<'c> ParaBuilder<'c> {
@@ -233,6 +240,7 @@ impl<'c> ParaBuilder<'c> {
             style: Style::PLAIN,
             text_damage: Pieces::new(),
             damage: Pieces::new(),
+            displayable: false,
         }
     }
 
@@ -450,12 +458,19 @@ impl<'c, 'w> Assembler<'c, 'w> {
             data,
             assets: RefCell::new(AssetSink::new(parse_ctx)),
             pictures: RefCell::default(),
+            ole: RefCell::default(),
+            equations: RefCell::default(),
             field_locks: RefCell::default(),
         }
     }
 
     pub(super) fn with_comments(mut self, comments: super::comments::References) -> Self {
         self.comments = comments;
+        self
+    }
+
+    pub(super) fn with_ole(mut self, ole: Ole<'w>) -> Self {
+        self.ole = RefCell::new(Some(ole));
         self
     }
 }
@@ -520,9 +535,10 @@ impl Assembler<'_, '_> {
                 '\r' | '\u{7}' | '\u{c}' | '\u{e}' => {
                     let pap = self.effective_pap(s.fc, s.piece)?;
                     let done = std::mem::replace(&mut para, ParaBuilder::new(parse_ctx, region));
+                    let displayable = done.displayable;
                     let (inlines, damage) = done.finish(s.cp, &mut targets, &mut lock)?;
                     self.report(damage.into_iter().map(Damaged::Piece), region);
-                    self.end_paragraph(c, pap, inlines, &mut flow, region)?;
+                    self.end_paragraph(c, pap, inlines, displayable, &mut flow, region)?;
                 }
                 _ => {
                     self.character(&s, drop, &segment.chp, &mut para, &mut targets, region)?;
@@ -722,13 +738,14 @@ impl Assembler<'_, '_> {
         c: char,
         pap: EffectivePap,
         inlines: Vec<Inline>,
+        displayable: bool,
         flow: &mut Flow,
         region: Region,
     ) -> Result<(), ConvertError> {
         let cell_mark = c == '\u{7}';
         if !(pap.effective.in_table.unwrap_or(false) || cell_mark) {
             flow.flush_table(self.parse_ctx)?;
-            self.emit_paragraph(&pap, inlines, flow, region);
+            self.emit_paragraph(&pap, inlines, displayable, flow, region);
             return Ok(());
         }
         flow.flush_runs();
@@ -765,13 +782,48 @@ impl Assembler<'_, '_> {
         let chpx = self.chpx.lookup(fc).map(|p| p.chpx.as_slice());
         let sets = |flag| chpx.is_some_and(|chpx| sets_flag(chpx, flag));
         if sets(SPRM_CF_OLE2) {
-            self.parse_ctx.emit(DiagnosticCode::EmbeddedObject, region);
+            self.object(fc, region, para)?;
         } else if !sets(SPRM_CF_DATA)
             && let Some(image) = self.picture_at(fc, region, para.in_shape_result())?
         {
             para.push_inline(image)?;
         }
         Ok(())
+    }
+
+    fn object(
+        &self,
+        fc: u32,
+        region: Region,
+        para: &mut ParaBuilder<'_>,
+    ) -> Result<(), ConvertError> {
+        let location = self.chpx.lookup(fc).and_then(|p| sprm::chpx_pic_location(&p.chpx));
+        let equation = location.map(|location| self.pooled(location)).transpose()?.flatten();
+        let Some(Equation { tex, inline, unmapped }) = equation else {
+            self.parse_ctx.emit(DiagnosticCode::EmbeddedObject, region);
+            return Ok(());
+        };
+        self.parse_ctx.emit_count(DiagnosticCode::UnmappedSymbol, region, unmapped);
+        para.push_inline(Inline::Math(tex))?;
+        para.displayable |= !inline;
+        Ok(())
+    }
+
+    /// Read at the first reference, a failure too; each later one charges a unit and the TeX it
+    /// copies.
+    fn pooled(&self, location: u32) -> Result<Option<Equation>, ConvertError> {
+        let remembered = self.equations.borrow().get(&location).cloned();
+        if let Some(equation) = remembered {
+            let copied = equation.as_ref().map_or(0, |equation| equation.tex.len() as u64);
+            self.parse_ctx.charge(1 + copied)?;
+            return Ok(equation);
+        }
+        let equation = match self.ole.borrow_mut().as_mut() {
+            Some(ole) => pooled_equation(self.parse_ctx, ole, &format!("ObjectPool/_{location}"))?,
+            None => None,
+        };
+        self.equations.borrow_mut().insert(location, equation.clone());
+        Ok(equation)
     }
 
     /// The segment from the scalar `s`, with its properties in specification order: paragraph style chain -> CHPX -> piece Prm, where a `sprmCIstd` resets to the paragraph style and applies its character style at its own position.
@@ -896,6 +948,7 @@ impl Assembler<'_, '_> {
         &self,
         pap: &EffectivePap,
         inlines: Vec<Inline>,
+        displayable: bool,
         flow: &mut Flow,
         region: Region,
     ) {
@@ -939,13 +992,13 @@ impl Assembler<'_, '_> {
                         number,
                         label,
                     },
-                    blocks: vec![Block::Paragraph(inlines)],
+                    blocks: vec![paragraph(inlines, displayable)],
                 });
                 return;
             }
         }
         flow.flush_runs();
-        flow.blocks.push(Block::Paragraph(inlines));
+        flow.blocks.push(paragraph(inlines, displayable));
     }
 
     fn report(&self, damaged: impl IntoIterator<Item = Damaged>, region: Region) {
@@ -1047,6 +1100,13 @@ impl Assembler<'_, '_> {
         let marker = list.level(ilvl).marker.filter(|marker| marker.ordered())?;
         let (number, label) = self.number(ilfo, list, ilvl, region);
         Some(format!("{} ", label.unwrap_or_else(|| marker.label(number))))
+    }
+}
+
+fn paragraph(inlines: Vec<Inline>, displayable: bool) -> Block {
+    match lone_math(&inlines) {
+        Some(tex) if displayable => Block::Math(tex),
+        _ => Block::Paragraph(inlines),
     }
 }
 
@@ -1490,7 +1550,7 @@ mod tests {
         let table = clx(&[], ONE_PIECE);
         let text = assembler(&parse_ctx, view(b"x", &table, 1), Vec::new(), Vec::new());
         let pap = EffectivePap { istd: 0, effective };
-        text.end_paragraph(c, pap, plain("x"), &mut flow, Region::Body)?;
+        text.end_paragraph(c, pap, plain("x"), false, &mut flow, Region::Body)?;
         Ok(flow)
     }
 
@@ -1599,6 +1659,7 @@ mod tests {
         text.emit_paragraph(
             &EffectivePap { istd: 0, effective },
             plain("x"),
+            false,
             &mut flow,
             Region::Body,
         );
@@ -1617,7 +1678,7 @@ mod tests {
         let listed = PapDelta { ilfo: Some(1), ..PapDelta::default() };
         for (istd, effective) in [(0, listed), (QUOTE, PapDelta::default())] {
             let pap = EffectivePap { istd, effective };
-            text.emit_paragraph(&pap, plain("x"), &mut flow, Region::Body);
+            text.emit_paragraph(&pap, plain("x"), false, &mut flow, Region::Body);
         }
         assert_matches!(flow.blocks.as_slice(), [Block::List(_)]);
         assert_eq!(flow.list.len(), 0);

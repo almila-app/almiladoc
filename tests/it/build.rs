@@ -22,6 +22,9 @@ pub(crate) fn relationships(rels: &[(&str, &str, &str)]) -> String {
 pub(crate) fn ole(streams: &[(&str, &[u8])]) -> Vec<u8> {
     let mut file = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
     for (name, body) in streams {
+        if let Some((storage, _)) = name.rsplit_once('/') {
+            file.create_storage_all(storage).unwrap();
+        }
         file.create_stream(name).unwrap().write_all(body).unwrap();
     }
     file.flush().unwrap();

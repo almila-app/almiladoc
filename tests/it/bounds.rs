@@ -1,5 +1,6 @@
 use crate::build::{
-    W, docx, docx_document, docx_with, epub, odf, odf_styled, ods, ole, pptx, relationships,
+    W, atom, container, docx, docx_document, docx_with, epub, odf, odf_styled, ods, ole, pptx,
+    record, relationships,
 };
 use crate::support::{count, limit_mut, limited, trips, zip_package};
 use crate::word97::word97;
@@ -7,6 +8,7 @@ use almiladoc::{
     Conversion, ConvertError, Converter, DiagnosticCode, Format, Input, Limit, Limits,
 };
 use std::assert_matches;
+use std::fmt::Write as _;
 
 const CEILING: u64 = Limits::MAX_NESTING_CEILING;
 
@@ -50,6 +52,9 @@ const CASES: &[(&str, Format, u64, u64, Build)] = &[
     ("doc links", Format::Doc, 0, 1, doc_links),
     ("docx equation", Format::Docx, 1, 1, docx_equation),
     ("pptx equation", Format::Pptx, 1, 1, pptx_equation),
+    ("rtf equation", Format::Rtf, 1, 1, rtf_equation),
+    ("doc equation", Format::Doc, 1, 1, doc_equation),
+    ("ppt equation", Format::Ppt, 1, 1, ppt_equation),
 ];
 
 fn converter(max_nesting_depth: u64) -> Converter {
@@ -553,13 +558,16 @@ fn epub_math(units: usize) -> Vec<u8> {
 
 /// An Equation Native stream: MTEF v5 whose top record list holds `units` LINEs, each nested
 /// in the one before, around one character.
-fn equation_object(units: usize) -> Vec<u8> {
+fn equation_native(units: usize) -> Vec<u8> {
     let header = [&[5, 1, 0, 6, 0][..], b"DSMT4\0", &[0, 10]].concat();
     let mtef = [header, [1, 0].repeat(units), vec![2, 0, 131, b'x', 0], vec![0; units + 1]];
     let mtef = mtef.concat();
     let declared = u32::try_from(mtef.len()).unwrap().to_le_bytes();
-    let native = [&28_u16.to_le_bytes()[..], &[0; 6], &declared, &[0; 16], &mtef].concat();
-    ole(&[("Equation Native", &native)])
+    [&28_u16.to_le_bytes()[..], &[0; 6], &declared, &[0; 16], &mtef].concat()
+}
+
+fn equation_object(units: usize) -> Vec<u8> {
+    ole(&[("Equation Native", &equation_native(units))])
 }
 
 fn docx_equation(units: usize) -> Vec<u8> {
@@ -583,6 +591,84 @@ fn pptx_equation(units: usize) -> Vec<u8> {
             ("ppt/embeddings/one.bin", &payload),
         ],
     )
+}
+
+fn rtf_equation(units: usize) -> Vec<u8> {
+    let (name, native) = (b"Equation.DSMT4\0", equation_object(units));
+    let length = |bytes: &[u8]| u32::try_from(bytes.len()).unwrap().to_le_bytes();
+    let header = [&0x0501_u32.to_le_bytes()[..], &2_u32.to_le_bytes(), &length(name), name];
+    let ole1 = [&header.concat()[..], &[0; 8], &length(&native), &native].concat();
+    let data = ole1.iter().fold(String::new(), |mut hex, byte| {
+        write!(hex, "{byte:02x}").unwrap();
+        hex
+    });
+    rtf(&format!(r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\*\objdata {data}}}}}"))
+}
+
+fn doc_equation(units: usize) -> Vec<u8> {
+    const TEXT_FC: u32 = 0x400;
+    const CHPX_PAGE: u32 = 3;
+    let text = b"\x01\r";
+    let len = u32::try_from(text.len()).unwrap();
+    let (mut stream, mut table) =
+        word97(TEXT_FC, &[(0x4C, len)], text, &[(len, TEXT_FC, 0)], Some(0x0409));
+    let props = [0x0A, 0x08, 1, 0x03, 0x6A, 7, 0, 0, 0];
+    let mut page = vec![0u8; 512];
+    page[..8].copy_from_slice(&[TEXT_FC.to_le_bytes(), (TEXT_FC + len).to_le_bytes()].concat());
+    page[8] = 0x80;
+    page[0x100] = u8::try_from(props.len()).unwrap();
+    page[0x101..0x101 + props.len()].copy_from_slice(&props);
+    page[511] = 1;
+    stream.resize(usize::try_from(CHPX_PAGE).unwrap() * 512, 0);
+    stream.extend(page);
+    let plcf = [TEXT_FC, TEXT_FC + len, CHPX_PAGE].map(u32::to_le_bytes).concat();
+    let at = [u32::try_from(table.len()).unwrap(), u32::try_from(plcf.len()).unwrap()];
+    stream[0xFA..0x102].copy_from_slice(&at.map(u32::to_le_bytes).concat());
+    let size = u32::try_from(stream.len()).unwrap();
+    stream[0x40..0x44].copy_from_slice(&size.to_le_bytes());
+    table.extend(plcf);
+    ole(&[
+        ("0Table", &table),
+        ("WordDocument", &stream),
+        ("ObjectPool/_7/Equation Native", &equation_native(units)),
+    ])
+}
+
+fn ppt_equation(units: usize) -> Vec<u8> {
+    let page = atom(0x03F3, &[2, 0, 0, 256, 0]);
+    let prog_id: Vec<u8> = "Equation.DSMT4".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let embed = container(
+        0,
+        0x0FCC,
+        &[
+            atom(0x0FCD, &[0, 0]),
+            atom(0x0FC3, &[0, 0, 7, 0, 3, 0]),
+            record(2 << 4, 0x0FBA, &prog_id),
+        ],
+    );
+    let document =
+        container(0, 0x03E8, &[container(0, 0x0FF0, &[page]), container(0, 0x0409, &[embed])]);
+    let flags = [&1_u32.to_le_bytes()[..], &0x0A10_u32.to_le_bytes()].concat();
+    let shape = container(
+        0,
+        0xF004,
+        &[record(2, 0xF00A, &flags), container(0, 0xF011, &[atom(0x0BC1, &[7])])],
+    );
+    let drawing = container(0, 0x040C, &[container(0, 0xF002, &[container(0, 0xF003, &[shape])])]);
+    let slide = container(0, 0x03EE, &[atom(0x03EF, &[0; 6]), drawing]);
+    let storage = record(0, 0x1011, &equation_object(units));
+    let mut data = Vec::new();
+    let mut offsets = Vec::new();
+    for object in [&document, &slide, &storage] {
+        offsets.push(u32::try_from(data.len()).unwrap());
+        data.extend(object);
+    }
+    let directory = u32::try_from(data.len()).unwrap();
+    data.extend(atom(0x1772, &[&[1 | (3 << 20)][..], &offsets].concat()));
+    let edit = u32::try_from(data.len()).unwrap();
+    data.extend(atom(0x0FF5, &[0, 0, 0, directory, 1, 4, 0]));
+    let user = atom(0x0FF6, &[20, 0xE391_C05F, edit]);
+    ole(&[("Current User", &user), ("PowerPoint Document", &data)])
 }
 
 fn rtf(body: &str) -> Vec<u8> {

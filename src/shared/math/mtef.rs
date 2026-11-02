@@ -8,7 +8,7 @@ use crate::limits::Limit;
 use crate::shared::binary::ByteReader;
 use crate::shared::symbol::{Glyph as FontGlyph, SymbolFont, glyph_of};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Equation {
     pub tex: String,
     /// Its header marked it inline; otherwise the paragraph around it decides.

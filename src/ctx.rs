@@ -247,8 +247,8 @@ impl<'a> ParseCtx<'a> {
         self.ledger.charge(units)
     }
 
-    /// Decompressed bytes this parse has inflated, archive entries and
-    /// OfficeArt pictures alike, against [`Limits::max_total_bytes`].
+    /// Decompressed bytes this parse has inflated, archive entries, OfficeArt
+    /// pictures and embedded OLE objects alike, against [`Limits::max_total_bytes`].
     pub(crate) fn inflated_bytes(&self) -> u64 {
         self.inflated_bytes.get()
     }

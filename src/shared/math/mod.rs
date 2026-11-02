@@ -33,5 +33,13 @@ pub(crate) fn math_lines(inlines: &[Inline]) -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
+/// The TeX of the one equation `inlines` hold beside nothing but blanks and line breaks.
+pub(crate) fn lone_math(inlines: &[Inline]) -> Option<String> {
+    match math_lines(inlines)?.as_mut_slice() {
+        [tex] => Some(std::mem::take(tex)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -18,20 +18,9 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 `∥` means disjoint parallel work; `then` binds tighter and means serial. Unlisted items land separately before the first wave sharing their files.
 
-| Wave | Items | Placement |
-|---|---|---|
-| W7 | ole-equations-binary | |
+No wave is open.
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
-
-## Items
-
-### W7
-
-#### ole-equations-binary: MathType objects in RTF, DOC and PPT
-
-- Decode MathType/Equation Editor objects through `shared::ole_equation` where the binary readers hold them, adding its OLE1 ObjectHeader reader: RTF `\objdata` (the OLE1 header wrapping the CFB; hex capped at `max_entry_bytes` and charged as decoded, `\result` suppressed on success), DOC `ObjectPool/_<id>` named by `sprmCPicLocation`, PPT `ExOleObjStg` inflated through the shared inflation owner; the same equation yields the same TeX as DOCX.
-- Files: `src/shared/ole_equation.rs`, `src/formats/rtf/mod.rs`, `src/formats/doc/`, `src/formats/ppt/`, their fixture generators, `docs/support.md`; after the inflation owner lands, T2.
 
 ## External tracks
 

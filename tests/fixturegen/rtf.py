@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from fixturegen import mtef
 from fixturegen.common import write_file
 
 
@@ -52,6 +53,36 @@ def math_rtf(out: Path) -> None:
         "}",
     ]
     write_file(out / "rtf" / "handmade-math.rtf", "\n".join(parts).encode("cp1252"))
+
+
+def equations_rtf(out: Path) -> None:
+    """MathType and Equation Editor objects (an OLE1 \\objdata around the compound file), each
+    with its picture in \\result, decode to TeX in place of it: display alone in a paragraph,
+    inline beside text and inline by MathType's own flag; an Excel object keeps its picture."""
+    preview = r"{\pict\pngblip\picw1\pich1 89504e47}"
+
+    def obj(class_name: str, native: bytes) -> str:
+        data = mtef.ole1_object(class_name, native).hex()
+        lines = "\r\n".join(data[i : i + 64] for i in range(0, len(data), 64))
+        return (
+            rf"{{\object\objemb\objw1920\objh600{{\*\objclass {class_name}}}"
+            rf"{{\*\objdata {lines}}}{{\result {preview}}}}}"
+        )
+
+    quadratic = obj("Equation.DSMT4", mtef.ole_object(mtef.quadratic(mtef.V5)))
+    editor = obj("Equation.3", mtef.ole_object(mtef.quadratic(mtef.V3)))
+    energy = obj("Equation.DSMT4", mtef.ole_object(mtef.energy()))
+    sheet = obj("Excel.Sheet.12", b"\xd0\xcf\x11\xe0 not an equation")
+    parts = [
+        r"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\froman Times New Roman;}}",
+        r"\pard The roots are\par",
+        rf"\pard {quadratic}\par",
+        rf"\pard or, from Equation Editor, {editor} for any a.\par",
+        rf"\pard Energy is {energy}.\par",
+        rf"\pard A sheet follows: {sheet} done.\par",
+        "}",
+    ]
+    write_file(out / "rtf" / "handmade-equations.rtf", "\r\n".join(parts).encode("ascii"))
 
 
 def blockstyle_rtf(out: Path) -> None:
@@ -239,6 +270,7 @@ def abuse(out: Path) -> None:
 
 def generate(out: Path) -> None:
     merge_rtf(out)
+    equations_rtf(out)
     blockstyle_rtf(out)
     hidden_rtf(out)
     bin_rtf(out)

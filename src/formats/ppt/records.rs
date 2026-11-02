@@ -44,6 +44,7 @@ pub(super) const EXTERNAL_AVI_MOVIE: u16 = 0x1006;
 pub(super) const EXTERNAL_MCI_MOVIE: u16 = 0x1007;
 pub(super) const EXTERNAL_MIDI_AUDIO: u16 = 0x100D;
 pub(super) const EXTERNAL_WAV_AUDIO_LINK: u16 = 0x1010;
+pub(super) const EX_OLE_OBJ_STG: u16 = 0x1011;
 pub(super) const PROG_BINARY_TAG: u16 = 0x138A;
 pub(super) const BINARY_TAG_DATA_BLOB: u16 = 0x138B;
 pub(super) const PERSIST_DIRECTORY_ATOM: u16 = 0x1772;

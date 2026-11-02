@@ -23,7 +23,7 @@ use crate::shared::fields::{
 use crate::shared::header::resolve_header_rows;
 use crate::shared::link_label::label_is_absolute_url;
 use crate::shared::list::{ListEntry, ListKey, ListMark, flush_list};
-use crate::shared::math::{math_lines, omath_para_with_damage, omath_with_damage};
+use crate::shared::math::{lone_math, omath_para_with_damage, omath_with_damage};
 use crate::shared::mc::{self, is_picture_fill, is_text, is_vml_shape};
 use crate::shared::ole_equation::ole_equation;
 use crate::shared::symbol::{self, SymbolFont, Token};
@@ -696,9 +696,9 @@ fn hidden_beside_runs(
 
 fn displayed(pieces: Vec<Piece>) -> Vec<Piece> {
     if let [Piece::Inlines(inlines)] = pieces.as_slice()
-        && let Some([tex]) = math_lines(inlines).as_deref()
+        && let Some(tex) = lone_math(inlines)
     {
-        return vec![Piece::Blocks(vec![Block::Math(tex.clone())])];
+        return vec![Piece::Blocks(vec![Block::Math(tex)])];
     }
     pieces
 }

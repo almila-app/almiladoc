@@ -25,13 +25,14 @@ const MIB: u64 = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
-    /// Decompressed bytes of one archive entry, OfficeArt picture or
-    /// compound-file stream: a decompression bomb hides in one entry.
+    /// Decompressed bytes of one archive entry, OfficeArt picture, embedded
+    /// OLE object or compound-file stream: a decompression bomb hides in one
+    /// entry.
     pub max_entry_bytes: u64,
-    /// Decompressed bytes one parse inflates (archive entries and OfficeArt
-    /// pictures): a bomb spreads over many, a corrupt one too, which counts
-    /// what it inflated before failing its checksum or deflate stream, once
-    /// however many references name it.
+    /// Decompressed bytes one parse inflates (archive entries, OfficeArt
+    /// pictures and embedded OLE objects): a bomb spreads over many, a corrupt
+    /// one too, which counts what it inflated before failing its checksum or
+    /// deflate stream, once however many references name it.
     pub max_total_bytes: u64,
     /// Entries in one archive: each costs memory before any is read.
     pub max_entry_count: u64,
@@ -75,9 +76,9 @@ pub struct Limits {
     /// Bytes of one input, checked before any parse: everything else a
     /// conversion holds grows from it.
     pub max_input_bytes: u64,
-    /// Ratio of an archive entry's or OfficeArt picture's decompressed to
-    /// compressed size, checked on those declaring at least 1 MiB: ordinary
-    /// content compresses far less.
+    /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE
+    /// object's decompressed to compressed size, checked on those declaring at
+    /// least 1 MiB: ordinary content compresses far less.
     pub max_compression_ratio: u64,
     /// Markdown bytes one conversion writes, counting what rendering holds
     /// before writing it (a paragraph to trim, a table's cells), and JSON
@@ -189,9 +190,11 @@ impl Default for Limits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Limit {
-    /// Decompressed size of one archive entry, OfficeArt picture or compound-file stream.
+    /// Decompressed size of one archive entry, OfficeArt picture, embedded OLE object or
+    /// compound-file stream.
     EntryBytes,
-    /// Decompressed bytes one parse inflates (archive entries and OfficeArt pictures).
+    /// Decompressed bytes one parse inflates (archive entries, OfficeArt pictures and embedded
+    /// OLE objects).
     TotalBytes,
     /// Entries in one archive.
     EntryCount,
@@ -213,7 +216,8 @@ pub enum Limit {
     Records,
     /// Bytes of one input.
     InputBytes,
-    /// Ratio of an archive entry's or OfficeArt picture's decompressed to compressed size.
+    /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE object's decompressed to
+    /// compressed size.
     CompressionRatio,
     /// Markdown bytes one conversion writes.
     OutputBytes,

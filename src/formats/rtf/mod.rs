@@ -1,5 +1,6 @@
 mod comments;
 mod lexer;
+mod objects;
 mod sides;
 mod table;
 mod tables;
@@ -28,6 +29,7 @@ use crate::shared::sides::{SideStory, SideTimeline};
 use crate::shared::symbol::{self, Decoded, Glyph};
 use crate::shared::text::clean_text;
 use lexer::{Lexer, Token, hex_digit};
+use objects::ObjectState;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use table::TableState;
@@ -50,6 +52,8 @@ enum Capture {
     Bookmark,
     CommentMetadata,
     Pict,
+    ObjectClass,
+    ObjectData,
     PicturePropertyName,
     PicturePropertyValue,
     Math,
@@ -467,6 +471,7 @@ struct Destinations {
     listtext: Option<String>,
     listtext_loss: TextLoss,
     pict: Option<PictState>,
+    object: Option<ObjectState>,
     math: Option<MathState>,
     math_display: bool,
 }
@@ -607,6 +612,7 @@ impl<'a> Parser<'a> {
                         return Err(ConvertError::limit(Limit::NestingDepth, max));
                     }
                     self.flush_pending();
+                    self.note_object_omission();
                     self.stack.push(self.state);
                     if self.state.capture == Capture::Math
                         && let Some(math) = &mut self.dest.math
@@ -620,7 +626,8 @@ impl<'a> Parser<'a> {
                 Token::Hex(b) | Token::Byte(b) => {
                     if let Some(pict) = self.pict_payload() {
                         pict.hex.push(b);
-                    } else if self.state.capture != Capture::Pict
+                    } else if !self.push_object_payload(b)?
+                        && self.state.capture != Capture::Pict
                         && self.accepts_text()
                         && self.decoder.byte(b)
                     {
@@ -638,6 +645,8 @@ impl<'a> Parser<'a> {
             self.parse_ctx.emit(DiagnosticCode::UnclosedStructure, self.region());
         }
         self.flush_pending();
+        self.note_object_omission();
+        self.finish_object();
         self.comments.close(
             self.parse_ctx,
             0,
@@ -649,6 +658,7 @@ impl<'a> Parser<'a> {
 
     fn close_group(&mut self) -> Result<(), ConvertError> {
         self.flush_pending();
+        self.note_object_omission();
         match self.stack.pop() {
             Some(prev) => self.state = prev,
             None => self.parse_ctx.emit(DiagnosticCode::UnmatchedClose, Region::Body),
@@ -670,6 +680,10 @@ impl<'a> Parser<'a> {
         }
         if self.dest.pict.as_ref().is_some_and(|pict| depth < pict.depth) {
             self.finish_pict()?;
+        }
+        self.close_payload(depth)?;
+        if self.dest.object.as_ref().is_some_and(|object| object.closes_at(depth)) {
+            self.finish_object();
         }
         if let Some(math) = &mut self.dest.math {
             if depth < math.depth {
@@ -736,6 +750,8 @@ impl<'a> Parser<'a> {
             | Capture::Bookmark
             | Capture::CommentMetadata
             | Capture::Pict
+            | Capture::ObjectClass
+            | Capture::ObjectData
             | Capture::PicturePropertyName
             | Capture::PicturePropertyValue
             | Capture::Math => {}
@@ -840,7 +856,6 @@ impl<'a> Parser<'a> {
                 (DiagnosticCode::FooterOmitted, Region::Footer)
             }
             "annotation" => (DiagnosticCode::CommentOmitted, Region::Comment),
-            "object" => (DiagnosticCode::EmbeddedObject, self.region()),
             _ => return false,
         };
         let eligible = if code == DiagnosticCode::CommentOmitted {
@@ -851,7 +866,7 @@ impl<'a> Parser<'a> {
         if eligible {
             self.parse_ctx.emit(code, region);
         }
-        code != DiagnosticCode::EmbeddedObject
+        true
     }
 
     fn close_fields(&mut self, depth: usize) {
@@ -914,8 +929,10 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         self.flush_pending();
-        if !(word == "object" && (self.omit_deleted() || self.omit_hidden())) {
+        if word != "object" {
             self.state.omit |= self.report_destination(word);
+        } else if !(self.omit_deleted() || self.omit_hidden()) {
+            self.open_object();
         }
         self.state.suppress = true;
         self.state.capture = Capture::None;
@@ -1312,7 +1329,8 @@ impl<'a> Parser<'a> {
                 self.state.capture = Capture::Bookmark;
                 self.state.suppress = self.state.omit;
             }
-            "shppict" | "shptxt" | "result" => self.state.suppress = self.state.omit,
+            "shppict" | "shptxt" => self.state.suppress = self.state.omit,
+            "objclass" | "objdata" | "result" => return Ok(self.object_part(word)),
             "pict" => {
                 self.flush_pending();
                 self.omit_deleted();
@@ -1563,27 +1581,39 @@ impl<'a> Parser<'a> {
             return;
         }
         self.text_loss(loss);
-        if text.is_empty() {
-            return;
+        if !text.is_empty() {
+            self.store_capture(&text);
         }
+    }
+
+    fn store_capture(&mut self, text: &str) {
         match self.state.capture {
             Capture::ListText => {
                 if let Some(lt) = &mut self.dest.listtext {
-                    lt.push_str(&text);
+                    lt.push_str(text);
                 }
             }
-            Capture::Bookmark => self.dest.bookmark.push_str(&text),
-            Capture::CommentMetadata => self.comments.push_text(&text),
+            Capture::Bookmark => self.dest.bookmark.push_str(text),
+            Capture::CommentMetadata => self.comments.push_text(text),
             Capture::PicturePropertyName | Capture::PicturePropertyValue => {
                 if let Some(pict) = &mut self.dest.pict {
                     if self.state.capture == Capture::PicturePropertyName {
-                        pict.property_name.push_str(&text);
+                        pict.property_name.push_str(text);
                     } else {
-                        pict.property_value.push_str(&text);
+                        pict.property_value.push_str(text);
                     }
                 }
             }
-            Capture::Pict | Capture::FieldInstr | Capture::Math | Capture::None => {}
+            Capture::ObjectClass => {
+                if let Some(object) = &mut self.dest.object {
+                    object.push_class(text);
+                }
+            }
+            Capture::Pict
+            | Capture::ObjectData
+            | Capture::FieldInstr
+            | Capture::Math
+            | Capture::None => {}
         }
     }
 
@@ -1899,7 +1929,11 @@ fn shows(tokens: &[symbol::Token], unmapped: u64) -> bool {
 mod tests {
     use super::lexer::fuel;
     use super::*;
-    use crate::shared::test_support::diagnostic_rows;
+    use crate::shared::ole_equation::ole_equation;
+    use crate::shared::test_support::{
+        diagnostic_rows, equation_editor, equation_object, hex, mathtype, ole1_data,
+    };
+    use std::assert_matches;
 
     fn policy_converted(
         source: &str,
@@ -3437,5 +3471,319 @@ mod tests {
                 )));
             }
         }
+    }
+
+    fn equation_data(class: &str, mtef: &[u8]) -> Vec<u8> {
+        ole1_data(class, &equation_object(28, mtef.len(), mtef))
+    }
+
+    const PREVIEW: &str = r"{\pict\pngblip 89504e47}preview";
+
+    fn object(class: &str, data: &[u8], result: &str) -> String {
+        let data = hex(data);
+        format!(
+            r"{{\object\objemb{{\*\objclass {class}}}\objw100{{\*\objdata {data}}}{{\result {result}}}}}"
+        )
+    }
+
+    fn mathtype_object(inline: bool, mtcodes: &[u16]) -> String {
+        let data = equation_data("Equation.DSMT4", &mathtype(inline, mtcodes));
+        object("Equation.DSMT4", &data, PREVIEW)
+    }
+
+    fn document(body: &str) -> String {
+        format!(r"{{\rtf1\ansi {body}\par}}")
+    }
+
+    fn table_cell(body: &str) -> String {
+        format!(r"{{\rtf1\ansi \trowd\cellx1000\pard\intbl {body}\cell\row\pard after\par}}")
+    }
+
+    #[test]
+    fn an_equation_object_shows_its_tex_in_place_of_its_preview() {
+        use DiagnosticCode::UnmappedSymbol;
+        let xy = [0x78, 0x79];
+        let editor = equation_data("Equation.3", &equation_editor(&xy));
+        check(vec![
+            (
+                "a display equation alone in its paragraph",
+                document(&mathtype_object(false, &xy)),
+                Some("$$\n    xy\n$$\n"),
+                vec![],
+            ),
+            (
+                "an equation its header marks inline",
+                document(&mathtype_object(true, &xy)),
+                Some("$xy$\n"),
+                vec![],
+            ),
+            (
+                "an Equation Editor equation",
+                document(&object("Equation.3", &editor, PREVIEW)),
+                Some("$$\n    xy\n$$\n"),
+                vec![],
+            ),
+            (
+                "a display equation beside text",
+                document(&format!("a {} b", mathtype_object(false, &xy))),
+                Some("a $xy$ b\n"),
+                vec![],
+            ),
+            (
+                "an equation in a table cell",
+                table_cell(&mathtype_object(false, &xy)),
+                Some("|  |\n| --- |\n| $xy$ |\n\nafter\n"),
+                vec![],
+            ),
+            (
+                "an equation in a field result",
+                document(&format!(
+                    r"{{\field{{\*\fldinst EMBED Equation.DSMT4}}{{\fldrslt {}}}}}",
+                    mathtype_object(false, &xy)
+                )),
+                Some("$$\n    xy\n$$\n"),
+                vec![],
+            ),
+            (
+                "a character with no counterpart",
+                document(&mathtype_object(false, &[0x61, 0xE999, 0x62])),
+                Some("$$\n    ab\n$$\n"),
+                vec![(UnmappedSymbol, Region::Body, 1)],
+            ),
+            (
+                "an equation in a footnote",
+                document(&format!(r"a{{\footnote {}}}", mathtype_object(true, &xy))),
+                Some("a[^1]\n\n[^1]: $xy$\n"),
+                vec![],
+            ),
+        ]);
+        let doc = parse(&ParseCtx::default(), document(&mathtype_object(false, &xy)).as_bytes());
+        assert_eq!(doc.unwrap().assets, []);
+    }
+
+    #[test]
+    fn an_object_the_reader_cannot_decode_keeps_its_preview_and_reports_itself() {
+        let mtef = mathtype(false, &[0x78]);
+        let data = equation_data("Equation.DSMT4", &mtef);
+        let unknown_version = equation_data("Equation.DSMT4", &[9, 1, 0, 6, 0]);
+        let linked = [&data[..4], &1_u32.to_le_bytes(), &data[8..]].concat();
+        let other_class = equation_data("Excel.Sheet.12", &mtef);
+        let cases = [
+            ("a class that is not an equation", object("Excel.Sheet.12", &data, PREVIEW)),
+            ("a header naming another class", object("Equation.DSMT4", &other_class, PREVIEW)),
+            ("a linked object", object("Equation.DSMT4", &linked, PREVIEW)),
+            (
+                "no class",
+                format!(r"{{\object\objemb{{\*\objdata {}}}{{\result {PREVIEW}}}}}", hex(&data)),
+            ),
+            ("truncated data", object("Equation.DSMT4", &data[..data.len() - 1], PREVIEW)),
+            (
+                "data that is no compound file",
+                object("Equation.DSMT4", &ole1_data("Equation.DSMT4", b"ole"), PREVIEW),
+            ),
+            ("an unknown MTEF version", object("Equation.DSMT4", &unknown_version, PREVIEW)),
+            (
+                "no data",
+                format!(r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\result {PREVIEW}}}}}"),
+            ),
+            (
+                "a payload in a group of its own",
+                format!(
+                    r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\x{{\*\objdata {}}}}}{{\result {PREVIEW}}}}}",
+                    hex(&data)
+                ),
+            ),
+            (
+                "a preview before its data",
+                format!(
+                    r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\result {PREVIEW}}}{{\*\objdata {}}}}}",
+                    hex(&data)
+                ),
+            ),
+        ];
+        for (case, object) in cases {
+            let (shown, got) = converted(&document(&object));
+            assert_eq!(shown, "![Image](asset:0)preview\n", "{case}");
+            let kept = [
+                (DiagnosticCode::ImagePlaceholder, Region::Body, 1),
+                (DiagnosticCode::EmbeddedObject, Region::Body, 1),
+            ];
+            assert_eq!(got, kept, "{case}");
+        }
+    }
+
+    #[test]
+    fn an_object_class_is_trimmed_and_read_up_to_64_bytes() {
+        let editor = equation_editor(&[0x78]);
+        let data = equation_data("Equation.3", &editor);
+        let padded =
+            |width: usize| document(&object(&format!("{:<width$}", "Equation.3"), &data, PREVIEW));
+        assert_eq!(markdown(&padded(64)), "$$\n    x\n$$\n");
+        assert_eq!(markdown(&padded(65)), "![Image](asset:0)preview\n");
+    }
+
+    #[test]
+    fn a_group_inside_a_payload_leaves_it_whole() {
+        let data = hex(&equation_data("Equation.DSMT4", &mathtype(false, &[0x78])));
+        let (head, tail) = data.split_at(data.len() / 2);
+        let object = format!(
+            r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\*\objdata {head}{{\x}}{tail}}}{{\result {PREVIEW}}}}}"
+        );
+        assert_eq!(markdown(&document(&object)), "$$\n    x\n$$\n");
+    }
+
+    #[test]
+    fn an_equation_object_in_dropped_text_is_neither_read_nor_reported() {
+        use DiagnosticCode::{HeaderOmitted, HiddenOmitted, RevisionOmitted};
+        let object = mathtype_object(false, &[0x78]);
+        check(vec![
+            (
+                "a deleted object",
+                document(&format!(r"a{{\deleted {object}}}")),
+                Some("a\n"),
+                vec![(RevisionOmitted, Region::Body, 1)],
+            ),
+            (
+                "a hidden object",
+                document(&format!(r"a{{\v {object}}}")),
+                Some("a\n"),
+                vec![(HiddenOmitted, Region::Body, 1)],
+            ),
+            (
+                "an object in an omitted header",
+                format!(r"{{\rtf1{{\header {object}}}b}}"),
+                Some("b\n"),
+                vec![(HeaderOmitted, Region::Header, 1)],
+            ),
+        ]);
+    }
+
+    #[test]
+    fn an_object_dropped_by_a_control_inside_its_group_follows_the_policies() {
+        use crate::{HiddenPolicy as H, RevisionPolicy as R};
+        use DiagnosticCode::{HiddenOmitted, RevisionOmitted};
+        let data = hex(&equation_data("Equation.DSMT4", &mathtype(false, &[0x78])));
+        let parts = |class: &str, at: [&str; 3]| {
+            document(&format!(
+                r"a{{\object\objemb{}{{\*\objclass {class}}}{{\*\objdata {data}}}{}{{\result {PREVIEW}}}{}}}",
+                at[0], at[1], at[2]
+            ))
+        };
+        let after_keyword = |control| parts("Equation.DSMT4", [control, "", ""]);
+        let hidden = vec![(HiddenOmitted, Region::Body, 1)];
+        let deleted = vec![(RevisionOmitted, Region::Body, 1)];
+        let shown = "a$x$\n";
+        let cases = [
+            (r"\v", H::Omit, R::Accept, "a\n", hidden.clone()),
+            (r"\v", H::Emit, R::Accept, shown, vec![]),
+            (r"\deleted", H::Omit, R::Accept, "a\n", deleted.clone()),
+            (r"\deleted", H::Omit, R::Reject, shown, vec![]),
+            (r"\revised", H::Omit, R::Reject, "a\n", deleted.clone()),
+            (r"\revised", H::Omit, R::Accept, shown, vec![]),
+            (r"\deleted\v", H::Omit, R::Accept, "a\n", deleted.clone()),
+            (r"\v\v0", H::Omit, R::Accept, shown, vec![]),
+        ];
+        for (control, hidden_policy, revisions, markdown, reported) in cases {
+            let got = policy_converted(&after_keyword(control), hidden_policy, revisions);
+            assert_eq!(
+                got,
+                (markdown.into(), reported),
+                "{control} {hidden_policy:?} {revisions:?}"
+            );
+        }
+        for (at, reported) in [
+            (["", r"\v", ""], &hidden),
+            (["", "", r"\v"], &hidden),
+            (["", "", r"\deleted"], &deleted),
+        ] {
+            let got = policy_converted(&parts("Equation.DSMT4", at), H::Omit, R::Accept);
+            assert_eq!(got, ("a\n".into(), reported.clone()), "{at:?}");
+        }
+        let fuel = |class: &str| {
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, parts(class, [r"\v", "", ""]).as_bytes()).unwrap();
+            parse_ctx.fuel()
+        };
+        assert_eq!(fuel("Equation.DSMT4"), fuel("Excel.Sheet.12"));
+    }
+
+    #[test]
+    fn objects_settle_where_their_group_ends_even_when_it_never_does() {
+        let unclosed = (DiagnosticCode::UnclosedStructure, Region::Body, 1);
+        let embedded = (DiagnosticCode::EmbeddedObject, Region::Body, 1);
+        let data = hex(&equation_data("Equation.DSMT4", &mathtype(false, &[0x78])));
+        let head = r"{\rtf1 {\object{\*\objclass Equation.DSMT4}";
+        check(vec![
+            (
+                "an equation",
+                format!(r"{head}{{\*\objdata {data}}}"),
+                Some("$$\n    x\n$$\n"),
+                vec![unclosed],
+            ),
+            (
+                "a payload left open",
+                format!(r"{head}{{\*\objdata {data}"),
+                None,
+                vec![unclosed, embedded],
+            ),
+            (
+                "another object",
+                r"{\rtf1 {\object{\*\objclass Excel}{\*\objdata 0102}".into(),
+                None,
+                vec![unclosed, embedded],
+            ),
+        ]);
+    }
+
+    #[test]
+    fn only_the_first_payload_and_the_outermost_object_are_read() {
+        let data = |mtcode| equation_data("Equation.DSMT4", &mathtype(true, &[mtcode]));
+        let (x, y) = (hex(&data(0x78)), hex(&data(0x79)));
+        let twice = format!(
+            r"{{\object\objemb{{\*\objclass Equation.DSMT4}}{{\*\objdata {x}}}{{\*\objdata {y}}}}}"
+        );
+        assert_eq!(markdown(&document(&twice)), "$x$\n");
+        let inner = r"{\object\objemb{\*\objclass Excel.Sheet.8}{\*\objdata 03}{\result nested}}";
+        let outer = format!(
+            r"{{\object\objemb{{\*\objclass Excel.Sheet.12}}{{\*\objdata 0102}}{{\result inner{inner}}}}}"
+        );
+        let embedded = (DiagnosticCode::EmbeddedObject, Region::Body, 2);
+        assert_eq!(converted(&document(&outer)), ("innernested\n".to_owned(), vec![embedded]));
+        let equation = format!(
+            r"{{\object\objemb{{\*\objclass Excel.Sheet.12}}{{\*\objdata 0102}}{{\result {}}}}}",
+            mathtype_object(true, &[0x78])
+        );
+        let placeholder = (DiagnosticCode::ImagePlaceholder, Region::Body, 1);
+        assert_eq!(converted(&document(&equation)).1, [placeholder, embedded]);
+    }
+
+    #[test]
+    fn an_equation_payload_is_charged_as_decoded_and_stops_at_the_entry_limit() {
+        let mtef = mathtype(false, &[0x78]);
+        let native = equation_object(28, mtef.len(), &mtef);
+        let data = ole1_data("Equation.DSMT4", &native);
+        let fuel = |class: &str| {
+            let parse_ctx = ParseCtx::default();
+            parse(&parse_ctx, document(&object(class, &data, "")).as_bytes()).unwrap();
+            parse_ctx.fuel()
+        };
+        let decoding = ParseCtx::default();
+        ole_equation(&decoding, Some("Equation.DSMT4"), &native).unwrap();
+        assert_eq!(
+            fuel("Equation.DSMT4") - fuel("Excel.Sheet.12"),
+            data.len() as u64 + decoding.fuel()
+        );
+        let read = |class: &str, max_entry_bytes| {
+            let limits = crate::limits::Limits { max_entry_bytes, ..Default::default() };
+            let source = document(&object(class, &data, ""));
+            parse(&ParseCtx::new(&limits), source.as_bytes()).map(|_| ())
+        };
+        let max = data.len() as u64;
+        assert_matches!(read("Equation.DSMT4", max), Ok(()));
+        assert_matches!(
+            read("Equation.DSMT4", max - 1),
+            Err(ConvertError::ResourceLimit { limit: Limit::EntryBytes, max: m }) if m == max - 1
+        );
+        assert_matches!(read("Excel.Sheet.12", 1), Ok(()));
     }
 }

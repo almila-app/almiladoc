@@ -259,12 +259,12 @@ class Limits:
     ) -> Limits: ...
     @property
     def max_entry_bytes(self) -> int:
-        """Decompressed bytes of one archive entry, OfficeArt picture or
-        compound-file stream."""
+        """Decompressed bytes of one archive entry, OfficeArt picture, embedded
+        OLE object or compound-file stream."""
     @property
     def max_total_bytes(self) -> int:
-        """Decompressed bytes one parse inflates (archive entries and OfficeArt
-        pictures)."""
+        """Decompressed bytes one parse inflates (archive entries, OfficeArt
+        pictures and embedded OLE objects)."""
     @property
     def max_entry_count(self) -> int:
         """Entries in one archive."""
@@ -299,8 +299,8 @@ class Limits:
         """Bytes of one input, checked before it is copied or read."""
     @property
     def max_compression_ratio(self) -> int:
-        """Ratio of an archive entry's or OfficeArt picture's decompressed to
-        compressed size."""
+        """Ratio of an archive entry's, OfficeArt picture's or embedded OLE
+        object's decompressed to compressed size."""
     @property
     def max_output_bytes(self) -> int:
         """Markdown or JSON bytes one call writes."""
