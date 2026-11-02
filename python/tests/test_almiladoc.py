@@ -10,7 +10,6 @@ import json
 import os
 import pickle
 import re
-import shutil
 import struct
 import subprocess
 import sys
@@ -1961,22 +1960,6 @@ class PackageTest(unittest.TestCase):
         exported = {name for name in dir(almiladoc._almiladoc) if not name.startswith("_")}
         self.assertEqual(stubbed, exported)
         self.assertEqual(set(almiladoc.__all__), exported | {"Format"})
-
-    def test_the_readme_example_runs(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        block = re.search(r"```python\n(.*?)```", readme, re.DOTALL).group(1)
-        files = {
-            "report.docx": OUTLINE,
-            "table.csv": CSV,
-            "letter.rtf": RTF,
-            "scan.pdf": MIXED,
-        }
-        self.assertEqual(set(re.findall(r'"([\w-]+\.\w+)"', block)), set(files))
-        with tempfile.TemporaryDirectory() as directory:
-            for name, fixture in files.items():
-                shutil.copy(fixture, Path(directory) / name)
-            with contextlib.chdir(directory):
-                exec(compile(block, "README.md", "exec"), {"__name__": "readme"})
 
 
 if __name__ == "__main__":

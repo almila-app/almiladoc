@@ -49,9 +49,12 @@ description: Change the public surface the Python binding mirrors - `Format`, a 
    `src/formats/detect.rs`, a fixture directory (`add-fixture`), and a fuzz target with its
    `[[bin]]` in `fuzz/Cargo.toml`, seeds in `fuzz/seeds/<target>/` and a
    `fuzz/regressions/<target>/` directory: `make fuzz` fails without either.
-4. Update README.md where it lists formats, error variants, exception classes or the Python API;
-   `make python` runs its first `python` block.
+4. Update the guide page that owns the fact in the same commit (`docs/guide/`; README for
+   formats and features). `mirror_drift.py` names missing or stale names, links and format
+   rows, `python/tests/test_docs.py` runs every example and compares the stated defaults with
+   the code, and a changed meaning is a manual edit.
 5. Run `.claude/skills/change-core-api/scripts/mirror_drift.py` over the working tree: it names
    each format name the `Format` Literal lacks, each exception the binding never spells, each
-   `Limits` field the binding or stub never names, and each `code()` or
-   `UnsupportedKind::as_str` string that is not snake_case. Then use the `verify` workflow.
+   `Limits` field the binding or stub never names, each `code()` or `UnsupportedKind::as_str`
+   string that is not snake_case, and each name, link or format row of the guides that drifted.
+   Then use the `verify` workflow.

@@ -13,5 +13,6 @@ Sign off every commit (`git commit -s`) and give it a subject of at most 72 colu
 ## Changes
 
 - One change per pull request, with a test that fails without it.
-- `make ci` passes.
+- `make ci` passes; it runs the CI gates with `rust-toolchain.toml` and needs GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs locked tools and CPython 3.11/3.15. [ADR 0003](docs/adr/0003-ci-and-release.md) owns gate, tool and release policy; unavailable targets report `NOT RUN` with a reason.
+- [CLAUDE.md](CLAUDE.md) owns contributor-agent instructions.
 - A fixture is a file you may publish; never a confidential document.

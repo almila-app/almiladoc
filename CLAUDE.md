@@ -4,6 +4,7 @@
 - Converts Office, OpenDocument, RTF, EPUB, CSV and PDF to GitHub-Flavored Markdown.
 - Guidance: this file; scoped rules, procedures and review roles: `.claude/`.
 - Open work: `docs/roadmap.md`; support/loss contract: `docs/support.md`; decisions: `docs/adr/`.
+- User guides: `docs/guide/` (examples run, names and defaults checked); install: `README.md`.
 
 ## Work
 

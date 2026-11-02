@@ -19,6 +19,10 @@ pub use error::Error;
 pub use output::{Line, Page, Rectangle};
 pub use runtime::Runtime;
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 #[cfg(test)]
 mod tests;
 

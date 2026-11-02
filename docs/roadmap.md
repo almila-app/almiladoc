@@ -37,4 +37,4 @@ Check open unpdf PRs at each wave start with `gh pr view <n> --repo <repo> --jso
 
 ## Maintainer steps
 
-As each release step becomes due: green dispatched `release.yml` rehearsal → `v0.1.0-rc.1` approved in `testpypi` → green consumer proof → final 0.x tag. Before first final, supply `CRATES_IO_PUBLISH_NEW_TOKEN` (`publish-new`) in `crates-io`; before the next final, add the previous final's row to `docs/release-dates.tsv` (ADR 0003 decisions 7/9).
+As each release step becomes due: green consumer proof → final 0.x tag. At the first final, switch the README install lines to PyPI and crates.io. Before first final, supply `CRATES_IO_PUBLISH_NEW_TOKEN` (`publish-new`) in `crates-io`; before the next final, add the previous final's row to `docs/release-dates.tsv` (ADR 0003 decisions 7/9).

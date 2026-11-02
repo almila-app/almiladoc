@@ -26,6 +26,7 @@ LOCAL_FILES = (
     ".claude/agent-memory-local",
 )
 STYLE = ".claude/rules/docs-style.md"
+GUIDES = ":(glob)docs/guide/*.md"
 MAKEFILE = "Makefile"
 SELF_TEST = '"--self-test"'
 SKIPPED_DIRS = {"worktrees", "agent-memory-local", "__pycache__"}
@@ -111,6 +112,12 @@ def setup_files(root: Path) -> list[Path]:
             and rel(root, path) not in LOCAL_FILES
         ]
     return found
+
+
+def guide_files(root: Path) -> list[Path]:
+    flags = ("-z", "-c", "-o", "--exclude-per-directory=.gitignore")
+    listed = git(root, "ls-files", *flags, "--", GUIDES)
+    return [root / path for path in sorted(set(listed.split("\0")) - {""})]
 
 
 def entrypoint_problems(root: Path) -> list[str]:
@@ -199,7 +206,7 @@ def budget_problems(root: Path) -> list[str]:
     if len(table) < FEWEST_BUDGET_ROWS or width is None:
         return [f"{STYLE}: budget table unreadable ({len(table)} rows, width row {bool(width)})"]
     problems, budgeted = [], set()
-    setup = setup_files(root)
+    setup = [*setup_files(root), *guide_files(root)]
     for glob, ceiling in table.items():
         files = [path for path in setup if glob_regex(glob).match(rel(root, path))]
         if not files:
@@ -378,6 +385,7 @@ paths:
 | `.claude/rules/*.md` | 20 lines |
 | `.claude/skills/*/SKILL.md` | 20 lines |
 | `.claude/agents/*.md` | 20 lines |
+| `docs/guide/*.md` | 5 lines |
 | every line of the above | 100 columns; table rows excepted |
 """
 GOOD_SKILL = "---\nname: verify\ndescription: Pick gates.\n---\n\nRun `{script}`.\n"
@@ -405,6 +413,7 @@ def seed(root: Path) -> None:
         ".claude/skills/verify/SKILL.md": GOOD_SKILL.format(script=SCRIPT),
         SCRIPT: "",
         ".claude/agents/reviewer.md": GOOD_AGENT,
+        "docs/guide/index.md": "# guide\n",
     }
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -508,7 +517,7 @@ def self_test_cases() -> tuple[list[str], int]:
         "columns, budget 100": write("CLAUDE.md", "x" * 101 + "\n"),
         "no `paths` frontmatter": write(STYLE, GOOD_STYLE.split("---\n", 2)[2]),
         "scopes to everything": write(STYLE, GOOD_STYLE.replace('"*.md"', '"**"')),
-        "matches no file": write(STYLE, GOOD_STYLE.replace('"*.md"', '"docs/**"')),
+        "matches no file": write(STYLE, GOOD_STYLE.replace('"*.md"', '"nowhere/**"')),
         "does not exist from the repository root": write(
             ".claude/skills/verify/SKILL.md", GOOD_SKILL.format(script="scripts/run.py")
         ),
@@ -552,6 +561,12 @@ def self_test_cases() -> tuple[list[str], int]:
         "docs/CLAUDE.md:1: home path": write("docs/CLAUDE.md", f"see {HOME}/x\n"),
         "docs/CLAUDE.md: not tracked": write("docs/CLAUDE.md", "# docs\n"),
         "docs/CLAUDE.md: 6 lines, budget 5": write("docs/CLAUDE.md", "x\n" * 6),
+        "docs/guide/a.md: 6 lines, budget 5": write("docs/guide/a.md", "x\n" * 6),
+        "docs/guide/a.md:1: 101 columns, budget 100": write("docs/guide/a.md", "x" * 101 + "\n"),
+        "docs/guide/b.md: 6 lines, budget 5": lambda r: (
+            write("docs/guide/b.md", "x\n" * 6)(r),
+            git(r, "add", "docs/guide/b.md"),
+        ),
     }
     failures = []
 

@@ -10,6 +10,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! - Build one [`Converter`] from a [`Config`] and share it across threads.
+//! - [`Input::new`] checks the bytes against a [`Format`]; [`Input::auto`] detects the format.
+//! - [`Converter::convert`] returns the Markdown. [`Converter::parse`] keeps the document for
+//!   [`Parsed::render`], the gaps OCR fills and, with the `serde` feature, `Parsed::to_json`.
+//! - [`Converter::inspect`] gives PDF page verdicts. [`Converter::convert_with_ocr`] converts and
+//!   runs an [`OcrEngine`] in one call, such as `OcrHttp` with the `ocr-http` feature.
+//!
 //! What a conversion cannot carry into its output is reported as
 //! [`Diagnostics`]: content [`Lost`](LossClass::Lost) fails the conversion
 //! with [`ConvertError::Incomplete`] under the default [`OnLoss::Fail`], and
@@ -17,6 +24,13 @@
 //! PDF page gap left unfilled or failed raises [`ConvertError::NeedsOcr`]
 //! first: it is [`Deferred`](LossClass::Deferred), not lost. Every piece of
 //! input skipped or repaired on the way is reported in [`Diagnostics`] too.
+//!
+//! Guides: [formats and features](https://github.com/almila-app/almiladoc/blob/main/README.md),
+//! [convert](https://github.com/almila-app/almiladoc/blob/main/docs/guide/convert.md),
+//! [errors](https://github.com/almila-app/almiladoc/blob/main/docs/guide/errors.md),
+//! [OCR](https://github.com/almila-app/almiladoc/blob/main/docs/guide/ocr.md),
+//! [services](https://github.com/almila-app/almiladoc/blob/main/docs/guide/integrate.md) and
+//! [format support](https://github.com/almila-app/almiladoc/blob/main/docs/support.md).
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -76,6 +90,21 @@ const _: () = {
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+#[cfg(all(doctest, feature = "ocr-http", feature = "serde", feature = "raster"))]
+mod guide_doctests {
+    #[doc = include_str!("../docs/guide/convert.md")]
+    struct Convert;
+
+    #[doc = include_str!("../docs/guide/errors.md")]
+    struct Errors;
+
+    #[doc = include_str!("../docs/guide/ocr.md")]
+    struct Ocr;
+
+    #[doc = include_str!("../docs/guide/integrate.md")]
+    struct Integrate;
+}
 
 /// Input format. Selects the parser; container variants that share a parser
 /// (docm, xlsm, ...) map onto these via [`Format::sniff`] or

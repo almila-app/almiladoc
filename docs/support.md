@@ -1,6 +1,6 @@
-# Conversion limits
+# Format support
 
-Per-format retained content and diagnostic codes; [README](../README.md#rust) explains loss classes/OnLoss, [Limits](../src/limits.rs) owns defaults, and [ADR 0001](adr/0001-architecture.md) owns rendering constraints. Code sets are checked both ways; format attribution still requires review.
+Per-format retained content and diagnostic codes; the [errors guide](guide/errors.md) explains loss classes/OnLoss, [Limits](../src/limits.rs) owns defaults, and [ADR 0001](adr/0001-architecture.md) owns rendering constraints. Code sets are checked both ways; format attribution still requires review.
 
 ## All formats
 
@@ -55,7 +55,7 @@ Per-format retained content and diagnostic codes; [README](../README.md#rust) ex
 
 ## PowerPoint
 
-- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets; MathType and Equation Editor objects show as TeX as in Word, PPT reading the `ExOleObjStg` a `ProgID`-named `ExOleEmbed` points to (stored or zlib-compressed, counted against the inflation limits; none on masters).
+- PPT/PPS/POT/PPTX/PPTM/PPSX/PPSM retain slide units, level-2 titles, one `---` between nonempty bodies and quoted speaker notes; ownerless PPT notes precede slides outside unit ranges. PPTX resolves master/layout/slide cascades and reads tables/equations/chart/SmartArt text and `p:oleObj/p:pic` previews labelled by frame description, retaining payload assets; MathType and Equation Editor objects show as TeX as in Word, PPT reading the `ExOleObjStg` a `ProgID`-named OLE embed record points to (stored or zlib-compressed, counted against the inflation limits; none on masters).
 - **Comments:** Emit reads legacy/modern PPTX threads/replies and binary PPT comments, retaining resolved content. **Omitted:** `comment_omitted` for declared parts/records, `hidden_omitted` for hidden slides and PPTX DrawingML objects.
 
 | Lost code | Scope |

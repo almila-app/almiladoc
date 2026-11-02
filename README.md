@@ -1,129 +1,107 @@
 # almiladoc
 
-Rust library and Python binding converting Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF to GitHub-Flavored Markdown. Runs in-process; network access requires a caller-configured `OcrHttp` engine.
+Rust library and Python binding that convert 12 document formats to GitHub-Flavored Markdown in-process. There is no CLI.
 
-Fair Source (source-available), under the [licence terms](#licence). No release yet: TestPyPI receives the first candidate after the OCR stack; PyPI and crates.io receive the first final, and the API may change before then.
+- No OCR model ships: scanned pages go to an OpenAI-compatible vision server (`OcrHttp`) or to your own OCR.
+- No network access unless you pass `OcrHttp`.
+- Fair Source (source-available), under the [licence terms](#licence). A release candidate is on TestPyPI; PyPI and crates.io receive the first final, and the API may change before then.
 
 ## Formats
 
-| Format | Extensions |
-|---|---|
-| Word | `.doc`, `.docx`, `.docm` |
-| PowerPoint | `.ppt`, `.pps`, `.pot`, `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
-| Excel | `.xls`, `.xlsx`, `.xlsm`, `.xlsb` |
-| OpenDocument | `.odt`, `.ods`, `.odp` |
-| Rich Text Format | `.rtf` |
-| EPUB | `.epub` |
-| CSV | `.csv` |
-| PDF | `.pdf` |
+| `format=` name | Family | Extensions |
+|---|---|---|
+| `doc` | Word 97-2003 | `.doc` |
+| `docx` | Word | `.docx`, `.docm` |
+| `odt` | OpenDocument text | `.odt` |
+| `pdf` | PDF | `.pdf` |
+| `ppt` | PowerPoint 97-2003 | `.ppt`, `.pps`, `.pot` |
+| `pptx` | PowerPoint | `.pptx`, `.pptm`, `.ppsx`, `.ppsm` |
+| `rtf` | Rich Text Format | `.rtf` |
+| `epub` | EPUB 2 and 3 | `.epub` |
+| `xlsx` | Excel, every generation | `.xlsx`, `.xlsm`, `.xlsb`, `.xls` |
+| `ods` | OpenDocument spreadsheet | `.ods` |
+| `odp` | OpenDocument presentation | `.odp` |
+| `csv` | CSV | `.csv` |
 
-Content determines the format; CSV has no signature and must be named or supplied as a fallback. [Support](docs/support.md) lists retained content, losses and OCR markers per format.
+- Content decides the format; CSV has no signature and must be named.
+- What each format keeps and loses: [Format support](https://github.com/almila-app/almiladoc/blob/main/docs/support.md).
 
 ## Install
 
-Before release, build from source with a Rust toolchain:
-
 ```sh
+pip install --pre --index-url https://test.pypi.org/simple/ almiladoc
 pip install git+https://github.com/almila-app/almiladoc
+cargo add almiladoc --git https://github.com/almila-app/almiladoc --features ocr-http,serde
 ```
 
-## Python
+- Python 3.11 or newer. The first line installs the release candidate; the second builds from source and needs Rust 1.99 or newer.
+- The wheel has every Cargo feature.
+
+| Cargo feature | Default | Adds |
+|---|---|---|
+| `pdf` | yes | PDF input; without it a PDF fails `feature_disabled` |
+| `raster` | yes | Page images for OCR (implies `pdf`); without it PDF gaps get no image |
+| `serde` | no | `Parsed::to_json` and `JSON_SCHEMA_VERSION` |
+| `ocr-http` | no | `OcrHttp`, the OpenAI-compatible OCR engine |
+
+## Quickstart
 
 ```python
-import json
 from pathlib import Path
 
 import almiladoc
 
 converter = almiladoc.Converter()
-report = converter.convert_path("report.docx")
-markdown = report.markdown
-
-table = Path("table.csv").read_bytes()
-markdown = converter.convert(table, "csv").markdown
-
-parsed = converter.parse(Path("report.docx").read_bytes())
-model = json.loads(parsed.to_json())
-assets = parsed.assets()
-assert parsed.render().markdown == report.markdown
-
-config = almiladoc.Config(
-    limits=almiladoc.Limits(max_input_bytes=64 << 20),
-    threads=4,
-    on_loss=almiladoc.OnLoss.REPORT,
-)
-lenient = almiladoc.Converter(config)
-for diagnostic in lenient.convert_path("report.docx").diagnostics:
-    print(diagnostic.code, diagnostic.loss_class, diagnostic.region, diagnostic.count)
-
-token = almiladoc.CancelToken()
-markdown = converter.convert(table, "csv", cancel=token).markdown
-
-letter = Path("letter.rtf").read_bytes()
-try:
-    converter.convert(letter, "doc")
-except almiladoc.UnsupportedError as error:
-    markdown = converter.convert(letter, error.detected).markdown
-
-try:
-    converter.convert_path("scan.pdf")
-except almiladoc.NeedsOcrError as error:
-    print(error.pages, error.page_count)
+print(converter.convert_path("report.docx").markdown)
+print(converter.convert(Path("table.csv").read_bytes(), "csv").markdown)
 ```
-
-- Share a frozen-config `Converter`; calls release the GIL, borrow `bytes`, admit other contiguous buffers before copying and check path size before reading. Omitted format detects content, paths fall back to extension, and mismatches expose `UnsupportedError.detected` for explicit retry.
-- A cross-thread `CancelToken` stops work at the next charged unit, between PDF pages and before painting steps; Ctrl-C is unseen during calls.
-- `parse` → `Parsed.gaps` → fill/fail → render supports external OCR; `ocr_pages="all"` or 1-based pages forces PDF gaps (ignored for other formats), `Config(pdf_scans=PdfScanPolicy.COVERAGE_FIRST)` also gaps every page images cover at least half of, whatever text it holds, and `Config(image_ocr=ImageOcr.ALL)` adds embedded PNG/JPEG gaps after their blocks, naming the asset index.
-- `fill_gap` accepts Markdown, `fill_gap_lines` accepts literal `OcrLine(text, (left, top, right, bottom))` with normalized bounds and no inferred headings/tables, and `fill_gap_tables` accepts standalone text-only table/tr/td HTML at top-level gaps. All refusals are atomic: unknown/settled gaps raise KeyError/ValueError and per-fill limits GapRefused with limit.
-- Pickleable `ocr_requests(gaps=None, *, dpi=150, max_pixels=12_845_056, max_bytes=None)` return an `OcrRequest` (embedded image or PDF PNG, with `width`, `height` and per-kind `RasterFidelity` for a painted page) or an `OcrRefusal` (`kind` `unpaintable` or `over_bytes`) per gap; return text with `fill_gap(request.gap, text)`, or use `Parsed.ocr(engine)`/`convert(..., ocr=engine)`. `OcrHttp.recognize(requests)` returns pickleable `OcrResult`s (text or `OcrFailure` with kind, status and `retry_after`, plus token usage, realized tier and attempts) for requests from another process.
-- `Conversion.units` contains `(kind, ordinal, start, end)` offsets into Python Unicode Markdown; `Parsed.to_json()` uses the Rust schema and `assets()` returns `(id, media_type, data)`.
-
-The [typed binding](python/almiladoc/_almiladoc.pyi) owns signatures, exception fields and configuration defaults. Conversion failures derive from `ConvertError` with stable snake_case codes; invalid fields raise `ConfigError(ValueError)` naming `limit` (`raster` for dpi/pixels/bytes), unknown formats ValueError, invalid buffers TypeError and unreadable paths/directories/Unix FIFOs/devices OSError.
-
-## Rust
 
 ```rust
 use almiladoc::{Config, Converter, Format, Input};
 
-fn convert(report: &[u8], csv: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let converter = Converter::new(Config::default())?;
-    let report = converter.convert(Input::auto(report, None))?.into_markdown();
-    let table = converter.convert(Input::new(csv, Format::Csv))?.into_markdown();
-    Ok((report, table))
+    let csv = b"name,year\nAda,1843\n";
+    let markdown = converter.convert(Input::new(csv, Format::Csv))?.into_markdown();
+    assert_eq!(markdown, "| name | year |\n| --- | --- |\n| Ada | 1843 |\n");
+    Ok(())
 }
 ```
 
-- Pass bytes through checked `Input::new` or `Input::auto(bytes, fallback)`, which uses fallback only for unrecognized content. Share a validated converter; calls use private thread pools (default 1), while parse retains configuration, assets, cancellation and diagnostics for render; [converter rustdoc](src/converter.rs) owns API details.
-- [Limits](src/limits.rs) admit input before parsing and charge deterministic work; cancellation continues through render, JSON, fills, OCR and request export. A PDF page selection past the last page fails `PageOutOfRange` (`PageOutOfRangeError`); inspect supports PDF only.
-- Diagnostics carry code/class/region/unit/count, never input text: Omitted is policy, Deferred a placeholder/gap, Lost unread content and Info formatting/repair. Parse retains losses; default Fail renders Lost as Incomplete and unfilled/failed pages as NeedsOcr first; Report returns diagnostics with is_complete false ([support](docs/support.md)).
-- [Typed errors](src/error.rs) contain only escaped/capped input part names; boundary panics become Internal, requiring worker recycling. [Unit ranges](src/converter.rs) are UTF-8 bytes, while Python ranges count characters; empty readable units keep original ordinals and zero-length ranges.
-- `serde` adds model/diagnostic/identity/conversion serialization and `Parsed::to_json`, including losses under output/work limits; [JSON rustdoc](src/converter.rs) owns the envelope and [schema version](src/json.rs) changes only for removal, rename or changed meaning, so readers ignore additions. Images distinguish unread/unavailable and carry source origins, anchors carry destination units, tables have no kind and gap ids allow null units.
-- Default pdf/raster features use [unpdf](https://docs.rs/unpdf); without pdf, PDF is Unsupported. Page decoding has no caller budget inside a page: isolate PDF work in memory-capped workers recycled after failure.
-- Optional `ocr-http` adds `OcrHttp` for OpenAI-compatible chat/completions; construction opens no socket, redirects are refused and workers finish before return. Keys require HTTPS or direct loopback (HTTPS endpoint through proxies), only explicit proxies are used, and replacement PEM roots apply to endpoint/HTTPS proxy; a cancel closes requests in flight; [HTTP rustdoc](src/ocr/http/mod.rs) owns configuration, message layouts, service tiers, batches/retries and recognize_images, [ADR 0002](docs/adr/0002-ocr-port.md) owns engine/fill constraints.
+## Rules for coding agents
 
-### Identity
+Copy these into the agent instructions of a project that uses almiladoc.
 
-`Converter::identity()` fixes version and SHA-256 `config_fingerprint` of output-affecting fields (excluding limits and threads). With committed `Cargo.lock`, equal identity, input and gap fills produce byte-identical output across calls, threads and, except PDF, architectures.
+- Build one `Converter` per `Config` and share it; get throughput from concurrent calls.
+- Default `OnLoss.FAIL` raises `NeedsOcrError` for an unfilled PDF page, then `IncompleteError` for lost content. `OnLoss.REPORT` returns Markdown with `is_complete` false and the diagnostics.
+- Branch on `error.code` and `kind`, never on messages.
+- CSV is never detected: pass `"csv"`. Format names are exact and lower case; every Excel file is `"xlsx"`.
+- A scanned PDF needs `ocr=` or the gap loop of the OCR guide; otherwise it raises `NeedsOcrError`.
+- Convert untrusted PDFs in a memory-capped worker process and recycle it after `InternalError`.
+- Read signatures from the installed `_almiladoc.pyi` (Python) or `cargo doc --all-features` (Rust).
 
-The optional [offline OCR adapter](ocr-local/) uses verified caller files and the core's located-line layout.
+## Guides
 
-## Development
-
-`make ci` runs the CI gates using `rust-toolchain.toml`; prerequisites are GNU make, rustup and [uv](https://docs.astral.sh/uv/), which installs locked tools and CPython 3.11/3.15. [ADR 0003](docs/adr/0003-ci-and-release.md) owns gate, tool and release policy; [CLAUDE.md](CLAUDE.md) owns contributor-agent instructions; unavailable targets report `NOT RUN` with a reason.
+- [Convert documents](https://github.com/almila-app/almiladoc/blob/main/docs/guide/convert.md): calls, detection, output conventions, content policies.
+- [Errors and losses](https://github.com/almila-app/almiladoc/blob/main/docs/guide/errors.md): every error code and what to do.
+- [OCR for scans and images](https://github.com/almila-app/almiladoc/blob/main/docs/guide/ocr.md): routes, `OcrHttp` options, failures.
+- [Run almiladoc in a service](https://github.com/almila-app/almiladoc/blob/main/docs/guide/integrate.md): limits, isolation, cancellation, caching, recipes.
+- [Format support](https://github.com/almila-app/almiladoc/blob/main/docs/support.md): what each format keeps and loses.
+- [Offline OCR adapter](https://github.com/almila-app/almiladoc/blob/main/ocr-local/README.md): the Rust crate for OCR without a network.
 
 ## Licence
 
-- This repository's own work is under the [Business Source License 1.1](LICENSE) (BUSL-1.1). Each version becomes available under the MIT License four years after it is first made publicly available.
-- The portions [REUSE.toml](REUSE.toml) marks MIT are under the [MIT License](LICENSES/MIT.txt), with the copyright line it records; REUSE.toml records the copyright and licence of each file.
+- This repository's own work is under the [Business Source License 1.1](https://github.com/almila-app/almiladoc/blob/main/LICENSE) (BUSL-1.1). Each version becomes available under the MIT License four years after it is first made publicly available.
+- The portions [REUSE.toml](https://github.com/almila-app/almiladoc/blob/main/REUSE.toml) marks MIT are under the [MIT License](https://github.com/almila-app/almiladoc/blob/main/LICENSES/MIT.txt), with the copyright line it records; REUSE.toml records the copyright and licence of each file.
 
 A commercial licence covers any other production use: USD 1,000 per project per year for a licensee whose gross revenue and outside funding are each at most USD 5 million, a project being one product, service or internal application that uses almiladoc; above that, priced per company. Write to almilaapp@gmail.com.
 
 ### Licensing
 
-- **What is a Competing Use?** Making almiladoc available to others in a commercial product or service that substitutes for it or offers the same or substantially similar functionality. [LICENSE](LICENSE) is the binding text.
+- **What is a Competing Use?** Making almiladoc available to others in a commercial product or service that substitutes for it or offers the same or substantially similar functionality. [LICENSE](https://github.com/almila-app/almiladoc/blob/main/LICENSE) is the binding text.
 - **What is free?** Any non-production use, such as evaluation, development and testing, and production use other than a Competing Use by an individual for personal, non-commercial purposes, for non-commercial teaching or academic research, or by anyone who, with their affiliates, had less than USD 100,000 in gross revenue in the preceding 12 months and has raised less than USD 100,000 in outside funding in total.
 - **When does a version become MIT?** On the fourth anniversary of the date that version is first made publicly available; from then on, that version is under the MIT License alone.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and the [code of conduct](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](https://github.com/almila-app/almiladoc/blob/main/CONTRIBUTING.md), [SECURITY.md](https://github.com/almila-app/almiladoc/blob/main/SECURITY.md) and the [code of conduct](https://github.com/almila-app/almiladoc/blob/main/CODE_OF_CONDUCT.md).

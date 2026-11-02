@@ -13,8 +13,9 @@ description: Select and run the repository's verification gates for the current 
   DCO judges `origin/main..HEAD`.
 - Gates run `make <name>` except `rust` (fmt/clippy and changed-line policy lints), `fixtures`
   (`.claude/skills/add-fixture/scripts/fixtures.py check`), `mirrors`
-  (`.claude/skills/change-core-api/scripts/mirror_drift.py`), `public` (added-line privacy),
-  `commits` (DCO and message checks).
+  (`.claude/skills/change-core-api/scripts/mirror_drift.py`), `examples` (`cargo test --doc` over
+  the crate and `ocr-local/`: every guide's Rust blocks), `public` (added-line privacy),
+  `commits` (DCO and message checks). A guide edit also selects `python` (`test_docs.py`).
 - Exit: 0 pass, 1 fail, 3 unavailable. NOT RUN never passes; install missing tools and rerun.
   `make tools` fetches pins; fuzz toolchain: `fuzz/rust-toolchain.toml`; final CI: ADR 0004.
 - Isolate mutants or restore/diff before commit; `make licences` may rewrite notices before failing,

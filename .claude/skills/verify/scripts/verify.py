@@ -44,6 +44,7 @@ RUST = (
     "ocr-local/src/",
     "ocr-local/tests/",
 )
+DOCS = ("README.md", "docs/guide/", "ocr-local/README.md")
 ROOT_CARGO = ("Cargo.toml", "Cargo.lock")
 CARGO = (*ROOT_CARGO, "python/Cargo.toml")
 TOOLCHAIN = "rust-toolchain.toml"
@@ -146,10 +147,10 @@ def tail(text: str) -> str:
     return "\n".join(text.splitlines()[-TAIL:])
 
 
-def run(*argv: str) -> Outcome:
+def run(*argv: str, env: dict[str, str] | None = None) -> Outcome:
     print(f"$ {' '.join(argv)}", flush=True)
     try:
-        done = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+        done = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True)
     except FileNotFoundError:
         return Outcome("NOT RUN", f"`{argv[0]}` not installed")
     if done.returncode:
@@ -264,6 +265,23 @@ def mirrors(_: Change) -> Outcome:
     return run(sys.executable, str(SKILLS / "change-core-api/scripts/mirror_drift.py"))
 
 
+def examples(_: Change) -> Outcome:
+    if absent := needs("cargo"):
+        return absent
+    environment = insta_env()
+    environment.setdefault("CARGO_TARGET_DIR", str(ROOT / "target"))
+    doctest = ("cargo", "test", "--locked", "--all-features", "--doc")
+    native = ("--manifest-path", "ocr-local/Cargo.toml")
+    return chain(
+        lambda: run(*doctest, env=environment),
+        lambda: run(*doctest[:3], *native, *doctest[3:], env=environment),
+    )
+
+
+def documents(change: Change, *prefixes: str) -> list[str]:
+    return [path for path in change.paths if path.startswith(prefixes)]
+
+
 def published_mail(change: Change) -> set[str]:
     published = output("git", "grep", "-h", "-I", "-e", "@", change.base)
     return set(PATTERNS["e-mail address"].findall(published))
@@ -360,20 +378,32 @@ def gates(root: Path = ROOT) -> list[tuple[str, Callable[[Change], Outcome], Tri
             ),
         ),
         ("fixtures", fixtures, lambda c: c.touches(*FIXTURE_INPUTS)),
-        ("mirrors", mirrors, lambda c: c.touches(*CORE_API, "python/")),
+        (
+            "mirrors",
+            mirrors,
+            lambda c: c.touches(*CORE_API, "python/") + documents(c, *DOCS, "docs/support.md"),
+        ),
+        (
+            "examples",
+            examples,
+            lambda c: documents(c, *DOCS) + c.touches("src/", "ocr-local/src/", suffix=".rs"),
+        ),
         (
             "python",
             target("python", cargo=True),
-            lambda c: c.touches(
-                "python/",
-                *CORE_API,
-                *opened,
-                *UV,
-                *DIST,
-                "LICENSES/",
-                *ROOT_CARGO,
-                TOOLCHAIN,
-                MAKEFILE,
+            lambda c: (
+                c.touches(
+                    "python/",
+                    *CORE_API,
+                    *opened,
+                    *UV,
+                    *DIST,
+                    "LICENSES/",
+                    *ROOT_CARGO,
+                    TOOLCHAIN,
+                    MAKEFILE,
+                )
+                + documents(c, *DOCS)
             ),
         ),
         (
@@ -457,10 +487,14 @@ def self_test() -> int:
     cases = {
         "python/src/lib.rs": every_path | {"rust", "doc", "features", "mirrors", "python"},
         "src/model/block.rs": every_path
-        | {"rust", "test", "doc", "features", "mirrors", "python", "fuzz"},
+        | {"rust", "test", "doc", "features", "mirrors", "python", "fuzz", "examples"},
         "src/limits.rs": every_path
-        | {"rust", "test", "doc", "features", "mirrors", "python", "fuzz"},
-        "src/formats/rtf/mod.rs": every_path | {"rust", "test", "doc", "features"},
+        | {"rust", "test", "doc", "features", "mirrors", "python", "fuzz", "examples"},
+        "src/formats/rtf/mod.rs": every_path | {"rust", "test", "doc", "features", "examples"},
+        "README.md": every_path | {"python", "examples", "mirrors"},
+        "docs/guide/ocr.md": every_path | {"python", "examples", "mirrors"},
+        "ocr-local/README.md": every_path | {"python", "examples", "mirrors"},
+        "docs/support.md": every_path | {"mirrors"},
         "tests/fixture-src/book.md": every_path | {"test", "fixtures"},
         "tests/fixtures/docx/handmade-rich.docx": every_path | {"test", "fixtures", "python"},
         "tests/fixtures/docx/other.docx": every_path | {"test", "fixtures"},
@@ -472,7 +506,7 @@ def self_test() -> int:
         "tests/snapshots/snapshots__docx__other.docx.diagnostics.snap": every_path | {"test"},
         "fuzz/fuzz_targets/xlsx.rs": every_path | {"rust", "fuzz"},
         "fuzz/Cargo.lock": every_path | {"fuzz", "policy", "locks"},
-        "ocr-local/src/lib.rs": every_path | {"rust", "test", "doc"},
+        "ocr-local/src/lib.rs": every_path | {"rust", "test", "doc", "examples"},
         "ocr-local/tests/native.rs": every_path | {"rust", "test", "doc"},
         "ocr-local/Cargo.toml": every_path
         | {"rust", "test", "doc", "policy", "locks", "licences"},
@@ -624,7 +658,19 @@ def self_test() -> int:
             failures.append(f"commit {label}: {found.status}, expected {expected} {finding}")
         if {path for path, _, _ in scan.call_args.args[0]} != {"commit:abc123"}:
             failures.append(f"commit {label}: scanner label is influenced by the subject")
-    count = len(cases) + len(readings) + len(lint_cases) + len(commit_cases) + 4
+    sent = []
+    with (
+        patch(__name__ + ".needs", return_value=None),
+        patch(
+            __name__ + ".run", side_effect=lambda *a, env=None: sent.append(a) or Outcome("PASS")
+        ),
+    ):
+        examples(Change("", []))
+    doctest = ("cargo", "test", "--locked", "--all-features", "--doc")
+    native = ("cargo", "test", "--locked", "--manifest-path", "ocr-local/Cargo.toml")
+    if sent != [doctest, (*native, "--all-features", "--doc")]:
+        failures.append(f"the examples gate runs {sent}")
+    count = len(cases) + len(readings) + len(lint_cases) + len(commit_cases) + 5
     print("\n".join(failures) or f"self-test: {count} cases pass")
     return 1 if failures else 0
 
