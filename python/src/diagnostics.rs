@@ -21,8 +21,8 @@ impl Diagnostic {
     }
 
     /// The code's fixed class: `omitted` by a policy, `deferred` behind a
-    /// placeholder, `lost`, or `info`; only `lost` makes a conversion
-    /// incomplete.
+    /// placeholder or gap, `lost`, or `info`; only `lost` raises
+    /// `IncompleteError` under `OnLoss.FAIL`.
     #[getter]
     fn loss_class(&self) -> &'static str {
         self.0.class.as_str()
@@ -34,7 +34,7 @@ impl Diagnostic {
         self.0.region.as_str()
     }
 
-    /// The 1-based page, slide, sheet or chapter it sat in, or `None` across
+    /// The 1-based page, slide, sheet or spine item it sat in, or `None` across
     /// the document.
     #[getter]
     fn unit(&self) -> Option<u32> {

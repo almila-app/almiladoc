@@ -657,6 +657,9 @@ fn unsupported_table_context_refuses_atomically_and_engines_use_the_same_owner()
     );
     nested.fill_gap(id, GapFill::Markdown("ordinary fill".into())).unwrap();
     assert!(nested.render().unwrap().markdown().contains("ordinary fill"));
+    let mut inside = parsed(&converter, &bytes);
+    assert_eq!(inside.ocr(&Tables(MERGED), None), Ok(summary(0, 1, 0)));
+    assert_eq!(counts(&inside, DiagnosticCode::OcrFailed), 1);
     let mut engine = parsed(&converter, &pictures(1, 8));
     assert_eq!(engine.ocr(&Tables(MERGED), None), Ok(summary(1, 0, 0)));
     assert!(engine.render().unwrap().markdown().contains(MERGED));

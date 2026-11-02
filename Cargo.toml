@@ -72,6 +72,10 @@ include = ["/src", "/README.md", "/LICENSE", "/LICENSES", "/NOTICE", "/REUSE.tom
 [lints]
 workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dev-dependencies]
 dhat = "0.3.3"
 insta = "1.49.0"

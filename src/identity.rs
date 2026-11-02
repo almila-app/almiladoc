@@ -18,7 +18,8 @@ pub struct EngineIdentity {
     /// The crate version.
     pub version: &'static str,
     /// The lowercase hex SHA-256 of `key=value;` pairs, one per output-shaping [`Config`]
-    /// field in declaration order; default content policies, `limits` and `threads` are omitted.
+    /// field in declaration order: `on_loss`, `images` and `image_ocr` always, each other
+    /// content policy only when not at its default, `limits` and `threads` never.
     pub config_fingerprint: String,
 }
 

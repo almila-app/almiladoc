@@ -539,6 +539,23 @@ fn release_builds_check_overflow_and_unwind() {
     assert!(found.is_empty(), "{}", found.join("\n"));
 }
 
+#[test]
+fn docs_rs_documents_every_feature() {
+    let manifest = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let docs_rs: Vec<String> = manifest
+        .lines()
+        .skip_while(|line| line.trim() != "[package.metadata.docs.rs]")
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .map(|line| line.split('#').next().unwrap_or_default().replace([' ', '\t'], ""))
+        .collect();
+    for setting in ["all-features=true", r#"rustdoc-args=["--cfg","docsrs"]"#] {
+        assert!(docs_rs.iter().any(|line| line == setting), "docs.rs lacks {setting}");
+    }
+    let lib = std::fs::read_to_string(root().join("src/lib.rs")).unwrap();
+    assert!(lib.contains("#![cfg_attr(docsrs, feature(doc_cfg))]"));
+}
+
 mod self_test {
     use super::*;
 

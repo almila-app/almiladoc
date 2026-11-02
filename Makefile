@@ -233,7 +233,7 @@ fuzz: $(CARGO_FUZZ) $(AGE) $(AGE_KEYGEN)
 	  if [ -f dicts/$$target.dict ]; then dictionary=-dict=dicts/$$target.dict; fi
 	  cargo fuzz run --target "$$host" $$target seeds/$$target regressions/$$target -- -runs=0 $$dictionary
 	done
-	RUSTDOCFLAGS="$$RUSTDOCFLAGS --cfg docsrs" cargo doc --locked --manifest-path ../Cargo.toml --no-deps
+	RUSTDOCFLAGS="$$RUSTDOCFLAGS --cfg docsrs" cargo doc --locked --manifest-path ../Cargo.toml --no-deps --all-features
 
 fuzz-campaign: $(CARGO_FUZZ) $(AGE)
 	$(call need_tool,$(CARGO_FUZZ))

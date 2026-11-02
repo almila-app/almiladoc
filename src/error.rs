@@ -56,14 +56,16 @@ pub enum ConvertError {
         /// where the PDF engine does not say.
         max: u64,
     },
-    /// Some pages of a PDF await OCR, which almiladoc does not do, and the
-    /// configuration's [`OnLoss`](crate::OnLoss) is `Fail`. It is raised
-    /// before [`ConvertError::Incomplete`], so output missing those pages
-    /// never passes as complete.
+    /// Some pages of a PDF have a gap that awaits OCR or whose OCR failed
+    /// ([`Parsed::fail_gap`](crate::Parsed::fail_gap),
+    /// [`Parsed::ocr`](crate::Parsed::ocr)), and the configuration's
+    /// [`OnLoss`](crate::OnLoss) is `Fail`. It is raised on rendering, before
+    /// [`ConvertError::Incomplete`], so output missing those pages never passes as
+    /// complete.
     #[error("{}", needs_ocr(pages, *page_count))]
     #[non_exhaustive]
     NeedsOcr {
-        /// 1-indexed pages that need OCR.
+        /// 1-indexed pages whose gap is not filled.
         pages: Vec<u32>,
         /// Pages in the document.
         page_count: u32,

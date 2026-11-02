@@ -71,8 +71,9 @@ class ConfigError(ValueError):
     `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`, or a zero
     `max_bytes`."""
     ceiling: int | None
-    """The highest value the limit accepts, for a limit with a ceiling
-    (`max_nesting_depth`); `None` otherwise."""
+    """The highest value the limit accepts, set only when the value passed
+    exceeds it (`max_nesting_depth` over 1024, `max_pages` over 4294967295);
+    `None` otherwise, a zero included."""
     max: int | None
     """The most threads one call may run on, for `threads`; `None`
     otherwise."""
@@ -99,11 +100,12 @@ class UnsupportedError(ConvertError):
     named, to retry with; `None` otherwise."""
 
 class NeedsOcrError(ConvertError):
-    """Pages of a PDF await OCR, which almiladoc does not do, under
-    `OnLoss.FAIL`; it is raised before `IncompleteError`."""
+    """Pages of a PDF have a gap that awaits OCR or whose OCR failed, under
+    `OnLoss.FAIL`; it is raised on conversion or `Parsed.render`, before
+    `IncompleteError`."""
 
     pages: list[int]
-    """1-indexed pages that need OCR."""
+    """1-indexed pages whose gap is not filled."""
     page_count: int
     """Pages in the document."""
 
@@ -163,7 +165,8 @@ class OnLoss:
     """What a conversion does once some content was lost."""
 
     FAIL: ClassVar[OnLoss]
-    """Raise `IncompleteError` with the diagnostics."""
+    """Raise `NeedsOcrError` for a PDF page gap not filled, else `IncompleteError`
+    with the diagnostics once content was lost."""
     REPORT: ClassVar[OnLoss]
     """Return the `Conversion`, whose `is_complete` is false."""
 
@@ -172,15 +175,20 @@ class ImagePolicy:
     """How images appear in Markdown without fetching their content."""
 
     PLACEHOLDER: ClassVar[ImagePolicy]
+    """Retain its position as an asset reference, source link or visible marker."""
     ALT_TEXT: ClassVar[ImagePolicy]
+    """Render its alternative text, or `Image` when no text is supplied."""
     OMIT: ClassVar[ImagePolicy]
+    """Render nothing for the image."""
 
 @final
 class CommentPolicy:
     """Whether supported comments appear as isolated GFM footnotes."""
 
     OMIT: ClassVar[CommentPolicy]
+    """Count source references without reading comment parts."""
     EMIT: ClassVar[CommentPolicy]
+    """Preserve comments as GFM footnotes, with replies inside their parent."""
     def __repr__(self) -> str: ...
 
 @final
@@ -188,7 +196,9 @@ class HiddenPolicy:
     """Whether supported hidden source content appears in the output."""
 
     OMIT: ClassVar[HiddenPolicy]
+    """Count hidden content without reading its side parts."""
     EMIT: ClassVar[HiddenPolicy]
+    """Preserve supported hidden text, structures and units."""
     def __repr__(self) -> str: ...
 
 @final
@@ -196,7 +206,9 @@ class RevisionPolicy:
     """Which tracked text revision view appears in the output."""
 
     ACCEPT: ClassVar[RevisionPolicy]
+    """Keep inserted text and remove deleted text."""
     REJECT: ClassVar[RevisionPolicy]
+    """Keep deleted text and remove inserted text."""
     def __repr__(self) -> str: ...
 
 @final
@@ -204,37 +216,52 @@ class HeaderFooterPolicy:
     """Whether supported headers and footers appear in the output."""
 
     OMIT: ClassVar[HeaderFooterPolicy]
+    """Count omitted source values without reading them."""
     EMIT: ClassVar[HeaderFooterPolicy]
+    """Preserve their content, page-dependent fields as fixed tokens, in labelled
+    blockquotes."""
 
 @final
 class ImageOcr:
     """Which images a parse leaves a gap after for the caller's OCR: `NONE`,
     or `ALL`, every embedded PNG or JPEG judged by its bytes, each other image
     counting `image_not_ocred`. The image itself still appears as
-    `ImagePolicy` says."""
+    `ImagePolicy` says. A PDF's images get no gap: its pages do, as
+    `PdfScanPolicy` and `ocr_pages` say."""
 
     NONE: ClassVar[ImageOcr]
+    """No image."""
     ALL: ClassVar[ImageOcr]
+    """Every embedded PNG or JPEG outside a PDF."""
 
 @final
 class PdfScanPolicy:
     """Which PDF pages a parse treats as scans, for the caller's OCR:
-    `CONSERVATIVE`, an image and no readable text, or only furniture or
-    margin text over at least half the page; `COVERAGE_FIRST`, those pages
-    and every page at least half covered by images whatever native text it
-    holds, which OCR then replaces. Other formats ignore it."""
+    `CONSERVATIVE`, a page with an image and no readable text, or one at
+    least half covered by images whose only text is margin text or running
+    heads and folios (at 90% coverage or more, text that recurs on other
+    pages too); `COVERAGE_FIRST`, those pages and every page at least half
+    covered by images whatever native text it holds, which OCR then replaces.
+    Other formats ignore it."""
 
     CONSERVATIVE: ClassVar[PdfScanPolicy]
+    """A page with an image and no readable text, or one at least half covered
+    by images whose only text is margin text or running heads and folios; at
+    90% coverage or more, text that recurs on other pages also qualifies."""
     COVERAGE_FIRST: ClassVar[PdfScanPolicy]
+    """The conservative pages, and every page at least half covered by images
+    whatever native text it holds, which OCR then replaces."""
 
 @final
 class Limits:
     """The safety limits of one `Converter`, frozen; each crossing raises
     `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
-    than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
-    almiladoc's own default, and must be at least 1; `max_nesting_depth` at
-    most 1024 and `max_pages` at most 4294967295. A field out of range raises
-    `ConfigError`."""
+    than `max_work`, which raises `GapRefused`. Every field is keyword-only,
+    defaults to almiladoc's own default (stated on the field and listed by
+    `repr(Limits())`) and must be at least 1; `max_nesting_depth` at most 1024
+    and `max_pages` at most 4294967295. A field below 0 or too big for 64 bits
+    raises `OverflowError`, a non-int one, `None` included, `TypeError`, and
+    any other one out of range `ConfigError`."""
 
     def __new__(
         cls,
@@ -260,74 +287,82 @@ class Limits:
     @property
     def max_entry_bytes(self) -> int:
         """Decompressed bytes of one archive entry, OfficeArt picture, embedded
-        OLE object or compound-file stream."""
+        OLE object or compound-file stream. Default 128 MiB."""
     @property
     def max_total_bytes(self) -> int:
         """Decompressed bytes one parse inflates (archive entries, OfficeArt
-        pictures and embedded OLE objects)."""
+        pictures and embedded OLE objects). Default 512 MiB."""
     @property
     def max_entry_count(self) -> int:
-        """Entries in one archive."""
+        """Entries in one archive. Default 100,000."""
     @property
     def max_nesting_depth(self) -> int:
-        """Nesting depth of input structure and of the parsed document, at
-        most 1024."""
+        """Nesting depth of XML elements, RTF groups, Word fields and equation
+        records in the input, and of the parsed document's lists, cells, quotes
+        and links, at most 1024. Default 256."""
     @property
     def max_xml_nodes(self) -> int:
-        """XML nodes one part or opted-in OCR table fragment holds at once."""
+        """XML nodes one part or opted-in OCR table fragment holds at once. Default 2,000,000."""
     @property
     def max_grid_slots(self) -> int:
-        """Grid positions the tables of one parse materialize together."""
+        """Grid positions the tables of one parse materialize together, every
+        table but a CSV's. Default 4,000,000."""
     @property
     def max_expansion(self) -> int:
         """Content-bearing cells a span or repeat expansion produces per
-        table."""
+        table. Default 4,000,000."""
     @property
     def max_expansion_text_bytes(self) -> int:
-        """Text bytes repeat expansion duplicates per document."""
+        """Text bytes OpenDocument table repeats duplicate per document. Default 64 MiB."""
     @property
     def max_asset_total_bytes(self) -> int:
-        """Bytes of embedded assets one document retains."""
+        """Bytes of embedded assets one document retains. Default 128 MiB."""
     @property
     def max_record_depth(self) -> int:
-        """Nesting depth of binary record containers."""
+        """Nesting depth of binary record containers. Default 64."""
     @property
     def max_records(self) -> int:
-        """Binary records visited in one record stream."""
+        """Binary records visited in one record stream. Default 16,000,000."""
     @property
     def max_input_bytes(self) -> int:
-        """Bytes of one input, checked before it is copied or read."""
+        """Bytes of one input, checked before it is copied or read. Default 256 MiB."""
     @property
     def max_compression_ratio(self) -> int:
         """Ratio of an archive entry's, OfficeArt picture's or embedded OLE
-        object's decompressed to compressed size."""
+        object's decompressed to compressed size. Default 1,000."""
     @property
     def max_output_bytes(self) -> int:
-        """Markdown or JSON bytes one call writes."""
+        """Markdown or JSON bytes one call writes. Default 256 MiB."""
     @property
     def max_work(self) -> int:
-        """Work units one call charges, bounding its time deterministically."""
+        """Work units one conversion charges over its whole life, bounding its
+        time deterministically: a `Parsed` keeps the count, each `ocr_requests`,
+        `ocr` batch and fill adding to it, and each `render` or `to_json`
+        charging on from it without adding to it. Default 536,870,912."""
     @property
     def max_pages(self) -> int:
         """Slides, sheets, spine items and PDF pages one document holds, each
         numbered by its place in the document's list, at most 4294967295; a
-        PDF declaring more is refused before any page is read."""
+        PDF declaring more is refused before any page is read. Default 100,000."""
     @property
     def max_ocr_text_bytes(self) -> int:
         """Bytes of one gap's fill, past which `Parsed.fill_gap` raises
-        `GapRefused`; located lines also count 32 bytes per box."""
+        `GapRefused`; located lines also count 32 bytes per box. Default 1 MiB."""
 
 @final
 class Config:
     """The configuration of one `Converter`, frozen and keyword-only: its
-    `Limits`, the threads each call runs on (1 to 64; no reader uses more
-    than one), what a loss does, how images appear, which leave gaps for
-    OCR and which PDF pages count as scans. Omitted fields, and `None`, take
-    almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL`,
-    `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`,
-    `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and
-    `RevisionPolicy.ACCEPT`.
-    A thread count out of range raises `ConfigError`."""
+    `Limits`, the threads each call runs on (1 to 64; only `Parsed.ocr_requests`
+    and `Parsed.ocr`, which the `ocr` of `Converter.convert` and
+    `Converter.convert_path` runs, use more than one, painting PDF pages at
+    once), what a loss does, how images appear, which leave gaps for OCR and
+    which PDF pages count as scans. Omitted fields take almiladoc's defaults:
+    `Limits()`, 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`,
+    `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`, `HeaderFooterPolicy.OMIT`,
+    `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and `RevisionPolicy.ACCEPT`; so
+    does `None`, for every field but `threads`. `threads` below 0 or too big
+    for 64 bits raises `OverflowError`, a non-int, `None` included,
+    `TypeError`, and any other value outside 1 to 64 `ConfigError`."""
 
     def __new__(
         cls,
@@ -402,14 +437,14 @@ class Diagnostic:
     @property
     def loss_class(self) -> str:
         """The code's fixed class: `omitted` by a policy, `deferred` behind a
-        placeholder, `lost`, or `info`; only `lost` makes a conversion
-        incomplete."""
+        placeholder or gap, `lost`, or `info`; only `lost` raises
+        `IncompleteError` under `OnLoss.FAIL`."""
     @property
     def region(self) -> str:
         """Where the content sat, such as `body` or `note`."""
     @property
     def unit(self) -> int | None:
-        """The 1-based page, slide, sheet or chapter it sat in, or `None`
+        """The 1-based page, slide, sheet or spine item it sat in, or `None`
         across the document."""
     @property
     def count(self) -> int:
@@ -452,6 +487,7 @@ class OcrLine:
     """A literal horizontal line with finite normalized left, top, right, bottom bounds."""
 
     BOX_BYTES: ClassVar[int]
+    """32: the bytes each line counts against `max_ocr_text_bytes` besides its text."""
     def __new__(cls, text: str, bounds: tuple[float, float, float, float]) -> OcrLine: ...
     @property
     def text(self) -> str:
@@ -594,30 +630,53 @@ _OcrFailureKind = Literal[
 
 @final
 class OcrHttp:
-    """Reads gaps' images through an OpenAI-compatible vision server, posting
-    each to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the
-    `ocr` of `Converter.convert`, or `recognize`. `api_key` goes only over
-    `https` or to loopback; `prompt`, `None` for the default, asks for each
-    image's Markdown; `layout` places it: `image_then_text` or
-    `text_then_image` in one user message, or `developer_then_image` or
-    `system_then_image` in a message of its own before the image's;
-    `extra_body` adds JSON fields to each request; `max_tokens` is sent as
-    `token_limit_field`, `max_tokens` or `max_completion_tokens`, and
-    `temperature`, 0 to 2, unless `None`; `image_detail` sends `low`, `high`
-    or `auto` with each image; a reply must name `answer_model` when one is
-    set; the first of up to 4 `service_tiers` is sent, and a 429 whose error
-    code is among `tier_fallback`'s codes or whose message starts with its
-    prefix moves the request once to the next; `preserve_table_spans` makes
-    a reply a `fill_gap_tables` fill, failing a gap below the top level;
-    a page is painted as
-    `Parsed.ocr_requests` paints it at `dpi` and `max_pixels`, and `Parsed.ocr`
-    refuses an image over `max_bytes`, `None` for no bound; a request the
-    server cannot take yet is tried up to `retries` more times, at most 10;
-    and `concurrency`, 1 to 16, requests go out at once. A field out of range
-    raises `ConfigError` naming it. No socket opens before a request and no
-    redirect is followed. `root_certificates_pem` replaces Mozilla roots,
-    including for an HTTPS proxy; `proxy` explicitly selects an HTTP(S)
-    CONNECT proxy and requires HTTPS when `api_key` is set."""
+    """Reads gaps' images through an OpenAI-compatible vision server, posting each
+    to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the `ocr` of
+    `Converter.convert` and `Converter.convert_path`, or `recognize`. No socket
+    opens before a request and no redirect is followed. An int below 0, or too
+    big for its argument's unsigned 32- or 64-bit type, raises `OverflowError`,
+    a value of the wrong type `TypeError`, and any other field out of range
+    `ConfigError` naming it.
+
+    - `base_url`: `http` or `https` with a host and no userinfo, query or fragment.
+    - `api_key`: visible ASCII, sent as a bearer token only over `https` or to
+      loopback.
+    - `prompt`: what the model is asked of each image. `None` is "Transcribe all
+      text in this image as Markdown, keeping its headings, lists and tables, and
+      reply with the Markdown alone."
+    - `layout`: `image_then_text` or `text_then_image` in one user message, or
+      `developer_then_image` or `system_then_image` with the prompt in a message
+      of its own before the image's.
+    - `extra_body`: JSON fields added to each request, none of `messages`, `model`,
+      `max_tokens`, `max_completion_tokens`, `temperature`, `n`, `stream` and
+      `service_tier`.
+    - `max_tokens`: sent as `token_limit_field`, `max_tokens` or
+      `max_completion_tokens`. `temperature` is 0 to 2, or `None` to send none.
+    - `image_detail`: `low`, `high` or `auto`, sent with each image.
+    - `answer_model`: a reply must name it when one is set.
+    - `service_tiers`: up to 4 tokens of up to 32 letters, digits, `-` or `_`; the
+      first is sent.
+    - `tier_fallback`: `(codes, message_prefix)`, which needs at least 2
+      `service_tiers`, one code or a prefix, and at most 16 codes. A 429 whose
+      error code is among the codes or whose message starts with the prefix moves
+      the request to its next tier, each such 429 one tier on until the last.
+    - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, failing a gap
+      below the top level.
+    - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
+      paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
+      bound.
+    - `retries`: at most 10 more tries of a request the server cannot take yet,
+      each after 0.5 s doubling to 30 s, or its `Retry-After` seconds up to 60 s.
+    - `concurrency`: 1 to 16 requests at once.
+    - `root_certificates_pem`: certificates only, at most 1 MiB and 256 of them;
+      they replace Mozilla roots, including for an HTTPS proxy.
+    - `proxy`: an HTTP(S) CONNECT proxy URI of at most 8 KiB, requiring HTTPS when
+      `api_key` is set; without it connections are direct.
+
+    A reply body must be fewer than six times the request's `max_text_bytes` plus
+    64 KiB. Timeouts are fixed: 10 s to connect, 60 s to send the request,
+    60 s to send its body, 300 s to receive the response, 60 s to receive its
+    body."""
 
     def __new__(
         cls,
@@ -776,7 +835,8 @@ class OcrSummary:
         """Gaps filled."""
     @property
     def failed(self) -> int:
-        """Gaps failed: the engine failed them, or a limit refused their fill."""
+        """Gaps failed: the engine failed them, or their fill was refused by a
+        limit or for an invalid table."""
     @property
     def unattempted(self) -> int:
         """Gaps left for a later call: the engine did not attempt them, or a
@@ -805,18 +865,22 @@ class Parsed:
         `gaps` names raises `KeyError`, one filled or failed already
         `ValueError`, Markdown past `Limits.max_ocr_text_bytes`, nested past
         `max_nesting_depth` or whose tables may pass `max_grid_slots`
-        `GapRefused`, and work past `max_work` `ResourceLimitError`; each
-        leaves the document as it was."""
+        `GapRefused`, work past `max_work` `ResourceLimitError`, and a cancel of
+        the parse's token `CancelledError`; each leaves the document as it was."""
     def fill_gap_lines(self, gap: _GapRow, lines: collections.abc.Sequence[OcrLine]) -> None:
-        """Fill with literal lines, grouping columns and paragraphs in the core.
-        Text and 32 bytes per box must fit max_ocr_text_bytes; refusal changes nothing.
+        """Fill `gap` with literal `OcrLine` values, grouping columns and paragraphs in the core.
+        Text and 32 bytes per box must fit `max_ocr_text_bytes`; refusal leaves the gap unchanged.
 
-        Raises KeyError for an unknown gap, ValueError for a settled gap, GapRefused
-        for a fill bound, and conversion errors for fatal failures."""
+        Raises `KeyError` for an unknown gap, `ValueError` for a settled gap, `GapRefused`
+        past `max_ocr_text_bytes` or another per-fill limit, `ResourceLimitError` past
+        `max_work`, and `CancelledError` once the parse's token is cancelled."""
     def fill_gap_tables(self, gap: _GapRow, markdown: str) -> None:
-        """Fill a top-level gap with Markdown and standalone top-level HTML tables.
+        """Fill a top-level `gap` with Markdown and standalone top-level HTML tables.
         Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
-        Unsupported tables/context raise ValueError and per-fill limits GapRefused, atomically."""
+        Unsupported tables or context raise `ValueError`, per-fill limits `GapRefused`, work
+        past `max_work` `ResourceLimitError`, and a cancel of the parse's token
+        `CancelledError`, each leaving the gap unfilled. A gap no row of `gaps` names raises
+        `KeyError`, and one filled or failed already `ValueError`."""
     def fail_gap(self, gap: _GapRow) -> None:
         """Record that OCR of `gap`, a row of `gaps`, failed: `render` writes
         `<!-- ocr-failed page N -->` in a page's place and nothing after an
@@ -880,11 +944,11 @@ class Parsed:
         """Read the image of each gap of `gaps`, rows of `Parsed.gaps`, or of every
         gap when `None`, that `ocr_requests` would ask for, through `engine`, with
         the GIL released: in batches that fill or fail each gap as `fill_gap` and
-        `fail_gap` do, a fill a limit refuses failing its gap, until a batch
-        holds a gap the engine did not attempt, which stays for a later call. A
-        gap `ocr_requests` would refuse is no request: it stays unfilled and the
-        summary counts it as `refused`. Work past `max_work` raises
-        `ResourceLimitError`, and a cancel of the parse's token
+        `fail_gap` do, a fill refused by a limit or for an invalid table failing
+        its gap, until a batch holds a gap the engine did not attempt, which
+        stays for a later call. A gap `ocr_requests` would refuse is no request:
+        it stays unfilled and the summary counts it as `refused`. Work past
+        `max_work` raises `ResourceLimitError`, and a cancel of the parse's token
         `CancelledError`, each keeping what earlier batches settled."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
@@ -954,7 +1018,7 @@ class Converter:
     ) -> Parsed:
         """Parse `data`, as `convert` takes it, into the document model; a PDF's
         pages that await OCR and, under `ImageOcr.ALL`, each embedded PNG or
-        JPEG are its `gaps`."""
+        JPEG of any other format are its `gaps`."""
     def inspect(
         self,
         data: Buffer,

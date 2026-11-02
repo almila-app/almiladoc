@@ -73,7 +73,8 @@ pub struct OcrHttpConfig {
     /// Service tiers to ask for, at most 4 tokens of up to 32 ASCII letters, digits, `-` or
     /// `_`; the first is sent, and none when empty, as by default.
     pub service_tiers: Vec<String>,
-    /// Which `429` replies move a request once to its next service tier; none by default.
+    /// Which `429` replies move a request to its next service tier, each matching one again
+    /// until the last; none by default.
     pub tier_fallback: Option<TierFallback>,
     /// Whether a reply fills as [`GapFill::MarkdownTables`], keeping its HTML table spans but
     /// failing a gap below the top level, rather than [`GapFill::Markdown`]; false by default.
@@ -183,8 +184,10 @@ impl fmt::Debug for Redacted<'_> {
 /// A 413, a reply past its cap, a refusal or an unfinished reply fails its gap; any other
 /// failure leaves it unattempted, its [`OcrFailureKind`] naming why. It follows no redirect,
 /// uses only an explicitly configured proxy, verifies TLS against Mozilla or the caller's
-/// replacement roots on rustls' process-wide provider or ring, and reads a reply body of under
-/// six times the request's `max_text_bytes` and 64 KiB.
+/// replacement roots on rustls' process-wide provider or ring, and reads a reply body of fewer
+/// than six times the request's `max_text_bytes` plus 64 KiB. Its timeouts are fixed: 10 s
+/// to connect, 60 s to send the request, 60 s to send its body, 300 s to receive the response
+/// and 60 s to receive its body.
 ///
 /// Each call opens connections of its own, which a cancel closes at once, so the requests in
 /// flight end as [`OcrFailureKind::Cancelled`]; a connect in progress first runs on to its

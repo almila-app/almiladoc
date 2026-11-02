@@ -270,8 +270,8 @@ impl Parsed {
     /// `gaps` names raises `KeyError`, one filled or failed already
     /// `ValueError`, Markdown past `Limits.max_ocr_text_bytes`, nested past
     /// `max_nesting_depth` or whose tables may pass `max_grid_slots`
-    /// `GapRefused`, and work past `max_work` `ResourceLimitError`; each
-    /// leaves the document as it was.
+    /// `GapRefused`, work past `max_work` `ResourceLimitError`, and a cancel of
+    /// the parse's token `CancelledError`; each leaves the document as it was.
     fn fill_gap(
         &self,
         py: Python<'_>,
@@ -283,7 +283,10 @@ impl Parsed {
 
     /// Fill a top-level `gap` with Markdown and standalone top-level HTML tables.
     /// Only table/tr/td, text and positive spans are accepted; merged cells render as safe HTML.
-    /// Unsupported tables/context raise `ValueError`, per-fill limits `GapRefused`, atomically.
+    /// Unsupported tables or context raise `ValueError`, per-fill limits `GapRefused`, work
+    /// past `max_work` `ResourceLimitError`, and a cancel of the parse's token
+    /// `CancelledError`, each leaving the gap unfilled. A gap no row of `gaps` names raises
+    /// `KeyError`, and one filled or failed already `ValueError`.
     fn fill_gap_tables(
         &self,
         py: Python<'_>,
@@ -297,7 +300,8 @@ impl Parsed {
     /// Text and 32 bytes per box must fit `max_ocr_text_bytes`; refusal leaves the gap unchanged.
     ///
     /// Raises `KeyError` for an unknown gap, `ValueError` for a settled gap, `GapRefused`
-    /// for a fill bound, and conversion errors for fatal failures.
+    /// past `max_ocr_text_bytes` or another per-fill limit, `ResourceLimitError` past
+    /// `max_work`, and `CancelledError` once the parse's token is cancelled.
     fn fill_gap_lines(
         &self,
         py: Python<'_>,
@@ -434,11 +438,11 @@ impl Parsed {
     /// Read the image of each gap of `gaps`, rows of `Parsed.gaps`, or of every
     /// gap when `None`, that `ocr_requests` would ask for, through `engine`, with
     /// the GIL released: in batches that fill or fail each gap as `fill_gap` and
-    /// `fail_gap` do, a fill a limit refuses failing its gap, until a batch
-    /// holds a gap the engine did not attempt, which stays for a later call. A
-    /// gap `ocr_requests` would refuse is no request: it stays unfilled and the
-    /// summary counts it as `refused`. Work past `max_work` raises
-    /// `ResourceLimitError`, and a cancel of the parse's token
+    /// `fail_gap` do, a fill refused by a limit or for an invalid table failing
+    /// its gap, until a batch holds a gap the engine did not attempt, which
+    /// stays for a later call. A gap `ocr_requests` would refuse is no request:
+    /// it stays unfilled and the summary counts it as `refused`. Work past
+    /// `max_work` raises `ResourceLimitError`, and a cancel of the parse's token
     /// `CancelledError`, each keeping what earlier batches settled.
     #[pyo3(signature = (engine, gaps = None))]
     fn ocr(
@@ -542,7 +546,7 @@ impl Converter {
 
     /// Parse `data`, as `convert` takes it, into the document model; a PDF's
     /// pages that await OCR and, under `ImageOcr.ALL`, each embedded PNG or
-    /// JPEG are its `gaps`.
+    /// JPEG of any other format are its `gaps`.
     #[pyo3(signature = (data, format = None, *, cancel = None, ocr_pages = None))]
     fn parse(
         &self,

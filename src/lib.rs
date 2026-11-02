@@ -13,8 +13,12 @@
 //! What a conversion cannot carry into its output is reported as
 //! [`Diagnostics`]: content [`Lost`](LossClass::Lost) fails the conversion
 //! with [`ConvertError::Incomplete`] under the default [`OnLoss::Fail`], and
-//! [`OnLoss::Report`] returns it beside the Markdown. Every piece of input
-//! skipped or repaired on the way is reported in [`Diagnostics`] too.
+//! [`OnLoss::Report`] returns it beside the Markdown. Under [`OnLoss::Fail`] a
+//! PDF page gap left unfilled or failed raises [`ConvertError::NeedsOcr`]
+//! first: it is [`Deferred`](LossClass::Deferred), not lost. Every piece of
+//! input skipped or repaired on the way is reported in [`Diagnostics`] too.
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod model;
 
@@ -108,9 +112,12 @@ pub enum Format {
     /// OpenDocument Text (`.odt`).
     Odt,
     /// Read page by page with [unpdf], each page a unit; a build without the
-    /// `pdf` feature converts none. A scanned or image-only page becomes a
-    /// [`Gap`](model::Gap) awaiting OCR, which almiladoc does not do: under
-    /// [`OnLoss::Fail`] the document errors with [`ConvertError::NeedsOcr`]
+    /// `pdf` feature converts none. A page whose own text does not stand for
+    /// what it shows (scanned or image-only, invisible, garbled, vector-drawn
+    /// or unreadable text) or that [`Input::with_ocr_pages`] selects becomes a
+    /// [`Gap`](model::Gap) for the caller's OCR, run by [`Parsed::ocr`] or
+    /// [`Converter::convert_with_ocr`]. Rendering with such a gap unfilled or
+    /// failed errors under [`OnLoss::Fail`] with [`ConvertError::NeedsOcr`]
     /// naming those pages.
     ///
     /// [unpdf]: https://docs.rs/unpdf

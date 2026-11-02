@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use crate::diagnostics::Diagnostics;
 use crate::model::GapReason;
 
-/// A PDF's container facts, its pages' verdicts and the diagnostics its parse reports.
+/// A PDF's pages, each with its verdict, and the diagnostics its parse reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Inspection {

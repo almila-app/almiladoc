@@ -29,8 +29,9 @@ pub(crate) mod exceptions {
         "A `Limits`, `Config` or `OcrHttp` field, or a raster spec, is out of \
          range. `limit` names the field (`threads` for the thread count, \
          `raster` for a raster spec's `dpi` and `max_pixels`); `ceiling` is the \
-         highest value a limit with one accepts and `max` the most threads, each \
-         `None` where it does not apply."
+         highest value `max_nesting_depth` or `max_pages` accepts, set only when \
+         the value passed exceeds it (a zero leaves it `None`), and `max` the most \
+         threads; each is `None` otherwise."
     );
 
     create_exception!(
@@ -67,9 +68,10 @@ pub(crate) mod exceptions {
         almiladoc,
         NeedsOcrError,
         ConvertError,
-        "Pages of a PDF await OCR, which almiladoc does not do, under \
-         `OnLoss.FAIL`; it is raised before `IncompleteError`. `pages` lists them \
-         (1-indexed) and `page_count` is the length of the document."
+        "Pages of a PDF have a gap that awaits OCR or whose OCR failed, under \
+         `OnLoss.FAIL`; it is raised on conversion or `Parsed.render`, before \
+         `IncompleteError`. `pages` lists them (1-indexed) and `page_count` is \
+         the length of the document."
     );
 
     create_exception!(

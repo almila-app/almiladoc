@@ -439,30 +439,53 @@ impl OcrRefusal {
     }
 }
 
-/// Reads gaps' images through an OpenAI-compatible vision server, posting
-/// each to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the
-/// `ocr` of `Converter.convert`, or `recognize`. `api_key` goes only over
-/// `https` or to loopback; `prompt`, `None` for the default, asks for each
-/// image's Markdown; `layout` places it: `image_then_text` or
-/// `text_then_image` in one user message, or `developer_then_image` or
-/// `system_then_image` in a message of its own before the image's;
-/// `extra_body` adds JSON fields to each request; `max_tokens` is sent as
-/// `token_limit_field`, `max_tokens` or `max_completion_tokens`, and
-/// `temperature`, 0 to 2, unless `None`; `image_detail` sends `low`, `high`
-/// or `auto` with each image; a reply must name `answer_model` when one is
-/// set; the first of up to 4 `service_tiers` is sent, and a 429 whose error
-/// code is among `tier_fallback`'s codes or whose message starts with its
-/// prefix moves the request once to the next; `preserve_table_spans` makes
-/// a reply a `fill_gap_tables` fill, failing a gap below the top level;
-/// a page is painted as
-/// `Parsed.ocr_requests` paints it at `dpi` and `max_pixels`, and `Parsed.ocr`
-/// refuses an image over `max_bytes`, `None` for no bound; a request the
-/// server cannot take yet is tried up to `retries` more times, at most 10;
-/// and `concurrency`, 1 to 16, requests go out at once. A field out of range
-/// raises `ConfigError` naming it. No socket opens before a request and no
-/// redirect is followed. `root_certificates_pem` replaces Mozilla roots,
-/// including for an HTTPS proxy; `proxy` explicitly selects an HTTP(S)
-/// CONNECT proxy and requires HTTPS when `api_key` is set.
+/// Reads gaps' images through an OpenAI-compatible vision server, posting each
+/// to `base_url`'s `chat/completions` with `model`: for `Parsed.ocr`, the `ocr` of
+/// `Converter.convert` and `Converter.convert_path`, or `recognize`. No socket
+/// opens before a request and no redirect is followed. An int below 0, or too
+/// big for its argument's unsigned 32- or 64-bit type, raises `OverflowError`,
+/// a value of the wrong type `TypeError`, and any other field out of range
+/// `ConfigError` naming it.
+///
+/// - `base_url`: `http` or `https` with a host and no userinfo, query or fragment.
+/// - `api_key`: visible ASCII, sent as a bearer token only over `https` or to
+///   loopback.
+/// - `prompt`: what the model is asked of each image. `None` is "Transcribe all
+///   text in this image as Markdown, keeping its headings, lists and tables, and
+///   reply with the Markdown alone."
+/// - `layout`: `image_then_text` or `text_then_image` in one user message, or
+///   `developer_then_image` or `system_then_image` with the prompt in a message
+///   of its own before the image's.
+/// - `extra_body`: JSON fields added to each request, none of `messages`, `model`,
+///   `max_tokens`, `max_completion_tokens`, `temperature`, `n`, `stream` and
+///   `service_tier`.
+/// - `max_tokens`: sent as `token_limit_field`, `max_tokens` or
+///   `max_completion_tokens`. `temperature` is 0 to 2, or `None` to send none.
+/// - `image_detail`: `low`, `high` or `auto`, sent with each image.
+/// - `answer_model`: a reply must name it when one is set.
+/// - `service_tiers`: up to 4 tokens of up to 32 letters, digits, `-` or `_`; the
+///   first is sent.
+/// - `tier_fallback`: `(codes, message_prefix)`, which needs at least 2
+///   `service_tiers`, one code or a prefix, and at most 16 codes. A 429 whose
+///   error code is among the codes or whose message starts with the prefix moves
+///   the request to its next tier, each such 429 one tier on until the last.
+/// - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, failing a gap
+///   below the top level.
+/// - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
+///   paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
+///   bound.
+/// - `retries`: at most 10 more tries of a request the server cannot take yet,
+///   each after 0.5 s doubling to 30 s, or its `Retry-After` seconds up to 60 s.
+/// - `concurrency`: 1 to 16 requests at once.
+/// - `root_certificates_pem`: certificates only, at most 1 MiB and 256 of them;
+///   they replace Mozilla roots, including for an HTTPS proxy.
+/// - `proxy`: an HTTP(S) CONNECT proxy URI of at most 8 KiB, requiring HTTPS when
+///   `api_key` is set; without it connections are direct.
+///
+/// A reply body must be fewer than six times the request's `max_text_bytes` plus
+/// 64 KiB. Timeouts are fixed: 10 s to connect, 60 s to send the request,
+/// 60 s to send its body, 300 s to receive the response, 60 s to receive its
+/// body.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct OcrHttp(pub(crate) almiladoc::OcrHttp);
 
@@ -949,7 +972,8 @@ pub(crate) struct OcrSummary {
     /// Gaps filled.
     #[pyo3(get)]
     filled: usize,
-    /// Gaps failed: the engine failed them, or a limit refused their fill.
+    /// Gaps failed: the engine failed them, or their fill was refused by a
+    /// limit or for an invalid table.
     #[pyo3(get)]
     failed: usize,
     /// Gaps left for a later call: the engine did not attempt them, or a

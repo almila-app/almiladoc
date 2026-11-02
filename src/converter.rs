@@ -204,6 +204,33 @@ impl Converter {
     /// # Errors
     ///
     /// As those three calls fail.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use almiladoc::{
+    ///     CancelToken, Config, Converter, Format, GapFill, ImageOcr, Input, OcrEngine,
+    ///     OcrOutcome, OcrRequest,
+    /// };
+    ///
+    /// struct Dots;
+    ///
+    /// impl OcrEngine for Dots {
+    ///     fn recognize(&self, requests: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+    ///         requests.iter().map(|_| OcrOutcome::Fill(GapFill::Markdown("A dot".into()))).collect()
+    ///     }
+    /// }
+    ///
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/docx/text.docx");
+    /// let docx = std::fs::read(path)?;
+    /// let mut config = Config::default();
+    /// config.image_ocr = ImageOcr::All;
+    /// let converter = Converter::new(config)?;
+    /// let conversion = converter.convert_with_ocr(Input::new(&docx, Format::Docx), &Dots)?;
+    /// assert!(conversion.markdown().contains("A dot"));
+    /// assert!(conversion.is_complete());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn convert_with_ocr(
         &self,
         input: Input<'_>,
@@ -658,7 +685,8 @@ impl Parsed {
     /// or failed and ask for an image, in document order and in batches of its
     /// [`OcrEngine::batch_size`], all on one pool built from its [`Config`]. Each
     /// [`OcrOutcome`](crate::OcrOutcome) fills or fails its gap as [`Parsed::fill_gap`] and
-    /// [`Parsed::fail_gap`] do: a fill a limit refuses fails its gap, a batch answered by the
+    /// [`Parsed::fail_gap`] do: a fill refused for a limit ([`GapError::Refused`]) or for an
+    /// invalid table ([`GapError::InvalidTable`]) fails its gap, a batch answered by the
     /// wrong number of outcomes fails all of its gaps, a gap whose image cannot be made is left
     /// unfilled and counted in [`OcrSummary::refused`], and a batch with an unattempted gap is
     /// the last, its unattempted gaps left for a later call.

@@ -1058,3 +1058,14 @@ fn a_cancel_interrupts_a_request_in_flight_over_tls() {
     assert_eq!(outcomes, [unattempted(OcrFailureKind::Cancelled, None)]);
     assert!(peer.serving.join().unwrap().is_some_and(|(_, seen)| seen.is_some()));
 }
+
+#[test]
+fn python_quotes_the_default_prompt() {
+    let quoted = format!("\"{}\"", OcrHttpConfig::DEFAULT_PROMPT);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in ["python/src/ocr.rs", "python/almiladoc/_almiladoc.pyi"] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        let words: Vec<_> = text.split_whitespace().filter(|word| *word != "///").collect();
+        assert!(words.join(" ").contains(&quoted), "{path}");
+    }
+}

@@ -1187,6 +1187,8 @@ class ConfigTest(unittest.TestCase):
             (lambda: almiladoc.Limits(max_input_bytes=0), ("max_input_bytes", None, None)),
             (lambda: almiladoc.Limits(max_nesting_depth=1025), ("max_nesting_depth", 1024, None)),
             (lambda: almiladoc.Limits(max_pages=1 << 32), ("max_pages", (1 << 32) - 1, None)),
+            (lambda: almiladoc.Limits(max_nesting_depth=0), ("max_nesting_depth", None, None)),
+            (lambda: almiladoc.Limits(max_pages=0), ("max_pages", None, None)),
             (lambda: almiladoc.Config(threads=0), ("threads", None, 64)),
             (lambda: almiladoc.Config(threads=65), ("threads", None, 64)),
         ]
@@ -1204,8 +1206,19 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(almiladoc.Limits(max_pages=(1 << 32) - 1).max_pages, (1 << 32) - 1)
         self.assertEqual(almiladoc.Config(threads=64).threads, 64)
         self.assertEqual(almiladoc.Limits(max_work=U64_MAX).max_work, U64_MAX)
-        with self.assertRaises(OverflowError):
-            almiladoc.Limits(max_work=-1)
+        url = "http://localhost:1/v1"
+        for make, raised in [
+            (lambda: almiladoc.Limits(max_work=-1), OverflowError),
+            (lambda: almiladoc.Limits(max_work=U64_MAX + 1), OverflowError),
+            (lambda: almiladoc.Limits(max_work=None), TypeError),
+            (lambda: almiladoc.Config(threads=-1), OverflowError),
+            (lambda: almiladoc.Config(threads=None), TypeError),
+            (lambda: almiladoc.OcrHttp(url, "vision", retries=-1), OverflowError),
+            (lambda: almiladoc.OcrHttp(url, "vision", dpi=1 << 32), OverflowError),
+            (lambda: almiladoc.OcrHttp(url, "vision", max_pixels=None), TypeError),
+        ]:
+            with self.subTest(raised=raised), self.assertRaises(raised):
+                make()
 
     def test_detection_runs_under_the_converters_limits(self):
         package = unidentified_package()
@@ -1915,6 +1928,27 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(
             (almiladoc.Conversion.__doc__, documented), (ast.get_docstring(conversion), stubbed)
         )
+
+    def test_every_limit_states_its_default_in_the_stub_and_the_module(self):
+        stub = Path(almiladoc.__file__).with_name("_almiladoc.pyi")
+        [limits] = [
+            node
+            for node in ast.parse(stub.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.ClassDef) and node.name == "Limits"
+        ]
+        stubbed = {
+            node.name: ast.get_docstring(node)
+            for node in limits.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("max_")
+        }
+        defaults = almiladoc.Limits()
+        self.assertEqual(set(stubbed), {name for name in dir(defaults) if name.startswith("max_")})
+        for name, stubbed_doc in stubbed.items():
+            for doc in (stubbed_doc, getattr(almiladoc.Limits, name).__doc__.strip()):
+                self.assertRegex(doc, r"Default [\d,]+( MiB)?\.\Z", name)
+                figure, _, unit = doc.rpartition("Default ")[2].rstrip(".").partition(" ")
+                stated = int(figure.replace(",", "")) << (20 if unit else 0)
+                self.assertEqual(stated, getattr(defaults, name), name)
 
     def test_the_stubs_cover_the_module(self):
         self.assertTrue(Path(almiladoc.__file__).with_name("py.typed").is_file())

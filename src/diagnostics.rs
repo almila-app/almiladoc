@@ -184,7 +184,7 @@ impl fmt::Display for DiagnosticCode {
 }
 
 /// One aggregated diagnostic: `count` occurrences of `code` in `region`, in
-/// one `unit` (a 1-based page, slide, sheet or chapter) or across the
+/// one `unit` (a 1-based page, slide, sheet or spine item) or across the
 /// document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -370,7 +370,9 @@ mod serialize {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum OnLoss {
-    /// Fail with [`ConvertError::Incomplete`](crate::ConvertError::Incomplete).
+    /// Fail with [`ConvertError::NeedsOcr`](crate::ConvertError::NeedsOcr) for a PDF page gap not
+    /// filled, else with [`ConvertError::Incomplete`](crate::ConvertError::Incomplete) once
+    /// content was [`Lost`](LossClass::Lost).
     #[default]
     Fail,
     /// Return the conversion, whose

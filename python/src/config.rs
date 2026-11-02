@@ -8,8 +8,8 @@ use pyo3::prelude::*;
 use crate::errors::config_error;
 
 /// What a conversion does once some content was lost: `FAIL` raises
-/// `IncompleteError`, `REPORT` returns the `Conversion`, whose
-/// `is_complete` is false.
+/// `NeedsOcrError` for a PDF page gap not filled, else `IncompleteError`;
+/// `REPORT` returns the `Conversion`, whose `is_complete` is false.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct OnLoss(almiladoc::OnLoss);
@@ -140,7 +140,8 @@ impl ImagePolicy {
 /// Which images a parse leaves a gap after for the caller's OCR: `NONE`, or
 /// `ALL`, every embedded PNG or JPEG judged by its bytes, each other image
 /// counting `image_not_ocred`. The image itself still appears as
-/// `ImagePolicy` says.
+/// `ImagePolicy` says. A PDF's images get no gap: its pages do, as
+/// `PdfScanPolicy` and `ocr_pages` say.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct ImageOcr(almiladoc::ImageOcr);
@@ -162,10 +163,11 @@ impl ImageOcr {
     }
 }
 
-/// Which PDF pages a parse treats as scans, for the caller's OCR: `CONSERVATIVE`, an image and
-/// no readable text, or only furniture or margin text over at least half the page;
-/// `COVERAGE_FIRST`, those pages and every page at least half covered by images whatever native
-/// text it holds, which OCR then replaces. Other formats ignore it.
+/// Which PDF pages a parse treats as scans, for the caller's OCR: `CONSERVATIVE`, a page with an
+/// image and no readable text, or one at least half covered by images whose only text is margin
+/// text or running heads and folios (at 90% coverage or more, text that recurs on other pages
+/// too); `COVERAGE_FIRST`, those pages and every page at least half covered by images whatever
+/// native text it holds, which OCR then replaces. Other formats ignore it.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct PdfScanPolicy(almiladoc::PdfScanPolicy);
@@ -189,10 +191,12 @@ impl PdfScanPolicy {
 
 /// The safety limits of one `Converter`, frozen; each crossing raises
 /// `ResourceLimitError` naming it, bar one `Parsed.fill_gap` crosses other
-/// than `max_work`, which raises `GapRefused`. Every field is keyword-only, defaults to
-/// almiladoc's own default, and must be at least 1; `max_nesting_depth` at
-/// most 1024 and `max_pages` at most 4294967295. A field out of range raises
-/// `ConfigError`.
+/// than `max_work`, which raises `GapRefused`. Every field is keyword-only,
+/// defaults to almiladoc's own default (stated on the field and listed by
+/// `repr(Limits())`) and must be at least 1; `max_nesting_depth` at most 1024
+/// and `max_pages` at most 4294967295. A field below 0 or too big for 64 bits
+/// raises `OverflowError`, a non-int one, `None` included, `TypeError`, and
+/// any other one out of range `ConfigError`.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq)]
 pub(crate) struct Limits(pub(crate) almiladoc::Limits);
@@ -237,44 +241,66 @@ macro_rules! limits {
 limits! {
     /// Decompressed bytes of one archive entry, OfficeArt picture, embedded OLE object or
     /// compound-file stream.
+    /// Default 128 MiB.
     max_entry_bytes,
     /// Decompressed bytes one parse inflates (archive entries, OfficeArt pictures and embedded
     /// OLE objects).
+    /// Default 512 MiB.
     max_total_bytes,
     /// Entries in one archive.
+    /// Default 100,000.
     max_entry_count,
-    /// Nesting depth of input structure and of the parsed document, at most
-    /// 1024.
+    /// Nesting depth of XML elements, RTF groups, Word fields and equation
+    /// records in the input, and of the parsed document's lists, cells, quotes
+    /// and links, at most 1024.
+    /// Default 256.
     max_nesting_depth,
     /// XML nodes one part or opted-in OCR table fragment holds at once.
+    /// Default 2,000,000.
     max_xml_nodes,
-    /// Grid positions the tables of one parse materialize together.
+    /// Grid positions the tables of one parse materialize together, every
+    /// table but a CSV's.
+    /// Default 4,000,000.
     max_grid_slots,
     /// Content-bearing cells a span or repeat expansion produces per table.
+    /// Default 4,000,000.
     max_expansion,
-    /// Text bytes repeat expansion duplicates per document.
+    /// Text bytes OpenDocument table repeats duplicate per document.
+    /// Default 64 MiB.
     max_expansion_text_bytes,
     /// Bytes of embedded assets one document retains.
+    /// Default 128 MiB.
     max_asset_total_bytes,
     /// Nesting depth of binary record containers.
+    /// Default 64.
     max_record_depth,
     /// Binary records visited in one record stream.
+    /// Default 16,000,000.
     max_records,
     /// Bytes of one input, checked before it is copied or read.
+    /// Default 256 MiB.
     max_input_bytes,
     /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE object's decompressed to
     /// compressed size.
+    /// Default 1,000.
     max_compression_ratio,
     /// Markdown or JSON bytes one call writes.
+    /// Default 256 MiB.
     max_output_bytes,
-    /// Work units one call charges, bounding its time deterministically.
+    /// Work units one conversion charges over its whole life, bounding its
+    /// time deterministically: a `Parsed` keeps the count, each `ocr_requests`,
+    /// `ocr` batch and fill adding to it, and each `render` or `to_json`
+    /// charging on from it without adding to it.
+    /// Default 536,870,912.
     max_work,
     /// Slides, sheets, spine items and PDF pages one document holds, each
     /// numbered by its place in the document's list, at most 4294967295; a
     /// PDF declaring more is refused before any page is read.
+    /// Default 100,000.
     max_pages,
     /// Bytes of one gap's fill, past which `Parsed.fill_gap` raises
     /// `GapRefused`; located lines also count 32 bytes per box.
+    /// Default 1 MiB.
     max_ocr_text_bytes,
 }
 
@@ -285,14 +311,17 @@ impl Hash for Limits {
 }
 
 /// The configuration of one `Converter`, frozen and keyword-only: its
-/// `Limits`, the threads each call runs on (1 to 64; no reader uses more
-/// than one), what a loss does, how images appear, which leave gaps for
-/// OCR and which PDF pages count as scans. Omitted fields, and `None`, take
-/// almiladoc's defaults: `Limits()`, 1 thread, `OnLoss.FAIL`,
-/// `ImagePolicy.PLACEHOLDER`, `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`,
-/// `HeaderFooterPolicy.OMIT`, `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and
-/// `RevisionPolicy.ACCEPT`.
-/// A thread count out of range raises `ConfigError`.
+/// `Limits`, the threads each call runs on (1 to 64; only `Parsed.ocr_requests`
+/// and `Parsed.ocr`, which the `ocr` of `Converter.convert` and
+/// `Converter.convert_path` runs, use more than one, painting PDF pages at
+/// once), what a loss does, how images appear, which leave gaps for OCR and
+/// which PDF pages count as scans. Omitted fields take almiladoc's defaults:
+/// `Limits()`, 1 thread, `OnLoss.FAIL`, `ImagePolicy.PLACEHOLDER`,
+/// `ImageOcr.NONE`, `PdfScanPolicy.CONSERVATIVE`, `HeaderFooterPolicy.OMIT`,
+/// `CommentPolicy.OMIT`, `HiddenPolicy.OMIT` and `RevisionPolicy.ACCEPT`; so
+/// does `None`, for every field but `threads`. `threads` below 0 or too big
+/// for 64 bits raises `OverflowError`, a non-int, `None` included,
+/// `TypeError`, and any other value outside 1 to 64 `ConfigError`.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq)]
 pub(crate) struct Config(pub(crate) almiladoc::Config);

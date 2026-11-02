@@ -16,7 +16,8 @@ const MIB: u64 = 1024 * 1024;
 /// failing [`ConvertError::ResourceLimit`](crate::ConvertError::ResourceLimit)
 /// with its [`Limit`], or refusing a fill as the module documents.
 ///
-/// The defaults admit ordinary large documents.
+/// The defaults, which admit ordinary large documents, are stated on each field and built by
+/// [`Limits::default`].
 ///
 /// Limits and cancellation reach the PDF engine (unpdf) between pages and
 /// before each step of painting one: inside a page its stream decoding takes
@@ -28,13 +29,16 @@ pub struct Limits {
     /// Decompressed bytes of one archive entry, OfficeArt picture, embedded
     /// OLE object or compound-file stream: a decompression bomb hides in one
     /// entry.
+    /// Default 128 MiB.
     pub max_entry_bytes: u64,
     /// Decompressed bytes one parse inflates (archive entries, OfficeArt
     /// pictures and embedded OLE objects): a bomb spreads over many, a corrupt
     /// one too, which counts what it inflated before failing its checksum or
     /// deflate stream, once however many references name it.
+    /// Default 512 MiB.
     pub max_total_bytes: u64,
     /// Entries in one archive: each costs memory before any is read.
+    /// Default 100,000.
     pub max_entry_count: u64,
     /// Nesting depth of input structure (XML elements in a part, RTF groups,
     /// Word fields, an equation object's MTEF record lists) and of the parsed
@@ -42,15 +46,17 @@ pub struct Limits {
     /// and links, a gap's fill counted from the container the gap sits in:
     /// recursion over it needs stack in proportion. At most
     /// [`Limits::MAX_NESTING_CEILING`].
+    /// Default 256.
     pub max_nesting_depth: u64,
     /// XML nodes one part holds at once: each costs about 400 bytes once
     /// parsed. An xlsx worksheet holds its structure around the rows and one
     /// row at a time, so it bounds a row, not the row count.
+    /// Default 2,000,000.
     pub max_xml_nodes: u64,
     /// Grid positions the tables of one parse materialize together, covered
     /// and padding ones too, and the positions a span claims in rows its
     /// table never supplies: spans, merges and repeats address far more
-    /// cells than the input holds. Every DOCX, PPTX, ODF, EPUB, RTF, DOC, XLSX,
+    /// cells than the input holds. Every DOCX, PPTX, ODF, EPUB, RTF, DOC, PDF, XLSX,
     /// XLSB and XLS table counts, and a DrawingML chart's: a header row and a
     /// row per category, each with a category cell and a cell per series,
     /// admitted before the table is built. A CSV's table does not. An xlsx,
@@ -58,27 +64,35 @@ pub struct Limits {
     /// too, count against the positions left as its rows and records stream.
     /// A gap's fill counts the cells its tables may hold, padding included,
     /// before it is parsed, against the whole limit.
+    /// Default 4,000,000.
     pub max_grid_slots: u64,
     /// Content-bearing cells a span or repeat expansion produces per table.
+    /// Default 4,000,000.
     pub max_expansion: u64,
     /// Text bytes repeat expansion duplicates per document: a small document
     /// amplifies memory by repeating content-bearing cells.
+    /// Default 64 MiB.
     pub max_expansion_text_bytes: u64,
     /// Bytes of embedded assets one document retains: they are kept in
     /// memory with the document.
+    /// Default 128 MiB.
     pub max_asset_total_bytes: u64,
     /// Nesting depth of binary record containers and BIFF8 XLS custom worksheet
     /// views: their traversal needs memory in proportion.
+    /// Default 64.
     pub max_record_depth: u64,
     /// Binary records visited in one record stream: each costs time even
     /// when it yields nothing.
+    /// Default 16,000,000.
     pub max_records: u64,
     /// Bytes of one input, checked before any parse: everything else a
     /// conversion holds grows from it.
+    /// Default 256 MiB.
     pub max_input_bytes: u64,
     /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE
     /// object's decompressed to compressed size, checked on those declaring at
     /// least 1 MiB: ordinary content compresses far less.
+    /// Default 1,000.
     pub max_compression_ratio: u64,
     /// Markdown bytes one conversion writes, counting what rendering holds
     /// before writing it (a paragraph to trim, a table's cells), and JSON
@@ -86,8 +100,9 @@ pub struct Limits {
     /// amplify the input, and the JSON's field names and `kind` tags amplify
     /// it several times over, as each styled run of text spells out its
     /// style.
+    /// Default 256 MiB.
     pub max_output_bytes: u64,
-    /// Work units one conversion charges, bounding its time deterministically:
+    /// Work units one conversion charges over its whole life, bounding its time deterministically:
     /// XML events, RTF tokens, CSS rules an element's tag or classes name, KiB
     /// inflated or 2 KiB of compressed input read, whichever is more, records
     /// and cells (CSV, PPT, DOC), PDF pages, their blocks, inline runs and text
@@ -102,25 +117,31 @@ pub struct Limits {
     /// of each image an OCR request copies, and of a page it paints 128 pixels
     /// before painting, 128 pixels of each step's work as unpdf prices it,
     /// rounded up, and 16 bytes of its PNG after. Detection shares these counters
-    /// with parsing, and rendering continues the same ledger. The default, two
+    /// with parsing. A [`Parsed`](crate::Parsed) keeps the count: each `ocr_requests`,
+    /// `ocr` batch and fill adds to it, and each `render` or `to_json` charges on from
+    /// it without adding to it, so repeated requests can cross a budget each would pass
+    /// on a fresh parse. The default, two
     /// units per byte of [`Limits::max_input_bytes`], admits ordinary large
     /// inputs, including a 256 MiB RTF containing one hex picture. Work that
     /// grows faster than the input crosses it: a PPT of 65 hyperlinks each over
     /// one text of 4 Mi UTF-16 units (8 MiB), each link charging its range read
-    /// and its label compared, asks 545 259 782.
+    /// and its label compared, asks 545,259,782.
+    /// Default 536,870,912.
     pub max_work: u64,
     /// Units one document holds: slides, sheets, EPUB spine items and PDF
     /// pages, a CSV being one sheet. Each unit costs fixed work that its
     /// bytes and nodes do not price, such as the relationships part a `.pptx`
     /// reads per slide: a 2.7 KB `.odp` of empty `draw:page` elements declares
-    /// 100 001. Each is numbered by its place in the document's own list, so
+    /// 100,001. Each is numbered by its place in the document's own list, so
     /// a hidden, skipped or unreadable one still takes its number, and the
     /// first unit numbered past this is refused; a PDF declaring more pages is
     /// refused before any is read. At most `u32::MAX`.
+    /// Default 100,000.
     pub max_pages: u64,
     /// Bytes of one gap's fill: a model's reply is untrusted, and its
     /// Markdown parse holds the whole of it at once; located lines also count
     /// 32 bytes per box.
+    /// Default 1 MiB.
     pub max_ocr_text_bytes: u64,
 }
 
@@ -219,7 +240,7 @@ pub enum Limit {
     /// Ratio of an archive entry's, OfficeArt picture's or embedded OLE object's decompressed to
     /// compressed size.
     CompressionRatio,
-    /// Markdown bytes one conversion writes.
+    /// Markdown or JSON bytes one call writes.
     OutputBytes,
     /// Work units one conversion charges.
     Work,
@@ -329,6 +350,28 @@ mod tests {
                 (Limit::OcrTextBytes, 1024 * 1024),
             ]
         );
+    }
+
+    #[test]
+    fn every_field_documents_its_default() {
+        let lines: Vec<&str> = include_str!("limits.rs").lines().collect();
+        for (limit, value) in Limits::default().fields() {
+            let field = format!("    pub {limit}: u64,");
+            let figure = lines
+                .iter()
+                .position(|line| *line == field)
+                .and_then(|at| lines[at - 1].trim().strip_prefix("/// Default "))
+                .and_then(|doc| doc.strip_suffix('.'))
+                .unwrap_or_else(|| panic!("{limit}: no `/// Default <figure>.` line above it"));
+            let (digits, unit) = figure.split_once(' ').unwrap_or((figure, ""));
+            let scale = match unit {
+                "" => 1,
+                "MiB" => MIB,
+                other => panic!("{limit}: unit {other}"),
+            };
+            let stated = digits.replace(',', "").parse::<u64>();
+            assert_eq!(stated.map(|stated| stated * scale), Ok(value), "{limit}");
+        }
     }
 
     #[test]

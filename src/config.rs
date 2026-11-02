@@ -44,8 +44,11 @@ use crate::limits::{Limit, Limits};
 pub struct Config {
     /// The safety limits every call enforces.
     pub limits: Limits,
-    /// Threads each call's pool holds, from 1 to [`Config::MAX_THREADS`]; no
-    /// reader works on more than one yet.
+    /// Threads each call's pool holds, from 1 to [`Config::MAX_THREADS`]. Only
+    /// [`Parsed::ocr_requests`](crate::Parsed::ocr_requests) and
+    /// [`Parsed::ocr`](crate::Parsed::ocr), which
+    /// [`Converter::convert_with_ocr`](crate::Converter::convert_with_ocr) runs, use more than
+    /// one, painting PDF pages at once; parsing, rendering and JSON run on one.
     pub threads: usize,
     /// What a conversion does once some content was lost.
     pub on_loss: OnLoss,
@@ -202,7 +205,9 @@ pub enum ImageOcr {
     #[default]
     None,
     /// Every embedded PNG or JPEG, judged by its bytes' signature; each other image counts
-    /// `image_not_ocred`.
+    /// `image_not_ocred`. A PDF's images get none: its pages do, as [`PdfScanPolicy`] and
+    /// [`Input::with_ocr_pages`](crate::Input::with_ocr_pages) say, and its images count
+    /// `image_omitted`.
     All,
 }
 
@@ -221,8 +226,9 @@ impl ImageOcr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum PdfScanPolicy {
-    /// An image and no readable text, or only furniture or margin text over at least half the
-    /// page.
+    /// A page with an image and no readable text, or one at least half covered by images whose
+    /// only text is margin text or running heads and folios; at 90% coverage or more, text that
+    /// recurs on other pages also qualifies.
     #[default]
     Conservative,
     /// The conservative pages, and every page at least half covered by images whatever native
