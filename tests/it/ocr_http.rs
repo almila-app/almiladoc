@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::build::{docx_with, relationships};
-use crate::support::{configured, fixture};
+use crate::support::{all_requests, configured, fixture};
 use almiladoc::{
     CancelToken, Format, GapFill, ImageDetail, ImageOcr, Input, MessageLayout, OcrEngine,
     OcrFailure, OcrFailureKind, OcrHttp, OcrHttpConfig, OcrImage, OcrOutcome, OcrReport,
@@ -195,7 +195,7 @@ fn images(max_ocr_text_bytes: u64) -> (Parsed, Vec<OcrRequest>) {
     });
     let mut parsed =
         converter.parse(Input::new(&fixture("docx/handmade-rich.docx"), Format::Docx)).unwrap();
-    let [request] = parsed.ocr_requests(&RasterSpec::default(), None).unwrap().try_into().unwrap();
+    let [request] = all_requests(&mut parsed, &RasterSpec::default()).try_into().unwrap();
     (parsed, vec![request; 6])
 }
 
@@ -331,7 +331,7 @@ fn a_status_sent_before_a_large_body_is_read_still_reaches_its_gap() {
     let converter = configured(|config| config.image_ocr = ImageOcr::All);
     let large = noisy_picture(8 << 20);
     let mut parsed = converter.parse(Input::new(&large, Format::Docx)).unwrap();
-    let [request] = parsed.ocr_requests(&RasterSpec::default(), None).unwrap().try_into().unwrap();
+    let [request] = all_requests(&mut parsed, &RasterSpec::default()).try_into().unwrap();
     let server = Server::start(vec![Answer::Early(413)]);
     assert_eq!(
         one(&engine(&server.base_url, |_| {}), &request),

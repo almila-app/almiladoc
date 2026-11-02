@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use almiladoc::model::{GapId, GapReason, OcrOrigin};
-use almiladoc::{
-    ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict, RasterSpec,
-};
+use almiladoc::{ConvertError, Format, GapError, GapFill, Input, PageSelection, PageVerdict};
+use pyo3::IntoPyObjectExt as _;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
@@ -18,7 +17,7 @@ use crate::config::Config;
 use crate::diagnostics::diagnostic_tuple;
 use crate::errors::{Failure, config_error, convert_error, gap_error, gap_refused};
 use crate::input::{Admission, buffer, read_file};
-use crate::ocr::{OcrHttp, OcrLine, OcrRequest, OcrSummary};
+use crate::ocr::{OcrHttp, OcrLine, OcrRefusal, OcrRequest, OcrSummary, raster_spec};
 
 /// A flag any thread sets to cancel the calls it was passed to.
 #[pyclass(frozen, module = "almiladoc")]
@@ -386,38 +385,48 @@ impl Parsed {
         self.lock(py).gaps().map(|gap| gap_row(gap.id, gap.origin, &gap.reasons)).collect()
     }
 
-    /// An `OcrRequest` for each gap of `gaps`, rows of `Parsed.gaps`, or every
-    /// gap when `None`, that is not yet filled or failed and asks for an
-    /// image, in document order, made with the GIL released: an OCR run
-    /// elsewhere, in another process too, reads each and passes its text to
-    /// `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. An
-    /// embedded image is copied and a page painted as a PNG at the largest
-    /// dpi up to `dpi` at which its media box fits `max_pixels`, a page that
-    /// cannot be painted asking for none, and a row naming no unsettled gap is passed
-    /// over. A `dpi` outside 50 to 600 or `max_pixels` outside 1048576 to
-    /// 41943040 raises `ConfigError` with `limit` `raster`, an int that fits
-    /// neither `OverflowError`, and work past `max_work` `ResourceLimitError`.
-    #[pyo3(signature = (gaps = None, *, dpi = 150, max_pixels = 12_845_056))]
-    fn ocr_requests(
+    /// An `OcrRequest`, or an `OcrRefusal` where no image can be made, for each
+    /// gap of `gaps`, rows of `Parsed.gaps`, or every gap when `None`, that is
+    /// not yet filled or failed and asks for an image, in document order, made
+    /// with the GIL released: an OCR run elsewhere, in another process too,
+    /// reads each request and passes its text to `fill_gap(request.gap, text)`,
+    /// or calls `fail_gap(request.gap)`. An embedded image is copied and a page
+    /// painted as a PNG at the largest dpi up to `dpi` at which its media box
+    /// fits `max_pixels`, its request holding the pixel `width` and `height`
+    /// and a `RasterFidelity` of what the painting left out. A page that
+    /// cannot be painted is an `unpaintable` refusal, and an image over
+    /// `max_bytes` encoded bytes, `None` for no bound, an `over_bytes` one;
+    /// either gap stays unfilled, for a later call or `fill_gap`. A row naming
+    /// no unsettled gap is passed over. A `dpi` outside 50 to 600,
+    /// `max_pixels` outside 1048576 to 41943040 or a `max_bytes` of 0 raises
+    /// `ConfigError` with `limit` `raster`, an int that fits none of them
+    /// `OverflowError`, and work past `max_work` `ResourceLimitError`.
+    #[pyo3(signature = (gaps = None, *, dpi = 150, max_pixels = 12_845_056, max_bytes = None))]
+    fn ocr_requests<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         gaps: Option<Vec<GapKey<'_>>>,
         dpi: u32,
         max_pixels: u64,
-    ) -> PyResult<Vec<OcrRequest>> {
-        let mut spec = RasterSpec::default();
-        (spec.dpi, spec.max_pixels) = (dpi, max_pixels);
+        max_bytes: Option<u64>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let spec = raster_spec(py, dpi, max_pixels, max_bytes)?;
         let ids = self.gap_ids(gaps);
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;
-        let requests = py
+        let made = py
             .detach(|| parsed.ocr_requests(&spec, ids.as_deref()))
             .map_err(|e| convert_error(py, &e))?;
-        requests
-            .iter()
-            .map(|request| {
-                let row = gap_row(request.gap, request.origin, &request.reasons);
-                OcrRequest::of(py, row, request)
+        made.iter()
+            .map(|made| match made {
+                Ok(request) => {
+                    let row = gap_row(request.gap, request.origin, &request.reasons);
+                    OcrRequest::of(py, row, request)?.into_bound_py_any(py)
+                }
+                Err(refusal) => {
+                    let row = gap_row(refusal.gap, refusal.origin, &refusal.reasons);
+                    OcrRefusal::of(py, row, refusal)?.into_bound_py_any(py)
+                }
             })
             .collect()
     }
@@ -426,10 +435,11 @@ impl Parsed {
     /// gap when `None`, that `ocr_requests` would ask for, through `engine`, with
     /// the GIL released: in batches that fill or fail each gap as `fill_gap` and
     /// `fail_gap` do, a fill a limit refuses failing its gap, until a batch
-    /// holds a gap the engine did not attempt, which stays for a later call.
-    /// Work past `max_work` raises `ResourceLimitError`, and a cancel of the
-    /// parse's token `CancelledError`, each keeping what earlier batches
-    /// settled.
+    /// holds a gap the engine did not attempt, which stays for a later call. A
+    /// gap `ocr_requests` would refuse is no request: it stays unfilled and the
+    /// summary counts it as `refused`. Work past `max_work` raises
+    /// `ResourceLimitError`, and a cancel of the parse's token
+    /// `CancelledError`, each keeping what earlier batches settled.
     #[pyo3(signature = (engine, gaps = None))]
     fn ocr(
         &self,

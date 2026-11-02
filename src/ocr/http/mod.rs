@@ -78,7 +78,8 @@ pub struct OcrHttpConfig {
     /// Whether a reply fills as [`GapFill::MarkdownTables`], keeping its HTML table spans but
     /// failing a gap below the top level, rather than [`GapFill::Markdown`]; false by default.
     pub preserve_table_spans: bool,
-    /// How large an image of a page the server takes.
+    /// How large an image the server takes: what [`Parsed::ocr`](crate::Parsed::ocr) paints a
+    /// page at and refuses an image over.
     pub raster: RasterSpec,
     /// Attempts after the first for a request the server could not take yet, at most 10; 3 by
     /// default.

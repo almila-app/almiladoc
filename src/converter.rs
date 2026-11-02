@@ -19,8 +19,8 @@ use crate::ledger::{CancelToken, Ledger};
 use crate::limits::Limit;
 use crate::model::{Block, Document, Gap, GapId, OcrOrigin, Unit, UnitKind};
 use crate::ocr::{
-    GapError, GapFill, GapFills, GapState, Inputs, OcrEngine, OcrRequest, OcrSummary, RasterSpec,
-    Target, gaps, leave_image_gaps, requests,
+    GapError, GapFill, GapFills, GapState, Inputs, OcrEngine, OcrRefusal, OcrRequest, OcrSummary,
+    RasterFidelity, RasterSpec, Target, gaps, leave_image_gaps, requests,
 };
 use crate::pool::run_on_pool;
 use crate::render::markdown::{Meter, Unread, render, render_losses};
@@ -596,15 +596,23 @@ impl Parsed {
         Ok(())
     }
 
-    /// The request for each gap `gaps` names, every gap when `None`, that is not yet filled or
-    /// failed and asks for an image, in document order, for an engine run elsewhere: its
-    /// results come back through [`Parsed::fill_gap`] and [`Parsed::fail_gap`]. An embedded
+    /// The request or refusal for each gap `gaps` names, every gap when `None`, that is not yet
+    /// filled or failed and asks for an image, in document order, for an engine run elsewhere:
+    /// its results come back through [`Parsed::fill_gap`] and [`Parsed::fail_gap`]. An embedded
     /// image is copied and a page painted at the largest dpi up to `spec`'s at which its media
-    /// box fits `spec`'s pixel cap, the pages at once on a pool built from its [`Config`]; a page
-    /// that cannot be painted asks for none, and an id that names no unsettled gap is passed
-    /// over. Work is charged on from the work charged so far: a page's media-box pixels at one
-    /// unit per 128 before it is painted, each step of its painting the pixels of work unpdf
-    /// prices it at one unit per 128, rounded up, and each image's bytes at one per 16.
+    /// box fits `spec`'s pixel cap, the pages at once on a pool built from its [`Config`]; an
+    /// id that names no unsettled gap is passed over.
+    ///
+    /// A gap whose image cannot be made is an [`OcrRefusal`] in its place and stays unfilled,
+    /// so a later call with another spec may ask again and [`Parsed::fill_gap`] may fill it:
+    /// [`RefusalKind::Unpaintable`](crate::RefusalKind::Unpaintable) for a page that cannot be
+    /// painted, [`RefusalKind::OverBytes`](crate::RefusalKind::OverBytes) for an image over
+    /// `spec`'s byte bound. A painted page's request holds its size and [`RasterFidelity`].
+    ///
+    /// Work is charged on from the work charged so far: a page's media-box pixels at one unit
+    /// per 128 before it is painted, each step of its painting the pixels of work unpdf prices
+    /// it at one unit per 128, rounded up, and each image's bytes at one per 16, a refused
+    /// page's PNG included.
     ///
     /// # Errors
     ///
@@ -624,7 +632,8 @@ impl Parsed {
     /// let mut config = Config::default();
     /// config.image_ocr = ImageOcr::All;
     /// let mut parsed = Converter::new(config)?.parse(Input::new(&docx, Format::Docx))?;
-    /// for request in parsed.ocr_requests(&RasterSpec::default(), None)? {
+    /// for made in parsed.ocr_requests(&RasterSpec::default(), None)? {
+    ///     let Ok(request) = made else { continue };
     ///     assert_eq!(request.image.media_type, "image/png");
     ///     parsed.fill_gap(request.gap, GapFill::Markdown("A dot".into()))?;
     /// }
@@ -635,7 +644,7 @@ impl Parsed {
         &mut self,
         spec: &RasterSpec,
         gaps: Option<&[GapId]>,
-    ) -> Result<Vec<OcrRequest>, ConvertError> {
+    ) -> Result<Vec<Result<OcrRequest, OcrRefusal>>, ConvertError> {
         self.refuse_cancelled()?;
         spec.validate().map_err(ConvertError::InvalidConfig)?;
         let config = Arc::clone(&self.config);
@@ -650,7 +659,8 @@ impl Parsed {
     /// [`OcrEngine::batch_size`], all on one pool built from its [`Config`]. Each
     /// [`OcrOutcome`](crate::OcrOutcome) fills or fails its gap as [`Parsed::fill_gap`] and
     /// [`Parsed::fail_gap`] do: a fill a limit refuses fails its gap, a batch answered by the
-    /// wrong number of outcomes fails all of its gaps, and a batch with an unattempted gap is
+    /// wrong number of outcomes fails all of its gaps, a gap whose image cannot be made is left
+    /// unfilled and counted in [`OcrSummary::refused`], and a batch with an unattempted gap is
     /// the last, its unattempted gaps left for a later call.
     ///
     /// # Errors
@@ -879,17 +889,21 @@ impl Target for Parsed {
         &mut self,
         gaps: &[Gap],
         spec: &RasterSpec,
-    ) -> Result<Vec<OcrRequest>, ConvertError> {
+    ) -> Result<Vec<Result<OcrRequest, OcrRefusal>>, ConvertError> {
         let limits = &self.config.limits;
         let ledger = Ledger::new(limits.max_work, self.cancel.as_ref()).starting_at(self.fuel);
         let made = requests(gaps, self.inputs(), spec, &ledger, limits.max_ocr_text_bytes)?;
         self.fuel = ledger.spent();
-        let mut requests = Vec::with_capacity(made.len());
-        for (request, unpainted) in made {
-            self.fills.note_unpainted(request.gap, unpainted);
-            requests.push(request);
+        for made in &made {
+            match made {
+                Ok(request) => {
+                    let unpainted = request.image.fidelity.map_or(0, RasterFidelity::lost);
+                    self.fills.note_unpainted(request.gap, unpainted);
+                }
+                Err(refusal) => self.fills.note_unpainted(refusal.gap, 0),
+            }
         }
-        Ok(requests)
+        Ok(made)
     }
 
     fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError> {
@@ -1126,6 +1140,7 @@ mod tests {
                 assert_eq!(asset.bytes, *bytes);
             }
             let requests = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
+            let requests: Vec<_> = requests.into_iter().map(Result::unwrap).collect();
             let expected: Vec<_> = parts
                 .iter()
                 .enumerate()

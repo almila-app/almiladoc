@@ -374,7 +374,15 @@ mod tests {
     }
 
     fn image() -> OcrImage {
-        OcrImage { bytes: Arc::from(&b"\x89PNG"[..]), media_type: "image/png", dpi: None }
+        let bytes = Arc::from(&b"\x89PNG"[..]);
+        OcrImage {
+            bytes,
+            media_type: "image/png",
+            dpi: None,
+            width: None,
+            height: None,
+            fidelity: None,
+        }
     }
 
     #[test]

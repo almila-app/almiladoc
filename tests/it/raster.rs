@@ -1,9 +1,14 @@
+use std::assert_matches;
+
 use crate::pdf::write_pdf;
-use crate::support::{configured, converter, fixture, limited, reported, trips};
+use crate::support::{
+    all_requests, bounded, configured, converter, fixture, limited, reported, trips,
+};
 use almiladoc::model::OcrOrigin;
 use almiladoc::{
     CancelToken, ConfigError, ConvertError, Converter, DiagnosticCode, Format, GapFill, Input,
-    Limit, Limits, OcrEngine, OcrOutcome, OcrRequest, PageSelection, Parsed, RasterSpec, Region,
+    Limit, Limits, OcrEngine, OcrOutcome, OcrRequest, OcrSummary, PageSelection, Parsed,
+    RasterFidelity, RasterSpec, RefusalKind, Region,
 };
 
 fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
@@ -19,13 +24,14 @@ fn png_size(png: &[u8]) -> (u32, u32) {
 }
 
 fn requested(parsed: &mut Parsed, spec: &RasterSpec) -> Vec<(u32, Option<u32>, (u32, u32))> {
-    let requests = parsed.ocr_requests(spec, None).unwrap();
-    requests
+    all_requests(parsed, spec)
         .iter()
         .map(|request| {
             let OcrOrigin::Page(page) = request.origin else { panic!("{request:?}") };
             assert_eq!(request.image.media_type, "image/png");
-            (page.get(), request.image.dpi, png_size(&request.image.bytes))
+            let (width, height) = png_size(&request.image.bytes);
+            assert_eq!((request.image.width, request.image.height), (Some(width), Some(height)));
+            (page.get(), request.image.dpi, (width, height))
         })
         .collect()
 }
@@ -49,7 +55,7 @@ fn a_page_gap_exports_its_page_at_the_spec_s_dpi() {
     assert_eq!(pages, [1, 2, 3, 4, 5]);
     let pngs = |threads| {
         let mut parsed = every_page(&converter(threads), &bytes);
-        let requests = parsed.ocr_requests(&default, None).unwrap();
+        let requests = all_requests(&mut parsed, &default);
         requests.into_iter().map(|request| request.image.bytes).collect::<Vec<_>>()
     };
     let once = pngs(1);
@@ -157,7 +163,7 @@ fn an_engine_and_the_hand_run_requests_fill_pages_alike() {
     let converted =
         converter(1).convert_with_ocr(Input::new(&bytes, Format::Pdf), &engine()).unwrap();
     let mut by_hand = converter(1).parse(Input::new(&bytes, Format::Pdf)).unwrap();
-    for request in by_hand.ocr_requests(&RasterSpec::default(), None).unwrap() {
+    for request in all_requests(&mut by_hand, &RasterSpec::default()) {
         let OcrOrigin::Page(page) = request.origin else { panic!("{request:?}") };
         by_hand.fill_gap(request.gap, GapFill::Markdown(format!("page {page}"))).unwrap();
     }
@@ -171,8 +177,7 @@ fn an_engine_and_the_hand_run_requests_fill_pages_alike() {
 fn a_page_s_pixels_are_charged_before_it_is_painted_its_steps_as_it_paints_and_its_png_after() {
     let bytes = page_pdf("/MediaBox [0 0 612 792]");
     let mut unlimited = every_page(&converter(1), &bytes);
-    let [request] =
-        unlimited.ocr_requests(&RasterSpec::default(), None).unwrap().try_into().unwrap();
+    let [request] = all_requests(&mut unlimited, &RasterSpec::default()).try_into().unwrap();
     let png = u64::try_from(request.image.bytes.len()).unwrap();
     let (pixels, bytes_charged) = ((1275_u64 * 1650).div_ceil(128), png.div_ceil(16));
     let least = |passes: &dyn Fn(&mut Parsed) -> bool| {
@@ -244,7 +249,7 @@ fn painting_losses(bytes: &[u8]) -> Vec<(DiagnosticCode, Region, Option<u32>, u6
     let mut run = converter(1).parse(input()).unwrap();
     run.ocr(&engine, None).unwrap();
     let mut by_hand = converter(1).parse(input()).unwrap();
-    for request in by_hand.ocr_requests(&RasterSpec::default(), None).unwrap() {
+    for request in all_requests(&mut by_hand, &RasterSpec::default()) {
         by_hand.fill_gap(request.gap, GapFill::Markdown("page".into())).unwrap();
     }
     assert_eq!(reported(run.diagnostics()), reported(by_hand.diagnostics()));
@@ -306,21 +311,38 @@ fn a_filled_page_reports_each_kind_its_painting_left_out() {
         &plain("/G1 gs 0 0 1 rg 100 100 200 200 re f"),
         &[&group],
     );
-    for (bytes, expected) in [
-        (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10)),
-        (korean_run(""), lost(1)),
-        (korean_run("0 600 612 192 re W n"), lost(1)),
-        (korean_run("0 0 10 10 re W n"), Vec::new()),
-        (korean_run("1 0 0 1 1000 0 cm"), Vec::new()),
-        (undecodable, lost(1)),
-        (image, lost(1)),
-        (inline, lost(1)),
-        (masked, Vec::new()),
-        (fixture("pdf/handmade-jpeg-scan.pdf"), Vec::new()),
-        (fixture("pdf/handmade-mesh-shading.pdf"), Vec::new()),
+    for (bytes, expected, fidelity) in [
+        (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10), [10, 0, 0, 0, 0, 0, 0]),
+        (korean_run(""), lost(1), [1, 0, 0, 0, 0, 0, 0]),
+        (korean_run("0 600 612 192 re W n"), lost(1), [1, 0, 0, 0, 0, 0, 0]),
+        (korean_run("0 0 10 10 re W n"), Vec::new(), [0; 7]),
+        (korean_run("1 0 0 1 1000 0 cm"), Vec::new(), [0; 7]),
+        (undecodable, lost(1), [0, 0, 0, 0, 0, 1, 0]),
+        (image, lost(1), [0, 1, 0, 0, 0, 0, 0]),
+        (inline, lost(1), [0, 0, 1, 0, 0, 0, 0]),
+        (masked, Vec::new(), [0, 0, 0, 0, 1, 0, 0]),
+        (fixture("pdf/handmade-jpeg-scan.pdf"), Vec::new(), [0; 7]),
+        (fixture("pdf/handmade-mesh-shading.pdf"), Vec::new(), [0, 0, 0, 1, 0, 0, 0]),
+        (page_pdf("/MediaBox [0 0 612 792]"), Vec::new(), [0, 0, 0, 0, 0, 0, 1]),
     ] {
         assert_eq!(painting_losses(&bytes), expected);
+        assert_eq!(fidelity_of(&bytes), fidelity);
     }
+}
+
+fn fidelity_of(bytes: &[u8]) -> [u32; 7] {
+    let mut parsed = every_page(&converter(1), bytes);
+    let [request] = all_requests(&mut parsed, &RasterSpec::default()).try_into().unwrap();
+    let f = request.image.fidelity.unwrap();
+    [
+        f.text_runs,
+        f.images,
+        f.inline_images,
+        f.shadings,
+        f.soft_masks,
+        f.content_streams,
+        f.substituted_text_runs,
+    ]
 }
 
 #[test]
@@ -328,7 +350,7 @@ fn a_fill_reports_its_latest_request_s_painting_and_a_failure_none() {
     let bytes = fixture("pdf/handmade-predefined-cmap.pdf");
     let default = RasterSpec::default();
     let mut filled = every_page(&converter(1), &bytes);
-    let [request] = filled.ocr_requests(&default, None).unwrap().try_into().unwrap();
+    let [request] = all_requests(&mut filled, &default).try_into().unwrap();
     filled.ocr_requests(&default, None).unwrap();
     filled.fill_gap(request.gap, GapFill::Markdown("page".into())).unwrap();
     let lost = [(DiagnosticCode::RasterIncomplete, Region::Body, Some(1), 10)];
@@ -338,4 +360,107 @@ fn a_fill_reports_its_latest_request_s_painting_and_a_failure_none() {
     failed.fail_gap(request.gap).unwrap();
     let ocr_failed = [(DiagnosticCode::OcrFailed, Region::Body, Some(1), 1)];
     assert_eq!(reported(failed.diagnostics()), ocr_failed);
+}
+
+fn unpaintable_second_page() -> Vec<u8> {
+    let content = plain("BT /F1 24 Tf 72 400 Td (Painted) Tj ET");
+    write_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources \
+         << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>"
+            .to_owned(),
+        content,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 0 0] /Contents 99 0 R >>".to_owned(),
+    ])
+}
+
+#[test]
+fn a_gap_page_that_cannot_be_painted_is_a_typed_refusal_in_its_place() {
+    let mut parsed = every_page(&converter(1), &unpaintable_second_page());
+    let made = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
+    let gaps: Vec<_> = parsed.gaps().cloned().collect();
+    assert_eq!(gaps.len(), 2);
+    assert_eq!(made.len(), 2);
+    assert_matches!(&made[0], Ok(request) if request.gap == gaps[0].id);
+    let refusal = made[1].as_ref().unwrap_err();
+    assert_eq!(refusal.gap, gaps[1].id);
+    assert_eq!(refusal.origin, OcrOrigin::Page(2.try_into().unwrap()));
+    assert_eq!(refusal.reasons, gaps[1].reasons);
+    assert_eq!(refusal.kind, RefusalKind::Unpaintable);
+}
+
+#[test]
+fn an_engine_never_sees_a_refused_page_which_stays_a_gap_a_later_fill_settles() {
+    let mut parsed = every_page(&converter(1), &unpaintable_second_page());
+    let second = parsed.gaps().map(|gap| gap.id).nth(1).unwrap();
+    let engine = Pages { cancels: None, calls: std::sync::Mutex::default() };
+    let mut expected = OcrSummary::default();
+    (expected.filled, expected.refused) = (1, 1);
+    let summary = parsed.ocr(&engine, None).unwrap();
+    assert_eq!(summary, expected);
+    assert_eq!(
+        summary.filled + summary.failed + summary.unattempted + summary.refused,
+        parsed.gaps().count()
+    );
+    assert_eq!(*engine.calls.lock().unwrap(), [1]);
+    let gap = [(DiagnosticCode::OcrGap, Region::Body, Some(2), 1)];
+    assert_eq!(reported(parsed.diagnostics()), gap);
+    assert_matches!(
+        parsed.render(),
+        Err(ConvertError::NeedsOcr { pages, page_count: 2, .. }) if pages == [2]
+    );
+    parsed.fill_gap(second, GapFill::Markdown("later".into())).unwrap();
+    assert_eq!(parsed.render().unwrap().markdown(), "page 1\n\nlater\n");
+}
+
+#[test]
+fn a_png_over_the_byte_bound_is_refused_after_its_work_is_charged_and_one_at_it_is_not() {
+    let bytes = page_pdf("/MediaBox [0 0 612 792]");
+    let mut parsed = every_page(&converter(1), &bytes);
+    let unbounded = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
+    let [Ok(request)] = &unbounded[..] else { panic!("{unbounded:?}") };
+    let len = u64::try_from(request.image.bytes.len()).unwrap();
+    assert_eq!(parsed.ocr_requests(&bounded(len), None).unwrap(), unbounded);
+    let over = parsed.ocr_requests(&bounded(len - 1), None).unwrap();
+    let [Err(refusal)] = &over[..] else { panic!("{over:?}") };
+    assert_eq!(refusal.kind, RefusalKind::OverBytes { bytes: len });
+    assert_eq!(refusal.gap, request.gap);
+    let work = |spec: RasterSpec| {
+        crate::bounds::least_work(|converter| {
+            let input = Input::new(&bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
+            converter.parse(input).is_ok_and(|mut parsed| parsed.ocr_requests(&spec, None).is_ok())
+        })
+    };
+    assert_eq!(work(bounded(len - 1)), work(RasterSpec::default()));
+}
+
+#[test]
+fn a_gap_refused_after_a_painted_request_reports_none_of_the_earlier_painting() {
+    let bytes = fixture("pdf/handmade-predefined-cmap.pdf");
+    let mut parsed = every_page(&converter(1), &bytes);
+    let [request] = all_requests(&mut parsed, &RasterSpec::default()).try_into().unwrap();
+    assert_eq!(request.image.fidelity.map(RasterFidelity::lost), Some(10));
+    let refused = parsed.ocr_requests(&bounded(1), None).unwrap();
+    assert_matches!(&refused[..], [Err(refusal)] if refusal.gap == request.gap);
+    parsed.fill_gap(request.gap, GapFill::Markdown("page".into())).unwrap();
+    assert_eq!(reported(parsed.diagnostics()), Vec::new());
+}
+
+#[test]
+fn what_painting_does_not_observe_is_named_wherever_fidelity_is_documented() {
+    const UNOBSERVED: &str =
+        "annotation appearances, lab/devicen colours and missing stand-in glyphs are not observed";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "src/ocr/raster.rs",
+        "python/src/ocr.rs",
+        "python/almiladoc/_almiladoc.pyi",
+        "docs/support.md",
+        "docs/adr/0002-ocr-port.md",
+    ] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap().to_lowercase();
+        let words: Vec<_> = text.split_whitespace().filter(|word| *word != "///").collect();
+        assert!(words.join(" ").contains(UNOBSERVED), "{path}");
+    }
 }

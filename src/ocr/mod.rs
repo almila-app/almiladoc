@@ -26,9 +26,9 @@ pub use http::{
 pub(crate) use images::leave_image_gaps;
 pub use lines::OcrLine;
 pub(crate) use lines::blocks as line_blocks;
-pub use raster::RasterSpec;
+pub use raster::{RasterFidelity, RasterSpec};
 pub(crate) use request::{Inputs, requests};
-pub use request::{OcrImage, OcrRequest};
+pub use request::{OcrImage, OcrRefusal, OcrRequest, RefusalKind};
 
 /// What OCR read for one gap.
 #[derive(Clone, PartialEq, Eq)]

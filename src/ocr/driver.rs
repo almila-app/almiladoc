@@ -1,24 +1,27 @@
 use crate::error::ConvertError;
 use crate::ledger::CancelToken;
 use crate::model::{Gap, GapId};
-use crate::ocr::{GapError, GapFill, OcrEngine, OcrOutcome, OcrRequest, OcrSummary, RasterSpec};
+use crate::ocr::{
+    GapError, GapFill, OcrEngine, OcrOutcome, OcrRefusal, OcrRequest, OcrSummary, RasterSpec,
+};
 
 /// The parsed document an OCR call asks requests of and settles gaps in.
 pub(crate) trait Target {
-    /// The request of each of `gaps` that asks for an image, in order, its image charged and a
-    /// page painted under `spec`.
+    /// The request or refusal of each of `gaps` that asks for an image, in order, its image
+    /// charged and a page painted under `spec`.
     fn requests(
         &mut self,
         gaps: &[Gap],
         spec: &RasterSpec,
-    ) -> Result<Vec<OcrRequest>, ConvertError>;
+    ) -> Result<Vec<Result<OcrRequest, OcrRefusal>>, ConvertError>;
     fn fill(&mut self, id: GapId, fill: GapFill) -> Result<(), GapError>;
     fn fail(&mut self, id: GapId) -> Result<(), GapError>;
 }
 
 /// Run `engine` over `gaps`, each asking for an image, in order and in batches of its size:
 /// each outcome fills or fails its gap, a refused fill fails it, a batch answered by the wrong
-/// number of outcomes fails all of its gaps, and a batch with an unattempted gap is the last.
+/// number of outcomes fails all of its gaps, a gap with no image is counted as refused and left
+/// unfilled, and a batch with an unattempted gap is the last.
 /// A cancel seen once a batch returns applies none of its outcomes.
 pub(crate) fn run(
     target: &mut impl Target,
@@ -30,7 +33,13 @@ pub(crate) fn run(
     spec.validate().map_err(ConvertError::InvalidConfig)?;
     let mut summary = OcrSummary::default();
     for (done, batch) in gaps.chunks(size).enumerate() {
-        let requests = target.requests(batch, &spec)?;
+        let mut requests = Vec::with_capacity(batch.len());
+        for made in target.requests(batch, &spec)? {
+            match made {
+                Ok(request) => requests.push(request),
+                Err(_) => summary.refused += 1,
+            }
+        }
         if requests.is_empty() {
             continue;
         }
@@ -97,7 +106,7 @@ mod tests {
     use super::*;
     use crate::limits::Limit;
     use crate::model::{AssetId, OcrOrigin};
-    use crate::ocr::{OcrFailure, OcrFailureKind, OcrImage};
+    use crate::ocr::{OcrFailure, OcrFailureKind, OcrImage, RefusalKind};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Settled {
@@ -111,6 +120,7 @@ mod tests {
         refuse: Option<u32>,
         fail_fill: Option<(u32, ConvertError)>,
         unasked: Vec<u32>,
+        unpaintable: Vec<u32>,
     }
 
     fn gap(n: u32) -> Gap {
@@ -123,14 +133,32 @@ mod tests {
             &mut self,
             gaps: &[Gap],
             _: &RasterSpec,
-        ) -> Result<Vec<OcrRequest>, ConvertError> {
-            let image = OcrImage { bytes: Vec::new().into(), media_type: "image/png", dpi: None };
-            let request = |gap: &Gap| OcrRequest {
-                gap: gap.id,
-                origin: gap.origin,
-                reasons: Vec::new(),
-                image: image.clone(),
-                max_text_bytes: 1,
+        ) -> Result<Vec<Result<OcrRequest, OcrRefusal>>, ConvertError> {
+            let image = OcrImage {
+                bytes: Vec::new().into(),
+                media_type: "image/png",
+                dpi: None,
+                width: None,
+                height: None,
+                fidelity: None,
+            };
+            let request = |gap: &Gap| {
+                if self.unpaintable.contains(&gap.id.ordinal().get()) {
+                    let kind = RefusalKind::Unpaintable;
+                    return Err(OcrRefusal {
+                        gap: gap.id,
+                        origin: gap.origin,
+                        reasons: Vec::new(),
+                        kind,
+                    });
+                }
+                Ok(OcrRequest {
+                    gap: gap.id,
+                    origin: gap.origin,
+                    reasons: Vec::new(),
+                    image: image.clone(),
+                    max_text_bytes: 1,
+                })
             };
             let asked = gaps.iter().filter(|gap| !self.unasked.contains(&gap.id.ordinal().get()));
             Ok(asked.map(request).collect())
@@ -210,7 +238,7 @@ mod tests {
     }
 
     fn summary(filled: usize, failed: usize, unattempted: usize) -> OcrSummary {
-        OcrSummary { filled, failed, unattempted }
+        OcrSummary { filled, failed, unattempted, refused: 0 }
     }
 
     fn seven() -> Vec<Gap> {
@@ -238,6 +266,27 @@ mod tests {
         let done = run(&mut target, &seven(), &engine, &CancelToken::new());
         assert_eq!(done, Ok(summary(5, 0, 0)));
         assert_eq!(engine.calls(), [vec![1, 2], vec![5, 6], vec![7]]);
+    }
+
+    #[test]
+    fn a_refused_gap_reaches_no_engine_stays_unsettled_and_is_counted_beside_the_rest() {
+        let mut target = Fake { unpaintable: vec![2, 5], ..Fake::default() };
+        let engine = Scripted::new(3, &["FF", "FU"]);
+        let done = run(&mut target, &seven(), &engine, &CancelToken::new());
+        let expected = OcrSummary { filled: 3, failed: 0, unattempted: 2, refused: 2 };
+        assert_eq!(done, Ok(expected));
+        assert_eq!(engine.calls(), [vec![1, 3], vec![4, 6]]);
+        assert_eq!(target.settled, [1, 3, 4].map(filled));
+    }
+
+    #[test]
+    fn a_batch_of_refused_gaps_is_counted_and_asks_no_engine() {
+        let mut target = Fake { unpaintable: vec![1, 2, 3], ..Fake::default() };
+        let engine = Scripted::new(3, &[]);
+        let done = run(&mut target, &seven(), &engine, &CancelToken::new());
+        assert_eq!(done, Ok(OcrSummary { filled: 4, failed: 0, unattempted: 0, refused: 3 }));
+        assert_eq!(engine.calls(), [vec![4, 5, 6], vec![7]]);
+        assert_eq!(target.settled, [4, 5, 6, 7].map(filled));
     }
 
     #[test]

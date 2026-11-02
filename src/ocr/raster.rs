@@ -1,21 +1,27 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::RangeInclusive;
 
 use crate::config::ConfigError;
 use crate::error::ConvertError;
 use crate::formats::Source;
 use crate::ledger::{Ledger, SharedLedger};
+#[cfg(feature = "raster")]
+use unpdf::parser::raster::RasterGaps;
 
-/// How large an image of a page an [`OcrEngine`](crate::OcrEngine) takes: the resolution a
-/// page is painted at, unless its pixels would pass `max_pixels`.
+/// How large an image an [`OcrEngine`](crate::OcrEngine) takes: the resolution a page is
+/// painted at, unless its pixels would pass `max_pixels`, and the most bytes an encoded image
+/// holds.
 ///
 /// # Examples
 ///
 /// ```
+/// use std::num::NonZeroU64;
 /// use almiladoc::{ConfigError, RasterSpec};
 ///
 /// let mut spec = RasterSpec::default();
-/// assert_eq!((spec.dpi, spec.max_pixels), (150, 12_845_056));
+/// assert_eq!((spec.dpi, spec.max_pixels, spec.max_bytes), (150, 12_845_056, None));
+/// spec.max_bytes = NonZeroU64::new(3 << 20);
+/// assert_eq!(spec.validate(), Ok(()));
 /// spec.dpi = 601;
 /// assert_eq!(spec.validate(), Err(ConfigError::Raster));
 /// ```
@@ -26,6 +32,11 @@ pub struct RasterSpec {
     pub dpi: u32,
     /// The most pixels one page's image holds, 1 Mpx to [`RasterSpec::MAX_PIXELS_CEILING`].
     pub max_pixels: u64,
+    /// The most bytes one image holds as encoded, an embedded PNG or JPEG's and a painted
+    /// page's PNG alike; a larger one is refused as
+    /// [`RefusalKind::OverBytes`](crate::RefusalKind::OverBytes), never painted again smaller.
+    /// `None` bounds none.
+    pub max_bytes: Option<NonZeroU64>,
 }
 
 impl RasterSpec {
@@ -34,7 +45,7 @@ impl RasterSpec {
     const DPI: RangeInclusive<u32> = 50..=600;
     const MIN_PIXELS: u64 = 1 << 20;
 
-    /// Check the dpi and the pixel cap against their ranges.
+    /// Check the dpi and the pixel cap against their ranges; the byte bound has none.
     ///
     /// # Errors
     ///
@@ -71,7 +82,7 @@ const POINTS_PER_INCH: f64 = 72.0;
 
 impl Default for RasterSpec {
     fn default() -> Self {
-        Self { dpi: 150, max_pixels: 12_845_056 }
+        Self { dpi: 150, max_pixels: 12_845_056, max_bytes: None }
     }
 }
 
@@ -107,11 +118,58 @@ pub(crate) fn plan(
     Ok(None)
 }
 
-/// A page painted as an RGB PNG, and how many of its text runs, images, inline images and
-/// content streams the painting left out.
+/// What painting a page left out or replaced, by kind, in runs, images or streams.
+///
+/// Annotation appearances, Lab/DeviceN colours and missing stand-in glyphs are not observed
+/// yet, so a page with every count zero can still differ from its source in them.
+///
+/// # Examples
+///
+/// ```
+/// use almiladoc::RasterFidelity;
+///
+/// let mut fidelity = RasterFidelity::default();
+/// (fidelity.text_runs, fidelity.shadings, fidelity.substituted_text_runs) = (2, 5, 7);
+/// assert_eq!(fidelity.lost(), 2);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub struct RasterFidelity {
+    /// Text runs not painted: no font program or stand-in face, or a code that selects no glyph.
+    pub text_runs: u32,
+    /// Images not painted: a codec or colour space the painter lacks, or data that did not decode.
+    pub images: u32,
+    /// Inline images not painted.
+    pub inline_images: u32,
+    /// Shadings and pattern colours not painted.
+    pub shadings: u32,
+    /// Soft masks not applied as set.
+    pub soft_masks: u32,
+    /// Content streams that could not be decoded.
+    pub content_streams: u32,
+    /// Text runs painted in a standard face standing in for the page's own font: readable.
+    pub substituted_text_runs: u32,
+}
+
+impl RasterFidelity {
+    /// What the painting dropped from the page, as `raster_incomplete` counts it: text runs,
+    /// images, inline images and content streams. Shadings, soft masks and substituted runs
+    /// are decorative or readable, so they are not lost.
+    #[must_use]
+    pub fn lost(self) -> u64 {
+        [self.text_runs, self.images, self.inline_images, self.content_streams]
+            .into_iter()
+            .map(u64::from)
+            .sum()
+    }
+}
+
+/// A page painted as an RGB PNG, its pixel size, and what the painting left out.
 pub(crate) struct Painted {
     pub(crate) png: Vec<u8>,
-    pub(crate) unpainted: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fidelity: RasterFidelity,
 }
 
 /// 1-based `page` of `source` painted at `dpi`, its crop box turned by its `/Rotate`, each step
@@ -134,7 +192,7 @@ fn paint_with_budget(
     mut charge: impl FnMut(u64) -> Result<(), ConvertError>,
 ) -> Result<Option<Painted>, ConvertError> {
     use std::ops::ControlFlow;
-    use unpdf::parser::raster::{PageRegion, RasterOptions};
+    use unpdf::parser::raster::{PageRegion, RasterOptions, RasteredPage};
     let (Some(pdf), Ok(dpi)) = (source.pdf.as_ref(), u16::try_from(dpi)) else { return Ok(None) };
     let options = RasterOptions { dpi: f32::from(dpi), region: PageRegion::Crop };
     let mut charged = Ok(());
@@ -144,11 +202,31 @@ fn paint_with_budget(
     });
     charged?;
     let Ok(painted) = painted else { return Ok(None) };
-    let gaps = painted.gaps;
-    let unpainted =
-        [gaps.text_runs, gaps.images, gaps.inline_images, gaps.undecodable_content_streams];
-    let unpainted = unpainted.into_iter().map(u64::from).sum();
-    Ok(Some(Painted { png: painted.to_png(), unpainted }))
+    let png = painted.to_png();
+    let RasteredPage { width, height, rgba: _, gaps, substituted_text_runs } = painted;
+    let fidelity = fidelity(gaps, substituted_text_runs);
+    Ok(Some(Painted { png, width, height, fidelity }))
+}
+
+#[cfg(feature = "raster")]
+fn fidelity(gaps: RasterGaps, substituted_text_runs: u32) -> RasterFidelity {
+    let RasterGaps {
+        text_runs,
+        images,
+        inline_images,
+        shadings,
+        soft_masks,
+        undecodable_content_streams: content_streams,
+    } = gaps;
+    RasterFidelity {
+        text_runs,
+        images,
+        inline_images,
+        shadings,
+        soft_masks,
+        content_streams,
+        substituted_text_runs,
+    }
 }
 
 #[cfg(not(feature = "raster"))]
@@ -163,11 +241,18 @@ pub(crate) fn paint(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
+    #[cfg(feature = "raster")]
+    pub(crate) fn five_page(boxes: Vec<Option<crate::formats::pdf::PageBox>>) -> Source {
+        let bytes = include_bytes!("../../tests/fixtures/pdf/handmade-five-page.pdf");
+        let parser = unpdf::parser::PdfParser::from_bytes(bytes).unwrap();
+        Source { pdf: Some(crate::formats::pdf::PdfSource { parser, boxes }) }
+    }
+
     fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
-        RasterSpec { dpi, max_pixels }
+        RasterSpec { dpi, max_pixels, max_bytes: None }
     }
 
     #[test]
@@ -202,10 +287,7 @@ mod tests {
 
     #[cfg(feature = "raster")]
     fn source() -> Source {
-        let bytes = include_bytes!("../../tests/fixtures/pdf/handmade-five-page.pdf");
-        let parser = unpdf::parser::PdfParser::from_bytes(bytes).unwrap();
-        let pdf = crate::formats::pdf::PdfSource { parser, boxes: Vec::new() };
-        Source { pdf: Some(pdf) }
+        five_page(Vec::new())
     }
 
     #[cfg(feature = "raster")]
@@ -218,6 +300,63 @@ mod tests {
         });
         ledger.settle(shared);
         (painted, ledger.spent())
+    }
+
+    #[test]
+    fn a_fidelity_loses_only_the_kinds_that_drop_content() {
+        let none = RasterFidelity::default();
+        for (fidelity, lost) in [
+            (RasterFidelity { text_runs: 1, ..none }, 1),
+            (RasterFidelity { images: 2, ..none }, 2),
+            (RasterFidelity { inline_images: 3, ..none }, 3),
+            (RasterFidelity { content_streams: 4, ..none }, 4),
+            (RasterFidelity { shadings: 5, ..none }, 0),
+            (RasterFidelity { soft_masks: 6, ..none }, 0),
+            (RasterFidelity { substituted_text_runs: 7, ..none }, 0),
+            (
+                RasterFidelity { text_runs: u32::MAX, images: u32::MAX, ..none },
+                2 * u64::from(u32::MAX),
+            ),
+        ] {
+            assert_eq!(fidelity.lost(), lost, "{fidelity:?}");
+        }
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn each_unpdf_count_lands_in_its_own_fidelity_field() {
+        let gaps = RasterGaps {
+            text_runs: 1,
+            images: 2,
+            inline_images: 3,
+            shadings: 4,
+            soft_masks: 5,
+            undecodable_content_streams: 6,
+        };
+        let expected = RasterFidelity {
+            text_runs: 1,
+            images: 2,
+            inline_images: 3,
+            shadings: 4,
+            soft_masks: 5,
+            content_streams: 6,
+            substituted_text_runs: 7,
+        };
+        assert_eq!(fidelity(gaps, 7), expected);
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn a_painted_page_holds_its_pixel_size_and_what_it_left_out() {
+        let ledger = Ledger::new(u64::MAX, None);
+        let shared = ledger.share();
+        let painted = paint(&source(), NonZeroU32::MIN, 72, &shared).unwrap().unwrap();
+        ledger.settle(shared);
+        let word = |at: usize| u32::from_be_bytes(painted.png[at..at + 4].try_into().unwrap());
+        assert_eq!((painted.width, painted.height), (612, 792));
+        assert_eq!((word(16), word(20)), (painted.width, painted.height));
+        let substituted = RasterFidelity { substituted_text_runs: 1, ..RasterFidelity::default() };
+        assert_eq!(painted.fidelity, substituted);
     }
 
     #[cfg(feature = "raster")]

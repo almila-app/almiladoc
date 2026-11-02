@@ -2,11 +2,11 @@ use std::num::NonZeroU32;
 use std::sync::Mutex;
 
 use crate::build::{docx_with, relationships};
-use crate::support::{configured, fixture, trips};
+use crate::support::{all_requests, bounded, configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr,
     ImagePolicy, Input, Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrLine, OcrOutcome,
-    OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec,
+    OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec, RefusalKind,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -255,7 +255,7 @@ fn hand_run_requests_and_fills_render_the_engine_s_reading() {
     let converter = image_ocr(|config| config.on_loss = OnLoss::Report);
     let rich = fixture("docx/handmade-rich.docx");
     let mut by_hand = parsed(&converter, &rich);
-    for request in by_hand.ocr_requests(&RasterSpec::default(), None).unwrap() {
+    for request in all_requests(&mut by_hand, &RasterSpec::default()) {
         by_hand.fill_gap(request.gap, GapFill::Markdown(read(&request))).unwrap();
     }
     assert_eq!(by_hand.ocr_requests(&RasterSpec::default(), None), Ok(Vec::new()));
@@ -268,16 +268,14 @@ fn requests_pass_over_a_settled_gap_and_charge_their_copies() {
     let converter = image_ocr(|config| config.limits.max_ocr_text_bytes = 3 << 20);
     let mut parsed = parsed(&converter, &bytes);
     let [one, two] = parsed.gaps().map(|gap| gap.id).collect::<Vec<_>>().try_into().unwrap();
-    let requests = parsed.ocr_requests(&RasterSpec::default(), None).unwrap();
+    let requests = all_requests(&mut parsed, &RasterSpec::default());
     assert_eq!(
         requests.iter().map(|r| (r.gap, r.max_text_bytes)).collect::<Vec<_>>(),
         [(one, 3 << 20), (two, 3 << 20)]
     );
     parsed.fail_gap(one).unwrap();
-    assert_eq!(
-        parsed.ocr_requests(&RasterSpec::default(), Some(&[one, two])).unwrap(),
-        requests[1..]
-    );
+    let again = parsed.ocr_requests(&RasterSpec::default(), Some(&[one, two])).unwrap();
+    assert_eq!(again, requests[1..].iter().cloned().map(Ok).collect::<Vec<_>>());
     let parse = least_work(&bytes, &|_| true);
     let copied =
         least_work(&bytes, &|parsed| parsed.ocr_requests(&RasterSpec::default(), None).is_ok());
@@ -287,6 +285,57 @@ fn requests_pass_over_a_settled_gap_and_charge_their_copies() {
     let mut parsed = image_ocr(|_| {}).parse(input).unwrap();
     cancelled.cancel();
     assert_eq!(parsed.ocr_requests(&RasterSpec::default(), None), Err(ConvertError::Cancelled));
+}
+
+#[test]
+fn an_embedded_image_over_the_byte_bound_is_refused_and_asked_of_no_engine() {
+    let bytes = pictures(2, 4000);
+    let mut parsed = parsed(&image_ocr(|_| {}), &bytes);
+    let unbounded = all_requests(&mut parsed, &RasterSpec::default());
+    let len = u64::try_from(unbounded[0].image.bytes.len()).unwrap();
+    let image = &unbounded[0].image;
+    assert_eq!((image.dpi, image.width, image.height, image.fidelity), (None, None, None, None));
+    let at = parsed.ocr_requests(&bounded(len), None).unwrap();
+    assert_eq!(at, unbounded.iter().cloned().map(Ok).collect::<Vec<_>>());
+    let over = parsed.ocr_requests(&bounded(len - 1), None).unwrap();
+    let kinds: Vec<_> = over.iter().map(|made| made.as_ref().err().map(|r| r.kind)).collect();
+    assert_eq!(kinds, [Some(RefusalKind::OverBytes { bytes: len }); 2]);
+    struct Bounded(RasterSpec);
+    impl OcrEngine for Bounded {
+        fn raster(&self) -> RasterSpec {
+            self.0
+        }
+        fn recognize(&self, _: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+            panic!("a refused image is read by no engine")
+        }
+    }
+    let mut expected = summary(0, 0, 0);
+    expected.refused = 2;
+    assert_eq!(parsed.ocr(&Bounded(bounded(len - 1)), None), Ok(expected));
+    assert_eq!(counts(&parsed, DiagnosticCode::OcrGap), 2);
+    let copied =
+        |spec: RasterSpec| least_work(&bytes, &|parsed| parsed.ocr_requests(&spec, None).is_ok());
+    assert_eq!(copied(bounded(len - 1)), least_work(&bytes, &|_| true));
+    assert_eq!(copied(bounded(len)), copied(RasterSpec::default()));
+}
+
+#[test]
+fn a_cancel_in_raster_refuses_a_call_whose_every_image_is_refused() {
+    struct CancelsInRaster(CancelToken);
+    impl OcrEngine for CancelsInRaster {
+        fn raster(&self) -> RasterSpec {
+            self.0.cancel();
+            bounded(1)
+        }
+        fn recognize(&self, _: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+            panic!("a refused image is read by no engine")
+        }
+    }
+    let bytes = pictures(2, 4000);
+    let token = CancelToken::new();
+    let input = Input::new(&bytes, Format::Docx).with_cancel(token.clone());
+    let mut parsed = image_ocr(|_| {}).parse(input).unwrap();
+    assert_eq!(parsed.ocr(&CancelsInRaster(token), None), Err(ConvertError::Cancelled));
 }
 
 struct Located(Vec<OcrLine>);

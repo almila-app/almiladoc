@@ -35,6 +35,7 @@ __all__ = [
     "OcrFailure",
     "OcrHttp",
     "OcrLine",
+    "OcrRefusal",
     "OcrRequest",
     "OcrResult",
     "OcrSummary",
@@ -42,6 +43,7 @@ __all__ = [
     "PageOutOfRangeError",
     "Parsed",
     "PdfScanPolicy",
+    "RasterFidelity",
     "ResourceLimitError",
     "RevisionPolicy",
     "TokenUsage",
@@ -66,7 +68,8 @@ class ConfigError(ValueError):
     limit: str
     """The field: a limit's name such as `max_work`, `threads`, an
     `OcrHttp` argument such as `base_url`, or `raster` for the `dpi` and
-    `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`."""
+    `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`, or a zero
+    `max_bytes`."""
     ceiling: int | None
     """The highest value the limit accepts, for a limit with a ceiling
     (`max_nesting_depth`); `None` otherwise."""
@@ -459,12 +462,60 @@ class OcrLine:
     def __getnewargs__(self) -> tuple[str, tuple[float, float, float, float]]: ...
 
 @final
+class RasterFidelity:
+    """What painting a page left out or replaced, by kind, which pickles:
+    `text_runs`, `images`, `inline_images`, `shadings`, `soft_masks` and
+    `content_streams` not painted or not applied as set, and
+    `substituted_text_runs` painted in a standard face standing in for the
+    page's font. `lost` is what `raster_incomplete` counts: every kind but
+    shadings, soft masks and substituted runs.
+    Annotation appearances, Lab/DeviceN colours and missing stand-in glyphs are not
+    observed, so zero counts are not a completeness claim."""
+
+    def __new__(
+        cls,
+        text_runs: int = 0,
+        images: int = 0,
+        inline_images: int = 0,
+        shadings: int = 0,
+        soft_masks: int = 0,
+        content_streams: int = 0,
+        substituted_text_runs: int = 0,
+    ) -> RasterFidelity: ...
+    @property
+    def text_runs(self) -> int:
+        """Text runs not painted."""
+    @property
+    def images(self) -> int:
+        """Images not painted."""
+    @property
+    def inline_images(self) -> int:
+        """Inline images not painted."""
+    @property
+    def shadings(self) -> int:
+        """Shadings and pattern colours not painted."""
+    @property
+    def soft_masks(self) -> int:
+        """Soft masks not applied as set."""
+    @property
+    def content_streams(self) -> int:
+        """Content streams that could not be decoded."""
+    @property
+    def substituted_text_runs(self) -> int:
+        """Text runs painted in a standard face standing in for the page's font."""
+    @property
+    def lost(self) -> int:
+        """What the painting dropped from the page, as `raster_incomplete` counts it."""
+    def __getnewargs__(self) -> tuple[int, int, int, int, int, int, int]: ...
+
+@final
 class OcrRequest:
     """One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
     `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
     its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`;
-    `max_text_bytes`, the most bytes of Markdown a fill of it takes; and
-    `dpi`, the resolution a page was painted at, `None` for an embedded image."""
+    `max_text_bytes`, the most bytes of Markdown a fill of it takes; `dpi`,
+    `width` and `height`, the resolution and pixel size a page was painted at,
+    and `fidelity`, what the painting left out, each `None` for an embedded image."""
 
     def __new__(
         cls,
@@ -473,6 +524,9 @@ class OcrRequest:
         media_type: str,
         max_text_bytes: int,
         dpi: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        fidelity: RasterFidelity | None = None,
     ) -> OcrRequest: ...
     @property
     def gap(self) -> _GapRow:
@@ -489,6 +543,41 @@ class OcrRequest:
     @property
     def dpi(self) -> int | None:
         """The resolution a page was painted at; `None` for an embedded image."""
+    @property
+    def width(self) -> int | None:
+        """The pixel width of a painted page; `None` for an embedded image."""
+    @property
+    def height(self) -> int | None:
+        """The pixel height of a painted page; `None` for an embedded image."""
+    @property
+    def fidelity(self) -> RasterFidelity | None:
+        """What painting a page left out; `None` for an embedded image."""
+
+_OcrRefusalKind = Literal["unpaintable", "over_bytes"]
+
+@final
+class OcrRefusal:
+    """A gap that has no image to read, which pickles and stays unfilled: `gap`,
+    the row of `Parsed.gaps` it stands for, and `kind`, `unpaintable` for a
+    page that cannot be painted or `over_bytes` for an image over `max_bytes`,
+    whose `bytes` are the size it would have held; `None` for `unpaintable`."""
+
+    def __new__(
+        cls,
+        gap: _GapRow,
+        kind: _OcrRefusalKind,
+        bytes: int | None = None,
+    ) -> OcrRefusal: ...
+    @property
+    def gap(self) -> _GapRow:
+        """The row of `Parsed.gaps` that has no image."""
+    @property
+    def kind(self) -> _OcrRefusalKind:
+        """`unpaintable` or `over_bytes`."""
+    @property
+    def bytes(self) -> int | None:
+        """The bytes the encoded image would have held, for `over_bytes`."""
+    def __getnewargs__(self) -> tuple[_GapRow, _OcrRefusalKind, int | None]: ...
 
 _OcrFailureKind = Literal[
     "rejected",
@@ -521,7 +610,8 @@ class OcrHttp:
     prefix moves the request once to the next; `preserve_table_spans` makes
     a reply a `fill_gap_tables` fill, failing a gap below the top level;
     a page is painted as
-    `Parsed.ocr_requests` paints it at `dpi` and `max_pixels`; a request the
+    `Parsed.ocr_requests` paints it at `dpi` and `max_pixels`, and `Parsed.ocr`
+    refuses an image over `max_bytes`, `None` for no bound; a request the
     server cannot take yet is tried up to `retries` more times, at most 10;
     and `concurrency`, 1 to 16, requests go out at once. A field out of range
     raises `ConfigError` naming it. No socket opens before a request and no
@@ -550,6 +640,7 @@ class OcrHttp:
         preserve_table_spans: bool = False,
         dpi: int = 150,
         max_pixels: int = 12_845_056,
+        max_bytes: int | None = None,
         retries: int = 3,
         concurrency: int = 1,
         root_certificates_pem: bytes | None = None,
@@ -690,6 +781,10 @@ class OcrSummary:
     def unattempted(self) -> int:
         """Gaps left for a later call: the engine did not attempt them, or a
         request before theirs was not attempted."""
+    @property
+    def refused(self) -> int:
+        """Gaps left unfilled because no image could be made of them: a page
+        that cannot be painted, or an image over `max_bytes`."""
 
 @final
 class Parsed:
@@ -759,18 +854,24 @@ class Parsed:
         *,
         dpi: int = 150,
         max_pixels: int = 12_845_056,
-    ) -> list[OcrRequest]:
-        """An `OcrRequest` for each gap of `gaps`, rows of `Parsed.gaps`, or every
-        gap when `None`, that is not yet filled or failed and asks for an
-        image, in document order, made with the GIL released: an OCR run
-        elsewhere, in another process too, reads each and passes its text to
-        `fill_gap(request.gap, text)`, or calls `fail_gap(request.gap)`. An
-        embedded image is copied and a page painted as a PNG at the largest
-        dpi up to `dpi` at which its media box fits `max_pixels`, a page that
-        cannot be painted asking for none, and a row naming no unsettled gap is passed
-        over. A `dpi` outside 50 to 600 or `max_pixels` outside 1048576 to
-        41943040 raises `ConfigError` with `limit` `raster`, an int that fits
-        neither `OverflowError`, and work past `max_work` `ResourceLimitError`."""
+        max_bytes: int | None = None,
+    ) -> list[OcrRequest | OcrRefusal]:
+        """An `OcrRequest`, or an `OcrRefusal` where no image can be made, for each
+        gap of `gaps`, rows of `Parsed.gaps`, or every gap when `None`, that is
+        not yet filled or failed and asks for an image, in document order, made
+        with the GIL released: an OCR run elsewhere, in another process too,
+        reads each request and passes its text to `fill_gap(request.gap, text)`,
+        or calls `fail_gap(request.gap)`. An embedded image is copied and a page
+        painted as a PNG at the largest dpi up to `dpi` at which its media box
+        fits `max_pixels`, its request holding the pixel `width` and `height`
+        and a `RasterFidelity` of what the painting left out. A page that
+        cannot be painted is an `unpaintable` refusal, and an image over
+        `max_bytes` encoded bytes, `None` for no bound, an `over_bytes` one;
+        either gap stays unfilled, for a later call or `fill_gap`. A row naming
+        no unsettled gap is passed over. A `dpi` outside 50 to 600,
+        `max_pixels` outside 1048576 to 41943040 or a `max_bytes` of 0 raises
+        `ConfigError` with `limit` `raster`, an int that fits none of them
+        `OverflowError`, and work past `max_work` `ResourceLimitError`."""
     def ocr(
         self,
         engine: OcrHttp,
@@ -780,10 +881,11 @@ class Parsed:
         gap when `None`, that `ocr_requests` would ask for, through `engine`, with
         the GIL released: in batches that fill or fail each gap as `fill_gap` and
         `fail_gap` do, a fill a limit refuses failing its gap, until a batch
-        holds a gap the engine did not attempt, which stays for a later call.
-        Work past `max_work` raises `ResourceLimitError`, and a cancel of the
-        parse's token `CancelledError`, each keeping what earlier batches
-        settled."""
+        holds a gap the engine did not attempt, which stays for a later call. A
+        gap `ocr_requests` would refuse is no request: it stays unfilled and the
+        summary counts it as `refused`. Work past `max_work` raises
+        `ResourceLimitError`, and a cancel of the parse's token
+        `CancelledError`, each keeping what earlier batches settled."""
     def assets(self) -> list[tuple[int, str, bytes]]:
         """Every embedded asset as `(id, media_type, data)`, `id` being the
         index an image's `asset` source names: body, stored notes, then headers

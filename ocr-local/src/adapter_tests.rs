@@ -94,6 +94,11 @@ fn parsed(count: usize) -> almiladoc::Parsed {
     Converter::new(config).unwrap().parse(Input::new(rtf.as_bytes(), Format::Rtf)).unwrap()
 }
 
+fn requests(count: usize) -> Vec<almiladoc::OcrRequest> {
+    let made = parsed(count).ocr_requests(&RasterSpec::default(), None).unwrap();
+    made.into_iter().map(|request| request.unwrap()).collect()
+}
+
 fn failed(kind: OcrFailureKind) -> OcrOutcome {
     OcrOutcome::Failed(OcrFailure::new(kind, None))
 }
@@ -208,7 +213,7 @@ fn bad_images_fail_before_any_producer_call() {
 
 #[test]
 fn runtime_faults_stop_the_batch_while_per_image_refusals_keep_exact_cardinality() {
-    let mut requests = parsed(3).ocr_requests(&RasterSpec::default(), None).unwrap();
+    let mut requests = requests(3);
     assert_eq!(requests.len(), 3);
     requests[0].image = OcrImage::new(b"\x89PNG\r\n\x1a\ninvalid".to_vec(), None).unwrap();
     let (engine, calls) = local(vec![Ok(page()), Ok(page())], false);
@@ -240,7 +245,7 @@ fn crop_limit_refusal_fails_only_its_image_and_keeps_later_requests() {
         panic!("oversized crops must be refused before allocation")
     })
     .unwrap_err();
-    let requests = parsed(3).ocr_requests(&RasterSpec::default(), None).unwrap();
+    let requests = requests(3);
     let (engine, calls) = local(vec![Err(error), Ok(page()), Ok(page())], false);
     let outcomes = engine.recognize(&requests, &CancelToken::new());
     assert_eq!(outcomes.len(), 3);
@@ -253,7 +258,7 @@ fn crop_limit_refusal_fails_only_its_image_and_keeps_later_requests() {
 
 #[test]
 fn cancellation_before_decode_after_native_return_and_busy_engine_never_fill() {
-    let requests = parsed(3).ocr_requests(&RasterSpec::default(), None).unwrap();
+    let requests = requests(3);
     for during in [false, true] {
         let cancel = CancelToken::new();
         if !during {

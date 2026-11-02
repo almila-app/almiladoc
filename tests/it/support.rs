@@ -1,12 +1,12 @@
 use std::io::{Cursor, Write};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 
 use crate::build::epub_bare;
 use almiladoc::model::{Block, CellSlot, Inline};
 use almiladoc::{
     Config, ConvertError, Converter, Diagnostic, DiagnosticCode, Diagnostics, Format, ImagePolicy,
-    Input, Limit, Limits, OnLoss, Region,
+    Input, Limit, Limits, OcrRequest, OnLoss, Parsed, RasterSpec, Region,
 };
 
 pub(crate) const POLICIES: [ImagePolicy; 3] =
@@ -91,6 +91,17 @@ pub(crate) fn limit_mut(limits: &mut Limits, limit: Limit) -> &mut u64 {
         Limit::OcrTextBytes => &mut limits.max_ocr_text_bytes,
         other => panic!("{other} has no Limits field"),
     }
+}
+
+pub(crate) fn bounded(max_bytes: u64) -> RasterSpec {
+    let mut spec = RasterSpec::default();
+    spec.max_bytes = NonZeroU64::new(max_bytes);
+    spec
+}
+
+pub(crate) fn all_requests(parsed: &mut Parsed, spec: &RasterSpec) -> Vec<OcrRequest> {
+    let made = parsed.ocr_requests(spec, None).unwrap();
+    made.into_iter().map(|request| request.unwrap()).collect()
 }
 
 pub(crate) fn trips<T>(result: &Result<T, ConvertError>, limit: Limit, max: u64) -> bool {

@@ -7,6 +7,7 @@ use crate::formats::Source;
 use crate::ledger::Ledger;
 use crate::model::{Asset, Gap, GapId, GapReason, OcrOrigin};
 use crate::ocr::images::media_type;
+use crate::ocr::raster::{Painted, RasterFidelity};
 use crate::ocr::{RasterSpec, raster};
 use crate::pool::map_ordered;
 
@@ -41,11 +42,17 @@ pub struct OcrImage {
     pub media_type: &'static str,
     /// The resolution a page was painted at; `None` for an embedded image.
     pub dpi: Option<u32>,
+    /// The pixel width of a painted page; `None` for an embedded image.
+    pub width: Option<u32>,
+    /// The pixel height of a painted page; `None` for an embedded image.
+    pub height: Option<u32>,
+    /// What painting a page left out; `None` for an embedded image, which is not painted.
+    pub fidelity: Option<RasterFidelity>,
 }
 
 impl OcrImage {
-    /// The image `bytes` hold, painted at `dpi` if a page; `None` unless they open with the
-    /// PNG or JPEG signature.
+    /// The image `bytes` hold, painted at `dpi` if a page, its size and fidelity unknown;
+    /// `None` unless they open with the PNG or JPEG signature.
     ///
     /// # Examples
     ///
@@ -61,7 +68,7 @@ impl OcrImage {
     pub fn new(bytes: impl Into<Arc<[u8]>>, dpi: Option<u32>) -> Option<Self> {
         let bytes = bytes.into();
         let media_type = media_type(&bytes)?;
-        Some(Self { bytes, media_type, dpi })
+        Some(Self { bytes, media_type, dpi, width: None, height: None, fidelity: None })
     }
 }
 
@@ -71,6 +78,9 @@ impl fmt::Debug for OcrImage {
             .field("media_type", &self.media_type)
             .field("bytes", &self.bytes.len())
             .field("dpi", &self.dpi)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("fidelity", &self.fidelity)
             .finish()
     }
 }
@@ -100,71 +110,155 @@ fn image_of<'a>(gap: &Gap, assets: &'a [Asset]) -> Option<(&'a [u8], &'static st
     Some((bytes, media_type(bytes)?))
 }
 
-/// How a gap's image is had: an embedded one copied, or a page to paint at a dpi.
+/// A gap [`Parsed::ocr_requests`](crate::Parsed::ocr_requests) could not make an image for,
+/// which stays unfilled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OcrRefusal {
+    /// The gap the image would have filled.
+    pub gap: GapId,
+    /// What the image would have been of.
+    pub origin: OcrOrigin,
+    /// Why the source's own text does not serve, as the gap holds them.
+    pub reasons: Vec<GapReason>,
+    /// Why there is no image.
+    pub kind: RefusalKind,
+}
+
+/// Why a gap has no image: closed, so it carries no text of the painter's error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RefusalKind {
+    /// The page cannot be painted: it has no usable box, or the painter failed on it.
+    Unpaintable,
+    /// The encoded image holds more bytes than [`RasterSpec::max_bytes`] allows.
+    OverBytes {
+        /// The bytes the encoded image holds.
+        bytes: u64,
+    },
+}
+
+impl RefusalKind {
+    /// The kind's stable `snake_case` name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unpaintable => "unpaintable",
+            Self::OverBytes { .. } => "over_bytes",
+        }
+    }
+}
+
+/// How a gap's image is had: an embedded one copied, a page to paint at a dpi, or no image.
 enum Plan {
     Image(OcrImage),
     Page { page: NonZeroU32, dpi: u32 },
+    Refused(RefusalKind),
 }
 
-/// The request of each of `gaps` that asks for an image, in order, with how much of its page
-/// painting left out, charged to `ledger` as [`crate::Parsed::ocr_requests`] says.
+/// The request or refusal of each of `gaps` that asks for an image, in order, charged to
+/// `ledger` as [`crate::Parsed::ocr_requests`] says.
 pub(crate) fn requests(
     gaps: &[Gap],
     inputs: Inputs<'_>,
     spec: &RasterSpec,
     ledger: &Ledger<'_>,
     max_text_bytes: u64,
-) -> Result<Vec<(OcrRequest, u64)>, ConvertError> {
+) -> Result<Vec<Result<OcrRequest, OcrRefusal>>, ConvertError> {
     let mut plans = Vec::with_capacity(gaps.len());
     for gap in gaps {
         let plan = match gap.origin {
             OcrOrigin::Page(page) => {
-                raster::plan(inputs.source, page, spec, ledger)?.map(|dpi| Plan::Page { page, dpi })
+                Some(raster::plan(inputs.source, page, spec, ledger)?.map_or(
+                    Plan::Refused(RefusalKind::Unpaintable),
+                    |dpi| Plan::Page { page, dpi },
+                ))
             }
-            _ => embedded(gap, inputs.assets, ledger)?.map(Plan::Image),
+            _ => embedded(gap, inputs.assets, spec, ledger)?,
         };
         plans.extend(plan.map(|plan| (gap, plan)));
     }
     let shared = ledger.share();
     let painted = map_ordered(&plans, |(_, plan)| match *plan {
         Plan::Page { page, dpi } => raster::paint(inputs.source, page, dpi, &shared),
-        Plan::Image(_) => Ok(None),
+        Plan::Image(_) | Plan::Refused(_) => Ok(None),
     });
     ledger.settle(shared);
     let mut made = Vec::with_capacity(plans.len());
     for ((gap, plan), painted) in plans.into_iter().zip(painted) {
-        let (image, unpainted) = match (plan, painted?) {
-            (Plan::Image(image), _) => (image, 0),
-            (Plan::Page { dpi, .. }, Some(painted)) => {
-                ledger.charge(byte_units(painted.png.len()))?;
-                let png = Arc::from(painted.png);
-                (
-                    OcrImage { bytes: png, media_type: "image/png", dpi: Some(dpi) },
-                    painted.unpainted,
-                )
-            }
-            (Plan::Page { .. }, None) => continue,
+        let image = match (plan, painted?) {
+            (Plan::Image(image), _) => Ok(image),
+            (Plan::Refused(kind), _) => Err(kind),
+            (Plan::Page { dpi, .. }, Some(painted)) => page_image(painted, dpi, spec, ledger)?,
+            (Plan::Page { .. }, None) => Err(RefusalKind::Unpaintable),
         };
-        let (gap, origin, reasons) = (gap.id, gap.origin, gap.reasons.clone());
-        made.push((OcrRequest { gap, origin, reasons, image, max_text_bytes }, unpainted));
+        ledger.charge(0)?;
+        let (id, origin, reasons) = (gap.id, gap.origin, gap.reasons.clone());
+        made.push(match image {
+            Ok(image) => Ok(OcrRequest { gap: id, origin, reasons, image, max_text_bytes }),
+            Err(kind) => Err(OcrRefusal { gap: id, origin, reasons, kind }),
+        });
     }
     Ok(made)
 }
 
-/// `gap`'s embedded PNG or JPEG copied, its bytes charged to `ledger`.
+/// `painted` as a page's image, its PNG bytes charged to `ledger` even when `spec` refuses them.
+fn page_image(
+    painted: Painted,
+    dpi: u32,
+    spec: &RasterSpec,
+    ledger: &Ledger<'_>,
+) -> Result<Result<OcrImage, RefusalKind>, ConvertError> {
+    let bytes = byte_count(painted.png.len());
+    ledger.charge(byte_units(bytes))?;
+    if over(spec, bytes) {
+        return Ok(Err(RefusalKind::OverBytes { bytes }));
+    }
+    Ok(Ok(OcrImage {
+        bytes: Arc::from(painted.png),
+        media_type: "image/png",
+        dpi: Some(dpi),
+        width: Some(painted.width),
+        height: Some(painted.height),
+        fidelity: Some(painted.fidelity),
+    }))
+}
+
+/// `gap`'s embedded PNG or JPEG copied, its bytes charged to `ledger`, or refused uncopied when
+/// `spec` bounds it.
 fn embedded(
     gap: &Gap,
     assets: &[Asset],
+    spec: &RasterSpec,
     ledger: &Ledger<'_>,
-) -> Result<Option<OcrImage>, ConvertError> {
+) -> Result<Option<Plan>, ConvertError> {
     let Some((bytes, media_type)) = image_of(gap, assets) else { return Ok(None) };
-    ledger.charge(byte_units(bytes.len()))?;
-    Ok(Some(OcrImage { bytes: Arc::from(bytes), media_type, dpi: None }))
+    let len = byte_count(bytes.len());
+    if over(spec, len) {
+        return Ok(Some(Plan::Refused(RefusalKind::OverBytes { bytes: len })));
+    }
+    ledger.charge(byte_units(len))?;
+    Ok(Some(Plan::Image(OcrImage {
+        bytes: Arc::from(bytes),
+        media_type,
+        dpi: None,
+        width: None,
+        height: None,
+        fidelity: None,
+    })))
 }
 
-/// Units of work `len` bytes of image cost.
-fn byte_units(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or(u64::MAX).div_ceil(BYTES_PER_UNIT)
+fn over(spec: &RasterSpec, bytes: u64) -> bool {
+    spec.max_bytes.is_some_and(|max| bytes > max.get())
+}
+
+fn byte_count(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// Units of work `bytes` bytes of image cost.
+fn byte_units(bytes: u64) -> u64 {
+    bytes.div_ceil(BYTES_PER_UNIT)
 }
 
 #[cfg(test)]
@@ -186,15 +280,25 @@ mod tests {
         Gap { id: GapId::new(None, NonZeroU32::MIN), origin, reasons: Vec::new() }
     }
 
+    type Made = Result<OcrRequest, OcrRefusal>;
+
+    fn made(
+        gap: &Gap,
+        assets: &[Asset],
+        source: &Source,
+        ledger: &Ledger<'_>,
+    ) -> Result<Option<Made>, ConvertError> {
+        let gaps = [gap.clone()];
+        let inputs = Inputs { assets, source };
+        Ok(requests(&gaps, inputs, &RasterSpec::default(), ledger, 7)?.into_iter().next())
+    }
+
     fn requested(
         gap: &Gap,
         assets: &[Asset],
         ledger: &Ledger<'_>,
-    ) -> Result<Option<OcrRequest>, ConvertError> {
-        let (source, gaps) = (Source::default(), [gap.clone()]);
-        let inputs = Inputs { assets, source: &source };
-        let made = requests(&gaps, inputs, &RasterSpec::default(), ledger, 7)?;
-        Ok(made.into_iter().next().map(|(request, _)| request))
+    ) -> Result<Option<Made>, ConvertError> {
+        made(gap, assets, &Source::default(), ledger)
     }
 
     #[test]
@@ -202,12 +306,12 @@ mod tests {
         let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &[0; 25]].concat();
         let ledger = Ledger::new(u64::MAX, None);
         let made = requested(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &ledger);
-        let made = made.unwrap().unwrap();
+        let made = made.unwrap().unwrap().unwrap();
         assert_eq!((&*made.image.bytes, made.image.media_type), (png.as_slice(), "image/png"));
         assert_eq!((made.max_text_bytes, ledger.spent()), (7, 3));
         assert_eq!(
             format!("{:?}", made.image),
-            r#"OcrImage { media_type: "image/png", bytes: 33, dpi: None }"#
+            r#"OcrImage { media_type: "image/png", bytes: 33, dpi: None, width: None, height: None, fidelity: None }"#
         );
         let short = Ledger::new(2, None);
         let refused = requested(&gap(OcrOrigin::Image(AssetId(0))), &[asset(&png)], &short);
@@ -216,9 +320,7 @@ mod tests {
 
     #[test]
     fn no_image_no_request() {
-        let page = OcrOrigin::Page(NonZeroU32::MIN);
         let cases = [
-            (gap(page), b"\xff\xd8\xff".as_slice()),
             (gap(OcrOrigin::Image(AssetId(0))), b"GIF89a".as_slice()),
             (gap(OcrOrigin::Image(AssetId(1))), b"\xff\xd8\xff".as_slice()),
         ];
@@ -226,6 +328,53 @@ mod tests {
             let ledger = Ledger::new(u64::MAX, None);
             assert_eq!(requested(&gap, &[asset(bytes)], &ledger), Ok(None), "{gap:?}");
             assert_eq!(ledger.spent(), 0);
+        }
+    }
+
+    #[test]
+    fn each_refusal_kind_has_its_own_snake_case_name_and_no_other_text() {
+        for (kind, name, debug) in [
+            (RefusalKind::Unpaintable, "unpaintable", "Unpaintable"),
+            (RefusalKind::OverBytes { bytes: 9 }, "over_bytes", "OverBytes { bytes: 9 }"),
+        ] {
+            assert_eq!((kind.as_str(), format!("{kind:?}")), (name, debug.to_owned()));
+        }
+    }
+
+    #[cfg(feature = "raster")]
+    mod pages {
+        use super::*;
+        use crate::formats::pdf::PageBox;
+
+        const LETTER: Option<PageBox> = Some(PageBox { width: 612.0, height: 792.0 });
+        const LETTER_PIXELS: u64 = 1275 * 1650;
+
+        fn painted(page: u32, boxes: Vec<Option<PageBox>>) -> (Made, u64) {
+            let gap = gap(OcrOrigin::Page(NonZeroU32::new(page).unwrap()));
+            let ledger = Ledger::new(u64::MAX, None);
+            let source = raster::tests::five_page(boxes);
+            let made = made(&gap, &[], &source, &ledger).unwrap().unwrap();
+            (made, ledger.spent())
+        }
+
+        #[test]
+        fn a_page_that_cannot_be_painted_is_an_unpaintable_refusal_whatever_stops_it() {
+            let letters = || vec![LETTER; 6];
+            let wide = PageBox { width: 612.0, height: 0.0 };
+            let nan = PageBox { width: f32::NAN, height: 792.0 };
+            for (page, boxes, spent, why) in [
+                (6, letters(), LETTER_PIXELS.div_ceil(128), "unpdf has no such page"),
+                (2, vec![LETTER, None], 0, "the page was never read"),
+                (1, vec![Some(wide)], 0, "no height"),
+                (1, vec![Some(PageBox { width: 0.0, height: 792.0 })], 0, "no width"),
+                (1, vec![Some(nan)], 0, "not a number"),
+            ] {
+                let (made, charged) = painted(page, boxes);
+                let refusal = made.unwrap_err();
+                assert_eq!(refusal.kind, RefusalKind::Unpaintable, "{why}");
+                assert_eq!(refusal.origin, OcrOrigin::Page(NonZeroU32::new(page).unwrap()));
+                assert_eq!(charged, spent, "{why}");
+            }
         }
     }
 }

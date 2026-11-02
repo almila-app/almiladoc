@@ -31,6 +31,7 @@ mod _almiladoc {
     };
     #[pymodule_export]
     use crate::ocr::{
-        OcrAttempt, OcrFailure, OcrHttp, OcrLine, OcrRequest, OcrResult, OcrSummary, TokenUsage,
+        OcrAttempt, OcrFailure, OcrHttp, OcrLine, OcrRefusal, OcrRequest, OcrResult, OcrSummary,
+        RasterFidelity, TokenUsage,
     };
 }

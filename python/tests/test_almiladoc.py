@@ -100,6 +100,29 @@ def png_size(png):
     return struct.unpack(">II", png[16:24])
 
 
+def unpaintable_second_page():
+    """A two-page PDF whose second page has a box with no area, so no image of it exists."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources "
+        b"<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>",
+        b"<< /Length 39 >>\nstream\nBT /F1 24 Tf 72 400 Td (Painted) Tj ET\nendstream",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 0 0] /Contents 99 0 R >>",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    table = b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    return (
+        out
+        + b"xref\n0 %d\n0000000000 65535 f \n%s" % (len(objects) + 1, table)
+        + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+        % (len(objects) + 1, len(out))
+    )
+
+
 def archive(parts):
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as zipped:
@@ -787,12 +810,16 @@ class ConversionTest(unittest.TestCase):
         self.assertEqual(
             repr(request),
             f'OcrRequest(gap={request.gap!r}, media_type="image/png", '
-            f"image=<{len(request.image)} bytes>, max_text_bytes=1048576, dpi=None)",
+            f"image=<{len(request.image)} bytes>, max_text_bytes=1048576, dpi=None, "
+            "width=None, height=None, fidelity=None)",
         )
         self.assertEqual(parsed.ocr_requests([("page", 1, 1, 1, None, [])]), [])
         copy = pickle.loads(pickle.dumps(request))
-        fields = attrgetter("gap", "image", "media_type", "dpi", "max_text_bytes")
+        fields = attrgetter(
+            "gap", "image", "media_type", "dpi", "width", "height", "fidelity", "max_text_bytes"
+        )
         self.assertEqual(fields(copy), fields(request))
+        self.assertEqual(fields(request)[3:7], (None, None, None, None))
         parsed.fill_gap(copy.gap, f"OCR {copy.gap[2]}")
         self.assertEqual(parsed.ocr_requests(), [])
         self.assertEqual(
@@ -822,14 +849,122 @@ class ConversionTest(unittest.TestCase):
         (request,) = parsed.ocr_requests(dpi=50)
         copy = pickle.loads(pickle.dumps(request))
         self.assertEqual((copy.dpi, copy.image, copy.gap), (50, request.image, request.gap))
-        for refused in [{"dpi": 49}, {"dpi": 601}, {"max_pixels": (1 << 20) - 1}]:
+        self.assertEqual(
+            (request.width, request.height), png_size(request.image), "the painted pixels"
+        )
+        self.assertEqual(
+            (copy.width, copy.height, copy.fidelity),
+            (request.width, request.height, almiladoc.RasterFidelity()),
+        )
+        for refused in [
+            {"dpi": 49},
+            {"dpi": 601},
+            {"max_pixels": (1 << 20) - 1},
+            {"max_bytes": 0},
+        ]:
             with self.assertRaises(almiladoc.ConfigError) as caught:
                 parsed.ocr_requests(**refused)
             self.assertEqual(caught.exception.limit, "raster", refused)
-        for unfit in [{"dpi": -1}, {"max_pixels": 1 << 64}]:
+        for unfit in [{"dpi": -1}, {"max_pixels": 1 << 64}, {"max_bytes": 1 << 64}]:
             with self.assertRaises(OverflowError):
                 parsed.ocr_requests(**unfit)
         self.assertEqual(len(parsed.gaps), 1)
+
+    def test_a_png_over_the_byte_bound_is_an_over_bytes_refusal_and_one_at_it_is_not(self):
+        parsed = almiladoc.Converter().parse(MIXED.read_bytes())
+        (request,) = parsed.ocr_requests()
+        size = len(request.image)
+        (at,) = parsed.ocr_requests(max_bytes=size)
+        self.assertEqual(
+            attrgetter("gap", "image", "width", "fidelity")(at),
+            attrgetter("gap", "image", "width", "fidelity")(request),
+        )
+        (over,) = parsed.ocr_requests(max_bytes=size - 1)
+        self.assertIsInstance(over, almiladoc.OcrRefusal)
+        self.assertEqual((over.gap, over.kind, over.bytes), (request.gap, "over_bytes", size))
+        self.assertEqual(
+            repr(over), f"OcrRefusal(gap={request.gap!r}, kind='over_bytes', bytes={size})"
+        )
+        copy = pickle.loads(pickle.dumps(over))
+        self.assertEqual((copy.gap, copy.kind, copy.bytes), (over.gap, "over_bytes", size))
+        self.assertEqual(len(parsed.gaps), 1)
+        parsed.fill_gap(over.gap, "scanned")
+        self.assertIn("scanned", parsed.render().markdown)
+
+    def test_an_embedded_image_over_the_byte_bound_is_refused_before_it_is_copied(self):
+        config = almiladoc.Config(
+            on_loss=almiladoc.OnLoss.REPORT, image_ocr=almiladoc.ImageOcr.ALL
+        )
+        parsed = almiladoc.Converter(config).parse(RICH.read_bytes())
+        size = len(parsed.assets()[0][2])
+        (at,) = parsed.ocr_requests(max_bytes=size)
+        self.assertEqual(at.image, parsed.assets()[0][2])
+        (over,) = parsed.ocr_requests(max_bytes=size - 1)
+        self.assertEqual((over.kind, over.bytes), ("over_bytes", size))
+
+    def test_a_page_that_cannot_be_painted_is_an_unpaintable_refusal(self):
+        data = unpaintable_second_page()
+        parsed = almiladoc.Converter().parse(data, ocr_pages="all")
+        first, second = parsed.ocr_requests()
+        self.assertIsInstance(first, almiladoc.OcrRequest)
+        self.assertEqual(first.gap, parsed.gaps[0])
+        self.assertIsInstance(second, almiladoc.OcrRefusal)
+        self.assertEqual(
+            (second.gap, second.kind, second.bytes), (parsed.gaps[1], "unpaintable", None)
+        )
+        self.assertEqual(
+            repr(second), f"OcrRefusal(gap={second.gap!r}, kind='unpaintable', bytes=None)"
+        )
+        copy = pickle.loads(pickle.dumps(second))
+        self.assertEqual((copy.gap, copy.kind, copy.bytes), (second.gap, "unpaintable", None))
+        with self.assertRaises(almiladoc.NeedsOcrError) as caught:
+            parsed.render()
+        self.assertEqual(caught.exception.pages, [1, 2])
+
+    def test_a_refusal_names_a_known_kind_and_the_bytes_only_of_over_bytes(self):
+        row = ("page", 1, 1, 1, None, [])
+        self.assertEqual(almiladoc.OcrRefusal(row, "over_bytes", 7).bytes, 7)
+        for kind, size in [("unreadable", None), ("over_bytes", None), ("unpaintable", 7)]:
+            with self.assertRaises(ValueError, msg=(kind, size)):
+                almiladoc.OcrRefusal(row, kind, size)
+
+    def test_a_raster_fidelity_counts_each_kind_and_loses_only_what_was_dropped(self):
+        fidelity = almiladoc.RasterFidelity(1, 2, 3, 4, 5, 6, 7)
+        self.assertEqual(
+            attrgetter(
+                "text_runs",
+                "images",
+                "inline_images",
+                "shadings",
+                "soft_masks",
+                "content_streams",
+                "substituted_text_runs",
+                "lost",
+            )(fidelity),
+            (1, 2, 3, 4, 5, 6, 7, 1 + 2 + 3 + 6),
+        )
+        self.assertEqual(almiladoc.RasterFidelity(shadings=4, soft_masks=5).lost, 0)
+        self.assertEqual(pickle.loads(pickle.dumps(fidelity)), fidelity)
+        self.assertEqual(hash(pickle.loads(pickle.dumps(fidelity))), hash(fidelity))
+        self.assertNotEqual(fidelity, almiladoc.RasterFidelity(7, 6, 5, 4, 3, 2, 1))
+        self.assertEqual(
+            repr(fidelity),
+            "RasterFidelity(text_runs=1, images=2, inline_images=3, shadings=4, "
+            "soft_masks=5, content_streams=6, substituted_text_runs=7)",
+        )
+        request = almiladoc.OcrRequest(
+            ("page", 1, 1, 1, None, []), b"", "image/png", 9, 150, 3, 4, fidelity
+        )
+        copy = pickle.loads(pickle.dumps(request))
+        self.assertEqual((copy.width, copy.height, copy.fidelity), (3, 4, fidelity))
+
+    def test_a_painted_page_s_request_carries_the_counts_its_painting_measured(self):
+        parsed = almiladoc.Converter().parse(PREDEFINED_CMAP.read_bytes(), ocr_pages="all")
+        (request,) = parsed.ocr_requests()
+        expected = almiladoc.RasterFidelity(text_runs=10)
+        self.assertEqual((request.fidelity, request.fidelity.lost), (expected, 10))
+        copy = pickle.loads(pickle.dumps(request))
+        self.assertEqual((copy.fidelity, copy.fidelity.lost), (expected, 10))
 
     def test_the_identity_is_the_configs(self):
         identity = almiladoc.Converter().identity
@@ -1326,9 +1461,9 @@ class OcrHttpTest(unittest.TestCase):
         self.assertIn("\n\nA dot\n\n", converted.markdown)
         self.assertNotIn("ocr_gap", [diagnostic.code for diagnostic in converted.diagnostics])
         self.assertEqual((from_path.markdown, parsed.render().markdown), (converted.markdown,) * 2)
-        self.assertEqual(repr(none), "OcrSummary(filled=0, failed=0, unattempted=0)")
-        self.assertEqual(repr(summary), "OcrSummary(filled=1, failed=0, unattempted=0)")
-        self.assertEqual((again.filled, again.failed, again.unattempted), (0, 0, 0))
+        self.assertEqual(repr(none), "OcrSummary(filled=0, failed=0, unattempted=0, refused=0)")
+        self.assertEqual(repr(summary), "OcrSummary(filled=1, failed=0, unattempted=0, refused=0)")
+        self.assertEqual(attrgetter("filled", "failed", "unattempted", "refused")(again), (0,) * 4)
         self.assertEqual(len(server.seen), 3)
         path, authorization, body = server.seen[0]
         self.assertEqual(
@@ -1337,6 +1472,18 @@ class OcrHttpTest(unittest.TestCase):
         )
         with self.assertRaises(TypeError):
             converter_.convert(data, ocr=object())
+
+    def test_an_image_over_the_engines_byte_bound_is_counted_refused_and_stays_a_gap(self):
+        converter_, data = self.rich()
+        parsed = converter_.parse(data)
+        (gap,) = parsed.gaps
+        engine = almiladoc.OcrHttp("http://localhost:1/v1", "vision", max_bytes=1)
+        summary = parsed.ocr(engine)
+        self.assertEqual(
+            attrgetter("filled", "failed", "unattempted", "refused")(summary), (0, 0, 0, 1)
+        )
+        self.assertEqual(repr(summary), "OcrSummary(filled=0, failed=0, unattempted=0, refused=1)")
+        self.assertEqual([request.gap for request in parsed.ocr_requests()], [gap])
 
     def test_a_childs_pickled_requests_fill_through_the_parents_engine(self):
         converter_, data = self.rich()
@@ -1503,6 +1650,7 @@ class OcrHttpTest(unittest.TestCase):
             ("concurrency", {"concurrency": 0}),
             ("concurrency", {"concurrency": 17}),
             ("raster", {"dpi": 49}),
+            ("raster", {"max_bytes": 0}),
         ]:
             arguments = {"base_url": "http://localhost:1/v1", "model": "vision", **given}
             with self.assertRaises(almiladoc.ConfigError) as caught:

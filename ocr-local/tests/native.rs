@@ -86,7 +86,7 @@ fn check_case(
     let mut parsed = parsed(&bytes);
     let mut requests = parsed.ocr_requests(raster, None).expect("native request export failed");
     assert_eq!(requests.len(), 1);
-    let request = requests.pop().expect("native request missing");
+    let request = requests.pop().expect("native request missing").expect("native image refused");
     let mut outcomes = engine.recognize(std::slice::from_ref(&request), &CancelToken::new());
     assert_eq!(outcomes.len(), 1);
     let OcrOutcome::Fill(GapFill::Lines(lines)) = outcomes.pop().expect("native outcome missing")
