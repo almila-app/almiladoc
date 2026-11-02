@@ -23,7 +23,7 @@ use crate::shared::text::trim_tex;
 use crate::shared::uri::is_safe_link;
 use crate::{ImagePolicy, UnitSpan};
 use anchors::{AnchorMap, AnchorScope, resolve_anchors};
-use escape::{InlineContext, MathSite, backtick_fence, escape_marker_label, escape_math};
+use escape::{InlineContext, MathSite, Sharing, backtick_fence, escape_marker_label, escape_math};
 use inline::render_inlines;
 use shape::Shapes;
 pub(crate) use sink::Meter;
@@ -941,7 +941,7 @@ fn write_header_footer(
     sink.write(&format!("<a id=\"{prefix}\"></a>{label} ({variant}{inherited})"))?;
     if let Some(name) = &value.page_style {
         let mut text = Text::new(sink.meter());
-        escape_marker_label(name, InlineContext::Block, false, &mut text)?;
+        escape_marker_label(name, InlineContext::Block, Sharing::Alone, &mut text)?;
         sink.write(" of page style ")?;
         sink.write(text.as_str())?;
     }
@@ -1009,8 +1009,8 @@ fn write_list(
                 (None, kind) => Some(Cow::Owned(kind.label(n))),
             };
             if let Some(label) = label {
-                let beside_math = table::holds_math_in(&item.blocks, rc);
-                escape_marker_label(&label, InlineContext::Block, beside_math, &mut marker)?;
+                let sharing = Sharing::math_if(table::holds_math_in(&item.blocks, rc));
+                escape_marker_label(&label, InlineContext::Block, sharing, &mut marker)?;
                 marker.push(' ')?;
             }
         }

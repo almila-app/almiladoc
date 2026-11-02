@@ -1,3 +1,4 @@
+mod escape;
 mod images;
 mod marks;
 mod selection;
@@ -438,6 +439,7 @@ fn math_read(md: &str, options: Options) -> usize {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "the table of contexts and their guarded text")]
 fn math_anywhere_in_one_inline_context_guards_all_of_its_text() {
     let tex = |t: &str| Inline::Math(t.into());
     let cell = Cell::new(vec![
@@ -451,13 +453,14 @@ fn math_anywhere_in_one_inline_context_guards_all_of_its_text() {
         origin: ImageOrigin::new(Region::Body, None),
     };
     let label = link(vec![tex("y")], external("http://e.test"));
-    let labelled = List {
-        marker: MarkerKind::Bullet,
-        start: 1,
-        items: vec![ListItem {
-            blocks: vec![Block::Paragraph(vec![tex("x")])],
-            marker_label: Some("<1@example.com>".into()),
-        }],
+    let beside_dollar = |block| {
+        let dollar = Cell::from_inlines(vec![Inline::plain("$x")]);
+        table_from(vec![vec![dollar, Cell::new(vec![block])]], 0)
+    };
+    let labelled = |label: &str| {
+        let blocks = vec![Block::Paragraph(vec![tex("x")])];
+        let items = vec![ListItem { blocks, marker_label: Some(label.into()) }];
+        Block::List(List { marker: MarkerKind::Bullet, start: 1, items })
     };
     for (name, blocks, expected, links) in [
         (
@@ -468,11 +471,36 @@ fn math_anywhere_in_one_inline_context_guards_all_of_its_text() {
         ),
         (
             "link label",
-            vec![Block::Paragraph(vec![label, Inline::plain("<1@example.com>")])],
+            vec![Block::Paragraph(vec![label.clone(), Inline::plain("<1@example.com>")])],
             "[$y$](http://e.test)\\<1@example.com>\n",
             1,
         ),
-        ("list marker label", vec![Block::List(labelled)], "- \\<1@example.com> $x$\n", 0),
+        (
+            "link label, no email",
+            vec![Block::Paragraph(vec![label, Inline::plain("<1 b>")])],
+            "[$y$](http://e.test)\\<1 b>\n",
+            1,
+        ),
+        (
+            "list beside a dollar",
+            vec![beside_dollar(bulleted(vec![Block::Paragraph(vec![tex("y")])]))],
+            "|  |  |\n| --- | --- |\n| \\$x | • $y$ |\n",
+            0,
+        ),
+        (
+            "quote beside a dollar",
+            vec![beside_dollar(Block::BlockQuote(vec![Block::Paragraph(vec![tex("y")])]))],
+            "|  |  |\n| --- | --- |\n| \\$x | $y$ |\n",
+            0,
+        ),
+        (
+            "table beside a dollar",
+            vec![beside_dollar(table_from(vec![vec![Cell::from_inlines(vec![tex("y")])]], 0))],
+            "|  |  |\n| --- | --- |\n| \\$x | $y$ |\n",
+            0,
+        ),
+        ("list marker label", vec![labelled("<1@example.com>")], "- \\<1@example.com> $x$\n", 0),
+        ("list marker label, no email", vec![labelled("<1 b>")], "- \\<1 b> $x$\n", 0),
         (
             "image alt",
             vec![Block::Paragraph(vec![alt, tex("x"), Inline::plain("@example.com>")])],
@@ -1237,8 +1265,7 @@ fn a_nested_cell_holds_its_text_once_whatever_its_depth() {
     let mut out = super::sink::Text::new(&meter);
     let fills = GapFills::default();
     let rc = Ctx::of(&document, &fills, Placeholder, &meter).unwrap();
-    let beside_math = super::table::holds_math_in(&nested.blocks, &rc);
-    super::table::render_cell(&nested, beside_math, &rc, &mut out).unwrap();
+    super::table::render_cell(&nested, super::escape::Sharing::Parts, &rc, &mut out).unwrap();
     assert_eq!(out.as_str(), long);
     assert!(meter.admitted() <= long.len() as u64 + 100 * 8, "{}", meter.admitted());
 }

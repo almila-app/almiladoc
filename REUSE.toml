@@ -138,6 +138,7 @@ path = [
     "src/render/markdown/shape.rs",
     "src/render/markdown/image.rs",
     "src/render/markdown/marks.rs",
+    "src/render/markdown/tests/escape.rs",
     "src/render/markdown/tests/images.rs",
     "src/render/markdown/tests/marks.rs",
     "src/render/markdown/tests/selection.rs",

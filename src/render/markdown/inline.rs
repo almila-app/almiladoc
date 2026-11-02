@@ -2,7 +2,7 @@ use crate::error::ConvertError;
 use crate::model::{Inline, LinkTarget, Style};
 use crate::render::markdown::Ctx;
 use crate::render::markdown::escape::{
-    Delims, EscapeOpts, InlineContext, MathSite, backtick_fence, escape_math, escape_text,
+    Delims, EscapeOpts, InlineContext, MathSite, Sharing, backtick_fence, escape_math, escape_text,
     escape_url_as_text, format_url, masked_dollar_closes,
 };
 use crate::render::markdown::image::{Presentation, label, project};
@@ -253,21 +253,21 @@ pub(crate) fn render_inlines(
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    render_based(inlines, ctx, Style::PLAIN, false, rc, out)
+    render_based(inlines, ctx, Style::PLAIN, Sharing::Alone, rc, out)
 }
 
-/// Renders inlines into an inline context that already holds math elsewhere when `beside_math`.
+/// Renders inlines into an inline context that also holds the text `sharing` names.
 pub(crate) fn render_based(
     inlines: &[Inline],
     ctx: InlineContext,
     base: Style,
-    beside_math: bool,
+    sharing: Sharing,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let items = normalize(inlines, ctx, base, rc, out.meter())?;
-    let beside_math = beside_math || holds_math(inlines);
-    let scope = Scope { ctx, in_label: false, base: Stack::of(base), beside_math };
+    let sharing = sharing.max(Sharing::math_if(holds_math(inlines)));
+    let scope = Scope { ctx, in_label: false, base: Stack::of(base), sharing, after: Delims::NONE };
     render_scope(&items, scope, rc, out)
 }
 
@@ -295,11 +295,15 @@ struct Scope {
     ctx: InlineContext,
     in_label: bool,
     base: Stack,
-    beside_math: bool,
+    sharing: Sharing,
+    after: Delims,
 }
 
 fn lookahead(items: &[Norm<'_>], scope: Scope, out: &Text<'_>) -> Result<Vec<Ahead>, ConvertError> {
     let mut ahead = vec![END; items.len() + 1];
+    if let Some(end) = ahead.last_mut() {
+        end.delims = scope.after;
+    }
     for (idx, item) in items.iter().enumerate().rev() {
         let next = ahead.get(idx + 1).copied().unwrap_or(END);
         out.charge(1)?;
@@ -417,7 +421,7 @@ fn render_scope(
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    let Scope { ctx, in_label, beside_math, .. } = scope;
+    let Scope { ctx, in_label, sharing, .. } = scope;
     let start = out.len();
     let ahead = lookahead(items, scope, out)?;
     let references = references(items, &ahead);
@@ -435,6 +439,7 @@ fn render_scope(
             marks.open_to(here.marks, out)?;
         }
         let after_delimiter = std::mem::take(&mut marks.delimited);
+        let after_backtick = out.as_str().ends_with('`');
         let ends = references.get(idx).copied().unwrap_or_default();
         match item {
             Norm::Text { text, style } if style.code => push_code_span(text, ctx, out)?,
@@ -445,18 +450,20 @@ fn render_scope(
                     styled: *style != Style::PLAIN,
                     trailing_delims: next.delims,
                     in_label,
-                    beside_math,
-                    joining: text
-                        .chars()
-                        .next()
-                        .filter(|c| after_delimiter && matches!(c, '*' | '_' | '~')),
+                    sharing,
+                    joining: text.chars().next().filter(|&c| {
+                        (after_delimiter && matches!(c, '*' | '_' | '~'))
+                            || (after_backtick && c == '`')
+                    }),
                     ..trailing(items.get(idx + 1))
                 };
                 write_text(text, ctx, opts, ends, out)?;
             }
             Norm::NoteRef(id) => write_note_ref(id, false, rc, out)?,
             Norm::CommentRef(id) => write_note_ref(id, true, rc, out)?,
-            Norm::Link { label, target } => render_link(label, target, scope, rc, out)?,
+            Norm::Link { label, target } => {
+                render_link(label, target, scope, next.delims, rc, out)?;
+            }
             Norm::Image { alt, presentation } => render_image(alt, *presentation, scope, out)?,
             Norm::Math(tex) => {
                 math_angle = tex.trim_end().ends_with('<');
@@ -501,22 +508,25 @@ fn push_mark(
 }
 
 fn trailing(follower: Option<&Norm<'_>>) -> EscapeOpts {
+    let trailing_marked =
+        matches!(follower, Some(Norm::Text { style, .. }) if *style != Style::PLAIN);
     EscapeOpts {
-        trailing_active: match follower {
-            Some(
-                Norm::Link { .. }
-                | Norm::Image { .. }
-                | Norm::NoteRef(_)
-                | Norm::CommentRef(_)
-                | Norm::Math(_),
-            ) => true,
-            Some(Norm::Text { style, .. }) => *style != Style::PLAIN,
-            _ => false,
-        },
+        trailing_active: trailing_marked
+            || matches!(
+                follower,
+                Some(
+                    Norm::Link { .. }
+                        | Norm::Image { .. }
+                        | Norm::NoteRef(_)
+                        | Norm::CommentRef(_)
+                        | Norm::Math(_)
+                )
+            ),
         trailing_nonspace: matches!(
             follower,
             Some(Norm::Anchor(_) | Norm::Checkbox(_) | Norm::LineBreak)
         ),
+        trailing_marked,
         ..EscapeOpts::default()
     }
 }
@@ -559,6 +569,7 @@ fn render_link(
     label: &Label<'_>,
     target: &LinkTarget,
     scope: Scope,
+    after: Delims,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
@@ -574,8 +585,10 @@ fn render_link(
     };
     out.push('[')?;
     match label {
-        Label::Content(items) => render_scope(items, Scope { in_label: true, ..scope }, rc, out)?,
-        Label::Url(label) => escape_url_as_text(label, ctx, scope.beside_math, out)?,
+        Label::Content(items) => {
+            render_scope(items, Scope { in_label: true, after, ..scope }, rc, out)?;
+        }
+        Label::Url(label) => escape_url_as_text(label, ctx, scope.sharing, out)?,
     }
     out.push_str("](")?;
     format_url(&url, out)?;
@@ -585,7 +598,7 @@ fn render_link(
 fn render_image(
     alt: &str,
     presentation: Presentation<'_>,
-    Scope { ctx, in_label, beside_math, .. }: Scope,
+    Scope { ctx, in_label, sharing, .. }: Scope,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let bracketed = matches!(presentation, Presentation::Asset(_) | Presentation::Link(_));
@@ -602,7 +615,7 @@ fn render_image(
             in_label: in_label || bracketed,
             at_line_start: ctx == InlineContext::Block,
             trailing_active: true,
-            beside_math,
+            sharing,
             ..Default::default()
         },
         out,
@@ -752,21 +765,22 @@ mod tests {
         let image = Norm::Image { alt: Cow::Borrowed("i"), presentation: Presentation::Marker };
         let link = Norm::Link { label: Label::Url("u"), target: &target };
         let bold = Style { bold: true, ..Style::PLAIN };
-        for (label, follower, active, nonspace) in [
-            ("nothing", None, false, false),
-            ("plain text", Some(text(Style::PLAIN)), false, false),
-            ("styled text", Some(text(bold)), true, false),
-            ("link", Some(link), true, false),
-            ("image", Some(image), true, false),
-            ("note reference", Some(Norm::NoteRef("n")), true, false),
-            ("math", Some(Norm::Math("x")), true, false),
-            ("anchor", Some(Norm::Anchor("a")), false, true),
-            ("checkbox", Some(Norm::Checkbox(true)), false, true),
-            ("line break", Some(Norm::LineBreak), false, true),
+        for (label, follower, active, nonspace, marked) in [
+            ("nothing", None, false, false, false),
+            ("plain text", Some(text(Style::PLAIN)), false, false, false),
+            ("styled text", Some(text(bold)), true, false, true),
+            ("code", Some(text(Style { code: true, ..Style::PLAIN })), true, false, true),
+            ("link", Some(link), true, false, false),
+            ("image", Some(image), true, false, false),
+            ("note reference", Some(Norm::NoteRef("n")), true, false, false),
+            ("math", Some(Norm::Math("x")), true, false, false),
+            ("anchor", Some(Norm::Anchor("a")), false, true, false),
+            ("checkbox", Some(Norm::Checkbox(true)), false, true, false),
+            ("line break", Some(Norm::LineBreak), false, true, false),
         ] {
             let opts = trailing(follower.as_ref());
-            let flags = (opts.trailing_active, opts.trailing_nonspace);
-            assert_eq!(flags, (active, nonspace), "{label}");
+            let flags = (opts.trailing_active, opts.trailing_nonspace, opts.trailing_marked);
+            assert_eq!(flags, (active, nonspace, marked), "{label}");
         }
     }
 

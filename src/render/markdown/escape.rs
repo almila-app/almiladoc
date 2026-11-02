@@ -28,10 +28,27 @@ pub(crate) struct EscapeOpts {
     /// The run's first character, where it would join the delimiter run written right before
     /// the run: it is escaped with the rest of its own run.
     pub joining: Option<char>,
-    /// The run shares a Markdown inline context with math, which a reader without math reads as
-    /// text that can complete a link, an autolink or a code span and a reader with math pairs by
-    /// its dollars, so every `$`, backtick, bracket and `<` a non-space follows is escaped.
-    pub beside_math: bool,
+    /// A styled run follows, whose delimiters and code fence an email address continues through.
+    pub trailing_marked: bool,
+    pub sharing: Sharing,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Sharing {
+    #[default]
+    Alone,
+    /// Shares an inline context with separately rendered text (cell parts, a table's cells), so
+    /// each backtick and `[` is escaped.
+    Parts,
+    /// Shares an inline context with math, which pairs by its dollars, so each `$`, backtick and
+    /// bracket, and each `<` a non-space follows, is escaped.
+    Math,
+}
+
+impl Sharing {
+    pub(crate) fn math_if(holds_math: bool) -> Self {
+        if holds_math { Self::Math } else { Self::Alone }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -159,10 +176,11 @@ impl Scan {
             trailing_nonspace,
             trailing_delims,
             in_label,
-            beside_math,
+            trailing_marked,
+            sharing,
             ..
         } = self.opts;
-        let in_label = in_label || beside_math;
+        let in_label = in_label || sharing == Sharing::Math;
         let next = rest.chars().nth(1);
         let next_nonspace =
             next.map_or(trailing_active || trailing_nonspace, |n| !n.is_whitespace());
@@ -174,11 +192,11 @@ impl Scan {
         match c {
             '\\' => true,
             '(' | ':' if at == 0 => note_syntax(c, self.ctx, out.after_note()),
-            '$' => beside_math || (next_nonspace && paired(5)),
+            '$' => sharing == Sharing::Math || (next_nonspace && paired(5)),
             ']' if in_label => true,
             '~' if start_of_line && rest.starts_with("~~~") => true,
             '_' if start_of_line && line_is_only(rest, '_', 3) => true,
-            '`' => styled || beside_math || paired(3),
+            '`' => styled || sharing != Sharing::Alone || paired(3),
             '*' => styled || start_of_line || (next_nonspace && paired(0)),
             '_' => {
                 let prev_alnum = prev.is_some_and(char::is_alphanumeric);
@@ -186,8 +204,12 @@ impl Scan {
                 styled || (next_nonspace && !(prev_alnum && next_alnum) && paired(1))
             }
             '~' => styled || (next_nonspace && paired(2)),
-            '[' => in_label || paired(4),
-            '<' => opens_markup(next) || (beside_math && !next.is_some_and(char::is_whitespace)),
+            '[' => in_label || sharing != Sharing::Alone || paired(4),
+            '<' => {
+                opens_markup(next)
+                    || opens_email(rest.get(1..).unwrap_or_default(), styled || trailing_marked)
+                    || (sharing == Sharing::Math && !next.is_some_and(char::is_whitespace))
+            }
             '!' => next.is_none() && trailing_active,
             '|' if self.ctx == InlineContext::TableCell => true,
             '#' if start_of_line => {
@@ -342,24 +364,23 @@ pub(crate) fn format_url(url: &str, out: &mut Text<'_>) -> Result<(), ConvertErr
 pub(crate) fn escape_url_as_text(
     url: &str,
     ctx: InlineContext,
-    beside_math: bool,
+    sharing: Sharing,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
-    let opts =
-        EscapeOpts { trailing_active: true, in_label: true, beside_math, ..Default::default() };
+    let opts = EscapeOpts { trailing_active: true, in_label: true, sharing, ..Default::default() };
     escape_text(&controls_to_spaces(url), ctx, opts, out)
 }
 
 pub(super) fn escape_marker_label(
     label: &str,
     ctx: InlineContext,
-    beside_math: bool,
+    sharing: Sharing,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
     let opts = EscapeOpts {
         at_line_start: ctx == InlineContext::Block,
         trailing_active: true,
-        beside_math,
+        sharing,
         ..Default::default()
     };
     escape_text(&controls_to_spaces(label), ctx, opts, out)
@@ -387,6 +408,20 @@ pub(super) enum MathSite {
 
 fn opens_markup(next: Option<char>) -> bool {
     next.is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?'))
+}
+
+/// Whether the local-part characters after a `<` end at an `@`, or, when `continues`, at the
+/// run's end.
+fn opens_email(after: &str, continues: bool) -> bool {
+    let local = after.find(|c: char| !is_email_local(c)).unwrap_or(after.len());
+    match after.get(local..).and_then(|rest| rest.chars().next()) {
+        Some(c) => c == '@' && local > 0,
+        None => continues,
+    }
+}
+
+fn is_email_local(c: char) -> bool {
+    c.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(c)
 }
 
 /// Escapes each `$`, backtick and unmatched brace no odd backslash run escapes, as pulldown-cmark

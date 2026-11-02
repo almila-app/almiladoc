@@ -1,7 +1,7 @@
 use crate::error::ConvertError;
 use crate::model::{Block, Cell, CellSlot, Inline, List, MarkerKind, Style, Table};
 use crate::render::markdown::Ctx;
-use crate::render::markdown::escape::{InlineContext, escape_marker_label};
+use crate::render::markdown::escape::{InlineContext, Sharing, escape_marker_label};
 use crate::render::markdown::inline::{holds_math, push_code_span, push_math_span, render_based};
 use crate::render::markdown::sink::{Meter, Sink, Text};
 
@@ -12,7 +12,7 @@ struct RenderedRow<'m> {
 
 fn render_row<'m>(
     row: &[CellSlot],
-    beside_math: bool,
+    sharing: Sharing,
     rc: &Ctx<'_>,
     meter: &'m Meter<'m>,
 ) -> Result<RenderedRow<'m>, ConvertError> {
@@ -21,7 +21,7 @@ fn render_row<'m>(
         match slot {
             CellSlot::Origin(cell) => {
                 let mut text = Text::new(meter);
-                render_cell(cell, beside_math, rc, &mut text)?;
+                render_cell(cell, sharing, rc, &mut text)?;
                 if !text.as_str().is_empty() {
                     rendered.shown = col + 1;
                     rendered.texts.push((col, text));
@@ -39,11 +39,12 @@ pub(crate) fn write_table(
     sink: &mut Sink<'_>,
 ) -> Result<(), ConvertError> {
     let meter = sink.meter();
-    let beside_math = table.origins().any(|cell| holds_math_in(&cell.blocks, rc));
+    let sharing = Sharing::math_if(table.origins().any(|cell| holds_math_in(&cell.blocks, rc)))
+        .max(Sharing::Parts);
     let mut rendered = table
         .grid
         .iter()
-        .map(|row| render_row(row, beside_math, rc, meter))
+        .map(|row| render_row(row, sharing, rc, meter))
         .collect::<Result<Vec<_>, _>>()?;
     while rendered.last().is_some_and(|row| row.shown == 0) {
         rendered.pop();
@@ -174,7 +175,7 @@ fn write_blank_cells(count: usize, sink: &mut Sink<'_>) -> Result<(), ConvertErr
 /// A cell's edge whitespace is padding the table's own padding would swallow anyway, and spreadsheets carry it by the thousand.
 pub(crate) fn render_cell(
     cell: &Cell,
-    beside_math: bool,
+    sharing: Sharing,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
 ) -> Result<(), ConvertError> {
@@ -182,7 +183,7 @@ pub(crate) fn render_cell(
     let mut parts = Join::new("<br>");
     cell.blocks
         .iter()
-        .try_for_each(|block| cell_block_text(block, beside_math, rc, out, &mut parts))?;
+        .try_for_each(|block| cell_block_text(block, sharing, rc, out, &mut parts))?;
     out.close_cell();
     Ok(())
 }
@@ -229,7 +230,7 @@ impl Join {
 
 fn cell_block_text(
     block: &Block,
-    beside_math: bool,
+    sharing: Sharing,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
     parts: &mut Join,
@@ -238,15 +239,15 @@ fn cell_block_text(
         Block::Heading { content, .. } => parts.part(out, |out, start| {
             let bold = Style { bold: true, ..Style::PLAIN };
             out.open_cell();
-            render_based(content, InlineContext::TableCell, bold, beside_math, rc, out)?;
+            render_based(content, InlineContext::TableCell, bold, sharing, rc, out)?;
             out.close_cell();
             Ok(out.len() > start)
         }),
         Block::Paragraph(inlines) => parts.part(out, |out, start| {
-            render_based(inlines, InlineContext::TableCell, Style::PLAIN, beside_math, rc, out)?;
+            render_based(inlines, InlineContext::TableCell, Style::PLAIN, sharing, rc, out)?;
             Ok(!out.since(start).trim().is_empty())
         }),
-        Block::List(list) => list_text(list, beside_math, rc, out, parts),
+        Block::List(list) => list_text(list, sharing, rc, out, parts),
         Block::Table(table) => table.grid.iter().try_for_each(|row| {
             // Keep empty cells in the join so values stay in their source
             // column positions.
@@ -258,7 +259,7 @@ fn cell_block_text(
                     }
                     if let CellSlot::Origin(cell) = slot {
                         let mark = out.len();
-                        render_cell(cell, beside_math, rc, out)?;
+                        render_cell(cell, sharing, rc, out)?;
                         any |= out.len() > mark;
                     }
                 }
@@ -266,7 +267,7 @@ fn cell_block_text(
             })
         }),
         Block::BlockQuote(blocks) => {
-            blocks.iter().try_for_each(|block| cell_block_text(block, beside_math, rc, out, parts))
+            blocks.iter().try_for_each(|block| cell_block_text(block, sharing, rc, out, parts))
         }
         Block::CodeBlock { text, .. } => {
             let t = text.trim();
@@ -289,14 +290,14 @@ fn cell_block_text(
             .filled(gap)
             .unwrap_or_default()
             .iter()
-            .try_for_each(|block| cell_block_text(block, beside_math, rc, out, parts)),
+            .try_for_each(|block| cell_block_text(block, sharing, rc, out, parts)),
         Block::Rule | Block::UnitStart(_) | Block::HeaderFooter(_) => Ok(()),
     }
 }
 
 fn list_text(
     list: &List,
-    beside_math: bool,
+    sharing: Sharing,
     rc: &Ctx<'_>,
     out: &mut Text<'_>,
     parts: &mut Join,
@@ -305,7 +306,7 @@ fn list_text(
         parts.part(out, |out, _| {
             match (&item.marker_label, list.marker) {
                 (Some(label), _) => {
-                    escape_marker_label(label, InlineContext::TableCell, beside_math, out)?;
+                    escape_marker_label(label, InlineContext::TableCell, sharing, out)?;
                     out.push(' ')?;
                 }
                 (None, MarkerKind::Bullet) => out.push_str("• ")?,
@@ -316,7 +317,7 @@ fn list_text(
             let mut inner = Join::new(" ");
             item.blocks
                 .iter()
-                .try_for_each(|block| cell_block_text(block, beside_math, rc, out, &mut inner))?;
+                .try_for_each(|block| cell_block_text(block, sharing, rc, out, &mut inner))?;
             Ok(inner.any)
         })
     })
