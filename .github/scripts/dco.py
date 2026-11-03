@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEPENDABOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
+COPILOT = ("copilot-swe-agent[bot]", "198982749+Copilot@users.noreply.github.com")
+PULL_REQUEST_SKIPS = {DEPENDABOT, COPILOT}
 ISOLATED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
 SIGN_OFFS = "%(trailers:key=Signed-off-by,valueonly,separator=%x01)"
 FIELDS = f"%H%x00%an%x00%ae%x00%cn%x00%ce%x00{SIGN_OFFS}%x00%s%x00%B%x00"
@@ -43,7 +45,7 @@ def check(root: Path, revisions: str, skip_dependabot: bool) -> list[str]:
             field.strip("\n") for field in fields[start : start + 7]
         )
         first_line = fields[start + 7].split("\n", 1)[0].rstrip()
-        if skip_dependabot and (name, email) == DEPENDABOT:
+        if skip_dependabot and (name, email) in PULL_REQUEST_SKIPS:
             continue
         signed = {value.strip() for value in trailers.split("\x01") if value.strip()}
         if f"{name} <{email}>" not in signed:
@@ -447,7 +449,7 @@ def main() -> int:
     parser.add_argument(
         "--pull-request",
         action="store_true",
-        help="skip commits authored by dependabot[bot] from its noreply address",
+        help="skip commits authored by known automation bots from their noreply addresses",
     )
     args = parser.parse_args()
     if args.self_test:
