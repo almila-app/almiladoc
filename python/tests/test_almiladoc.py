@@ -104,8 +104,10 @@ def unpaintable_second_page():
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources "
-        b"<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources "
+            b"<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>"
+        ),
         b"<< /Length 39 >>\nstream\nBT /F1 24 Tf 72 400 Td (Painted) Tj ET\nendstream",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 0 0] /Contents 99 0 R >>",
     ]
