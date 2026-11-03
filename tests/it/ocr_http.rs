@@ -759,7 +759,9 @@ fn caller_roots_and_both_connect_proxy_schemes_are_verified() {
                 "CONNECT {}:443 HTTP/1.1\r\n",
                 std::net::Ipv4Addr::LOCALHOST
             )));
-            assert!(proxy.contains("Proxy-Authorization: Basic dXNlcjpwYXNz"));
+            use base64::Engine as _;
+            let basic = base64::engine::general_purpose::STANDARD.encode("user:pass");
+            assert!(proxy.contains(&format!("Proxy-Authorization: Basic {basic}\r\n")));
         }
     }
 }
