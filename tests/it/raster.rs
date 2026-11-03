@@ -1,6 +1,6 @@
 use std::assert_matches;
 
-use crate::pdf::write_pdf;
+use crate::pdf::{painted, plain, write_pdf};
 use crate::support::{
     all_requests, bounded, configured, converter, fixture, limited, reported, trips,
 };
@@ -260,24 +260,6 @@ fn painting_losses(bytes: &[u8]) -> Vec<(DiagnosticCode, Region, Option<u32>, u6
     lost
 }
 
-fn painted(resources: &str, contents: &str, extra: &[&str]) -> Vec<u8> {
-    let mut objects = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
-        format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {resources} >> \
-             /Contents 4 0 R >>"
-        ),
-        contents.to_owned(),
-    ];
-    objects.extend(extra.iter().map(|object| (*object).to_owned()));
-    write_pdf(&objects)
-}
-
-fn plain(content: &str) -> String {
-    format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len())
-}
-
 fn korean_run(placement: &str) -> Vec<u8> {
     let font = "<< /Type /Font /Subtype /Type0 /BaseFont /HYSMyeongJo-Medium /Encoding /Identity-H \
         /DescendantFonts [6 0 R] >>";
@@ -311,26 +293,47 @@ fn a_filled_page_reports_each_kind_its_painting_left_out() {
         &plain("/G1 gs 0 0 1 rg 100 100 200 200 re f"),
         &[&group],
     );
+    let uncolored = painted("", &plain("/Unknown cs 0.7 sc 100 100 200 200 re f"), &[]);
     for (bytes, expected, fidelity) in [
-        (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10), [10, 0, 0, 0, 0, 0, 0]),
-        (korean_run(""), lost(1), [1, 0, 0, 0, 0, 0, 0]),
-        (korean_run("0 600 612 192 re W n"), lost(1), [1, 0, 0, 0, 0, 0, 0]),
-        (korean_run("0 0 10 10 re W n"), Vec::new(), [0; 7]),
-        (korean_run("1 0 0 1 1000 0 cm"), Vec::new(), [0; 7]),
-        (undecodable, lost(1), [0, 0, 0, 0, 0, 1, 0]),
-        (image, lost(1), [0, 1, 0, 0, 0, 0, 0]),
-        (inline, lost(1), [0, 0, 1, 0, 0, 0, 0]),
-        (masked, Vec::new(), [0, 0, 0, 0, 1, 0, 0]),
-        (fixture("pdf/handmade-jpeg-scan.pdf"), Vec::new(), [0; 7]),
-        (fixture("pdf/handmade-mesh-shading.pdf"), Vec::new(), [0, 0, 0, 1, 0, 0, 0]),
-        (page_pdf("/MediaBox [0 0 612 792]"), Vec::new(), [0, 0, 0, 0, 0, 0, 1]),
+        (fixture("pdf/handmade-predefined-cmap.pdf"), lost(10), [10, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (korean_run(""), lost(1), [1, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (korean_run("0 600 612 192 re W n"), lost(1), [1, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (korean_run("0 0 10 10 re W n"), Vec::new(), [0; 9]),
+        (korean_run("1 0 0 1 1000 0 cm"), Vec::new(), [0; 9]),
+        (undecodable, lost(1), [0, 0, 0, 0, 0, 1, 0, 0, 0]),
+        (image, lost(1), [0, 1, 0, 0, 0, 0, 0, 0, 0]),
+        (inline, lost(1), [0, 0, 1, 0, 0, 0, 0, 0, 0]),
+        (masked, Vec::new(), [0, 0, 0, 0, 1, 0, 0, 0, 0]),
+        (fixture("pdf/handmade-jpeg-scan.pdf"), Vec::new(), [0; 9]),
+        (fixture("pdf/handmade-mesh-shading.pdf"), Vec::new(), [0, 0, 0, 1, 0, 0, 0, 0, 0]),
+        (page_pdf("/MediaBox [0 0 612 792]"), Vec::new(), [0, 0, 0, 0, 0, 0, 1, 0, 0]),
+        (uncolored, Vec::new(), [0, 0, 0, 0, 0, 0, 0, 1, 0]),
+        (highlighted(), Vec::new(), [0, 0, 0, 0, 0, 0, 0, 0, 1]),
     ] {
         assert_eq!(painting_losses(&bytes), expected);
         assert_eq!(fidelity_of(&bytes), fidelity);
     }
 }
 
-fn fidelity_of(bytes: &[u8]) -> [u32; 7] {
+fn highlighted() -> Vec<u8> {
+    let form = |entries: &str, body: &str| {
+        let entries = format!("/Type /XObject /Subtype /Form /BBox [72 695 272 725] {entries}");
+        format!("<< {entries} /Length {} >>\nstream\n{body}\nendstream", body.len())
+    };
+    let resources = "/ExtGState << /G << /BM /Multiply >> >> /XObject << /Fm 6 0 R >>";
+    write_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Annots [<< /Subtype /Highlight /Rect [72 695 272 725] /AP << /N 5 0 R >> >>] >>"
+            .to_owned(),
+        plain("0 0 1 rg 72 700 200 20 re f"),
+        form(&format!("/Resources << {resources} >>"), "/G gs /Fm Do"),
+        form("/Group << /S /Transparency /I false >>", "1 1 0 rg 72 695 200 30 re f"),
+    ])
+}
+
+fn fidelity_of(bytes: &[u8]) -> [u32; 9] {
     let mut parsed = every_page(&converter(1), bytes);
     let [request] = all_requests(&mut parsed, &RasterSpec::default()).try_into().unwrap();
     let f = request.image.fidelity.unwrap();
@@ -342,6 +345,8 @@ fn fidelity_of(bytes: &[u8]) -> [u32; 7] {
         f.soft_masks,
         f.content_streams,
         f.substituted_text_runs,
+        f.colors,
+        f.annotations,
     ]
 }
 
@@ -449,8 +454,11 @@ fn a_gap_refused_after_a_painted_request_reports_none_of_the_earlier_painting() 
 
 #[test]
 fn what_painting_does_not_observe_is_named_wherever_fidelity_is_documented() {
-    const UNOBSERVED: &str =
-        "annotation appearances, lab/devicen colours and missing stand-in glyphs are not observed";
+    const UNOBSERVED: [&str; 2] = [
+        "an annotation without an appearance stream, or whose `/as` selects none, is neither \
+         painted nor counted",
+        "nozoom/norotate are not applied",
+    ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in [
         "src/ocr/raster.rs",
@@ -461,6 +469,9 @@ fn what_painting_does_not_observe_is_named_wherever_fidelity_is_documented() {
     ] {
         let text = std::fs::read_to_string(root.join(path)).unwrap().to_lowercase();
         let words: Vec<_> = text.split_whitespace().filter(|word| *word != "///").collect();
-        assert!(words.join(" ").contains(UNOBSERVED), "{path}");
+        let text = words.join(" ");
+        for unobserved in UNOBSERVED {
+            assert!(text.contains(unobserved), "{path}: {unobserved}");
+        }
     }
 }

@@ -18,29 +18,34 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 `∥` means disjoint parallel work; `then` binds tighter and means serial. Unlisted items land separately before the first wave sharing their files.
 
-No wave is open.
+| Wave | Items | Placement |
+|---|---|---|
+| W8 | exact-long-edge then garbled-pages then scan-stamp | |
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
 
+## Items
+
+### W8
+
+#### exact-long-edge: OCR images with an exact long edge
+
+- `RasterSpec.dpi` becomes `size: RasterSize { Dpi, LongEdge }`: `LongEdge(L)` paints L pixels on the long edge of the rotated crop box unpdf 0.53.0's `PdfParser::page_size` reports, the short side by `PageSize::pixels` arithmetic (`round().max(1)`), and refuses an exact size over `max_pixels` as `OverPixels` instead of shrinking it; `Dpi` keeps its down-fit, sized on the crop box. Embedded PNG/JPEG requests read width/height from their headers; Python mirrors `long_edge` (with `dpi`, a raster `ConfigError`) and the `OcrHttpConfig` raster kwargs.
+- Files: `src/ocr/`, `src/formats/pdf.rs`, `python/`, ADR 0002, `docs/support.md`, `docs/guide/ocr.md`; T2.
+
+#### garbled-pages: a mostly garbled page becomes an OCR gap
+
+- `reasons()` adds `GarbledText` when the lost codes (unpdf 0.53.0's `Page::suppressed_text_codes` less the `UnreadableFont::codes` of `unmapped_codes` runs, plus codes left undecoded) reach `lost * 2 >= painted_text_chars + lost` and a named minimum; no new control or API. The threshold is measured on the ADR 0001 535-page corpus with zero new gaps (without it, a `PdfScanPolicy` rule instead of a default), and support.md states that such a gap left unfilled under Report, or unpaintable, drops the page's readable text and reports only `ocr_gap`.
+- Files: `src/formats/pdf.rs`, `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `docs/support.md`; T2.
+
+#### scan-stamp: a stamp over a page scan leaves the page an OCR gap
+
+- A page that unpdf 0.53.0's `Page::bilevel_image_coverage` shows a black-and-white scan covers becomes `ImageBacked` despite a one-off native stamp, which keeps it Text today; photos and figures covering as much stay Text. Threshold and guards are measured; support.md's stamp line and `ImageBacked` row change in place.
+- Files: `src/formats/pdf.rs`, `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `docs/support.md`; T2.
+
 ## External tracks
 
-Check open unpdf PRs at each wave start with `gh pr view <n> --repo <repo> --json state,mergedAt,reviewDecision`; 0.52.0 already carries the text, paint-budget, raster-gap, page-number and link fixes; its CHANGELOG, not the PR state, shows a landing.
-
-| Upstream | Needed behavior |
-|---|---|
-| [unpdf #27](https://github.com/iyulab/unpdf/pull/27) | page pixel size before painting, for an exact long-edge raster |
-| [unpdf #28](https://github.com/iyulab/unpdf/pull/28) | raster gaps that count text, deep forms and unpainted patterns the painter drops, so an OCR page's loss is reported |
-| [unpdf #29](https://github.com/iyulab/unpdf/pull/29) | a page's count of codes in discarded text runs, so a substantially garbled page becomes an OCR gap |
-| [unpdf #30](https://github.com/iyulab/unpdf/pull/30) | `/Differences` codes past a byte ignored instead of overflowing; the scheduled `pdf` fuzz target fails until it ships, then its input joins the regressions |
-| [unpdf #31](https://github.com/iyulab/unpdf/pull/31) | the page share bilevel images cover, so a stamp over a full-page scan still makes an OCR gap |
-| [unpdf #32](https://github.com/iyulab/unpdf/pull/32) | Lab, Separation and DeviceN colours painted through their declared spaces in OCR images |
-| [unpdf #33](https://github.com/iyulab/unpdf/pull/33) | annotation appearances painted in OCR images |
-| [unpdf #34](https://github.com/iyulab/unpdf/pull/34) | JPEG images painted through their declared colour spaces |
-| [unpdf #35](https://github.com/iyulab/unpdf/pull/35) | CMap code ranges that cannot overflow |
-| [unpdf #36](https://github.com/iyulab/unpdf/pull/36) | bounded parser nesting, so a deeply nested PDF cannot overflow the stack and abort the process |
-| [unpdf #37](https://github.com/iyulab/unpdf/pull/37) | an indirect XObject `/Subtype` resolved, so its form text is extracted |
-| [unpdf #39](https://github.com/iyulab/unpdf/pull/39) | malformed ToUnicode and TrueType cmaps read without panicking |
-
+- **unpdf image coverage:** union area is exact up to 256 image paints and sampled beyond, so crafted strips can keep a page under `CoverageFirst`'s half, leaving it to the default rule; adopt the release that measures it exactly (a sweep line).
 - **Offline OCR quality:** evaluate native OCR on representative consumer scans once a labelled corpus has paragraph ground truth and marked headings.
 - **Consumer proof:** after the candidate wheel reaches TestPyPI/PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the candidate, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, every later 0.x minor repeats it, and 1.0 proves its own candidate.
 - **Consumer agreement:** at proof start agree PDF scope, `Incomplete`/`Internal` handling, two-phase transport, prompt and concurrency; existing Xiaomi endpoint/settings need no additional live run before the first final tag (owner decision).

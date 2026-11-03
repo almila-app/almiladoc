@@ -1375,7 +1375,8 @@ mod tests {
 
     #[test]
     fn codes_a_font_gives_no_character_are_not_garbled() {
-        let font = |name: &str, reason, runs| UnreadableFont { name: name.into(), reason, runs };
+        let font =
+            |name: &str, reason, runs| UnreadableFont { name: name.into(), reason, runs, codes: 0 };
         let mut page = page(&["Body"]);
         page.unreadable_fonts = vec![
             font("SegoeUI", TextSuppression::UnmappedCodes, 2),

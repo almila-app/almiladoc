@@ -118,10 +118,12 @@ pub(crate) fn plan(
     Ok(None)
 }
 
-/// What painting a page left out or replaced, by kind, in runs, images or streams.
+/// What painting a page left out or replaced, by kind, in runs, images, streams, colours or
+/// annotations.
 ///
-/// Annotation appearances, Lab/DeviceN colours and missing stand-in glyphs are not observed
-/// yet, so a page with every count zero can still differ from its source in them.
+/// An annotation without an appearance stream, or whose `/AS` selects none, is neither painted
+/// nor counted, and NoZoom/NoRotate are not applied, so a page with every count zero can still
+/// differ from what a viewer draws.
 ///
 /// # Examples
 ///
@@ -135,7 +137,9 @@ pub(crate) fn plan(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub struct RasterFidelity {
-    /// Text runs not painted: no font program or stand-in face, or a code that selects no glyph.
+    /// Text runs not painted in full: no font program or stand-in face, a code that selects no
+    /// glyph or an outline-free glyph for visible text, a Type 3 glyph nested more than four
+    /// deep, or text shown before any font is set.
     pub text_runs: u32,
     /// Images not painted: a codec or colour space the painter lacks, or data that did not decode.
     pub images: u32,
@@ -145,16 +149,22 @@ pub struct RasterFidelity {
     pub shadings: u32,
     /// Soft masks not applied as set.
     pub soft_masks: u32,
-    /// Content streams that could not be decoded.
+    /// Content streams that could not be decoded, and forms nested too deep to paint.
     pub content_streams: u32,
     /// Text runs painted in a standard face standing in for the page's own font: readable.
     pub substituted_text_runs: u32,
+    /// Fills, strokes, text and stencil masks in a colour the painter does not convert, painted
+    /// in the shade of their ink instead.
+    pub colors: u32,
+    /// Annotations whose appearance could not be painted, or was painted without part of its
+    /// transparency groups or nested forms.
+    pub annotations: u32,
 }
 
 impl RasterFidelity {
     /// What the painting dropped from the page, as `raster_incomplete` counts it: text runs,
-    /// images, inline images and content streams. Shadings, soft masks and substituted runs
-    /// are decorative or readable, so they are not lost.
+    /// images, inline images and content streams. Shadings, soft masks, substituted runs,
+    /// colours and annotations are not lost.
     #[must_use]
     pub fn lost(self) -> u64 {
         [self.text_runs, self.images, self.inline_images, self.content_streams]
@@ -217,6 +227,8 @@ fn fidelity(gaps: RasterGaps, substituted_text_runs: u32) -> RasterFidelity {
         shadings,
         soft_masks,
         undecodable_content_streams: content_streams,
+        colors,
+        annotations,
     } = gaps;
     RasterFidelity {
         text_runs,
@@ -226,6 +238,8 @@ fn fidelity(gaps: RasterGaps, substituted_text_runs: u32) -> RasterFidelity {
         soft_masks,
         content_streams,
         substituted_text_runs,
+        colors,
+        annotations,
     }
 }
 
@@ -313,6 +327,8 @@ pub(crate) mod tests {
             (RasterFidelity { shadings: 5, ..none }, 0),
             (RasterFidelity { soft_masks: 6, ..none }, 0),
             (RasterFidelity { substituted_text_runs: 7, ..none }, 0),
+            (RasterFidelity { colors: 8, ..none }, 0),
+            (RasterFidelity { annotations: 9, ..none }, 0),
             (
                 RasterFidelity { text_runs: u32::MAX, images: u32::MAX, ..none },
                 2 * u64::from(u32::MAX),
@@ -332,6 +348,8 @@ pub(crate) mod tests {
             shadings: 4,
             soft_masks: 5,
             undecodable_content_streams: 6,
+            colors: 8,
+            annotations: 9,
         };
         let expected = RasterFidelity {
             text_runs: 1,
@@ -341,6 +359,8 @@ pub(crate) mod tests {
             soft_masks: 5,
             content_streams: 6,
             substituted_text_runs: 7,
+            colors: 8,
+            annotations: 9,
         };
         assert_eq!(fidelity(gaps, 7), expected);
     }

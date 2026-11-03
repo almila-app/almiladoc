@@ -172,5 +172,6 @@ impl OcrEngine for Mine {
 - Unattempted gaps stay open and the batch stops: call `Parsed.ocr` again later. Failed gaps are
   settled (`ocr_failed`). Branch on `OcrFailure.attempted`, not on `kind`.
 - Under `OnLoss.FAIL` an open or failed page gap raises `NeedsOcrError` at `Parsed.render`; a
-  filled page raises `IncompleteError` if painting left content out (`raster_incomplete`).
+  filled page raises `IncompleteError` if painting left text, images or content streams out
+  (`raster_incomplete`); `OcrRequest.fidelity` counts every kind, colours and annotations too.
 - One request per gap and attempt; `OcrResult` carries `usage`, `realized_tier` and `attempts`.

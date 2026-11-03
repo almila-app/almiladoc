@@ -1068,7 +1068,7 @@ class ConversionTest(unittest.TestCase):
                 almiladoc.OcrRefusal(row, kind, size)
 
     def test_a_raster_fidelity_counts_each_kind_and_loses_only_what_was_dropped(self):
-        fidelity = almiladoc.RasterFidelity(1, 2, 3, 4, 5, 6, 7)
+        fidelity = almiladoc.RasterFidelity(1, 2, 3, 4, 5, 6, 7, 8, 9)
         self.assertEqual(
             attrgetter(
                 "text_runs",
@@ -1078,18 +1078,22 @@ class ConversionTest(unittest.TestCase):
                 "soft_masks",
                 "content_streams",
                 "substituted_text_runs",
+                "colors",
+                "annotations",
                 "lost",
             )(fidelity),
-            (1, 2, 3, 4, 5, 6, 7, 1 + 2 + 3 + 6),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 1 + 2 + 3 + 6),
         )
-        self.assertEqual(almiladoc.RasterFidelity(shadings=4, soft_masks=5).lost, 0)
+        decorative = almiladoc.RasterFidelity(shadings=4, soft_masks=5, colors=8, annotations=9)
+        self.assertEqual(decorative.lost, 0)
         self.assertEqual(pickle.loads(pickle.dumps(fidelity)), fidelity)
         self.assertEqual(hash(pickle.loads(pickle.dumps(fidelity))), hash(fidelity))
-        self.assertNotEqual(fidelity, almiladoc.RasterFidelity(7, 6, 5, 4, 3, 2, 1))
+        self.assertNotEqual(fidelity, almiladoc.RasterFidelity(9, 8, 7, 6, 5, 4, 3, 2, 1))
         self.assertEqual(
             repr(fidelity),
             "RasterFidelity(text_runs=1, images=2, inline_images=3, shadings=4, "
-            "soft_masks=5, content_streams=6, substituted_text_runs=7)",
+            "soft_masks=5, content_streams=6, substituted_text_runs=7, colors=8, "
+            "annotations=9)",
         )
         request = almiladoc.OcrRequest(
             ("page", 1, 1, 1, None, []), b"", "image/png", 9, 150, 3, 4, fidelity

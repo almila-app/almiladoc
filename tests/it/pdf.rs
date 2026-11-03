@@ -608,6 +608,24 @@ pub(crate) fn write_pdf(objects: &[String]) -> Vec<u8> {
     out.into_bytes()
 }
 
+pub(crate) fn painted(resources: &str, contents: &str, extra: &[&str]) -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << {resources} >> \
+             /Contents 4 0 R >>"
+        ),
+        contents.to_owned(),
+    ];
+    objects.extend(extra.iter().map(|object| (*object).to_owned()));
+    write_pdf(&objects)
+}
+
+pub(crate) fn plain(content: &str) -> String {
+    format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len())
+}
+
 const TEXT: &str = "BT /F1 12 Tf 72 700 Td (Text) Tj ET";
 
 #[test]
@@ -837,6 +855,104 @@ fn unreadable_codes_and_runs_hidden_by_the_clip_or_page_report_no_loss() {
             assert_eq!(verdicts(&bytes), ["text"], "{clip}");
         }
     }
+}
+
+fn helvetica(entries: &str) -> String {
+    format!("/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica {entries} >> >>")
+}
+
+fn helvetica_page(entries: &str, content: &str, extra: &[&str]) -> Vec<u8> {
+    painted(&helvetica(entries), &plain(content), extra)
+}
+
+#[test]
+fn a_differences_code_outside_a_byte_names_nothing_until_the_next_code() {
+    for (differences, shown, expected) in
+        [("4294967361 /B", "A", "A\n"), ("-1 /a /b 66 /c", "AB", "Ac\n")]
+    {
+        let font = format!("/Encoding << /Differences [{differences}] >>");
+        let content = format!("BT /F1 12 Tf 72 700 Td ({shown}) Tj ET");
+        let bytes = helvetica_page(&font, &content, &[]);
+        let conversion = converter(1).convert(Input::new(&bytes, Format::Pdf));
+        assert_eq!(conversion.unwrap().markdown(), expected, "{differences}");
+    }
+}
+
+#[test]
+fn a_cmap_entry_that_overflows_or_is_not_hex_is_skipped_and_the_rest_still_maps() {
+    let cmap = |codespace: &str, entries: &str| {
+        plain(&format!(
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+             1 begincodespacerange {codespace} endcodespacerange {entries} \
+             endcmap CMapName currentdict /CMap defineresource pop end end"
+        ))
+    };
+    let simple = |entries: &str| {
+        let font = "/Encoding /WinAnsiEncoding /ToUnicode 5 0 R";
+        let content = "BT /F1 12 Tf 72 700 Td (AB) Tj ET";
+        helvetica_page(font, content, &[&cmap("<00> <FF>", entries)])
+    };
+    let composite = painted(
+        "/Font << /F1 5 0 R >>",
+        &plain("BT /F1 12 Tf 72 700 Td <00010041> Tj ET"),
+        &[
+            "<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding 6 0 R \
+             /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>",
+            &cmap("<0000> <FFFF>", "1 begincidrange <0000> <0001> 4294967295 endcidrange"),
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>",
+            &cmap("<0000> <FFFF>", "2 beginbfchar <0001> <0058> <0041> <0041> endbfchar"),
+        ],
+    );
+    for (bytes, expected) in [
+        (simple("2 beginbfrange <00> <01> <FFFFFFFF> <41> <42> <0061> endbfrange"), "ab\n"),
+        (simple("2 beginbfchar <41> <000\u{FFFD}> <42> <0062> endbfchar"), "Ab\n"),
+        (composite, "XA\n"),
+    ] {
+        let conversion = converter(1).convert(Input::new(&bytes, Format::Pdf)).unwrap();
+        assert_eq!(conversion.markdown(), expected);
+        assert!(conversion.diagnostics().is_empty(), "{expected}");
+    }
+}
+
+#[test]
+fn arrays_nested_past_the_parser_bound_lose_only_their_own_object() {
+    let nested = "[".repeat(100_000) + &"]".repeat(100_000);
+    let image = format!(
+        "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+         /BitsPerComponent 8 /Decode {nested} /Length 1 >>\nstream\na\nendstream"
+    );
+    let operand = helvetica_page("", &format!("{TEXT}\nBT {nested} TJ ET"), &[]);
+    let dictionary = painted(
+        &format!("{} /XObject << /Im1 5 0 R >>", helvetica("")),
+        &plain(&format!("q 9 0 0 9 9 9 cm /Im1 Do Q\n{TEXT}")),
+        &[&image],
+    );
+    let omitted = (DiagnosticCode::ImageOmitted, Region::Body, Some(1), 1);
+    for (bytes, diagnostics) in [(operand, vec![]), (dictionary, vec![omitted])] {
+        let conversion = converter(1).convert(Input::new(&bytes, Format::Pdf)).unwrap();
+        assert_eq!(conversion.markdown(), "Text\n");
+        assert_eq!(reported(conversion.diagnostics()), diagnostics);
+    }
+}
+
+#[test]
+fn a_form_whose_subtype_is_an_indirect_name_shows_its_text() {
+    let inside = "BT /F1 12 Tf 72 700 Td (Inside) Tj ET";
+    let form = format!(
+        "<< /Type /XObject /Subtype 6 0 R /BBox [0 0 612 792] /Resources << {} >> /Length {} >>\n\
+         stream\n{inside}\nendstream",
+        helvetica(""),
+        inside.len()
+    );
+    let bytes = painted(
+        &format!("{} /XObject << /Fm1 5 0 R >>", helvetica("")),
+        &plain("q /Fm1 Do Q"),
+        &[&form, "/Form"],
+    );
+    assert_eq!(verdicts(&bytes), ["text"]);
+    let conversion = converter(1).convert(Input::new(&bytes, Format::Pdf));
+    assert_eq!(conversion.unwrap().markdown(), "Inside\n");
 }
 
 const TARGET: &str = "https://example.test/paper";

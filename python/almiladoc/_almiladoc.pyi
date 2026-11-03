@@ -500,13 +500,15 @@ class OcrLine:
 @final
 class RasterFidelity:
     """What painting a page left out or replaced, by kind, which pickles:
-    `text_runs`, `images`, `inline_images`, `shadings`, `soft_masks` and
-    `content_streams` not painted or not applied as set, and
+    `text_runs`, `images`, `inline_images`, `shadings`, `soft_masks`,
+    `content_streams` and `annotations` not painted or not applied as set,
     `substituted_text_runs` painted in a standard face standing in for the
-    page's font. `lost` is what `raster_incomplete` counts: every kind but
-    shadings, soft masks and substituted runs.
-    Annotation appearances, Lab/DeviceN colours and missing stand-in glyphs are not
-    observed, so zero counts are not a completeness claim."""
+    page's font, and `colors` in a colour the painter does not convert, painted
+    in the shade of their ink. `lost` is what `raster_incomplete` counts: every
+    kind but shadings, soft masks, substituted runs, colours and annotations.
+    An annotation without an appearance stream, or whose `/AS` selects none, is
+    neither painted nor counted, and NoZoom/NoRotate are not applied, so zero
+    counts are not a completeness claim."""
 
     def __new__(
         cls,
@@ -517,6 +519,8 @@ class RasterFidelity:
         soft_masks: int = 0,
         content_streams: int = 0,
         substituted_text_runs: int = 0,
+        colors: int = 0,
+        annotations: int = 0,
     ) -> RasterFidelity: ...
     @property
     def text_runs(self) -> int:
@@ -540,9 +544,16 @@ class RasterFidelity:
     def substituted_text_runs(self) -> int:
         """Text runs painted in a standard face standing in for the page's font."""
     @property
+    def colors(self) -> int:
+        """Fills, strokes, text and stencil masks in a colour the painter does not
+        convert, painted in the shade of their ink."""
+    @property
+    def annotations(self) -> int:
+        """Annotations whose appearance was not painted, or painted only in part."""
+    @property
     def lost(self) -> int:
         """What the painting dropped from the page, as `raster_incomplete` counts it."""
-    def __getnewargs__(self) -> tuple[int, int, int, int, int, int, int]: ...
+    def __getnewargs__(self) -> tuple[int, int, int, int, int, int, int, int, int]: ...
 
 @final
 class OcrRequest:

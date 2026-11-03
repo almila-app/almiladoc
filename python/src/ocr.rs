@@ -70,13 +70,15 @@ pub(crate) fn raster_spec(
 }
 
 /// What painting a page left out or replaced, by kind, which pickles: `text_runs`,
-/// `images`, `inline_images`, `shadings`, `soft_masks` and `content_streams`
-/// not painted or not applied as set, and `substituted_text_runs` painted in a
-/// standard face standing in for the page's font. `lost` is what
-/// `raster_incomplete` counts: every kind but shadings, soft masks and
-/// substituted runs.
-/// Annotation appearances, Lab/DeviceN colours and missing stand-in glyphs are not
-/// observed, so zero counts are not a completeness claim.
+/// `images`, `inline_images`, `shadings`, `soft_masks`, `content_streams` and
+/// `annotations` not painted or not applied as set, `substituted_text_runs`
+/// painted in a standard face standing in for the page's font, and `colors`
+/// in a colour the painter does not convert, painted in the shade of their ink.
+/// `lost` is what `raster_incomplete` counts: every kind but shadings, soft
+/// masks, substituted runs, colours and annotations.
+/// An annotation without an appearance stream, or whose `/AS` selects none, is
+/// neither painted nor counted, and NoZoom/NoRotate are not applied, so zero
+/// counts are not a completeness claim.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RasterFidelity(almiladoc::RasterFidelity);
@@ -86,8 +88,9 @@ impl RasterFidelity {
     #[new]
     #[pyo3(signature = (
         text_runs = 0, images = 0, inline_images = 0, shadings = 0, soft_masks = 0,
-        content_streams = 0, substituted_text_runs = 0,
+        content_streams = 0, substituted_text_runs = 0, colors = 0, annotations = 0,
     ))]
+    #[expect(clippy::too_many_arguments, reason = "each count of Rust's fidelity is one argument")]
     fn new(
         text_runs: u32,
         images: u32,
@@ -96,6 +99,8 @@ impl RasterFidelity {
         soft_masks: u32,
         content_streams: u32,
         substituted_text_runs: u32,
+        colors: u32,
+        annotations: u32,
     ) -> Self {
         let mut fidelity = almiladoc::RasterFidelity::default();
         (fidelity.text_runs, fidelity.images, fidelity.inline_images) =
@@ -103,6 +108,7 @@ impl RasterFidelity {
         (fidelity.shadings, fidelity.soft_masks) = (shadings, soft_masks);
         (fidelity.content_streams, fidelity.substituted_text_runs) =
             (content_streams, substituted_text_runs);
+        (fidelity.colors, fidelity.annotations) = (colors, annotations);
         Self(fidelity)
     }
 
@@ -148,13 +154,26 @@ impl RasterFidelity {
         self.0.substituted_text_runs
     }
 
+    /// Fills, strokes, text and stencil masks in a colour the painter does not
+    /// convert, painted in the shade of their ink.
+    #[getter]
+    fn colors(&self) -> u32 {
+        self.0.colors
+    }
+
+    /// Annotations whose appearance was not painted, or painted only in part.
+    #[getter]
+    fn annotations(&self) -> u32 {
+        self.0.annotations
+    }
+
     /// What the painting dropped from the page, as `raster_incomplete` counts it.
     #[getter]
     fn lost(&self) -> u64 {
         self.0.lost()
     }
 
-    fn __getnewargs__(&self) -> (u32, u32, u32, u32, u32, u32, u32) {
+    fn __getnewargs__(&self) -> (u32, u32, u32, u32, u32, u32, u32, u32, u32) {
         let f = &self.0;
         (
             f.text_runs,
@@ -164,6 +183,8 @@ impl RasterFidelity {
             f.soft_masks,
             f.content_streams,
             f.substituted_text_runs,
+            f.colors,
+            f.annotations,
         )
     }
 
@@ -171,7 +192,8 @@ impl RasterFidelity {
         let f = &self.0;
         format!(
             "RasterFidelity(text_runs={}, images={}, inline_images={}, shadings={}, \
-             soft_masks={}, content_streams={}, substituted_text_runs={})",
+             soft_masks={}, content_streams={}, substituted_text_runs={}, colors={}, \
+             annotations={})",
             f.text_runs,
             f.images,
             f.inline_images,
@@ -179,6 +201,8 @@ impl RasterFidelity {
             f.soft_masks,
             f.content_streams,
             f.substituted_text_runs,
+            f.colors,
+            f.annotations,
         )
     }
 }
