@@ -228,7 +228,8 @@ impl ImageOcr {
 pub enum PdfScanPolicy {
     /// A page with an image and no readable text, or one at least half covered by images whose
     /// only text is margin text or running heads and folios; at 90% coverage or more, text that
-    /// recurs on other pages also qualifies.
+    /// recurs on other pages also qualifies, and at 90% coverage by black-and-white images any
+    /// native text does, which OCR then replaces.
     #[default]
     Conservative,
     /// The conservative pages, and every page at least half covered by images whatever native

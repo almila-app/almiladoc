@@ -11,7 +11,8 @@ Decide what gets OCR, pick a route, set it up and handle failures. almiladoc shi
   discards their text; other formats ignore it. A page past the last raises `PageOutOfRangeError`.
 - `Config.pdf_scans`: `PdfScanPolicy.CONSERVATIVE` takes a page with an image and no readable
   text, or one at least half covered by images whose only text is margin text or running heads
-  and folios (at 90% coverage or more, text that recurs on other pages too).
+  and folios (at 90% coverage or more, text that recurs on other pages too, and at 90% coverage by
+  black-and-white images any text, which OCR then replaces).
   `PdfScanPolicy.COVERAGE_FIRST` also takes every page at least half covered by images, whatever
   text it holds. The full rule: [Format support](../support.md#pdf).
 - `Config.image_ocr=ImageOcr.ALL` adds a gap after each use of an embedded PNG or JPEG in

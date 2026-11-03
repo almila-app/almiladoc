@@ -38,6 +38,7 @@ const VERDICTS: &[(&str, &[&str])] = &[
     ("handmade-chapter-dividers", &["text"; 3]),
     ("handmade-logo-header", &["text"; 3]),
     ("handmade-midpage-stamped-scan", &["text"]),
+    ("handmade-midpage-stamped-bilevel-scan", &["needs_ocr image_backed"]),
     ("handmade-strip-scan-stamped", &["text"]),
     ("handmade-clipped-scan-text", &["text"]),
     ("handmade-zero-area-crop-scan", &["text"; 3]),

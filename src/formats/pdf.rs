@@ -414,7 +414,9 @@ fn verdict(read: &ReadPage, furnished: Furnished, by_coverage: bool) -> PageVerd
 }
 
 fn scanned(page: &Page, furnished: Furnished, by_coverage: bool) -> bool {
-    if by_coverage && page.image_coverage >= HALF_PAGE {
+    if page.bilevel_image_coverage >= SCAN_COVERAGE
+        || (by_coverage && page.image_coverage >= HALF_PAGE)
+    {
         return true;
     }
     let margin_only =
@@ -833,6 +835,22 @@ mod tests {
             judged(&pages),
             [scanned.clone(), scanned, PageVerdict::Text, PageVerdict::Text]
         );
+    }
+
+    #[test]
+    fn a_black_and_white_scan_over_nine_tenths_of_a_page_is_a_scan_whatever_its_text() {
+        let scan = |coverage: f32, bilevel: f32| {
+            let mut page = page(&["Body"]);
+            page.image_op_count = 1;
+            (page.image_coverage, page.bilevel_image_coverage) = (coverage, bilevel);
+            page.painted_text_chars = 4;
+            ruled(page)
+        };
+        let scanned = needs_ocr(&[GapReason::ImageBacked]);
+        assert_eq!(scan(1.0, 1.0), scanned);
+        assert_eq!(scan(0.9, 0.9), scanned);
+        assert_eq!(scan(1.0, 0.89), PageVerdict::Text);
+        assert_eq!(scan(1.0, 0.0), PageVerdict::Text);
     }
 
     fn image_backed_pages(pages: &[&[&str]], coverage: f32) -> Vec<bool> {

@@ -240,14 +240,17 @@ class PdfScanPolicy:
     `CONSERVATIVE`, a page with an image and no readable text, or one at
     least half covered by images whose only text is margin text or running
     heads and folios (at 90% coverage or more, text that recurs on other
-    pages too); `COVERAGE_FIRST`, those pages and every page at least half
-    covered by images whatever native text it holds, which OCR then replaces.
-    Other formats ignore it."""
+    pages too, and at 90% coverage by black-and-white images any native
+    text, which OCR then replaces); `COVERAGE_FIRST`, those pages and every
+    page at least half covered by images whatever native text it holds,
+    which OCR then replaces. Other formats ignore it."""
 
     CONSERVATIVE: ClassVar[PdfScanPolicy]
     """A page with an image and no readable text, or one at least half covered
     by images whose only text is margin text or running heads and folios; at
-    90% coverage or more, text that recurs on other pages also qualifies."""
+    90% coverage or more, text that recurs on other pages also qualifies, and
+    at 90% coverage by black-and-white images any native text does, which OCR
+    then replaces."""
     COVERAGE_FIRST: ClassVar[PdfScanPolicy]
     """The conservative pages, and every page at least half covered by images
     whatever native text it holds, which OCR then replaces."""

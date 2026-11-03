@@ -18,20 +18,9 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 `∥` means disjoint parallel work; `then` binds tighter and means serial. Unlisted items land separately before the first wave sharing their files.
 
-| Wave | Items | Placement |
-|---|---|---|
-| W8 | scan-stamp | |
+No wave is open.
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
-
-## Items
-
-### W8
-
-#### scan-stamp: a stamp over a page scan leaves the page an OCR gap
-
-- A page that unpdf 0.53.0's `Page::bilevel_image_coverage` shows a black-and-white scan covers becomes `ImageBacked` despite a one-off native stamp, which keeps it Text today; photos and figures covering as much stay Text. Threshold and guards are measured; support.md's stamp line and `ImageBacked` row change in place.
-- Files: `src/formats/pdf.rs`, `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `docs/support.md`; T2.
 
 ## External tracks
 

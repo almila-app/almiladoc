@@ -166,7 +166,8 @@ impl ImageOcr {
 /// Which PDF pages a parse treats as scans, for the caller's OCR: `CONSERVATIVE`, a page with an
 /// image and no readable text, or one at least half covered by images whose only text is margin
 /// text or running heads and folios (at 90% coverage or more, text that recurs on other pages
-/// too); `COVERAGE_FIRST`, those pages and every page at least half covered by images whatever
+/// too, and at 90% coverage by black-and-white images any native text, which OCR then replaces);
+/// `COVERAGE_FIRST`, those pages and every page at least half covered by images whatever
 /// native text it holds, which OCR then replaces. Other formats ignore it.
 #[pyclass(frozen, eq, hash, module = "almiladoc")]
 #[derive(PartialEq, Eq, Hash)]

@@ -72,6 +72,20 @@ def gray_image(w: int, h: int, lines: bool) -> bytes:
     )
 
 
+def bilevel_image(w: int, h: int) -> bytes:
+    rows = b"".join(
+        (b"\x00" if y % 12 in (4, 5, 6) else b"\xff") * ((w + 7) // 8) for y in range(h)
+    )
+    data = zlib.compress(rows, 9)
+    return (
+        b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray"
+        b" /BitsPerComponent 1 /Filter /FlateDecode /Length %d >>\nstream\n"
+        % (w, h, len(data))
+        + data
+        + b"\nendstream"
+    )
+
+
 DOT = (
     b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
     b" /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream"
@@ -94,6 +108,7 @@ TILES = 8
 XOBJECTS = {
     b"Im1": lambda: DOT,
     b"Scan": lambda: gray_image(306, 396, True),
+    b"Bilevel": lambda: bilevel_image(306, 396),
     b"Jpeg": lambda: JPEG_SCAN,
     b"Fig": lambda: gray_image(240, 200, False),
     b"ScanHi": lambda: gray_image(1224, 1584, True),
@@ -394,6 +409,7 @@ VERDICT_CASES: dict[str, Case] = {
         (running_head(3) + LOGO + text_lines(BODY), [b"Fig"]),
     ],
     "midpage-stamped-scan": [(FULL_SCAN + MIDPAGE_STAMP, [b"Scan"])],
+    "midpage-stamped-bilevel-scan": [(band(b"Bilevel", 792) + MIDPAGE_STAMP, [b"Bilevel"])],
     "strip-scan-stamped": [(strips() + MIDPAGE_STAMP, [b"Scan"])],
     "clipped-scan-text": [(CLIP_AWAY + FULL_SCAN + b"Q\n" + text_lines(BODY), [b"Scan"])],
     "zero-area-crop-scan": [
