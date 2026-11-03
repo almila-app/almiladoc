@@ -30,6 +30,8 @@ const SCAN_COVERAGE: f32 = 0.9;
 const PARTIAL_SCAN_COVERAGE: f32 = 0.5;
 const HALF_PAGE: f32 = 0.5;
 const RUNNING_HEAD_CHARS: usize = 80;
+const GARBLED_MIN_CODES: u64 = 40;
+const GARBLED_LOST_PER_PAINTED: u64 = 2;
 
 pub(crate) struct Read {
     pub(crate) document: Document,
@@ -437,7 +439,10 @@ fn reasons(page: &Page, text_chars: usize, scanned: bool) -> Vec<GapReason> {
                 || (shown > 0 && invisible * 10 >= shown * 9)
                 || (textless && page.clipped_text_runs > 0),
         ),
-        (GapReason::GarbledText, page.suppressed_text_runs > 0 && textless),
+        (
+            GapReason::GarbledText,
+            (page.suppressed_text_runs > 0 && textless) || mostly_garbled(page),
+        ),
         (GapReason::ImageBacked, page.image_op_count > 0 && (textless || scanned)),
         (GapReason::VectorDrawn, textless && page.image_op_count == 0 && page.fill_op_count > 0),
     ]
@@ -452,6 +457,19 @@ fn reasons(page: &Page, text_chars: usize, scanned: bool) -> Vec<GapReason> {
         reasons.push(GapReason::UnreadableText);
     }
     reasons
+}
+
+fn mostly_garbled(page: &Page) -> bool {
+    let unmapped: u64 = page
+        .unreadable_fonts
+        .iter()
+        .filter(|font| font.reason == TextSuppression::UnmappedCodes)
+        .map(|font| u64::from(font.codes))
+        .sum();
+    let suppressed = u64::from(page.suppressed_text_codes).saturating_sub(unmapped);
+    let lost = suppressed + u64::from(page.undecoded_text_codes);
+    lost >= GARBLED_MIN_CODES
+        && lost >= u64::from(page.painted_text_chars) * GARBLED_LOST_PER_PAINTED
 }
 
 fn requested(verdict: PageVerdict) -> PageVerdict {
@@ -1410,6 +1428,63 @@ mod tests {
             diagnostic_rows::<(DiagnosticCode, Region, u64)>(&parse_ctx.into_diagnostics()),
             [(DiagnosticCode::GarbledFontEncoding, Region::Body, 2)]
         );
+    }
+
+    fn lost_page(painted: u32, fonts: &[(TextSuppression, u32)], undecoded: u32) -> Page {
+        let mut page = page(&["Body"]);
+        page.painted_text_chars = painted;
+        page.undecoded_text_codes = undecoded;
+        page.suppressed_text_runs = fonts.len();
+        page.suppressed_text_codes =
+            fonts.iter().fold(0, |total: u32, &(_, codes)| total.saturating_add(codes));
+        page.unreadable_fonts = fonts
+            .iter()
+            .map(|&(reason, codes)| UnreadableFont { name: "F".into(), reason, runs: 1, codes })
+            .collect();
+        page
+    }
+
+    #[test]
+    fn a_page_with_twice_as_many_lost_codes_as_painted_characters_needs_ocr_beside_its_text() {
+        use TextSuppression::{BinaryDensity, CompositeUnresolved, UnmappedCodes};
+        let garbled = needs_ocr(&[GapReason::GarbledText]);
+        type Fonts = &'static [(TextSuppression, u32)];
+        let cases: [(&str, u32, Fonts, u32, PageVerdict); 13] = [
+            ("twice the painted", 30, &[(CompositeUnresolved, 60)], 0, garbled.clone()),
+            ("one under twice", 30, &[(CompositeUnresolved, 59)], 0, PageVerdict::Text),
+            ("as many as painted", 100, &[(CompositeUnresolved, 100)], 0, PageVerdict::Text),
+            ("the minimum", 5, &[(CompositeUnresolved, 40)], 0, garbled.clone()),
+            ("one under the minimum", 5, &[(CompositeUnresolved, 39)], 0, PageVerdict::Text),
+            ("binary density", 30, &[(BinaryDensity, 60)], 0, garbled.clone()),
+            ("unmapped alone", 30, &[(UnmappedCodes, 100)], 0, PageVerdict::Text),
+            (
+                "unmapped beside fewer lost",
+                30,
+                &[(UnmappedCodes, 60), (CompositeUnresolved, 40)],
+                0,
+                PageVerdict::Text,
+            ),
+            (
+                "unmapped codes past the saturated total",
+                30,
+                &[(UnmappedCodes, u32::MAX), (UnmappedCodes, u32::MAX)],
+                0,
+                PageVerdict::Text,
+            ),
+            ("undecoded", 30, &[], 60, garbled.clone()),
+            ("one under twice undecoded", 30, &[], 59, PageVerdict::Text),
+            ("suppressed with undecoded", 30, &[(CompositeUnresolved, 30)], 30, garbled),
+            (
+                "suppressed without undecoded",
+                30,
+                &[(CompositeUnresolved, 30)],
+                0,
+                PageVerdict::Text,
+            ),
+        ];
+        for (label, painted, fonts, undecoded, expected) in cases {
+            assert_eq!(ruled(lost_page(painted, fonts, undecoded)), expected, "{label}");
+        }
     }
 
     #[test]

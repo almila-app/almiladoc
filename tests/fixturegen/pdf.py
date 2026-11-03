@@ -333,6 +333,13 @@ CLIP_AWAY = b"q 0 0 10 10 re W n\n"
 DIGITISED = b"BT /F1 8 Tf 220 20 Td (Digitized by the Internet Archive) Tj ET"
 SPACES = b"BT /F1 12 Tf 72 700 Td (          ) Tj ET"
 UNRESOLVED_RUN = b"BT /F2 12 Tf 72 600 Td <0102030405060708> Tj ET"
+
+
+def unresolved_codes(count: int) -> bytes:
+    codes = b"".join(b"%04X" % code for code in range(1, count + 1))
+    return b"BT /F2 12 Tf 72 600 Td <%s> Tj ET\n" % codes
+
+
 COVER = text_lines(TITLE, top=420, size=20)
 LOGO = b"q 40 0 0 40 540 730 cm /Fig Do Q\n"
 PLATE = band(b"Fig", 475)
@@ -413,6 +420,11 @@ VERDICT_CASES: dict[str, Case] = {
         (TEXT_PAGE, [b"Im1"]),
         (IMAGE_PAGE, [b"Im1"]),
     ],
+    "garbled-majority": [
+        (text_lines(BODY) + unresolved_codes(48), []),
+        (text_lines([b"Appendix tables"], top=740) + unresolved_codes(120), []),
+        (TEXT_PAGE, []),
+    ],
     "vector-glyphs": [(vector_glyphs(), [])],
     "figure-cover-hires": [(b"q 612 0 0 792 0 0 cm /FigHi Do Q\n" + COVER, [b"FigHi"])],
     "figure-large": [
@@ -480,6 +492,27 @@ def mesh_shading_pdf() -> bytes:
     )
 
 
+def unmapped_codes_pdf() -> bytes:
+    """A readable page and 124 control codes of a Type 3 font that gives them no character."""
+    codes = b"".join(b"%02X" % (1 + i % 31) for i in range(124))
+    content = text_lines(BODY) + b"BT /F3 12 Tf 72 600 Td <%s> Tj ET" % codes
+    return assemble(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+            3: HELVETICA,
+            4: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R"
+            b" /Resources << /Font << /F1 3 0 R /F3 6 0 R >> >> >>",
+            5: stream(content),
+            6: b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]"
+            b" /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /glyph 7 0 R >>"
+            b" /Encoding << /Type /Encoding /Differences [1 /glyph] >>"
+            b" /FirstChar 1 /LastChar 1 /Widths [1000] >>",
+            7: stream(b"1000 0 0 0 750 750 d1 0 0 750 750 re f"),
+        }
+    )
+
+
 def generate(out: Path) -> None:
     pdf = out / "pdf"
     write_file(pdf / "handmade-scanned.pdf", handmade_pdf([IMAGE_PAGE, IMAGE_PAGE]))
@@ -498,5 +531,6 @@ def generate(out: Path) -> None:
         handmade_pdf([ksc_page()], font=KSC_FONT, extra=[KOREA1_CID_FONT, KOREA1_DESCRIPTOR]),
     )
     write_file(pdf / "handmade-mesh-shading.pdf", mesh_shading_pdf())
+    write_file(pdf / "handmade-garbled-unmapped.pdf", unmapped_codes_pdf())
     for name, pages in VERDICT_CASES.items():
         write_file(pdf / f"handmade-{name}.pdf", case_pdf(pages, CROP_BOXES.get(name, ())))

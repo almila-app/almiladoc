@@ -7,8 +7,9 @@ use crate::build::docx;
 use crate::support::{configured, converter, corpus, fixture, limited, reported, reporting, trips};
 use almiladoc::model::{GapReason, OcrOrigin, UnitKind};
 use almiladoc::{
-    ConvertError, Converter, DiagnosticCode, Diagnostics, Format, HeaderFooterPolicy, Input, Limit,
-    LossClass, OnLoss, PageSelection, PageVerdict, PdfScanPolicy, Region, UnsupportedKind,
+    ConvertError, Converter, DiagnosticCode, Diagnostics, Format, GapFill, HeaderFooterPolicy,
+    Input, Limit, LossClass, OnLoss, PageSelection, PageVerdict, PdfScanPolicy, Region,
+    UnsupportedKind,
 };
 
 const VERDICTS: &[(&str, &[&str])] = &[
@@ -51,6 +52,8 @@ const VERDICTS: &[(&str, &[&str])] = &[
         "handmade-five-page-garbled",
         &["text", "needs_ocr image_backed", "text", "text", "needs_ocr image_backed"],
     ),
+    ("handmade-garbled-majority", &["text", "needs_ocr garbled_text", "text"]),
+    ("handmade-garbled-unmapped", &["text"]),
     ("handmade-vector-glyphs", &["needs_ocr vector_drawn"]),
     ("handmade-figure-cover-hires", &["text"]),
     ("handmade-figure-large", &["text"]),
@@ -222,6 +225,49 @@ fn unfilled_gaps_fail_needs_ocr_before_a_loss_fails_incomplete() {
 const FIVE_PAGES: &str = "Text on the first page\n\n<!-- needs-ocr page 2 -->\n\n\
                           Text on the first page\n\nText on the first page\n\n\
                           <!-- needs-ocr page 5 -->\n";
+
+const GARBLED_LOSS: (DiagnosticCode, Region, Option<u32>, u64) =
+    (DiagnosticCode::GarbledFontEncoding, Region::Body, Some(1), 1);
+
+#[test]
+fn a_mostly_garbled_page_awaits_ocr_before_a_page_with_a_few_garbled_words_fails_incomplete() {
+    let bytes = pdf_fixture("handmade-garbled-majority");
+    let error = converter(1).convert(Input::new(&bytes, Format::Pdf)).unwrap_err();
+    assert_matches!(&error, ConvertError::NeedsOcr { pages, page_count: 3, .. } if pages == &[2]);
+
+    let mut parsed = converter(1).parse(Input::new(&bytes, Format::Pdf)).unwrap();
+    let gaps: Vec<_> = parsed.gaps().map(|gap| (gap.id, gap.reasons.clone())).collect();
+    let [(id, reasons)] = gaps.as_slice() else { panic!("{gaps:?}") };
+    assert_eq!(reasons, &[GapReason::GarbledText]);
+    parsed.fill_gap(*id, GapFill::Markdown("Appendix tables".into())).unwrap();
+    let Err(ConvertError::Incomplete { diagnostics, .. }) = parsed.render() else {
+        panic!("the page below the share passed fail");
+    };
+    assert_eq!(reported(&diagnostics), [GARBLED_LOSS]);
+}
+
+#[test]
+fn an_unfilled_garbled_gap_under_report_drops_its_readable_text_and_reports_only_the_gap() {
+    let bytes = pdf_fixture("handmade-garbled-majority");
+    let conversion = reporting().convert(Input::new(&bytes, Format::Pdf)).unwrap();
+    let markdown = conversion.markdown();
+    assert!(markdown.contains("<!-- needs-ocr page 2 -->"), "{markdown}");
+    assert!(!markdown.contains("Appendix"), "{markdown}");
+    assert!(markdown.starts_with("Interviews were transcribed"), "{markdown}");
+    assert!(markdown.ends_with("Text on the first page\n"), "{markdown}");
+    let gap = (DiagnosticCode::OcrGap, Region::Body, Some(2), 1);
+    assert_eq!(reported(conversion.diagnostics()), [gap, GARBLED_LOSS]);
+    let classes: Vec<_> = conversion.diagnostics().iter().map(|d| d.class).collect();
+    assert_eq!(classes, [LossClass::Deferred, LossClass::Lost]);
+}
+
+#[test]
+fn unmapped_codes_whose_glyphs_show_neither_gap_a_page_nor_cost_a_loss() {
+    let bytes = pdf_fixture("handmade-garbled-unmapped");
+    let conversion = converter(1).convert(Input::new(&bytes, Format::Pdf)).unwrap();
+    assert!(conversion.markdown().starts_with("Interviews were transcribed"));
+    assert_eq!(reported(conversion.diagnostics()), []);
+}
 
 #[test]
 fn a_page_of_text_awaiting_no_ocr_beside_gaps_is_kept_whole_and_incomplete() {

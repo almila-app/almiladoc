@@ -67,7 +67,7 @@ pub enum GapReason {
     UnreadableContent,
     /// Its text is drawn invisible or clipped away: an OCR layer, or no text at all.
     InvisibleText,
-    /// Every text run it draws is in a font whose codes give no characters.
+    /// Most of its text is in fonts whose codes give no characters.
     GarbledText,
     /// Its text is an image: no text over an image, only furniture or margin text over at least
     /// half the page, or any text there under

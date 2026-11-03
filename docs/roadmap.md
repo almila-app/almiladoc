@@ -20,18 +20,13 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 | Wave | Items | Placement |
 |---|---|---|
-| W8 | garbled-pages then scan-stamp | |
+| W8 | scan-stamp | |
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
 
 ## Items
 
 ### W8
-
-#### garbled-pages: a mostly garbled page becomes an OCR gap
-
-- `reasons()` adds `GarbledText` when the lost codes (unpdf 0.53.0's `Page::suppressed_text_codes` less the `UnreadableFont::codes` of `unmapped_codes` runs, plus codes left undecoded) reach `lost * 2 >= painted_text_chars + lost` and a named minimum; no new control or API. The threshold is measured on the ADR 0001 535-page corpus with zero new gaps (without it, a `PdfScanPolicy` rule instead of a default), and support.md states that such a gap left unfilled under Report, or unpaintable, drops the page's readable text and reports only `ocr_gap`.
-- Files: `src/formats/pdf.rs`, `tests/fixturegen/pdf.py`, PDF fixtures and snapshots, `docs/support.md`; T2.
 
 #### scan-stamp: a stamp over a page scan leaves the page an OCR gap
 
