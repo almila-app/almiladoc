@@ -469,7 +469,7 @@ mod tests {
             ),
             (
                 ConvertError::InvalidConfig(ConfigError::Raster),
-                "invalid configuration: a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",
+                "invalid configuration: a raster spec takes 50 to 600 dpi or a long edge of 64 to 16384 pixels, and 1048576 to 41943040 pixels",
             ),
             (ConvertError::Cancelled, "conversion cancelled"),
             (ConvertError::Internal, "internal error"),

@@ -879,7 +879,7 @@ mod tests {
             assert_eq!(refused(config), Some(field));
         }
         let mut raster = config(base);
-        raster.raster.dpi = 601;
+        raster.raster.size = crate::RasterSize::Dpi(601);
         assert_eq!(OcrHttp::new(raster).err(), Some(ConfigError::Raster));
     }
 

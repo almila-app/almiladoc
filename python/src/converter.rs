@@ -407,27 +407,35 @@ impl Parsed {
     /// not yet filled or failed and asks for an image, in document order, made
     /// with the GIL released: an OCR run elsewhere, in another process too,
     /// reads each request and passes its text to `fill_gap(request.gap, text)`,
-    /// or calls `fail_gap(request.gap)`. An embedded image is copied and a page
-    /// painted as a PNG at the largest dpi up to `dpi` at which its media box
-    /// fits `max_pixels`, its request holding the pixel `width` and `height`
-    /// and a `RasterFidelity` of what the painting left out. A page that
-    /// cannot be painted is an `unpaintable` refusal, and an image over
+    /// or calls `fail_gap(request.gap)`. An embedded image is copied, its
+    /// request holding the pixel `width` and `height` its header declares. A
+    /// page is painted as a PNG at the largest dpi up to `dpi`, 150 unless
+    /// `long_edge` is set, at which its media box fits `max_pixels`,
+    /// or with exactly `long_edge` pixels on its long edge, its request holding
+    /// the pixel `width` and `height` and a `RasterFidelity` of what the
+    /// painting left out. A page that cannot be painted is an `unpaintable`
+    /// refusal, an exact `long_edge` that would hold more than `max_pixels`,
+    /// never painted smaller, an `over_pixels` one, and an image over
     /// `max_bytes` encoded bytes, `None` for no bound, an `over_bytes` one;
-    /// either gap stays unfilled, for a later call or `fill_gap`. A row naming
-    /// no unsettled gap is passed over. A `dpi` outside 50 to 600,
-    /// `max_pixels` outside 1048576 to 41943040 or a `max_bytes` of 0 raises
-    /// `ConfigError` with `limit` `raster`, an int that fits none of them
-    /// `OverflowError`, and work past `max_work` `ResourceLimitError`.
-    #[pyo3(signature = (gaps = None, *, dpi = 150, max_pixels = 12_845_056, max_bytes = None))]
+    /// each gap stays unfilled, for a later call or `fill_gap`. A row naming
+    /// no unsettled gap is passed over. A `dpi` outside 50 to 600, a
+    /// `long_edge` outside 64 to 16384, both of them given, `max_pixels`
+    /// outside 1048576 to 41943040 or a `max_bytes` of 0 raises `ConfigError`
+    /// with `limit` `raster`, an int that fits none of them `OverflowError`,
+    /// and work past `max_work` `ResourceLimitError`.
+    #[pyo3(signature = (
+        gaps = None, *, dpi = None, long_edge = None, max_pixels = 12_845_056, max_bytes = None,
+    ))]
     fn ocr_requests<'py>(
         &self,
         py: Python<'py>,
         gaps: Option<Vec<GapKey<'_>>>,
-        dpi: u32,
+        dpi: Option<u32>,
+        long_edge: Option<u32>,
         max_pixels: u64,
         max_bytes: Option<u64>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        let spec = raster_spec(py, dpi, max_pixels, max_bytes)?;
+        let spec = raster_spec(py, dpi, long_edge, max_pixels, max_bytes)?;
         let ids = self.gap_ids(gaps);
         let mut parsed = self.lock(py);
         let parsed: &mut almiladoc::Parsed = &mut parsed;

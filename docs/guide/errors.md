@@ -43,12 +43,12 @@ Know what each outcome means and what to do next.
 
 | Other Python exception | Raised by |
 |---|---|
-| `ConfigError` (a `ValueError`, with `limit`, `ceiling`, `max`; no `code`) | `Limits`, `Config`, `OcrHttp`, `Parsed.ocr_requests`: a value out of range. `limit` names the field, `raster` for dpi, pixels or a zero `max_bytes`; `ceiling`, set only for a value over it, is the most `max_nesting_depth` or `max_pages` takes (a zero leaves it `None`); `max` is the most `threads`; each is `None` otherwise |
+| `ConfigError` (a `ValueError`, with `limit`, `ceiling`, `max`; no `code`) | `Limits`, `Config`, `OcrHttp`, `Parsed.ocr_requests`: a value out of range. `limit` names the field, `raster` for dpi, long edge, pixels, a dpi given with a long edge or a zero `max_bytes`; `ceiling`, set only for a value over it, is the most `max_nesting_depth` or `max_pages` takes (a zero leaves it `None`); `max` is the most `threads`; each is `None` otherwise |
 | `OverflowError` | The same calls: a negative int, or one too big for the argument's unsigned 32- or 64-bit type |
 | `GapRefused` (a `ValueError`, with `limit`) | `Parsed.fill_gap` and its variants: a fill past a per-fill limit |
 | `KeyError` | `Parsed.fill_gap`, `Parsed.fail_gap`: no such gap |
 | `ValueError` | An unknown format name, a gap already settled, an invalid table fill |
-| `TypeError` | A buffer that is not contiguous bytes; `ocr_pages` holding non-integers; an argument of the wrong type, such as `None` for `threads`, a limit or `dpi` |
+| `TypeError` | A buffer that is not contiguous bytes; `ocr_pages` holding non-integers; an argument of the wrong type, such as `None` for `threads`, a limit or `max_pixels` |
 | `OSError` | `Converter.convert_path`: missing file, directory, FIFO or device |
 
 ```python

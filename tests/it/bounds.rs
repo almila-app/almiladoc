@@ -249,7 +249,7 @@ fn a_pdf_stops_at_max_output_bytes() {
 }
 
 pub(crate) fn least_work(passes: impl Fn(Converter) -> bool) -> u64 {
-    let (mut low, mut high) = (0, 1 << 20);
+    let (mut low, mut high) = (1, 1 << 20);
     while low < high {
         let mid = low + (high - low) / 2;
         if passes(limited(|limits| limits.max_work = mid)) { high = mid } else { low = mid + 1 }

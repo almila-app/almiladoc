@@ -20,18 +20,13 @@ Open work only; [ADRs](adr/) own decisions. Landing an item removes its section 
 
 | Wave | Items | Placement |
 |---|---|---|
-| W8 | exact-long-edge then garbled-pages then scan-stamp | |
+| W8 | garbled-pages then scan-stamp | |
 
 Before first publication prove native PDF and real-consumer integration together, and measure pool stack costs (ADR 0001).
 
 ## Items
 
 ### W8
-
-#### exact-long-edge: OCR images with an exact long edge
-
-- `RasterSpec.dpi` becomes `size: RasterSize { Dpi, LongEdge }`: `LongEdge(L)` paints L pixels on the long edge of the rotated crop box unpdf 0.53.0's `PdfParser::page_size` reports, the short side by `PageSize::pixels` arithmetic (`round().max(1)`), and refuses an exact size over `max_pixels` as `OverPixels` instead of shrinking it; `Dpi` keeps its down-fit, sized on the crop box. Embedded PNG/JPEG requests read width/height from their headers; Python mirrors `long_edge` (with `dpi`, a raster `ConfigError`) and the `OcrHttpConfig` raster kwargs.
-- Files: `src/ocr/`, `src/formats/pdf.rs`, `python/`, ADR 0002, `docs/support.md`, `docs/guide/ocr.md`; T2.
 
 #### garbled-pages: a mostly garbled page becomes an OCR gap
 

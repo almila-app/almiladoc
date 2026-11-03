@@ -70,7 +70,8 @@ pub use ledger::CancelToken;
 pub use limits::{Limit, Limits};
 pub use ocr::{
     GapError, GapFill, OcrEngine, OcrFailure, OcrFailureKind, OcrImage, OcrLine, OcrOutcome,
-    OcrRefusal, OcrRequest, OcrSummary, RasterFidelity, RasterSpec, RefusalKind, RetryAfter,
+    OcrRefusal, OcrRequest, OcrSummary, RasterFidelity, RasterSize, RasterSpec, RefusalKind,
+    RetryAfter,
 };
 #[cfg(feature = "ocr-http")]
 pub use ocr::{

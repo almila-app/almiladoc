@@ -700,18 +700,22 @@ impl Parsed {
     /// The request or refusal for each gap `gaps` names, every gap when `None`, that is not yet
     /// filled or failed and asks for an image, in document order, for an engine run elsewhere:
     /// its results come back through [`Parsed::fill_gap`] and [`Parsed::fail_gap`]. An embedded
-    /// image is copied and a page painted at the largest dpi up to `spec`'s at which its media
-    /// box fits `spec`'s pixel cap, the pages at once on a pool built from its [`Config`]; an
-    /// id that names no unsettled gap is passed over.
+    /// image is copied, its request holding the size its header declares. A page is painted at
+    /// the largest dpi up to `spec`'s at which its media box fits `spec`'s pixel cap,
+    /// or, for a [`LongEdge`](crate::RasterSize::LongEdge), with exactly that many pixels on its
+    /// long edge, the pages at once on a pool built from its [`Config`]; an id that names no
+    /// unsettled gap is passed over.
     ///
     /// A gap whose image cannot be made is an [`OcrRefusal`] in its place and stays unfilled,
     /// so a later call with another spec may ask again and [`Parsed::fill_gap`] may fill it:
     /// [`RefusalKind::Unpaintable`](crate::RefusalKind::Unpaintable) for a page that cannot be
-    /// painted, [`RefusalKind::OverBytes`](crate::RefusalKind::OverBytes) for an image over
-    /// `spec`'s byte bound. A painted page's request holds its size and [`RasterFidelity`].
+    /// painted, [`RefusalKind::OverPixels`](crate::RefusalKind::OverPixels) for an exact long
+    /// edge that would hold more pixels than `spec`'s cap, never painted smaller, and
+    /// [`RefusalKind::OverBytes`](crate::RefusalKind::OverBytes) for an image over `spec`'s
+    /// byte bound. A painted page's request holds its size and [`RasterFidelity`].
     ///
-    /// Work is charged on from the work charged so far: a page's media-box pixels at one unit
-    /// per 128 before it is painted, each step of its painting the pixels of work unpdf prices
+    /// Work is charged on from the work charged so far: a page's pixels at one unit per 128
+    /// before it is painted, each step of its painting the pixels of work unpdf prices
     /// it at one unit per 128, rounded up, and each image's bytes at one per 16, a refused
     /// page's PNG included.
     ///

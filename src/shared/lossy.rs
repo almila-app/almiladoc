@@ -14,6 +14,11 @@ pub(crate) fn to_f64(n: u64) -> f64 {
     n as f64
 }
 
+#[cfg(feature = "raster")]
+pub(crate) fn to_f32(x: f64) -> f32 {
+    x as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +90,15 @@ mod tests {
         assert_eq!(round_u64(to_f64(TWO_53 + 1)), TWO_53);
         assert_eq!(round_u64(to_f64(TWO_53 + 3)), TWO_53 + 4);
         assert_eq!(round_u64(to_f64(u64::MAX)), u64::MAX);
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn to_f32_rounds_to_the_nearest_f32_and_overflows_to_infinity() {
+        assert_eq!(to_f32(0.1).to_bits(), 0.1_f32.to_bits());
+        assert_eq!(to_f32(16_777_217.0).to_bits(), 16_777_216.0_f32.to_bits());
+        assert_eq!(to_f32(16_777_219.0).to_bits(), 16_777_220.0_f32.to_bits());
+        assert_eq!(to_f32(1e40), f32::INFINITY);
+        assert!(to_f32(f64::NAN).is_nan());
     }
 }

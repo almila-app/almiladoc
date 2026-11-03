@@ -28,7 +28,8 @@ pub(crate) mod exceptions {
         PyValueError,
         "A `Limits`, `Config` or `OcrHttp` field, or a raster spec, is out of \
          range. `limit` names the field (`threads` for the thread count, \
-         `raster` for a raster spec's `dpi` and `max_pixels`); `ceiling` is the \
+         `raster` for a raster spec's `dpi`, `long_edge` and `max_pixels`, a `dpi` \
+         with a `long_edge`, or a zero `max_bytes`); `ceiling` is the \
          highest value `max_nesting_depth` or `max_pages` accepts, set only when \
          the value passed exceeds it (a zero leaves it `None`), and `max` the most \
          threads; each is `None` otherwise."

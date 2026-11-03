@@ -6,8 +6,8 @@ use crate::error::ConvertError;
 use crate::formats::Source;
 use crate::ledger::Ledger;
 use crate::model::{Asset, Gap, GapId, GapReason, OcrOrigin};
-use crate::ocr::images::media_type;
-use crate::ocr::raster::{Painted, RasterFidelity};
+use crate::ocr::images::{dimensions, media_type};
+use crate::ocr::raster::{Painted, RasterFidelity, whole_dpi};
 use crate::ocr::{RasterSpec, raster};
 use crate::pool::map_ordered;
 
@@ -40,19 +40,23 @@ pub struct OcrImage {
     pub bytes: Arc<[u8]>,
     /// `image/png` or `image/jpeg`, from the bytes' signature.
     pub media_type: &'static str,
-    /// The resolution a page was painted at; `None` for an embedded image.
+    /// The resolution a page was painted at, in whole dots per inch from one to `u32::MAX`,
+    /// rounded and clamped when the page was painted at an exact long edge; `None` for an
+    /// embedded image.
     pub dpi: Option<u32>,
-    /// The pixel width of a painted page; `None` for an embedded image.
+    /// The pixel width of a painted page, or of an embedded image as its header declares it;
+    /// `None` when that header does not read.
     pub width: Option<u32>,
-    /// The pixel height of a painted page; `None` for an embedded image.
+    /// The pixel height of a painted page, or of an embedded image as its header declares it;
+    /// `None` when that header does not read.
     pub height: Option<u32>,
     /// What painting a page left out; `None` for an embedded image, which is not painted.
     pub fidelity: Option<RasterFidelity>,
 }
 
 impl OcrImage {
-    /// The image `bytes` hold, painted at `dpi` if a page, its size and fidelity unknown;
-    /// `None` unless they open with the PNG or JPEG signature.
+    /// The image `bytes` hold, painted at `dpi` if a page, its size as its header declares it
+    /// and its fidelity unknown; `None` unless they open with the PNG or JPEG signature.
     ///
     /// # Examples
     ///
@@ -68,7 +72,8 @@ impl OcrImage {
     pub fn new(bytes: impl Into<Arc<[u8]>>, dpi: Option<u32>) -> Option<Self> {
         let bytes = bytes.into();
         let media_type = media_type(&bytes)?;
-        Some(Self { bytes, media_type, dpi, width: None, height: None, fidelity: None })
+        let (width, height) = dimensions(&bytes, media_type).unzip();
+        Some(Self { bytes, media_type, dpi, width, height, fidelity: None })
     }
 }
 
@@ -131,6 +136,11 @@ pub struct OcrRefusal {
 pub enum RefusalKind {
     /// The page cannot be painted: it has no usable box, or the painter failed on it.
     Unpaintable,
+    /// The exact long edge would paint more pixels than [`RasterSpec::max_pixels`] allows.
+    OverPixels {
+        /// The pixels the page would have held.
+        pixels: u64,
+    },
     /// The encoded image holds more bytes than [`RasterSpec::max_bytes`] allows.
     OverBytes {
         /// The bytes the encoded image holds.
@@ -144,6 +154,7 @@ impl RefusalKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unpaintable => "unpaintable",
+            Self::OverPixels { .. } => "over_pixels",
             Self::OverBytes { .. } => "over_bytes",
         }
     }
@@ -152,7 +163,7 @@ impl RefusalKind {
 /// How a gap's image is had: an embedded one copied, a page to paint at a dpi, or no image.
 enum Plan {
     Image(OcrImage),
-    Page { page: NonZeroU32, dpi: u32 },
+    Page { page: NonZeroU32, dpi: f32 },
     Refused(RefusalKind),
 }
 
@@ -168,12 +179,10 @@ pub(crate) fn requests(
     let mut plans = Vec::with_capacity(gaps.len());
     for gap in gaps {
         let plan = match gap.origin {
-            OcrOrigin::Page(page) => {
-                Some(raster::plan(inputs.source, page, spec, ledger)?.map_or(
-                    Plan::Refused(RefusalKind::Unpaintable),
-                    |dpi| Plan::Page { page, dpi },
-                ))
-            }
+            OcrOrigin::Page(page) => Some(
+                raster::plan(inputs.source, page, spec, ledger)?
+                    .map_or_else(Plan::Refused, |dpi| Plan::Page { page, dpi }),
+            ),
             _ => embedded(gap, inputs.assets, spec, ledger)?,
         };
         plans.extend(plan.map(|plan| (gap, plan)));
@@ -205,7 +214,7 @@ pub(crate) fn requests(
 /// `painted` as a page's image, its PNG bytes charged to `ledger` even when `spec` refuses them.
 fn page_image(
     painted: Painted,
-    dpi: u32,
+    dpi: f32,
     spec: &RasterSpec,
     ledger: &Ledger<'_>,
 ) -> Result<Result<OcrImage, RefusalKind>, ConvertError> {
@@ -217,7 +226,7 @@ fn page_image(
     Ok(Ok(OcrImage {
         bytes: Arc::from(painted.png),
         media_type: "image/png",
-        dpi: Some(dpi),
+        dpi: Some(whole_dpi(dpi)),
         width: Some(painted.width),
         height: Some(painted.height),
         fidelity: Some(painted.fidelity),
@@ -238,12 +247,13 @@ fn embedded(
         return Ok(Some(Plan::Refused(RefusalKind::OverBytes { bytes: len })));
     }
     ledger.charge(byte_units(len))?;
+    let (width, height) = dimensions(bytes, media_type).unzip();
     Ok(Some(Plan::Image(OcrImage {
         bytes: Arc::from(bytes),
         media_type,
         dpi: None,
-        width: None,
-        height: None,
+        width,
+        height,
         fidelity: None,
     })))
 }
@@ -335,6 +345,7 @@ mod tests {
     fn each_refusal_kind_has_its_own_snake_case_name_and_no_other_text() {
         for (kind, name, debug) in [
             (RefusalKind::Unpaintable, "unpaintable", "Unpaintable"),
+            (RefusalKind::OverPixels { pixels: 7 }, "over_pixels", "OverPixels { pixels: 7 }"),
             (RefusalKind::OverBytes { bytes: 9 }, "over_bytes", "OverBytes { bytes: 9 }"),
         ] {
             assert_eq!((kind.as_str(), format!("{kind:?}")), (name, debug.to_owned()));
@@ -360,14 +371,15 @@ mod tests {
         #[test]
         fn a_page_that_cannot_be_painted_is_an_unpaintable_refusal_whatever_stops_it() {
             let letters = || vec![LETTER; 6];
-            let wide = PageBox { width: 612.0, height: 0.0 };
-            let nan = PageBox { width: f32::NAN, height: 792.0 };
+            let size = |width, height| Some(PageBox { width, height });
             for (page, boxes, spent, why) in [
                 (6, letters(), LETTER_PIXELS.div_ceil(128), "unpdf has no such page"),
                 (2, vec![LETTER, None], 0, "the page was never read"),
-                (1, vec![Some(wide)], 0, "no height"),
-                (1, vec![Some(PageBox { width: 0.0, height: 792.0 })], 0, "no width"),
-                (1, vec![Some(nan)], 0, "not a number"),
+                (1, vec![size(612.0, 0.0)], 0, "no height"),
+                (1, vec![size(0.0, 792.0)], 0, "no width"),
+                (1, vec![size(-612.0, 792.0)], 0, "a negative width"),
+                (1, vec![size(612.0, -792.0)], 0, "a negative height"),
+                (1, vec![size(f32::NAN, 792.0)], 0, "not a number"),
             ] {
                 let (made, charged) = painted(page, boxes);
                 let refusal = made.unwrap_err();

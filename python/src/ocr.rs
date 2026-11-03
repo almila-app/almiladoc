@@ -6,7 +6,8 @@ use std::time::SystemTime;
 
 use almiladoc::{
     ConfigError, GapFill, ImageDetail, MessageLayout, OcrFailureKind, OcrHttpConfig, OcrImage,
-    OcrOutcome, OcrReport, RasterSpec, RefusalKind, RetryAfter, TierFallback, TokenLimitField,
+    OcrOutcome, OcrReport, RasterSize, RasterSpec, RefusalKind, RetryAfter, TierFallback,
+    TokenLimitField,
 };
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -54,18 +55,27 @@ impl OcrLine {
     }
 }
 
-/// A raster spec of `dpi`, `max_pixels` and `max_bytes`; a zero `max_bytes` raises `ConfigError`
-/// with limit `raster`, as an out-of-range dpi does when the spec is used.
+/// A raster spec of `dpi` or `long_edge`, `max_pixels` and `max_bytes`; a zero `max_bytes`, or a
+/// `dpi` with a `long_edge`, raises `ConfigError` with limit `raster`, as an out-of-range size
+/// does when the spec is used.
 pub(crate) fn raster_spec(
     py: Python<'_>,
-    dpi: u32,
+    dpi: Option<u32>,
+    long_edge: Option<u32>,
     max_pixels: u64,
     max_bytes: Option<u64>,
 ) -> PyResult<RasterSpec> {
-    let zero = || config_error(py, &ConfigError::Raster);
-    let max_bytes = max_bytes.map(|bytes| NonZeroU64::new(bytes).ok_or_else(zero)).transpose()?;
+    let refused = || config_error(py, &ConfigError::Raster);
     let mut spec = RasterSpec::default();
-    (spec.dpi, spec.max_pixels, spec.max_bytes) = (dpi, max_pixels, max_bytes);
+    spec.size = match (dpi, long_edge) {
+        (Some(_), Some(_)) => return Err(refused()),
+        (Some(dpi), None) => RasterSize::Dpi(dpi),
+        (None, Some(edge)) => RasterSize::LongEdge(edge),
+        (None, None) => spec.size,
+    };
+    spec.max_bytes =
+        max_bytes.map(|bytes| NonZeroU64::new(bytes).ok_or_else(refused)).transpose()?;
+    spec.max_pixels = max_pixels;
     Ok(spec)
 }
 
@@ -210,9 +220,12 @@ impl RasterFidelity {
 /// One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
 /// `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
 /// its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`;
-/// `max_text_bytes`, the most bytes of Markdown a fill of it takes; `dpi`,
-/// `width` and `height`, the resolution and pixel size a page was painted at,
-/// and `fidelity`, what the painting left out, each `None` for an embedded image.
+/// `max_text_bytes`, the most bytes of Markdown a fill of it takes; `dpi`, the
+/// resolution a page was painted at, whole, 1 to 2**32 - 1, rounded and clamped
+/// for an exact `long_edge`, and `fidelity`, what the painting left out, each
+/// `None` for an embedded image; `width` and `height`, the pixel size of a
+/// painted page or an embedded image as its header declares it, `None` when
+/// that does not read.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct OcrRequest {
     gap: Py<PyTuple>,
@@ -311,19 +324,22 @@ impl OcrRequest {
         self.max_text_bytes
     }
 
-    /// The resolution a page was painted at; `None` for an embedded image.
+    /// The resolution a page was painted at, whole and at least 1; `None` for an
+    /// embedded image.
     #[getter]
     fn dpi(&self) -> Option<u32> {
         self.dpi
     }
 
-    /// The pixel width of a painted page; `None` for an embedded image.
+    /// The pixel width of a painted page, or of an embedded image as its header
+    /// declares it; `None` when that does not read.
     #[getter]
     fn width(&self) -> Option<u32> {
         self.width
     }
 
-    /// The pixel height of a painted page; `None` for an embedded image.
+    /// The pixel height of a painted page, or of an embedded image as its header
+    /// declares it; `None` when that does not read.
     #[getter]
     fn height(&self) -> Option<u32> {
         self.height
@@ -389,14 +405,21 @@ impl OcrRequest {
 
 /// A gap that has no image to read, which pickles and stays unfilled: `gap`,
 /// the row of `Parsed.gaps` it stands for, and `kind`, `unpaintable` for a
-/// page that cannot be painted or `over_bytes` for an image over `max_bytes`,
-/// whose `bytes` are the size it would have held; `None` for `unpaintable`.
+/// page that cannot be painted, `over_pixels` for an exact `long_edge` that
+/// would hold more than `max_pixels`, whose `pixels` are the pixels it would
+/// have held, or `over_bytes` for an image over `max_bytes`, whose `bytes` are
+/// the size it would have held; each is `None` for the other kinds.
 #[pyclass(frozen, module = "almiladoc")]
 pub(crate) struct OcrRefusal {
     gap: Py<PyTuple>,
     kind: &'static str,
     bytes: Option<u64>,
+    pixels: Option<u64>,
 }
+
+const UNPAINTABLE: &str = RefusalKind::Unpaintable.as_str();
+const OVER_PIXELS: &str = RefusalKind::OverPixels { pixels: 0 }.as_str();
+const OVER_BYTES: &str = RefusalKind::OverBytes { bytes: 0 }.as_str();
 
 impl OcrRefusal {
     pub(crate) fn of(
@@ -404,28 +427,41 @@ impl OcrRefusal {
         gap: GapRow,
         refusal: &almiladoc::OcrRefusal,
     ) -> PyResult<Self> {
-        let bytes = match refusal.kind {
-            RefusalKind::OverBytes { bytes } => Some(bytes),
-            _ => None,
+        let (bytes, pixels) = match refusal.kind {
+            RefusalKind::OverBytes { bytes } => (Some(bytes), None),
+            RefusalKind::OverPixels { pixels } => (None, Some(pixels)),
+            _ => (None, None),
         };
-        Ok(Self { gap: gap.into_pyobject(py)?.unbind(), kind: refusal.kind.as_str(), bytes })
+        Ok(Self {
+            gap: gap.into_pyobject(py)?.unbind(),
+            kind: refusal.kind.as_str(),
+            bytes,
+            pixels,
+        })
     }
 }
 
 #[pymethods]
 impl OcrRefusal {
     #[new]
-    #[pyo3(signature = (gap, kind, bytes = None))]
-    fn new(gap: Bound<'_, PyTuple>, kind: &str, bytes: Option<u64>) -> PyResult<Self> {
-        let over_bytes = RefusalKind::OverBytes { bytes: 0 }.as_str();
-        let kind = [RefusalKind::Unpaintable.as_str(), over_bytes]
+    #[pyo3(signature = (gap, kind, bytes = None, pixels = None))]
+    fn new(
+        gap: Bound<'_, PyTuple>,
+        kind: &str,
+        bytes: Option<u64>,
+        pixels: Option<u64>,
+    ) -> PyResult<Self> {
+        let kind = [UNPAINTABLE, OVER_PIXELS, OVER_BYTES]
             .into_iter()
             .find(|known| *known == kind)
             .ok_or_else(|| PyValueError::new_err("an OcrRefusal kind names no refusal"))?;
-        if (kind == over_bytes) != bytes.is_some() {
+        if (kind == OVER_BYTES) != bytes.is_some() {
             return Err(PyValueError::new_err("only an over_bytes refusal has bytes"));
         }
-        Ok(Self { gap: gap.unbind(), kind, bytes })
+        if (kind == OVER_PIXELS) != pixels.is_some() {
+            return Err(PyValueError::new_err("only an over_pixels refusal has pixels"));
+        }
+        Ok(Self { gap: gap.unbind(), kind, bytes, pixels })
     }
 
     /// The row of `Parsed.gaps` that has no image.
@@ -434,7 +470,7 @@ impl OcrRefusal {
         self.gap.bind(py).clone()
     }
 
-    /// `unpaintable` or `over_bytes`.
+    /// `unpaintable`, `over_pixels` or `over_bytes`.
     #[getter]
     fn kind(&self) -> &'static str {
         self.kind
@@ -446,19 +482,26 @@ impl OcrRefusal {
         self.bytes
     }
 
+    /// The pixels the page would have held, for `over_pixels`.
+    #[getter]
+    fn pixels(&self) -> Option<u64> {
+        self.pixels
+    }
+
     fn __getnewargs__<'py>(
         &self,
         py: Python<'py>,
-    ) -> (Bound<'py, PyTuple>, &'static str, Option<u64>) {
-        (self.gap(py), self.kind, self.bytes)
+    ) -> (Bound<'py, PyTuple>, &'static str, Option<u64>, Option<u64>) {
+        (self.gap(py), self.kind, self.bytes, self.pixels)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
-            "OcrRefusal(gap={}, kind='{}', bytes={})",
+            "OcrRefusal(gap={}, kind='{}', bytes={}, pixels={})",
             self.gap.bind(py).repr()?,
             self.kind,
             optional(self.bytes),
+            optional(self.pixels),
         ))
     }
 }
@@ -495,9 +538,10 @@ impl OcrRefusal {
 ///   the request to its next tier, each such 429 one tier on until the last.
 /// - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, keeping HTML and
 ///   OTSL table spans at a top-level gap and showing each merge once below it.
-/// - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
-///   paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
-///   bound.
+/// - `dpi`, `long_edge`, `max_pixels`, `max_bytes`: a page is painted as
+///   `Parsed.ocr_requests` paints it, at 150 dpi unless one of `dpi` and
+///   `long_edge` is set, and `Parsed.ocr` refuses an image over `max_bytes`, `None`
+///   for no bound.
 /// - `retries`: at most 10 more tries of a request the server cannot take yet,
 ///   each after 0.5 s doubling to 30 s, or its `Retry-After` seconds up to 60 s.
 /// - `concurrency`: 1 to 16 requests at once.
@@ -520,14 +564,14 @@ impl OcrHttp {
         base_url, model, *, api_key = None, prompt = None, layout = "image_then_text",
         extra_body = None, max_tokens = 8192, token_limit_field = "max_tokens",
         temperature = Some(0.0), image_detail = None, answer_model = None,
-        service_tiers = Vec::new(), tier_fallback = None, preserve_table_spans = false, dpi = 150,
-        max_pixels = 12_845_056, max_bytes = None, retries = 3, concurrency = 1,
+        service_tiers = Vec::new(), tier_fallback = None, preserve_table_spans = false, dpi = None,
+        long_edge = None, max_pixels = 12_845_056, max_bytes = None, retries = 3, concurrency = 1,
         root_certificates_pem = None, proxy = None,
     ), text_signature = "(base_url, model, *, api_key=None, prompt=None, \
         layout='image_then_text', extra_body=None, max_tokens=8192, \
         token_limit_field='max_tokens', temperature=0.0, image_detail=None, answer_model=None, \
-        service_tiers=(), tier_fallback=None, preserve_table_spans=False, dpi=150, \
-        max_pixels=12845056, max_bytes=None, retries=3, concurrency=1, \
+        service_tiers=(), tier_fallback=None, preserve_table_spans=False, dpi=None, \
+        long_edge=None, max_pixels=12845056, max_bytes=None, retries=3, concurrency=1, \
         root_certificates_pem=None, proxy=None)")]
     #[expect(
         clippy::too_many_arguments,
@@ -549,7 +593,8 @@ impl OcrHttp {
         service_tiers: Vec<String>,
         tier_fallback: Option<(Vec<String>, String)>,
         preserve_table_spans: bool,
-        dpi: u32,
+        dpi: Option<u32>,
+        long_edge: Option<u32>,
         max_pixels: u64,
         max_bytes: Option<u64>,
         retries: u32,
@@ -575,7 +620,7 @@ impl OcrHttp {
         config.tier_fallback =
             tier_fallback.map(|(codes, prefix)| TierFallback::new(codes, prefix));
         config.preserve_table_spans = preserve_table_spans;
-        config.raster = raster_spec(py, dpi, max_pixels, max_bytes)?;
+        config.raster = raster_spec(py, dpi, long_edge, max_pixels, max_bytes)?;
         (config.retries, config.concurrency) = (retries, concurrency);
         almiladoc::OcrHttp::new(config).map(Self).map_err(|e| config_error(py, &e))
     }

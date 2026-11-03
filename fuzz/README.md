@@ -10,7 +10,7 @@
 - `make locks` reproduces tracked Cargo.lock from root/shared versions plus fuzz-only pins and fails differences; refresh by copying root Cargo.lock here and running `cargo metadata --format-version 1` once.
 - XLS/XLSB/numfmt/mtef wrap mutations in OLE/OPC/styles/DOCX equation-object containers to reach inner parsers; XLSX consumes whole workbooks, seeding all three containers because detection chooses by bytes.
 - Shared config lowers max_grid_slots to fit the slow-unit bound; whole-input convert and part-injection check select all 16 comment/hidden/revision/header-footer profiles via stable FNV-1a of unchanged original bytes, including aligned CFB inputs. Saved inputs retain profiles across toolchains; seed contract tests explicitly use defaults and render/paint targets retain separate configs.
-- pdf_raster forces every page to a gap through painting_converter(), also lowering max_work, and compares two paints at ≤50 dpi/1 Mpx.
+- pdf_raster forces every page to a gap through painting_converter(), also lowering max_work, and compares two paints within 1 Mpx at ≤50 dpi, or at an exact 64-pixel long edge when the input's last byte is odd.
 - docx_body/pptx_slide/xlsx_sheet/odf_content inject one part into a stored, explicitly labelled package from src/lib.rs, bypassing detection on mutated bytes; compare two conversions and two parse/JSON results with one converter. Fixture-part seeds are tested for expected diagnostics/Markdown; ODT body selects text/sheet/presentation.
 - Optional dicts/<target>.dict declares every prefix in its matched prefix/local pairs; cargo test rejects undeclared prefixes and words libFuzzer would reject or drop beyond 64 bytes.
 

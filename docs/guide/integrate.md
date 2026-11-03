@@ -54,7 +54,8 @@ Process model, limits, isolation, cancellation and caching for untrusted input.
   Markdown, or every `OcrLine` in order with its text and bounds. A filled page also carries the
   `RasterFidelity.lost` of the last `OcrRequest` made for it, reported as `raster_incomplete`; it
   is 0 when no request was made or an `OcrRefusal` came after it. To replay a page fill, call
-  `ocr_requests` for its gap with the same `dpi`, `max_pixels` and `max_bytes` before filling.
+  `ocr_requests` for its gap with the same `dpi` or `long_edge`, `max_pixels` and `max_bytes`
+  before filling.
 
 ## Recipe: batch conversion
 

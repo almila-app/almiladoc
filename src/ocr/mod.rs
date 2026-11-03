@@ -26,7 +26,7 @@ pub use http::{
 pub(crate) use images::leave_image_gaps;
 pub use lines::OcrLine;
 pub(crate) use lines::blocks as line_blocks;
-pub use raster::{RasterFidelity, RasterSpec};
+pub use raster::{RasterFidelity, RasterSize, RasterSpec};
 pub(crate) use request::{Inputs, requests};
 pub use request::{OcrImage, OcrRefusal, OcrRequest, RefusalKind};
 

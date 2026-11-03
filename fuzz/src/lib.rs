@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn painting_past_the_fuzz_limit_is_refused() {
-        use almiladoc::{PageSelection, RasterSpec};
+        use almiladoc::{PageSelection, RasterSize, RasterSpec};
         use std::fmt::Write as _;
 
         let content = "0 0 1 rg 0 0 1440 1440 re f\n".repeat(200);
@@ -578,7 +578,7 @@ mod tests {
         let input = Input::new(pdf.as_bytes(), Format::Pdf).with_ocr_pages(PageSelection::All);
         let mut parsed = painting_converter().parse(input).unwrap();
         let mut spec = RasterSpec::default();
-        (spec.dpi, spec.max_pixels) = (50, 1 << 20);
+        (spec.size, spec.max_pixels) = (RasterSize::Dpi(50), 1 << 20);
         let refused = parsed.ocr_requests(&spec, None);
         assert!(
             matches!(

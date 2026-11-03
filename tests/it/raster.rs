@@ -8,12 +8,18 @@ use almiladoc::model::OcrOrigin;
 use almiladoc::{
     CancelToken, ConfigError, ConvertError, Converter, DiagnosticCode, Format, GapFill, Input,
     Limit, Limits, OcrEngine, OcrOutcome, OcrRequest, OcrSummary, PageSelection, Parsed,
-    RasterFidelity, RasterSpec, RefusalKind, Region,
+    RasterFidelity, RasterSize, RasterSpec, RefusalKind, Region,
 };
 
 fn spec(dpi: u32, max_pixels: u64) -> RasterSpec {
     let mut spec = RasterSpec::default();
-    (spec.dpi, spec.max_pixels) = (dpi, max_pixels);
+    (spec.size, spec.max_pixels) = (RasterSize::Dpi(dpi), max_pixels);
+    spec
+}
+
+fn long_edge(edge: u32) -> RasterSpec {
+    let mut spec = RasterSpec::default();
+    spec.size = RasterSize::LongEdge(edge);
     spec
 }
 
@@ -97,12 +103,149 @@ fn a_page_s_box_and_rotation_decide_its_image_s_size() {
 }
 
 #[test]
+fn a_dpi_page_fits_the_cap_by_its_media_box_and_paints_its_crop_box() {
+    let cropped = page_pdf("/MediaBox [0 0 3000 3000] /CropBox [0 0 612 792]");
+    let found = requested(&mut every_page(&converter(1), &cropped), &RasterSpec::default());
+    assert_eq!(found, [(1, Some(86), (731, 946))]);
+}
+
+#[test]
+fn a_dpi_page_fits_the_cap_by_its_pixels_each_side_rounded_up() {
+    let bytes = page_pdf("/MediaBox [0 0 700 900]");
+    for (max_pixels, dpi, size) in [
+        (1459 * 1875, 150, (1458, 1875)),
+        (1459 * 1875 - 1, 149, (1449, 1863)),
+        (1458 * 1875, 149, (1449, 1863)),
+    ] {
+        let found = requested(&mut every_page(&converter(1), &bytes), &spec(150, max_pixels));
+        assert_eq!(found, [(1, Some(dpi), size)], "{max_pixels}");
+    }
+}
+
+#[test]
+fn a_parse_sizes_no_page_however_many_await_ocr() {
+    let parse = |pages| {
+        let bytes = filled_pages(72, 1, pages);
+        crate::bounds::least_work(|converter| {
+            let input = Input::new(&bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
+            converter.parse(input).is_ok()
+        })
+    };
+    let (one, two, three) = (parse(1), parse(2), parse(3));
+    assert_eq!(three - two, two - one, "{one} {two} {three}");
+}
+
+#[test]
+fn a_long_edge_page_has_exactly_that_edge_whatever_its_box_and_rotation() {
+    const MEDIA: &str = "/MediaBox [0 0 612 792]";
+    const CROP: &str = "/CropBox [0 0 306 792]";
+    for (entries, edge, dpi, size) in [
+        (MEDIA.to_owned(), 1024, 93, (791, 1024)),
+        ("/MediaBox [0 0 792 612]".to_owned(), 1024, 93, (1024, 791)),
+        (format!("{MEDIA} /Rotate 90"), 1024, 93, (1024, 791)),
+        (format!("{MEDIA} /Rotate 180"), 1024, 93, (791, 1024)),
+        (format!("{MEDIA} /Rotate 270"), 1024, 93, (1024, 791)),
+        (format!("{MEDIA} {CROP}"), 1024, 93, (396, 1024)),
+        (format!("{MEDIA} {CROP} /Rotate 90"), 1024, 93, (1024, 396)),
+        ("/MediaBox [0 0 3000 3000] /CropBox [0 0 612 792]".to_owned(), 2048, 186, (1583, 2048)),
+        ("/MediaBox [0 0 300 396]".to_owned(), 512, 93, (388, 512)),
+        ("/MediaBox [0 0 500 500]".to_owned(), 800, 115, (800, 800)),
+        ("/MediaBox [0 0 1 1000]".to_owned(), 64, 5, (1, 64)),
+        ("/MediaBox [0 0 0.00000000001 0.0000000000001]".to_owned(), 64, u32::MAX, (64, 1)),
+    ] {
+        let mut parsed = every_page(&converter(1), &page_pdf(&entries));
+        let found = requested(&mut parsed, &long_edge(edge));
+        assert_eq!(found, [(1, Some(dpi), size)], "{entries} {edge}");
+    }
+}
+
+#[test]
+fn a_long_edge_over_the_pixel_cap_is_an_over_pixels_refusal_and_is_never_painted_smaller() {
+    let bytes = page_pdf("/MediaBox [0 0 612 792]");
+    let mut parsed = every_page(&converter(1), &bytes);
+    let gap = parsed.gaps().next().unwrap().id;
+    let pixels = 4096 * 3165;
+    let over = parsed.ocr_requests(&long_edge(4096), None).unwrap();
+    let [Err(refusal)] = &over[..] else { panic!("{over:?}") };
+    assert_eq!((refusal.gap, refusal.kind), (gap, RefusalKind::OverPixels { pixels }));
+    assert_eq!(refusal.origin, OcrOrigin::Page(1.try_into().unwrap()));
+    let mut roomy = long_edge(4096);
+    roomy.max_pixels = pixels;
+    assert_eq!(requested(&mut parsed, &roomy), [(1, Some(372), (3165, 4096))]);
+    roomy.max_pixels = pixels - 1;
+    let over = parsed.ocr_requests(&roomy, None).unwrap();
+    assert_matches!(&over[..], [Err(refusal)] if refusal.kind == RefusalKind::OverPixels { pixels });
+}
+
+#[test]
+fn an_engine_asking_an_over_pixel_long_edge_reads_nothing_and_the_refusal_paints_nothing() {
+    struct Exact(RasterSpec);
+    impl OcrEngine for Exact {
+        fn raster(&self) -> RasterSpec {
+            self.0
+        }
+        fn recognize(&self, _: &[OcrRequest], _: &CancelToken) -> Vec<OcrOutcome> {
+            panic!("a refused page is read by no engine")
+        }
+    }
+    let bytes = page_pdf("/MediaBox [0 0 612 792]");
+    let mut parsed = every_page(&converter(1), &bytes);
+    let mut expected = OcrSummary::default();
+    expected.refused = 1;
+    assert_eq!(parsed.ocr(&Exact(long_edge(4096)), None), Ok(expected));
+    assert_matches!(parsed.render(), Err(ConvertError::NeedsOcr { pages, .. }) if pages == [1]);
+    let work = |ask: Option<RasterSpec>| {
+        crate::bounds::least_work(|converter| {
+            let input = Input::new(&bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
+            let parsed = converter.parse(input);
+            parsed.is_ok_and(|mut parsed| {
+                ask.is_none_or(|spec| parsed.ocr_requests(&spec, None).is_ok())
+            })
+        })
+    };
+    let one_page_lookup = 1;
+    assert_eq!(work(Some(long_edge(4096))), work(None) + one_page_lookup);
+    assert!(work(Some(RasterSpec::default())) > work(Some(long_edge(4096))));
+}
+
+#[test]
+fn a_long_edge_request_looks_each_page_up_at_a_unit_per_page_of_the_document() {
+    let bytes = filled_pages(72, 1, 3);
+    let work = |ask: Option<RasterSpec>| {
+        crate::bounds::least_work(|converter| {
+            let input = Input::new(&bytes, Format::Pdf).with_ocr_pages(PageSelection::All);
+            converter.parse(input).is_ok_and(|mut parsed| {
+                ask.is_none_or(|spec| parsed.ocr_requests(&spec, None).is_ok())
+            })
+        })
+    };
+    let (lookups, pages) = (3, 3);
+    assert_eq!(work(Some(long_edge(16_384))), work(None) + lookups * pages);
+}
+
+#[test]
+fn a_dpi_page_is_the_page_unpdf_paints_at_that_dpi() {
+    use unpdf::parser::raster::{PageRegion, RasterOptions};
+    let bytes = fixture("pdf/handmade-five-page.pdf");
+    let options = RasterOptions { dpi: 150.0, region: PageRegion::Crop };
+    let direct = unpdf::PdfParser::from_bytes(&bytes).unwrap().render_page(2, &options).unwrap();
+    let mut parsed = converter(1).parse(Input::new(&bytes, Format::Pdf)).unwrap();
+    let requests = all_requests(&mut parsed, &RasterSpec::default());
+    assert_eq!(&*requests[0].image.bytes, direct.to_png().as_slice());
+}
+
+#[test]
 fn a_spec_out_of_range_is_refused_and_changes_nothing() {
     let bytes = fixture("pdf/handmade-five-page.pdf");
     let mut parsed = converter(1).parse(Input::new(&bytes, Format::Pdf)).unwrap();
-    for refused in
-        [spec(49, 1 << 20), spec(601, 1 << 20), spec(150, (1 << 20) - 1), spec(150, (40 << 20) + 1)]
-    {
+    for refused in [
+        spec(49, 1 << 20),
+        spec(601, 1 << 20),
+        spec(150, (1 << 20) - 1),
+        spec(150, (40 << 20) + 1),
+        long_edge(63),
+        long_edge(16_385),
+    ] {
         let refusal = parsed.ocr_requests(&refused, None);
         assert_eq!(refusal, Err(ConvertError::InvalidConfig(ConfigError::Raster)), "{refused:?}");
     }

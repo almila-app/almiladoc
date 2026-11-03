@@ -12,6 +12,21 @@ use crate::model::{
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_SIGNATURE: &[u8] = b"\xff\xd8\xff";
+const PNG_CHUNK_LENGTH: usize = 4;
+const PNG_HEADER_CHUNK: &[u8; 4] = b"IHDR";
+const MAX_SIDE: u32 = (1 << 31) - 1;
+const JPEG_SOI_LEN: usize = 2;
+const JPEG_PREFIX: u8 = 0xff;
+const JPEG_TEM: u8 = 0x01;
+const JPEG_SOF0: u8 = 0xc0;
+const JPEG_DHT: u8 = 0xc4;
+const JPEG_JPG_EXTENSION: u8 = 0xc8;
+const JPEG_DAC: u8 = 0xcc;
+const JPEG_SOF15: u8 = 0xcf;
+const JPEG_RST0: u8 = 0xd0;
+const JPEG_SOI: u8 = 0xd8;
+const JPEG_EOI: u8 = 0xd9;
+const JPEG_SOS: u8 = 0xda;
 
 /// Leave a gap after each block of `document`, side stories included, that shows an embedded PNG
 /// or JPEG, numbered in document order within its image's unit, and count `image_not_ocred` for every other image;
@@ -154,6 +169,57 @@ pub(crate) fn media_type(bytes: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The size the header of `bytes`, an image of `media_type`, declares, read in one forward pass
+/// that the copy of `bytes` already prices; `None` when it holds none or a side out of range.
+pub(crate) fn dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
+    let (width, height) =
+        if media_type == "image/png" { png_dimensions(bytes)? } else { jpeg_dimensions(bytes)? };
+    let valid = 1..=MAX_SIDE;
+    (valid.contains(&width) && valid.contains(&height)).then_some((width, height))
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let after_length = bytes.get(PNG_SIGNATURE.len() + PNG_CHUNK_LENGTH..)?;
+    let (name, rest) = after_length.split_first_chunk::<4>()?;
+    let (width, rest) = rest.split_first_chunk::<4>()?;
+    let (height, _) = rest.split_first_chunk::<4>()?;
+    (name == PNG_HEADER_CHUNK).then(|| (u32::from_be_bytes(*width), u32::from_be_bytes(*height)))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut rest = bytes.get(JPEG_SOI_LEN..)?;
+    loop {
+        let (&prefix, after) = rest.split_first()?;
+        let (&marker, after) = after.split_first()?;
+        if prefix != JPEG_PREFIX {
+            return None;
+        }
+        match marker {
+            JPEG_PREFIX => rest = rest.get(1..)?,
+            JPEG_TEM | JPEG_RST0..=JPEG_SOI => rest = after,
+            JPEG_EOI | JPEG_SOS => return None,
+            _ => {
+                let (length, payload) = after.split_first_chunk::<2>()?;
+                if is_frame_header(marker) {
+                    let (_precision, payload) = payload.split_first()?;
+                    let (height, payload) = payload.split_first_chunk::<2>()?;
+                    let (width, _) = payload.split_first_chunk::<2>()?;
+                    return Some((
+                        u32::from(u16::from_be_bytes(*width)),
+                        u32::from(u16::from_be_bytes(*height)),
+                    ));
+                }
+                rest = after.get(usize::from(u16::from_be_bytes(*length))..)?;
+            }
+        }
+    }
+}
+
+fn is_frame_header(marker: u8) -> bool {
+    (JPEG_SOF0..=JPEG_SOF15).contains(&marker)
+        && !matches!(marker, JPEG_DHT | JPEG_JPG_EXTENSION | JPEG_DAC)
 }
 
 #[cfg(test)]
@@ -376,6 +442,83 @@ mod tests {
                 .into_iter()
                 .collect();
             assert_eq!(rows, expected, "{inline:?}");
+        }
+    }
+
+    fn png(name: [u8; 4], width: u32, height: u32) -> Vec<u8> {
+        let sizes = [width.to_be_bytes(), height.to_be_bytes()].concat();
+        [PNG_SIGNATURE, &13_u32.to_be_bytes(), &name, &sizes, &[8, 2, 0, 0, 0]].concat()
+    }
+
+    fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(payload.len() + 2).unwrap();
+        [&[JPEG_PREFIX, marker][..], &length.to_be_bytes(), payload].concat()
+    }
+
+    fn frame(marker: u8, width: u16, height: u16) -> Vec<u8> {
+        let fields = [&[8][..], &height.to_be_bytes(), &width.to_be_bytes(), &[1, 1, 0x11, 0]];
+        segment(marker, &fields.concat())
+    }
+
+    fn jpeg(parts: &[&[u8]]) -> Vec<u8> {
+        [&[JPEG_PREFIX, JPEG_SOI][..], &parts.concat()].concat()
+    }
+
+    #[test]
+    fn a_png_declares_its_size_in_its_first_chunk_within_the_format_s_range() {
+        let truncated = png(*b"IHDR", 3, 5)[..20].to_vec();
+        for (bytes, expected) in [
+            (png(*b"IHDR", 3, 5), Some((3, 5))),
+            (png(*b"IHDR", 5, 3), Some((5, 3))),
+            (png(*b"IHDR", (1 << 31) - 1, 1), Some(((1 << 31) - 1, 1))),
+            (png(*b"IHDR", 1 << 31, 1), None),
+            (png(*b"IHDR", 1, 1 << 31), None),
+            (png(*b"IHDR", 0, 5), None),
+            (png(*b"IHDR", 3, 0), None),
+            (png(*b"IDAT", 3, 5), None),
+            (truncated, None),
+            (PNG_SIGNATURE.to_vec(), None),
+        ] {
+            assert_eq!(dimensions(&bytes, "image/png"), expected, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn a_jpeg_declares_its_size_in_its_first_frame_header_found_by_segment_lengths() {
+        let decoy = frame(JPEG_SOF0, 9, 9);
+        let app = segment(0xe0, &decoy[..]);
+        let real = frame(JPEG_SOF0, 7, 2);
+        let fills = [JPEG_PREFIX; 3];
+        for (bytes, expected, why) in [
+            (jpeg(&[&real]), Some((7, 2)), "a header straight after SOI"),
+            (jpeg(&[&app, &real]), Some((7, 2)), "a frame header inside another segment"),
+            (jpeg(&[&fills, &real]), Some((7, 2)), "fill bytes before a marker"),
+            (jpeg(&[&[JPEG_PREFIX, JPEG_TEM], &real]), Some((7, 2)), "a marker without length"),
+            (jpeg(&[&[JPEG_PREFIX, JPEG_RST0], &real]), Some((7, 2)), "a restart marker"),
+            (jpeg(&[&frame(JPEG_DHT, 9, 9), &real]), Some((7, 2)), "a Huffman table"),
+            (jpeg(&[&frame(JPEG_JPG_EXTENSION, 9, 9), &real]), Some((7, 2)), "a JPG extension"),
+            (jpeg(&[&frame(JPEG_DAC, 9, 9), &real]), Some((7, 2)), "an arithmetic table"),
+            (jpeg(&[&frame(JPEG_SOF0, 0, 2)]), None, "no width"),
+            (jpeg(&[&frame(JPEG_SOF0, 7, 0)]), None, "a height left to DNL"),
+            (jpeg(&[&segment(JPEG_SOS, &[0, 0]), &real]), None, "a scan before any frame"),
+            (jpeg(&[&[JPEG_PREFIX, JPEG_EOI, 0, 2], &real]), None, "the end of the image"),
+            (jpeg(&[&[0xdb, 0, 0xff], &real]), None, "a segment without its prefix"),
+            (jpeg(&[&[JPEG_PREFIX, 0xdb, 0, 0], &real]), None, "a length below its own two bytes"),
+            (jpeg(&[&[JPEG_PREFIX, 0xdb, 0, 1], &real]), None, "a length of one"),
+            (jpeg(&[&real[..8]]), None, "a truncated frame header"),
+            (jpeg(&[&app[..6]]), None, "a segment past the bytes"),
+            (vec![JPEG_PREFIX, JPEG_SOI], None, "no segment"),
+        ] {
+            assert_eq!(dimensions(&bytes, "image/jpeg"), expected, "{why}");
+        }
+    }
+
+    #[test]
+    fn every_frame_marker_declares_the_size_and_no_other_marker_does() {
+        for marker in 0..=u8::MAX {
+            let framed = matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
+            let read = dimensions(&jpeg(&[&frame(marker, 7, 2)]), "image/jpeg");
+            assert_eq!(read, framed.then_some((7, 2)), "{marker:#x}");
         }
     }
 

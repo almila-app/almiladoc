@@ -287,9 +287,12 @@ pub enum ConfigError {
         /// [`Config::MAX_THREADS`].
         max: usize,
     },
-    /// A [`RasterSpec`](crate::RasterSpec)'s dpi is outside 50 to 600, or its `max_pixels`
-    /// outside 1 Mpx to [`RasterSpec::MAX_PIXELS_CEILING`](crate::RasterSpec::MAX_PIXELS_CEILING).
-    #[error("a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels")]
+    /// A [`RasterSpec`](crate::RasterSpec)'s dpi is outside 50 to 600, its long edge outside 64
+    /// to 16,384, or its `max_pixels` outside 1 Mpx to
+    /// [`RasterSpec::MAX_PIXELS_CEILING`](crate::RasterSpec::MAX_PIXELS_CEILING).
+    #[error(
+        "a raster spec takes 50 to 600 dpi or a long edge of 64 to 16384 pixels, and 1048576 to 41943040 pixels"
+    )]
     Raster,
     /// An `OcrHttpConfig` field that `OcrHttp::new` refuses.
     #[error("ocr-http refuses its {field}")]
@@ -379,7 +382,7 @@ mod tests {
             (ConfigError::Threads { max: 64 }, "threads must be between 1 and 64"),
             (
                 ConfigError::Raster,
-                "a raster spec takes 50 to 600 dpi and 1048576 to 41943040 pixels",
+                "a raster spec takes 50 to 600 dpi or a long edge of 64 to 16384 pixels, and 1048576 to 41943040 pixels",
             ),
             (ConfigError::OcrHttp { field: "base_url" }, "ocr-http refuses its base_url"),
         ];

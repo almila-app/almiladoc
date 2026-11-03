@@ -5,8 +5,8 @@ use crate::build::{W, docx_with, relationships};
 use crate::support::{all_requests, bounded, configured, fixture, trips};
 use almiladoc::{
     CancelToken, Config, ConvertError, Converter, DiagnosticCode, Format, GapFill, ImageOcr,
-    ImagePolicy, Input, Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrLine, OcrOutcome,
-    OcrRequest, OcrSummary, OnLoss, Parsed, RasterSpec, RefusalKind,
+    ImagePolicy, Input, Limit, OcrEngine, OcrFailure, OcrFailureKind, OcrImage, OcrLine,
+    OcrOutcome, OcrRequest, OcrSummary, OnLoss, Parsed, RasterSize, RasterSpec, RefusalKind,
 };
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -82,6 +82,31 @@ fn pictures(count: usize, size: usize) -> Vec<u8> {
     docx_with(
         &body,
         &[("word/_rels/document.xml.rels", rels.as_bytes()), ("word/media/a.png", &png)],
+    )
+}
+
+fn png_header(width: u32, height: u32) -> Vec<u8> {
+    let sizes = [width.to_be_bytes(), height.to_be_bytes()].concat();
+    [PNG, &13_u32.to_be_bytes(), b"IHDR", &sizes, &[8, 2, 0, 0, 0]].concat()
+}
+
+fn jpeg_header(width: u16, height: u16) -> Vec<u8> {
+    let sizes = [height.to_be_bytes(), width.to_be_bytes()].concat();
+    [&[0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8][..], &sizes, &[1, 1, 0x11, 0]]
+        .concat()
+}
+
+fn two_pictures(png: &[u8], jpeg: &[u8]) -> Vec<u8> {
+    let picture =
+        |id| format!(r#"<w:p><w:r><w:drawing><a:blip r:embed="{id}"/></w:drawing></w:r></w:p>"#);
+    let rels = relationships(&[("png", "image", "media/a.png"), ("jpg", "image", "media/b.jpg")]);
+    docx_with(
+        &(picture("png") + &picture("jpg")),
+        &[
+            ("word/_rels/document.xml.rels", rels.as_bytes()),
+            ("word/media/a.png", png),
+            ("word/media/b.jpg", jpeg),
+        ],
     )
 }
 
@@ -260,6 +285,35 @@ fn hand_run_requests_and_fills_render_the_engine_s_reading() {
     }
     assert_eq!(by_hand.ocr_requests(&RasterSpec::default(), None), Ok(Vec::new()));
     assert_eq!(by_hand.render().unwrap().markdown(), RICH_READ);
+}
+
+#[test]
+fn an_embedded_png_and_jpeg_report_the_size_their_header_declares() {
+    let bytes = two_pictures(&png_header(3, 5), &jpeg_header(7, 2));
+    let mut parsed = parsed(&image_ocr(|_| {}), &bytes);
+    let mut exact = RasterSpec::default();
+    exact.size = RasterSize::LongEdge(64);
+    for spec in [RasterSpec::default(), exact] {
+        let requests = all_requests(&mut parsed, &spec);
+        for request in &requests {
+            let bytes = request.image.bytes.to_vec();
+            assert_eq!(OcrImage::new(bytes, None).as_ref(), Some(&request.image));
+        }
+        let sizes: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                let image = &request.image;
+                (image.media_type, image.width, image.height, image.dpi, image.fidelity)
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                ("image/png", Some(3), Some(5), None, None),
+                ("image/jpeg", Some(7), Some(2), None, None),
+            ]
+        );
+    }
 }
 
 #[test]

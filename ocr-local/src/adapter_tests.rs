@@ -8,7 +8,7 @@ use std::sync::{
 
 use almiladoc::{
     CancelToken, Converter, Format, GapFill, ImageOcr, Input, OcrEngine, OcrFailure,
-    OcrFailureKind, OcrImage, OcrOutcome, OnLoss, RasterSpec,
+    OcrFailureKind, OcrImage, OcrOutcome, OnLoss, RasterSize, RasterSpec,
 };
 use image::{DynamicImage, ImageFormat, RgbImage};
 use oar_ocr_core::{domain::TextRegion, processors::BoundingBox};
@@ -328,7 +328,7 @@ fn construction_refuses_raster_before_reading_any_model_and_holds_the_buffer_bou
         );
     }
     let mut invalid = raster;
-    invalid.dpi = 0;
+    invalid.size = RasterSize::Dpi(0);
     assert_eq!(
         LocalOcr::new(&runtime, &models, config.clone(), invalid).unwrap_err(),
         Error::Config("raster")

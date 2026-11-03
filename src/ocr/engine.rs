@@ -164,7 +164,8 @@ pub struct OcrSummary {
     /// the call.
     pub unattempted: usize,
     /// Gaps left unfilled because no image could be made of them, which no engine saw: a
-    /// page that cannot be painted, or an image over [`RasterSpec::max_bytes`].
+    /// page that cannot be painted, an exact long edge over [`RasterSpec::max_pixels`], or an
+    /// image over [`RasterSpec::max_bytes`].
     pub refused: usize,
 }
 

@@ -67,9 +67,9 @@ class ConfigError(ValueError):
 
     limit: str
     """The field: a limit's name such as `max_work`, `threads`, an
-    `OcrHttp` argument such as `base_url`, or `raster` for the `dpi` and
-    `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`, or a zero
-    `max_bytes`."""
+    `OcrHttp` argument such as `base_url`, or `raster` for the `dpi`,
+    `long_edge` and `max_pixels` of `Parsed.ocr_requests` or `OcrHttp`, a `dpi`
+    given with a `long_edge`, or a zero `max_bytes`."""
     ceiling: int | None
     """The highest value the limit accepts, set only when the value passed
     exceeds it (`max_nesting_depth` over 1024, `max_pages` over 4294967295);
@@ -560,9 +560,12 @@ class OcrRequest:
     """One gap's image for an OCR run elsewhere, which pickles: `gap`, the row of
     `Parsed.gaps` that `Parsed.fill_gap` and `Parsed.fail_gap` take; `image`,
     its PNG or JPEG bytes; `media_type`, `image/png` or `image/jpeg`;
-    `max_text_bytes`, the most bytes of Markdown a fill of it takes; `dpi`,
-    `width` and `height`, the resolution and pixel size a page was painted at,
-    and `fidelity`, what the painting left out, each `None` for an embedded image."""
+    `max_text_bytes`, the most bytes of Markdown a fill of it takes; `dpi`, the
+    resolution a page was painted at, whole, 1 to 2**32 - 1, rounded and clamped
+    for an exact `long_edge`, and `fidelity`, what the painting left out, each
+    `None` for an embedded image; `width` and `height`, the pixel size of a
+    painted page or an embedded image as its header declares it, `None` when
+    that does not read."""
 
     def __new__(
         cls,
@@ -589,42 +592,51 @@ class OcrRequest:
         """The most bytes of Markdown a fill of this gap takes."""
     @property
     def dpi(self) -> int | None:
-        """The resolution a page was painted at; `None` for an embedded image."""
+        """The resolution a page was painted at, whole and at least 1; `None` for an
+        embedded image."""
     @property
     def width(self) -> int | None:
-        """The pixel width of a painted page; `None` for an embedded image."""
+        """The pixel width of a painted page, or of an embedded image as its header
+        declares it; `None` when that does not read."""
     @property
     def height(self) -> int | None:
-        """The pixel height of a painted page; `None` for an embedded image."""
+        """The pixel height of a painted page, or of an embedded image as its header
+        declares it; `None` when that does not read."""
     @property
     def fidelity(self) -> RasterFidelity | None:
         """What painting a page left out; `None` for an embedded image."""
 
-_OcrRefusalKind = Literal["unpaintable", "over_bytes"]
+_OcrRefusalKind = Literal["unpaintable", "over_pixels", "over_bytes"]
 
 @final
 class OcrRefusal:
     """A gap that has no image to read, which pickles and stays unfilled: `gap`,
     the row of `Parsed.gaps` it stands for, and `kind`, `unpaintable` for a
-    page that cannot be painted or `over_bytes` for an image over `max_bytes`,
-    whose `bytes` are the size it would have held; `None` for `unpaintable`."""
+    page that cannot be painted, `over_pixels` for an exact `long_edge` that
+    would hold more than `max_pixels`, whose `pixels` are the pixels it would
+    have held, or `over_bytes` for an image over `max_bytes`, whose `bytes` are
+    the size it would have held; each is `None` for the other kinds."""
 
     def __new__(
         cls,
         gap: _GapRow,
         kind: _OcrRefusalKind,
         bytes: int | None = None,
+        pixels: int | None = None,
     ) -> OcrRefusal: ...
     @property
     def gap(self) -> _GapRow:
         """The row of `Parsed.gaps` that has no image."""
     @property
     def kind(self) -> _OcrRefusalKind:
-        """`unpaintable` or `over_bytes`."""
+        """`unpaintable`, `over_pixels` or `over_bytes`."""
     @property
     def bytes(self) -> int | None:
         """The bytes the encoded image would have held, for `over_bytes`."""
-    def __getnewargs__(self) -> tuple[_GapRow, _OcrRefusalKind, int | None]: ...
+    @property
+    def pixels(self) -> int | None:
+        """The pixels the page would have held, for `over_pixels`."""
+    def __getnewargs__(self) -> tuple[_GapRow, _OcrRefusalKind, int | None, int | None]: ...
 
 _OcrFailureKind = Literal[
     "rejected",
@@ -673,9 +685,10 @@ class OcrHttp:
       the request to its next tier, each such 429 one tier on until the last.
     - `preserve_table_spans`: a reply is a `fill_gap_tables` fill, keeping HTML and
       OTSL table spans at a top-level gap and showing each merge once below it.
-    - `dpi`, `max_pixels`, `max_bytes`: a page is painted as `Parsed.ocr_requests`
-      paints it, and `Parsed.ocr` refuses an image over `max_bytes`, `None` for no
-      bound.
+    - `dpi`, `long_edge`, `max_pixels`, `max_bytes`: a page is painted as
+      `Parsed.ocr_requests` paints it, at 150 dpi unless one of `dpi` and
+      `long_edge` is set, and `Parsed.ocr` refuses an image over `max_bytes`, `None`
+      for no bound.
     - `retries`: at most 10 more tries of a request the server cannot take yet,
       each after 0.5 s doubling to 30 s, or its `Retry-After` seconds up to 60 s.
     - `concurrency`: 1 to 16 requests at once.
@@ -708,7 +721,8 @@ class OcrHttp:
         service_tiers: collections.abc.Sequence[str] = (),
         tier_fallback: tuple[collections.abc.Sequence[str], str] | None = None,
         preserve_table_spans: bool = False,
-        dpi: int = 150,
+        dpi: int | None = None,
+        long_edge: int | None = None,
         max_pixels: int = 12_845_056,
         max_bytes: int | None = None,
         retries: int = 3,
@@ -929,7 +943,8 @@ class Parsed:
         self,
         gaps: collections.abc.Sequence[_GapRow] | None = None,
         *,
-        dpi: int = 150,
+        dpi: int | None = None,
+        long_edge: int | None = None,
         max_pixels: int = 12_845_056,
         max_bytes: int | None = None,
     ) -> list[OcrRequest | OcrRefusal]:
@@ -938,17 +953,22 @@ class Parsed:
         not yet filled or failed and asks for an image, in document order, made
         with the GIL released: an OCR run elsewhere, in another process too,
         reads each request and passes its text to `fill_gap(request.gap, text)`,
-        or calls `fail_gap(request.gap)`. An embedded image is copied and a page
-        painted as a PNG at the largest dpi up to `dpi` at which its media box
-        fits `max_pixels`, its request holding the pixel `width` and `height`
-        and a `RasterFidelity` of what the painting left out. A page that
-        cannot be painted is an `unpaintable` refusal, and an image over
+        or calls `fail_gap(request.gap)`. An embedded image is copied, its
+        request holding the pixel `width` and `height` its header declares. A
+        page is painted as a PNG at the largest dpi up to `dpi`, 150 unless
+        `long_edge` is set, at which its media box fits `max_pixels`,
+        or with exactly `long_edge` pixels on its long edge, its request holding
+        the pixel `width` and `height` and a `RasterFidelity` of what the
+        painting left out. A page that cannot be painted is an `unpaintable`
+        refusal, an exact `long_edge` that would hold more than `max_pixels`,
+        never painted smaller, an `over_pixels` one, and an image over
         `max_bytes` encoded bytes, `None` for no bound, an `over_bytes` one;
-        either gap stays unfilled, for a later call or `fill_gap`. A row naming
-        no unsettled gap is passed over. A `dpi` outside 50 to 600,
-        `max_pixels` outside 1048576 to 41943040 or a `max_bytes` of 0 raises
-        `ConfigError` with `limit` `raster`, an int that fits none of them
-        `OverflowError`, and work past `max_work` `ResourceLimitError`."""
+        each gap stays unfilled, for a later call or `fill_gap`. A row naming
+        no unsettled gap is passed over. A `dpi` outside 50 to 600, a
+        `long_edge` outside 64 to 16384, both of them given, `max_pixels`
+        outside 1048576 to 41943040 or a `max_bytes` of 0 raises `ConfigError`
+        with `limit` `raster`, an int that fits none of them `OverflowError`,
+        and work past `max_work` `ResourceLimitError`."""
     def ocr(
         self,
         engine: OcrHttp,

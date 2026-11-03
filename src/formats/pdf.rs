@@ -6,6 +6,8 @@ use std::ops::ControlFlow;
 
 use unpdf::model::{ListStyle, NumberStyle};
 use unpdf::parser::backend::TextSuppression;
+#[cfg(feature = "raster")]
+use unpdf::parser::raster::{PageRegion, PageSize};
 use unpdf::{
     Block as PdfBlock, ErrorMode, InlineContent, Page, PageSelection, PageStreamOptions, Paragraph,
     ParseEvent, PdfParser, Table as PdfTable, TextStyle,
@@ -53,6 +55,14 @@ pub(crate) struct PageBox {
 impl PdfSource {
     pub(crate) fn page_box(&self, page: NonZeroU32) -> Option<PageBox> {
         *self.boxes.get(usize::try_from(page.get() - 1).ok()?)?
+    }
+
+    pub(crate) fn page_count(&self) -> usize {
+        self.boxes.len()
+    }
+
+    pub(crate) fn displayed_size(&self, page: NonZeroU32) -> Option<PageSize> {
+        self.parser.page_size(page.get(), PageRegion::Crop).ok()
     }
 }
 

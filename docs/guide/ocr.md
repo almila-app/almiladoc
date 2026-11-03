@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - The key travels only over `https` or to loopback; only an explicit `proxy` is used, and
   redirects are refused. Retries (408, 429, 500, 502, 503, 504) wait 0.5 s doubling to 30 s, or
   `Retry-After` up to 60 s. Timeouts: connect 10 s, response 300 s.
-- Rust: set `OcrHttpConfig` fields; `raster` (`RasterSpec`) holds `dpi`, `max_pixels`, `max_bytes`.
+- Rust: set `OcrHttpConfig` fields; `raster` (`RasterSpec`) holds `size`, `max_pixels`, `max_bytes`.
   Its `ureq` logs request heads, key included, at trace level.
 
 | `OcrHttp` argument | Default | Meaning |
@@ -84,7 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `service_tiers` | `()` | Up to 4 tier names; the first is sent |
 | `tier_fallback` | `None` | `(codes, message_prefix)`: a matching 429 moves to the next tier |
 | `preserve_table_spans` | `False` | Replies keep HTML and OTSL table spans; a nested gap shows each merge once |
-| `dpi` | `150` | Page painting resolution, 50 to 600 |
+| `dpi` | `None` | Page painting resolution, 50 to 600; 150 unless `long_edge` is set |
+| `long_edge` | `None` | Exact pixels on a page's long edge, 64 to 16,384; not with `dpi` |
 | `max_pixels` | `12,845,056` | Pixel cap per page image, 1,048,576 to 41,943,040 |
 | `max_bytes` | `None` | Refuse an encoded image over this size |
 | `retries` | `3` | Extra tries, at most 10 |
@@ -121,8 +122,9 @@ print(parsed.render().markdown)
 | `Parsed.fill_gap_tables` | Markdown with `table`, `tr`, `td` HTML or OTSL | Spans kept at a top-level gap; a nested gap shows each merge once |
 
 - A fill past `max_ocr_text_bytes` raises `GapRefused`; `fail_gap` records the failure
-  (`ocr_failed`). `ocr_requests` returns an `OcrRefusal` (`unpaintable`, `over_bytes`) where no
-  image can be made, and paints at its own `dpi` and `max_pixels`.
+  (`ocr_failed`). `ocr_requests` returns an `OcrRefusal` (`unpaintable`, `over_pixels`,
+  `over_bytes`) where no image can be made. `long_edge=1024` paints exactly 1024 pixels on a
+  page's long edge; a size over `max_pixels` is refused, never shrunk.
 - An image outside a document takes the same fills through `Converter.render_ocr`: see the
   [Convert guide](convert.md#choose-the-call).
 
@@ -159,7 +161,7 @@ impl OcrEngine for Mine {
 | `kind` | `OcrHttp` settles as | Do this |
 |---|---|---|
 | `rejected` | Unattempted | The server refused the request (4xx): check key, model, `extra_body` |
-| `too_large`, `status` 413 | Failed | The server refused the image. For a PDF page lower `dpi` or `max_pixels`; they never resize an embedded image, so downscale its `OcrRequest.image` and send it through `OcrHttp.recognize`, or refuse it unsent with `max_bytes` |
+| `too_large`, `status` 413 | Failed | The server refused the image. For a PDF page lower `dpi`, `long_edge` or `max_pixels`; they never resize an embedded image, so downscale its `OcrRequest.image` and send it through `OcrHttp.recognize`, or refuse it unsent with `max_bytes` |
 | `too_large`, 2xx `status` | Failed | The reply passed 6 × `max_ocr_text_bytes` + 64 KiB: raise `Limits.max_ocr_text_bytes` |
 | `refused` | Failed | The model or its content filter refused the image |
 | `unfinished` | Failed | Raise `max_tokens` |
