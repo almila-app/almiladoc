@@ -5,7 +5,7 @@ SHELL := bash
 MAKEFLAGS += --no-builtin-rules
 
 CARGO ?= cargo
-UV_VERSION := 0.13.6
+UV_VERSION := 0.13.7
 UV := uv tool run uv@$(UV_VERSION)
 PYTHONS ?= 3.11 3.15
 DENY_CHECKS := advisories bans sources
