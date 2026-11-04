@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "almiladoc"
-version = "0.1.0-rc.2"
+version = "1.0.0"
 dependencies = [
  "base64",
  "cfb",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "almiladoc-python"
-version = "0.1.0-rc.2"
+version = "1.0.0"
 dependencies = [
  "almiladoc",
  "log",

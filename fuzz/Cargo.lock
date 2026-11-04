@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "almiladoc"
-version = "0.1.0-rc.2"
+version = "1.0.0"
 dependencies = [
  "cfb",
  "csv",

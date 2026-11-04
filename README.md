@@ -4,7 +4,7 @@ Rust library and Python binding that convert 12 document formats to GitHub-Flavo
 
 - No OCR model ships: scanned pages go to an OpenAI-compatible vision server (`OcrHttp`) or to your own OCR.
 - No network access unless you pass `OcrHttp`.
-- Fair Source (source-available), under the [licence terms](#licence). A release candidate is on TestPyPI; PyPI and crates.io receive the first final, and the API may change before then.
+- Fair Source (source-available), under the [licence terms](#licence). Releases are on PyPI and crates.io and follow Semantic Versioning.
 
 ## Formats
 
@@ -29,12 +29,11 @@ Rust library and Python binding that convert 12 document formats to GitHub-Flavo
 ## Install
 
 ```sh
-pip install --pre --index-url https://test.pypi.org/simple/ almiladoc
-pip install git+https://github.com/almila-app/almiladoc
-cargo add almiladoc --git https://github.com/almila-app/almiladoc --features ocr-http,serde
+pip install almiladoc
+cargo add almiladoc --features ocr-http,serde
 ```
 
-- Python 3.11 or newer. The first line installs the release candidate; the second builds from source and needs Rust 1.99 or newer.
+- Python 3.11 or newer; a platform without a wheel builds from the sdist and needs Rust 1.99 or newer.
 - The wheel has every Cargo feature.
 
 | Cargo feature | Default | Adds |

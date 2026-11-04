@@ -16,7 +16,7 @@ Accepted. Every push permanently publishes code and runs its workflows; organisa
 10. **Agent setup.** CLAUDE.md is the canonical instruction entry point; shared rules/procedures/reviews live once in `.claude/`, explicitly read without native discovery, and `make setup` validates tracked setup. Agents may implement, independent reviewers remain read-only and inherit the active model with another family consulted when available; machine facts/settings/memory/worktrees/tool state remain ignored.
 11. **Attribution.** Rewrite unsigned outside snippets/patches test-first under DCO (b), sign off and credit their author with Co-authored-by. Root REUSE.toml's `**` is BUSL-1.1 under the licensor's copyright; MIT-bearing annotations list their files, override, and keep paths/copyright lines while files exist, a moved or copied MIT-bearing file taking its path and lines along; no check holds this, since one would block on a licence.
 12. **Security.** Prepare fixes privately, land under neutral slugs at disclosure, tag after rehearsal, then publish advisory.
-13. **Release.** On-demand SemVer 0.x tags name landed main shas; read `.github/` diff since prior tag before pushing with maintainer credentials. ADR 0003 owns remaining release policy; environments permit self-review.
+13. **Release.** On-demand SemVer tags name landed main shas; read `.github/` diff since prior tag before pushing with maintainer credentials. ADR 0003 owns remaining release policy; environments permit self-review.
 
 ## Limits and rejected routes
 
