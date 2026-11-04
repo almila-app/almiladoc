@@ -24,9 +24,9 @@ No wave is open.
 
 - **unpdf image coverage:** union area is exact up to 256 image paints and sampled beyond, so crafted strips can keep a page under `CoverageFirst`'s half, leaving it to the default rule; adopt the release that measures it exactly (a sweep line).
 - **Offline OCR quality:** evaluate native OCR on representative consumer scans once a labelled corpus has paragraph ground truth and marked headings.
-- **Consumer proof:** with 1.0.0 on PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the release, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, and every later minor repeats it.
+- **Consumer proof:** with the first 1.x release on PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the release, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, and every later minor repeats it.
 - **Consumer agreement:** at proof start agree PDF scope, `Incomplete`/`Internal` handling, two-phase transport, prompt and concurrency; existing Xiaomi endpoint/settings need no additional live run (owner decision).
 
 ## Maintainer steps
 
-Before the `v1.0.0` tag, supply `CRATES_IO_PUBLISH_NEW_TOKEN` (`publish-new`) in `crates-io`; once the crate is published, delete it, add the crates.io trusted publisher and set `trustpub_only` (ADR 0003 decisions 6 and 9).
+Once the first crate is published, delete `CRATES_IO_PUBLISH_NEW_TOKEN` (`publish-new`) from `crates-io`, add the crates.io trusted publisher and set `trustpub_only` (ADR 0003 decisions 6 and 9).
