@@ -29,7 +29,6 @@ from urllib.parse import urlsplit
 import almiladoc
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/pdf/handmade-five-page.pdf"
-API_KEY = "OCR_LIVE_API_KEY"
 
 
 def settle(
@@ -67,6 +66,10 @@ WORKER = (
 
 def normalize(text: str) -> str:
     return " ".join(unicodedata.normalize("NFC", text).split())
+
+
+def operator_key() -> str | None:
+    return os.environ.get("OCR_LIVE_API_KEY") or None
 
 
 def bounded_file(path: Path, ceiling: int) -> bytes:
@@ -218,7 +221,7 @@ def recognize_corpus(args: argparse.Namespace) -> list[str]:
     engine = almiladoc.OcrHttp(
         args.base_url,
         args.model,
-        api_key=os.environ.get(API_KEY) or None,
+        api_key=operator_key(),
         concurrency=1,
         retries=0,
         temperature=0.0,
@@ -309,7 +312,7 @@ def smoke(args: argparse.Namespace) -> int:
     engine = almiladoc.OcrHttp(
         args.base_url,
         args.model,
-        api_key=os.environ.get(API_KEY) or None,
+        api_key=operator_key(),
         concurrency=args.concurrency,
         max_tokens=args.max_tokens or 8192,
     )
