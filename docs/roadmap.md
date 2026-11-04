@@ -22,7 +22,7 @@ No wave is open.
 
 ## External tracks
 
-- **unpdf image coverage:** union area is exact up to 256 image paints and sampled beyond, so crafted strips can keep a page under `CoverageFirst`'s half, leaving it to the default rule; adopt the release that measures it exactly (a sweep line).
+- **unpdf image coverage:** union area is exact up to 256 image paints and sampled beyond, so crafted strips can keep a page under `CoverageFirst`'s half, leaving it to the default rule; adopt the release of [unpdf #42](https://github.com/iyulab/unpdf/pull/42), which measures it exactly with a sweep line.
 - **Offline OCR quality:** evaluate native OCR on representative consumer scans once a labelled corpus has paragraph ground truth and marked headings.
 - **Consumer proof:** with the first 1.x release on PyPI, the consumer replaces its old converter without shims, asserts `importlib.metadata.version("almiladoc")` equals the release, asserts no old-converter import remains and passes its suite; first proof covers all formats and PDF through the model, and every later minor repeats it.
 - **Consumer agreement:** at proof start agree PDF scope, `Incomplete`/`Internal` handling, two-phase transport, prompt and concurrency; existing Xiaomi endpoint/settings need no additional live run (owner decision).
