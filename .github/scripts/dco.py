@@ -37,7 +37,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
 
 
 def check(root: Path, revisions: str, skip_dependabot: bool) -> list[str]:
-    fields = git(root, "log", f"--format={FIELDS}", revisions).split("\0")
+    fields = git(root, "log", f"--format={FIELDS}", "--end-of-options", revisions).split("\0")
     problems = []
     for start in range(0, len(fields) - 8, 8):
         sha, name, email, committer, committer_email, trailers, subject = (
@@ -70,20 +70,35 @@ def check(root: Path, revisions: str, skip_dependabot: bool) -> list[str]:
     return problems
 
 
-def resolves(root: Path, revision: str) -> bool:
-    return not subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
+def revision(value: str) -> str:
+    if not value or value.startswith("-"):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a revision")
+    return value
+
+
+def commit_id(root: Path, revision: str) -> str | None:
+    verify = ["rev-parse", "--verify", "--quiet", "--end-of-options", f"{revision}^{{commit}}"]
+    found = subprocess.run(
+        ["git", "-C", str(root), *verify],
         capture_output=True,
-    ).returncode
+        text=True,
+    )
+    return found.stdout.strip() if found.returncode == 0 else None
 
 
 def snapshot(root: Path) -> str:
-    index = Path(git(root, "rev-parse", "--path-format=absolute", "--git-path", "index").strip())
+    tracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--stage", "-z"], capture_output=True, check=True
+    ).stdout
     with tempfile.TemporaryDirectory() as directory:
-        copy = Path(directory) / "index"
-        if index.exists():
-            copy.write_bytes(index.read_bytes())
-        env = {**os.environ, "GIT_INDEX_FILE": str(copy)}
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index")}
+        subprocess.run(
+            ["git", "-C", str(root), "update-index", "-z", "--index-info"],
+            input=tracked,
+            capture_output=True,
+            check=True,
+            env=env,
+        )
         git(root, "add", "-A", env=env)
         return git(root, "write-tree", env=env).strip()
 
@@ -230,10 +245,10 @@ def declaration_self_test() -> list[str]:
         )
         marker = root / SIGN_OFF_POLICY
 
-        def run(base: str) -> tuple[int, str]:
+        def run(base: str, where: Path = root) -> tuple[int, str]:
             done = subprocess.run(
                 [sys.executable, "-I", "-B", __file__, "--base", base],
-                cwd=root,
+                cwd=where,
                 capture_output=True,
                 text=True,
             )
@@ -247,6 +262,24 @@ def declaration_self_test() -> list[str]:
 
         expect(f"a tree without {SIGN_OFF_POLICY}", (1, UNDECLARED))
         expect("a base that does not resolve", (1, UNRESOLVED.format("absent")), "absent")
+        for arguments in (["--base=HEAD", "--head=absent"], ["--base=HEAD", "--head=HEAD^{tree}"]):
+            done = subprocess.run(
+                [sys.executable, "-I", "-B", __file__, *arguments],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            if (done.returncode, done.stderr.strip()) != (1, UNRESOLVED.format(arguments[1][7:])):
+                failures.append(f"a head of {arguments[1]} gave {done.returncode} {done.stderr}")
+        for option in ("--output=leak", "-p", ""):
+            done = subprocess.run(
+                [sys.executable, "-I", "-B", __file__, f"--base={option}"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            if done.returncode != 2 or "is not a revision" not in done.stderr:
+                failures.append(f"a base of {option!r} gave {done.returncode} {done.stderr}")
         marker.parent.mkdir()
         marker.touch()
         expect(f"an empty {SIGN_OFF_POLICY}", (0, ""))
@@ -259,6 +292,23 @@ def declaration_self_test() -> list[str]:
         marker.mkdir()
         (marker / "file").touch()
         expect(f"a directory at {SIGN_OFF_POLICY}", (1, UNDECLARED))
+        (marker / "file").unlink()
+        marker.rmdir()
+        marker.write_text("signed off\n", encoding="utf-8")
+        git(root, "add", "--force", SIGN_OFF_POLICY)
+        git(
+            root, *identity, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "y"
+        )
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        exclude.write_text(".github/\n", encoding="utf-8")
+        expect(f"a tracked {SIGN_OFF_POLICY} the local excludes match", (0, ""))
+        (root / "sub").mkdir()
+        if (found := run("HEAD", root / "sub")) != (0, ""):
+            failures.append(
+                f"the excluded, tracked marker checked from a subdirectory gave {found}"
+            )
+        exclude.write_text("", encoding="utf-8")
         (root / "blob.txt").write_text("blob\n", encoding="utf-8")
         blob = git(root, "hash-object", "-w", "blob.txt").strip()
         index = {**os.environ, "GIT_INDEX_FILE": str(root / ".git" / "gitlink-index")}
@@ -281,8 +331,8 @@ def declaration_self_test() -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--base", help="the range's exclusive start")
-    parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--base", type=revision, help="the range's exclusive start")
+    parser.add_argument("--head", type=revision, default="HEAD")
     parser.add_argument(
         "--pull-request",
         action="store_true",
@@ -293,11 +343,12 @@ def main() -> int:
         return self_test()
     if not args.base:
         parser.error("--base is required")
-    root = Path.cwd()
-    if not resolves(root, args.base):
-        print(UNRESOLVED.format(args.base), file=sys.stderr)
+    root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip())
+    base, head = commit_id(root, args.base), commit_id(root, args.head)
+    if base is None or head is None:
+        print(UNRESOLVED.format(args.base if base is None else args.head), file=sys.stderr)
         return 1
-    problems = check(root, f"{args.base}..{args.head}", args.pull_request)
+    problems = check(root, f"{base}..{head}", args.pull_request)
     if not declares_sign_off(root, snapshot(root)):
         problems.append(UNDECLARED)
     for problem in problems:

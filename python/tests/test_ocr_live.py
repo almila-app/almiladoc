@@ -99,6 +99,12 @@ class CorpusTest(unittest.TestCase):
         for reply in ["Chapter\nOne\n===\nbody", "   # Chapter One  ###\nbody"]:
             self.assertEqual(self.live.judge(reply, ["body"], [(1, "Chapter One")]), "match")
 
+    def test_atx_closing_sequences_follow_commonmark(self):
+        self.assertEqual(
+            self.live.headings_in("### ###\n# #\n# a #b\n#  a  ##\t\n# a#\n####### a"),
+            [(3, ""), (1, ""), (1, "a #b"), (1, "a"), (1, "a#")],
+        )
+
     def test_each_quality_failure_has_its_own_reason(self):
         for reply, text, headings, expected in [
             ("second first", ["first", "second"], [], "text-mismatch"),

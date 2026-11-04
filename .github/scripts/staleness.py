@@ -54,7 +54,8 @@ def version(text: str) -> tuple[int, ...]:
 
 def makefile(root: Path) -> tuple[str, dict[str, str]]:
     text = (root / "Makefile").read_text(encoding="utf-8")
-    return text, dict(re.findall(r"(?m)^(\w+)\s*[:?]?=\s*(.*?)\s*$", text))
+    assignments = re.findall(r"(?m)^(\w+)[ \t]*[:?]?=(.*)$", text)
+    return text, {name: value.strip() for name, value in assignments}
 
 
 def workflow_lines(root: Path) -> list[tuple[str, str]]:

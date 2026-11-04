@@ -25,9 +25,7 @@ NOREPLY = re.compile(
 LOCAL_PART = re.compile(rb"[A-Za-z0-9._%+-]+")
 DOMAIN = re.compile(rb"[A-Za-z0-9.-]*")
 LETTERS = re.compile(rb"[A-Za-z]*")
-MAIL_ORACLE = re.compile(
-    rb"[A-Za-z0-9._%+-]+(?:\[bot\])?@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
-)
+MAIL_ORACLE = re.compile(rb"[A-Za-z0-9._%+-]++(?:\[bot\])?@(?:[A-Za-z0-9-]++\.)+[A-Za-z]{2,}")
 LINEAR_INPUTS = {
     "a long run ending in an address": (b"a" * 2**20 + b"@corp.co", 1),
     "a long run without an address": (b"a." * 2**19, 0),
@@ -295,7 +293,11 @@ def self_test() -> int:
         b"co",
         b"\xc3\xa9",
     ]
-    samples = [b"".join(rng.choices(tokens, k=rng.randint(1, 14))) for _ in range(50_000)]
+
+    def draw() -> bytes:
+        return b"".join(rng.choices(tokens, k=rng.randint(1, 14)))  # NOSONAR: seeded, reproducible
+
+    samples = [draw() for _ in range(50_000)]
     failures += [
         f"e-mail scan of {sample!r} gave {mail_addresses(sample)}, "
         f"the pattern {MAIL_ORACLE.findall(sample)}"

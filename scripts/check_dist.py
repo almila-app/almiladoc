@@ -3,10 +3,12 @@ metadata and the lockfile."""
 
 import argparse
 import io
+import subprocess
 import sys
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 
@@ -109,6 +111,29 @@ def without(files: dict[str, str], name: str) -> dict[str, str]:
     return {key: text for key, text in files.items() if key != name}
 
 
+def argument_failures(root: Path, wheel: Path, sdist: Path) -> list[str]:
+    zipped, folder = root / "listing.zip", root / "folder.whl"
+    zipped.write_bytes(wheel.read_bytes())
+    folder.mkdir()
+    refused = {
+        "a wheel named .zip": (zipped, sdist),
+        "a missing wheel": (root / "absent.whl", sdist),
+        "a wheel that is a directory": (folder, sdist),
+        "an sdist named .whl": (wheel, wheel),
+    }
+    failures = []
+    for label, (given_wheel, given_sdist) in refused.items():
+        arguments = ["--wheel", str(given_wheel), "--sdist", str(given_sdist)]
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", __file__, *arguments],
+            capture_output=True,
+            text=True,
+        )
+        if done.returncode != 2 or " is not a ." not in done.stderr:
+            failures.append(f"{label} was not refused: {done.returncode} {done.stderr}")
+    return failures
+
+
 def self_test() -> int:
     lock = f"{TOP}/Cargo.lock"
     metadata, pkg_info = f"{INFO}/METADATA", f"{TOP}/PKG-INFO"
@@ -165,16 +190,27 @@ def self_test() -> int:
                 for problem in check_sdist(write_sdist(root / f"sdist-{number}.tar.gz", files))
             ):
                 failures.append(f"{label} was not refused: {reason}")
+        failures += argument_failures(root, root / "whole.whl", root / "whole.tar.gz")
     for failure in failures:
         print(f"self-test: {failure}", file=sys.stderr)
     return 1 if failures else 0
 
 
+def archive_path(suffix: str) -> Callable[[str], Path]:
+    def parse(value: str) -> Path:
+        path = Path(value).resolve()
+        if not path.name.endswith(suffix) or not path.is_file():
+            raise argparse.ArgumentTypeError(f"{value} is not a {suffix} file")
+        return path
+
+    return parse
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--wheel", type=Path)
-    parser.add_argument("--sdist", type=Path)
+    parser.add_argument("--wheel", type=archive_path(".whl"))
+    parser.add_argument("--sdist", type=archive_path(".tar.gz"))
     args = parser.parse_args()
     if args.self_test:
         return self_test()

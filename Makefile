@@ -138,6 +138,7 @@ policy: $(CARGO_DENY)
 	  echo "the default build reaches a crate deny-offline.toml bans"; exit 1
 	fi
 	$(call need,python3)
+	python3 -I -B .github/scripts/deny_fixture.py --self-test
 	python3 -I -B .github/scripts/deny_fixture.py --cargo $(CARGO) --cargo-deny $(CARGO_DENY) --config deny.toml --checks "$(DENY_CHECKS)"
 
 locks:

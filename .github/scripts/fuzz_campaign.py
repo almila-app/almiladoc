@@ -165,7 +165,7 @@ def fuzz(campaign: Campaign, target: str, drill: bool = False) -> int:
             for path in (campaign.fuzz / "seeds" / target).iterdir()
             if path.is_file() and not path.name.startswith(".")
         )
-        shutil.copyfile(seed, found / f"drill-{hashlib.sha1(seed.read_bytes()).hexdigest()}")
+        shutil.copyfile(seed, found / f"drill-{digest(seed)}")
     return conclude(campaign, target, status, artifacts(found), log)
 
 
@@ -320,7 +320,7 @@ def self_test() -> int:
         def crash(prefix: str) -> Callable[[Path], None]:
             def write(log: Path) -> None:
                 found = root / "fuzz" / "artifacts" / "xlsx"
-                (found / f"{prefix}-{hashlib.sha1(crashing).hexdigest()}").write_bytes(crashing)
+                (found / f"{prefix}-{crash_hash}").write_bytes(crashing)
                 with log.open("ab") as out:
                     out.write(
                         b"==1== ERROR: libFuzzer: deadly signal\n"

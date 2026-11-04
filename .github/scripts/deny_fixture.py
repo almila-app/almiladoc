@@ -4,6 +4,7 @@ licence, which a control `check licenses` shows the fixture carries."""
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 ADVISED = ("smallvec", "0.6.0")
+CHECKS = ("advisories", "bans", "licenses", "sources")
 ENV = {
     key: value
     for key, value in os.environ.items()
@@ -122,7 +124,7 @@ def judge(
 
 
 def lock(args: argparse.Namespace, app: Path) -> Path:
-    subprocess.run([args.cargo, "generate-lockfile", "--quiet"], cwd=app, check=True, env=ENV)
+    subprocess.run([str(args.cargo), "generate-lockfile", "--quiet"], cwd=app, check=True, env=ENV)
     return app
 
 
@@ -160,15 +162,64 @@ def licence_failures(args: argparse.Namespace, app: Path, checks: list[str]) -> 
     return failures
 
 
+def executable(value: str) -> Path:
+    if (found := shutil.which(value)) is None:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an executable")
+    return Path(found).absolute()
+
+
+def check_names(value: str) -> list[str]:
+    names = value.split()
+    if not names or any(name not in CHECKS for name in names):
+        raise argparse.ArgumentTypeError(f"{value!r} names a check outside {', '.join(CHECKS)}")
+    return names
+
+
+def refuses(parse: Callable[[str], object], value: str) -> bool:
+    try:
+        parse(value)
+    except argparse.ArgumentTypeError:
+        return True
+    return False
+
+
+def self_test() -> int:
+    failures = []
+    with tempfile.TemporaryDirectory() as directory:
+        tool, proxy = Path(directory) / "tool", Path(directory) / "proxy"
+        tool.write_text("#!/bin/sh\n", encoding="utf-8")
+        tool.chmod(0o755)
+        proxy.symlink_to(tool)
+        if (found := executable(str(proxy))) != proxy:
+            failures.append(f"a proxy resolved to {found}, so argv[0] dispatch would break")
+        if not refuses(executable, str(Path(directory) / "absent")):
+            failures.append("a missing executable was accepted")
+    if check_names(" advisories  bans ") != ["advisories", "bans"]:
+        failures.append("check names were not split on whitespace")
+    failures += [
+        f"checks {value!r} were accepted"
+        for value in ("", "advisories --config=leak", "bans,sources", "Advisories")
+        if not refuses(check_names, value)
+    ]
+    for failure in failures:
+        print(f"self-test: {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cargo", default="cargo")
-    parser.add_argument("--cargo-deny", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--checks", required=True)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--cargo", type=executable, default="cargo")
+    parser.add_argument("--cargo-deny", type=executable)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--checks", type=check_names)
     args = parser.parse_args()
-    args.cargo_deny, args.config = args.cargo_deny.resolve(), args.config.resolve()
-    checks = args.checks.split()
+    if args.self_test:
+        return self_test()
+    if None in (args.cargo_deny, args.config, args.checks):
+        parser.error("--cargo-deny, --config and --checks are required without --self-test")
+    args.config = args.config.resolve()
+    checks = args.checks
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "licensed").mkdir()

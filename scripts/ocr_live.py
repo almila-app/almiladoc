@@ -57,8 +57,8 @@ STATUSES = re.compile(
     r"unattempted-(?:none|[0-9]{3}))\Z"
 )
 WORKER = (
-    "import runpy,sys; "
-    "raise SystemExit(runpy.run_path(sys.argv[1])['corpus_worker'](sys.argv[2:]))"
+    "import json,runpy,sys; "
+    "raise SystemExit(runpy.run_path(sys.argv[1])['corpus_worker'](json.load(sys.stdin)))"
 )
 
 
@@ -69,7 +69,7 @@ def normalize(text: str) -> str:
 def bounded_file(path: Path, ceiling: int) -> bytes:
     if not path.is_file():
         raise ValueError
-    with path.open("rb") as source:
+    with path.open("rb") as source:  # NOSONAR: reads the file its operator names, bounded
         data = source.read(ceiling + 1)
     if len(data) > ceiling:
         raise ValueError
@@ -144,6 +144,16 @@ def corpus(path: Path) -> list[tuple[bytes, list[str], list[tuple[int, str]]]]:
     return loaded
 
 
+def atx_heading(source: str) -> tuple[int, str] | None:
+    if not (match := re.fullmatch(r" {0,3}(#{1,6})[ \t](.+)", source)):
+        return None
+    content = match[2].rstrip(" \t")
+    unclosed = content.rstrip("#")
+    if unclosed != content and (not unclosed or unclosed[-1] in " \t"):
+        content = unclosed
+    return len(match[1]), normalize(content)
+
+
 def headings_in(markdown: str) -> list[tuple[int, str]]:
     result, previous, fence = [], [], ""
     for source in re.split(r"\r\n?|\n", markdown):
@@ -160,8 +170,8 @@ def headings_in(markdown: str) -> list[tuple[int, str]]:
         if source.expandtabs(4).startswith("    "):
             previous = []
             continue
-        if match := re.fullmatch(r" {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*", source):
-            result.append((len(match[1]), normalize(match[2])))
+        if heading := atx_heading(source):
+            result.append(heading)
             previous = []
             continue
         if previous and (match := re.fullmatch(r" {0,3}(=+|-+)[ \t]*", source)):
@@ -269,7 +279,8 @@ def corpus_worker(argv: list[str]) -> int:
 def corpus_process(args: argparse.Namespace, argv: list[str]) -> int:
     try:
         done = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", WORKER, str(Path(__file__).resolve()), *argv],
+            [sys.executable, "-I", "-B", "-c", WORKER, str(Path(__file__).resolve())],
+            input=json.dumps(argv).encode(),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=args.timeout,

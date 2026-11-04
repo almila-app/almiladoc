@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -241,27 +242,38 @@ def fetch(url: str) -> tuple[object, str | None]:
         time.sleep(30)
 
 
+def within(root: Path, path: Path) -> Path | None:
+    resolved = (root / path).resolve()
+    return resolved if resolved.is_relative_to(root.resolve()) else None
+
+
 def guard(args: argparse.Namespace, fetch: Fetch, root: Path) -> int:
     problems = tree_problems(root)
     target = ""
     if args.tag:
-        found, notes = tag_problems(fetch, git_ancestry(root), root, args.repository, args.tag)
+        found, text = tag_problems(fetch, git_ancestry(root), root, args.repository, args.tag)
         problems += found
-        args.notes.write_text(notes, encoding="utf-8")
+        if notes := within(root, args.notes):
+            notes.write_text(text, encoding="utf-8")
+        else:
+            problems.append(f"--notes {args.notes} is outside the repository")
         target = channel(args.tag, workspace(root)[0]) or ""
     for problem in problems:
         print(f"guard: {problem}", file=sys.stderr)
     if problems:
         return 1
-    with args.output.open("a", encoding="utf-8") as output:
-        output.write(f"channel={target}\n")
-    print(f"guard: tree checks pass{f'; tag {args.tag} publishes to {target}' if target else ''}")
+    print(f"channel={target}")
+    passed = f"; tag {args.tag} publishes to {target}" if target else ""
+    print(f"guard: tree checks pass{passed}", file=sys.stderr)
     return 0
 
 
 def verify(args: argparse.Namespace, fetch: Fetch, root: Path) -> int:
+    if (dist := within(root, args.dist)) is None:
+        print(f"verify-published: --dist {args.dist} is outside the repository", file=sys.stderr)
+        return 1
     problems = verify_problems(
-        fetch, root, args.dist, args.repository, (args.channel, args.run_id, args.commit)
+        fetch, root, dist, args.repository, (args.channel, args.run_id, args.commit)
     )
     for problem in problems:
         print(f"verify-published: {problem}", file=sys.stderr)
@@ -548,14 +560,14 @@ def test_containment(expect: Expect, base: Path) -> None:
     )
 
 
-def run_guard(base: Path, tree: Path, tag: str | None) -> tuple[int, str]:
-    output = base / "output"
-    output.write_text("", encoding="utf-8")
-    args = argparse.Namespace(repository=REPO, tag=tag, notes=base / "notes", output=output)
+def run_guard(tree: Path, tag: str | None, notes: Path | None = None) -> tuple[int, str]:
+    args = argparse.Namespace(repository=REPO, tag=tag, notes=notes or tree / "out" / "notes.md")
+    (tree / "out").mkdir(exist_ok=True)
     ref = {f"git/ref/tags/{tag}": {"object": {"type": "tag", "sha": "t" * 40}}}
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
         code = guard(args, fake_github(**ref), tree)
-    return code, output.read_text(encoding="utf-8")
+    return code, output.getvalue()
 
 
 def test_commands(expect: Expect, base: Path) -> None:
@@ -563,11 +575,13 @@ def test_commands(expect: Expect, base: Path) -> None:
     final = fake_tree(base / "guard-final", "0.2.0", "1.99")
     broken = fake_tree(base / "guard-broken", "0.2.0", "1.98")
     runs = [
-        run_guard(base, candidate, "v0.2.0-rc.1"),
-        run_guard(base, final, "v0.2.0"),
-        run_guard(base, candidate, None),
-        run_guard(base, broken, None),
-        run_guard(base, broken, "v0.2.0"),
+        run_guard(candidate, "v0.2.0-rc.1"),
+        run_guard(final, "v0.2.0"),
+        run_guard(candidate, None),
+        run_guard(broken, None),
+        run_guard(broken, "v0.2.0"),
+        run_guard(candidate, "v0.2.0-rc.1", base / "notes.md"),
+        run_guard(candidate, "v0.2.0-rc.1", Path("../notes.md")),
     ]
     expect(
         runs
@@ -577,10 +591,13 @@ def test_commands(expect: Expect, base: Path) -> None:
             (0, "channel=\n"),
             (1, ""),
             (1, ""),
+            (1, ""),
+            (1, ""),
         ],
         f"guard's exit codes and channel lines: {runs}",
     )
-    dist = base / "verify-dist"
+    expect(not (base / "notes.md").exists(), "guard wrote notes outside the repository")
+    dist = final / "dist"
     dist.mkdir()
     args = argparse.Namespace(
         repository=REPO, dist=dist, channel="pypi", run_id="7", commit=COMMIT
@@ -589,9 +606,16 @@ def test_commands(expect: Expect, base: Path) -> None:
     files = f"{REGISTRIES['pypi']}pypi/almiladoc/0.2.0/json"
     wheel = "almiladoc-0.2.0-py3-none-any.whl"
     other = fake_registries(dist, **{files: {"urls": [wheel_file(wheel, b"x")]}})
+    outside_dist = base / "verify-dist"
+    shutil.copytree(dist, outside_dist)
+    outside = argparse.Namespace(**{**vars(args), "dist": outside_dist})
     with contextlib.redirect_stderr(io.StringIO()):
-        codes = [verify(args, matching, final), verify(args, other, final)]
-    expect(codes == [0, 1], f"verify-published's exit codes: {codes}")
+        codes = [
+            verify(args, matching, final),
+            verify(args, other, final),
+            verify(outside, matching, final),
+        ]
+    expect(codes == [0, 1, 1], f"verify-published's exit codes: {codes}")
 
 
 def test_published(expect: Expect, base: Path) -> None:
@@ -722,7 +746,6 @@ def main() -> int:
     guarding.add_argument("--repository", required=True)
     guarding.add_argument("--tag")
     guarding.add_argument("--notes", type=Path, required=True)
-    guarding.add_argument("--output", type=Path, required=True)
     verifying = commands.add_parser("verify-published")
     verifying.add_argument("--repository", required=True)
     verifying.add_argument("--channel", choices=sorted(REGISTRIES), required=True)

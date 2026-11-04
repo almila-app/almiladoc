@@ -45,7 +45,7 @@ jobs:
         run: |
           mkdir -p out
           python3 -I -B .github/scripts/release_guard.py guard --repository "$GITHUB_REPOSITORY" \
-            ${TAG:+--tag "$TAG"} --notes out/notes.md --output "$GITHUB_OUTPUT"
+            ${TAG:+--tag "$TAG"} --notes out/notes.md >> "$GITHUB_OUTPUT"
       - if: github.event_name == 'push'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -69,7 +69,7 @@ jobs:
         with:
           version: 0.13.7
           enable-cache: false
-      - run: uv run --locked --only-group build -- maturin sdist --out dist
+      - run: uv run --locked --no-build --only-group build -- maturin sdist --out dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdist
@@ -127,7 +127,7 @@ jobs:
           cd out/almiladoc-*/
           for target in "manylinux_2_28 $ARCH-unknown-linux-gnu" "musllinux_1_2 $ARCH-unknown-linux-musl"; do
             read -r compatibility triple <<< "$target"
-            uv run --project "$GITHUB_WORKSPACE" --locked --only-group build --only-group zig -- \
+            uv run --project "$GITHUB_WORKSPACE" --locked --no-build --only-group build --only-group zig -- \
               maturin build --release --locked --zig --compatibility "$compatibility" --target "$triple" --out "$GITHUB_WORKSPACE/wheels"
           done
       - run: |
@@ -180,7 +180,7 @@ jobs:
           mkdir -p out wheels
           tar -xzf dist/almiladoc-*.tar.gz -C out
           cd out/almiladoc-*/
-          uv run --project "$GITHUB_WORKSPACE" --locked --only-group build -- \
+          uv run --project "$GITHUB_WORKSPACE" --locked --no-build --only-group build -- \
             maturin build --release --locked --out "$GITHUB_WORKSPACE/wheels"
       - run: |
           uv export --locked --only-group test --prune mypy --no-emit-project --format requirements.txt -o out/test-requirements.txt

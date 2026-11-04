@@ -1,11 +1,13 @@
 ---
 paths:
   - ".claude/skills/*/scripts/**"
+  - ".github/scripts/**"
+  - "scripts/**"
 ---
 
-# Setup scripts
+# Repository scripts
 
-- A script runs from anywhere in the checkout, and every path in the setup's text names it from
+- A script runs from anywhere in the checkout, and every path in a script's text names it from
   the repository root.
 - A success message states what was compared, never more than that.
 - A `--self-test` plants each defect class the script exists for, and the hostile input it
