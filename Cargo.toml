@@ -84,7 +84,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 
 [dependencies]
 base64 = { version = "0.23.1", optional = true }
-cfb = "0.15.0"
+cfb = "0.16.0"
 csv = "1.4.0"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 encoding_rs = "0.8.44"
