@@ -207,6 +207,7 @@ fn sequential() -> PageStreamOptions {
         password: None,
         parallel: false,
         suppress_low_confidence_ocr: true,
+        omit_running_heads: false,
         window_size: 1,
         emit_progress_every: u32::MAX,
     }
@@ -1542,5 +1543,6 @@ mod tests {
             (PageSelection::All, PageSelection::All)
         );
         assert_eq!((options.password, measured.password), (None, None));
+        assert_eq!((options.omit_running_heads, measured.omit_running_heads), (false, false));
     }
 }

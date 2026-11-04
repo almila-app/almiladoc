@@ -157,7 +157,7 @@ pub(crate) fn plan(
             .map(|(dpi, pixels)| (lossy::to_f32(f64::from(dpi)), pixels))
             .ok_or(RefusalKind::Unpaintable),
         RasterSize::LongEdge(edge) => {
-            // unpdf 0.53.0's page_size walks the whole page tree on every call.
+            // unpdf 0.54.0's page_size walks the whole page tree on every call.
             ledger.charge(u64::try_from(pdf.page_count()).unwrap_or(u64::MAX))?;
             match pdf.displayed_size(page) {
                 Some(size) if size.width > 0.0 && size.height > 0.0 => spec.long_edge(edge, size),
