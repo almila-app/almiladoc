@@ -25,7 +25,9 @@ NOREPLY = re.compile(
 LOCAL_PART = re.compile(rb"[A-Za-z0-9._%+-]+")
 DOMAIN = re.compile(rb"[A-Za-z0-9.-]*")
 LETTERS = re.compile(rb"[A-Za-z]*")
-MAIL_ORACLE = re.compile(rb"[A-Za-z0-9._%+-]++(?:\[bot\])?@(?:[A-Za-z0-9-]++\.)+[A-Za-z]{2,}")
+MAIL_ORACLE = re.compile(
+    rb"[A-Za-z0-9._%+-]++(?:\[bot\])?@(?:[A-Za-z0-9-]++\.)+[A-Za-z]{2,}"  # NOSONAR: oracle
+)
 LINEAR_INPUTS = {
     "a long run ending in an address": (b"a" * 2**20 + b"@corp.co", 1),
     "a long run without an address": (b"a." * 2**19, 0),

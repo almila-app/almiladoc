@@ -113,7 +113,7 @@ def without(files: dict[str, str], name: str) -> dict[str, str]:
 
 def argument_failures(root: Path, wheel: Path, sdist: Path) -> list[str]:
     zipped, folder = root / "listing.zip", root / "folder.whl"
-    zipped.write_bytes(wheel.read_bytes())
+    zipped.touch()
     folder.mkdir()
     refused = {
         "a wheel named .zip": (zipped, sdist),
