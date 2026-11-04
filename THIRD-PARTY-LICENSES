@@ -2775,7 +2775,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- aes 0.9.3
+- aes 0.9.4
 
 Copyright (c) 2018-2024 The RustCrypto Project Developers
 Copyright (c) 2018 Artyom Pavlov
@@ -3375,7 +3375,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 
 Used by:
-- ureq-proto 0.6.5
+- ureq-proto 0.7.1
 
 Copyright 2022 Martin Algesten
 
@@ -3425,7 +3425,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- cfb 0.15.0
+- cfb 0.16.0
 
 MIT License
 
@@ -3454,7 +3454,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- crc32fast 1.5.3
+- crc32fast 1.5.4
 
 MIT License
 
@@ -3501,7 +3501,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
 
 Used by:
-- ureq 3.5.0
+- ureq 3.5.1
 
 MIT License
 
@@ -3895,7 +3895,7 @@ THE SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- zip 9.2.0
+- zip 9.3.0
 
 The MIT License (MIT)
 

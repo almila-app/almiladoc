@@ -3335,7 +3335,7 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 MIT License (MIT)
 
 Used by:
-- cfb 0.15.0
+- cfb 0.16.0
 
 MIT License
 
@@ -3485,7 +3485,7 @@ SOFTWARE.
 MIT License (MIT)
 
 Used by:
-- crc32fast 1.5.3
+- crc32fast 1.5.4
 
 MIT License
 
@@ -4362,7 +4362,7 @@ MIT License (MIT)
 
 Used by:
 - tracing-core 0.1.36
-- zip 9.2.0
+- zip 9.3.0
 
 The MIT License (MIT)
 
