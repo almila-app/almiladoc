@@ -674,7 +674,8 @@ class ConversionTest(unittest.TestCase):
                 with self.assertRaisesRegex(AttributeError, message):
                     delattr(conversion, name)
         for name in ["markdown", "units", "diagnostics"]:
-            self.assertIs(getattr(conversion, name), getattr(conversion, name), name)
+            first, second = getattr(conversion, name), getattr(conversion, name)
+            self.assertIs(first, second, name)
         with self.assertRaises(TypeError):
             almiladoc.Diagnostic()
 

@@ -432,7 +432,12 @@ impl OcrHttp {
         let mut body = self.template.body(image, tier_name(tier));
         let mut report = OcrReport::untried(OcrFailureKind::Cancelled);
         let (mut status, mut retry_after) = (None, None);
-        while pause.take().is_none_or(|delay| wait(delay, cancel)) && !cancel.is_cancelled() {
+        report.outcome = loop {
+            let waited = pause.take().is_none_or(|delay| wait(delay, cancel));
+            if !waited || cancel.is_cancelled() {
+                let cancelled = OcrFailure::new(OcrFailureKind::Cancelled, status);
+                break OcrOutcome::Unattempted(cancelled.with_retry_after(retry_after));
+            }
             let fallback =
                 self.tier_fallback.as_ref().filter(|_| tier + 1 < self.service_tiers.len());
             let exchange = self.post(agent, &body, cap, fallback, cancel);
@@ -442,31 +447,26 @@ impl OcrHttp {
                 (exchange.status, wire::longer(retry_after, exchange.retry_after));
             (report.usage, report.realized_tier) = (exchange.usage, exchange.tier);
             let failure = move |kind| OcrFailure::new(kind, status).with_retry_after(retry_after);
-            report.outcome = match exchange.step {
+            match exchange.step {
                 Step::Read(text) if self.preserve_table_spans => {
-                    OcrOutcome::Fill(GapFill::MarkdownTables(text))
+                    break OcrOutcome::Fill(GapFill::MarkdownTables(text));
                 }
-                Step::Read(text) => OcrOutcome::Fill(GapFill::Markdown(text)),
-                Step::Failed(kind) => OcrOutcome::Failed(failure(kind)),
-                Step::Stopped(kind) => OcrOutcome::Unattempted(failure(kind)),
+                Step::Read(text) => break OcrOutcome::Fill(GapFill::Markdown(text)),
+                Step::Failed(kind) => break OcrOutcome::Failed(failure(kind)),
+                Step::Stopped(kind) => break OcrOutcome::Unattempted(failure(kind)),
                 Step::Later(kind) if retried == self.retries => {
-                    OcrOutcome::Unattempted(failure(kind))
+                    break OcrOutcome::Unattempted(failure(kind));
                 }
                 Step::Later(_) => {
                     pause = Some(delay(retried, exchange.retry_after));
                     retried += 1;
-                    continue;
                 }
                 Step::NextTier => {
                     tier += 1;
                     body = self.template.body(image, tier_name(tier));
-                    continue;
                 }
-            };
-            return report;
-        }
-        let cancelled = OcrFailure::new(OcrFailureKind::Cancelled, status);
-        report.outcome = OcrOutcome::Unattempted(cancelled.with_retry_after(retry_after));
+            }
+        };
         report
     }
 

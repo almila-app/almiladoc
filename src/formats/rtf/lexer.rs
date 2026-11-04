@@ -29,20 +29,18 @@ impl<'a> Lexer<'a> {
     }
 
     pub(super) fn next_token(&mut self) -> Result<Option<Token<'a>>, ConvertError> {
-        loop {
-            let Some(&b) = self.bytes.get(self.pos) else {
-                return Ok(None);
-            };
+        while let Some(&b) = self.bytes.get(self.pos) {
             self.parse_ctx.charge(1)?;
             self.pos += 1;
-            return Ok(match b {
-                b'{' => Some(Token::Open),
-                b'}' => Some(Token::Close),
-                b'\\' => self.control(),
-                b'\r' | b'\n' | b'\0' => continue,
-                b => Some(Token::Byte(b)),
-            });
+            match b {
+                b'\r' | b'\n' | b'\0' => {}
+                b'{' => return Ok(Some(Token::Open)),
+                b'}' => return Ok(Some(Token::Close)),
+                b'\\' => return Ok(self.control()),
+                b => return Ok(Some(Token::Byte(b))),
+            }
         }
+        Ok(None)
     }
 
     fn control(&mut self) -> Option<Token<'a>> {
