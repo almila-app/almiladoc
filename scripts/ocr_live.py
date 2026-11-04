@@ -9,11 +9,13 @@ supplied ATX/Setext level outside code blocks; HTML is refused when checking hea
 Empty text/headings require a blank reply. At least one text case is required.
 Corpus mode prints only POST chat/completions (relative to base_url) and fixed statuses, in case
 order, and runs in an owned worker killed at --timeout. It does not certify model accuracy.
+A server that needs a key reads it from OCR_LIVE_API_KEY, which only the operator sets.
 """
 
 import argparse
 import hashlib
 import json
+import os
 import re
 import struct
 import subprocess
@@ -27,6 +29,7 @@ from urllib.parse import urlsplit
 import almiladoc
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/pdf/handmade-five-page.pdf"
+API_KEY = "OCR_LIVE_API_KEY"
 
 
 def settle(
@@ -69,7 +72,7 @@ def normalize(text: str) -> str:
 def bounded_file(path: Path, ceiling: int) -> bytes:
     if not path.is_file():
         raise ValueError
-    with path.open("rb") as source:  # NOSONAR: reads the file its operator names, bounded
+    with path.open("rb") as source:
         data = source.read(ceiling + 1)
     if len(data) > ceiling:
         raise ValueError
@@ -212,11 +215,10 @@ def recognize_corpus(args: argparse.Namespace) -> list[str]:
         cases = corpus(args.corpus)
     except (OSError, ValueError, RecursionError):
         return ["invalid-corpus"]
-    key = bounded_file(args.key_file, 8192).decode("utf-8").strip() if args.key_file else None
     engine = almiladoc.OcrHttp(
         args.base_url,
         args.model,
-        api_key=key,
+        api_key=os.environ.get(API_KEY) or None,
         concurrency=1,
         retries=0,
         temperature=0.0,
@@ -248,7 +250,6 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = Arguments(prog="ocr_live", description=__doc__.splitlines()[0])
     parser.add_argument("base_url")
     parser.add_argument("model")
-    parser.add_argument("--key-file", type=Path, help="a file outside every repository")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--corpus", type=Path, help="a reviewed, SHA-256-pinned PNG manifest")
     parser.add_argument(
@@ -305,11 +306,10 @@ def corpus_process(args: argparse.Namespace, argv: list[str]) -> int:
 
 
 def smoke(args: argparse.Namespace) -> int:
-    key = bounded_file(args.key_file, 8192).decode("utf-8").strip() if args.key_file else None
     engine = almiladoc.OcrHttp(
         args.base_url,
         args.model,
-        api_key=key,
+        api_key=os.environ.get(API_KEY) or None,
         concurrency=args.concurrency,
         max_tokens=args.max_tokens or 8192,
     )

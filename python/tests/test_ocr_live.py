@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import struct
 import subprocess
 import tempfile
@@ -48,6 +49,8 @@ class CorpusTest(unittest.TestCase):
         spec.loader.exec_module(cls.live)
 
     def setUp(self):
+        self.enterContext(patch.dict(os.environ))
+        os.environ.pop("OCR_LIVE_API_KEY", None)
         directory = tempfile.TemporaryDirectory(prefix="ocr-quality-")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -98,6 +101,26 @@ class CorpusTest(unittest.TestCase):
         )
         for reply in ["Chapter\nOne\n===\nbody", "   # Chapter One  ###\nbody"]:
             self.assertEqual(self.live.judge(reply, ["body"], [(1, "Chapter One")]), "match")
+
+    def test_the_api_key_comes_only_from_the_operators_environment(self):
+        for value, expected in [("sk-live", "sk-live"), ("", None)]:
+            with patch.dict(os.environ, {"OCR_LIVE_API_KEY": value}):
+                _, _, constructor = self.recognize(["", ""])
+            self.assertEqual(constructor.call_args.kwargs["api_key"], expected)
+        with (
+            patch.dict(os.environ, {"OCR_LIVE_API_KEY": "sk-smoke"}),
+            patch.object(self.live.almiladoc, "OcrHttp") as constructor,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            constructor.return_value.recognize.return_value = []
+            self.live.main(["https://example.invalid/v1", "chosen-model"])
+        self.assertEqual(constructor.call_args.kwargs["api_key"], "sk-smoke")
+        key = self.root / "key"
+        key.write_text("sk-file\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.live.main([*self.argv, "--key-file", str(key)]), 1)
+        self.assertEqual(err.getvalue(), "POST chat/completions status=error\n")
 
     def test_atx_closing_sequences_follow_commonmark(self):
         self.assertEqual(
