@@ -13,7 +13,7 @@ include = ["Cargo.toml", "Cargo.lock", "README.md", "THIRD-PARTY-LICENSES", "src
 [dependencies]
 almiladoc = { path = "..", default-features = false }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
-oar-ocr-core = { version = "=0.10.2", default-features = false }
+oar-ocr-core = { version = "=0.10.3", default-features = false }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"] }
 rayon = "=1.12.0"
 sha2 = "=0.11.1"
